@@ -1,13 +1,19 @@
 # Kanban TUI — Design and Roadmap
 
-Status: implementation-ready; implementation has not started.
+Status: implementation in progress. The warning-clean GHC2024/Cabal foundation,
+local repository resolution, event-driven Brick/Vty dashboard, standalone-card
+workflow, explicit GitHub refresh, and last-good repository cache are
+implemented. Checklist-based tracker hierarchy, inherited PR membership, and
+tracker progress are also implemented. Native GitHub sub-issue membership,
+malformed-tracker diagnostics, and Codex/Claude usage providers remain for
+subsequent slices.
 
 ## 1. Purpose
 
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
 repository. It is intended to live comfortably in tmux, work over SSH, remain
 idle without consuming meaningful CPU, and make no network requests unless the
-user explicitly refreshes a data source.
+application starts or the user explicitly refreshes a data source.
 
 The dashboard combines:
 
@@ -31,8 +37,9 @@ branches, merge pull requests, or otherwise mutate remote state.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
 - Remain entirely keyboard-driven; mouse handling is out of scope initially.
-- Block on terminal events while idle and redraw only after input, resize, or
-  completion of an explicitly requested refresh.
+- Perform one asynchronous GitHub refresh at startup, then block on terminal
+  events while idle and redraw only after input, resize, or provider
+  completion.
 - Keep usage and GitHub refreshes independent so one failing source does not
   hide valid data from another.
 - Preserve the last good snapshot when a refresh fails.
@@ -91,6 +98,8 @@ Initial options:
 --path DIR                         repository path; defaults to cwd
 --repo OWNER/NAME                  explicit repository; skips remote resolution
 --color auto|truecolor|256|never  color policy; defaults to auto
+--border box|open                 border renderer; defaults to box
+--glyph-test                      print vertical-line candidates and exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -107,10 +116,11 @@ Startup performs only local work:
    The flag is the escape hatch for unusual setups: SSH host aliases, multiple
    remotes, and bare mirrors.
 5. Load configuration and the last cached snapshot, if enabled.
-6. Enter the TUI without contacting GitHub, OpenAI, or Anthropic.
+6. Enter the TUI immediately and start one asynchronous GitHub refresh. Startup
+   never contacts OpenAI or Anthropic.
 
-If there is no cached data, the board and usage sidebar show a clear prompt to
-press the appropriate refresh key.
+If there is no cached data, the board starts empty while the initial GitHub
+refresh runs. The usage sidebar shows a clear prompt to press its refresh key.
 
 ## 6. Layout
 
@@ -132,15 +142,21 @@ scrollable four-column board.
 ║ week     22% left   ║              ║              ║              ║              ║
 ║  resets  Fri 09:10  ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/k card  h/l column  enter  r board  u usage  R all  s sidebar  ? help  q quit
+ j/k item  h/l column  x epic  enter  r board  u usage  R all  s sidebar  ? help  q quit
 ```
 
 Responsive behavior:
 
 - The sidebar is 28 columns by default and toggles with `s`.
 - Board columns have a readable minimum width rather than being compressed
-  until their contents become useless.
-- When all four columns do not fit, the board becomes a horizontal viewport.
+  until their contents become useless. The initial minimum is 32 cells per
+  column.
+- When the open board has at least 134 cells available (four 32-cell columns
+  plus three two-cell gutters), all four columns are visible and divide every
+  available cell as evenly as possible. With the default 28-cell sidebar and
+  two-cell sidebar gutter, this corresponds to a 164-cell terminal.
+- Below that threshold, columns retain the 32-cell minimum and the board
+  becomes a horizontal viewport.
 - Moving with `h`/`l` scrolls the selected column into view.
 - Very narrow terminals may show one board column at a time.
 - Resize events reflow cards and excerpts without a network refresh.
@@ -151,12 +167,13 @@ Initial bindings:
 
 | Key | Action |
 |---|---|
-| `j` / Down | Select next visible card |
-| `k` / Up | Select previous visible card |
+| `j` / Down | Select next visible card or collapsed epic |
+| `k` / Up | Select previous visible card or collapsed epic |
 | `h` / Left | Select previous column |
 | `l` / Right | Select next column |
-| `g` | Select first card in the column |
-| `G` | Select last card in the column |
+| `g` | Select first visible item in the column |
+| `G` | Select last visible item in the column |
+| `x` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
 | `r` | Refresh GitHub board data |
@@ -240,8 +257,14 @@ amber `UNLINKED` warning.
 
 ### Borders
 
-- Application shell: double line, `╔═╗║╚╝`.
-- Connected column frames: single line, `┌─┬─┐│└─┴─┘`.
+- The optional `--border open` renderer avoids long vertical glyph runs. It uses
+  whitespace gutters between columns and horizontal header/footer rules, so
+  terminal font ascent/descent metrics cannot turn the main structure into a
+  dashed vertical line.
+- The default `--border box` renderer uses a double-line application shell
+  (`╔═╗║╚╝`) and a heavy
+  connected board frame (`┏━┳━┓┃┗━┻━┛`) when the selected font renders box
+  drawing continuously.
 - Cards: rounded, `╭─╮│╰─╯`.
 - Tracker headers: heavy accent, for example `┏━┓┃┗━┛` or a compact `◆` row.
 - Avoid emoji and ambiguous-width decorative characters. Prefer stable
@@ -440,6 +463,11 @@ indents that column's children beneath it:
   └─ B1  #759  Introduce the v83 save envelope
 ```
 
+Epic headers use a purple accent and start collapsed. A collapsed header is a
+keyboard focus target; `x` expands or collapses that epic everywhere it appears
+across the board. Child cards rejoin the ordinary `j`/`k` focus order only while
+their epic is expanded.
+
 Tracker progress is derived from checklist marks in the authoritative tracker
 body: checked entries divided by total recognized child entries. It is labeled
 `complete`, not `closed` or `open`, because a checklist mark is tracker state
@@ -472,9 +500,9 @@ Global attention sorting and implementation order interact as follows:
   child has a problem. Its red border remains visible in place.
 - Standalone cards are sorted problems first, then approved, then oldest first
   within each group.
-- Tracker headers are not selectable as workflow cards in the first release;
-  the details overlay for a child includes a selectable-free summary of its
-  tracker context.
+- Collapsed tracker headers participate in keyboard focus for expansion but do
+  not open a details overlay. The details overlay for an expanded child includes
+  its tracker context.
 
 ## 13. GitHub data acquisition
 
@@ -613,7 +641,9 @@ a countdown.
 ## 15. Refresh and event model
 
 - Brick owns the blocking terminal event loop.
-- Each provider runs in a short-lived worker only after an explicit refresh.
+- The GitHub provider runs once in a short-lived startup worker and again only
+  after an explicit refresh. Usage providers run only after an explicit
+  refresh.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, or explicit
   terminal repaint.
@@ -766,6 +796,9 @@ passing golden-frame suite at wide, minimum four-column, and narrow sizes.
 
 ### Milestone 2 — GitHub snapshot and workflow board
 
+Core slice implemented; truncation counters and nested-connection overflow
+indicators remain to finish the milestone.
+
 - Implement local remote resolution and authenticated `gh` GraphQL execution.
 - Fetch and paginate open issues and PRs.
 - Decode labels, bodies, assignees, links, mergeability, and checks.
@@ -773,10 +806,13 @@ passing golden-frame suite at wide, minimum four-column, and narrow sizes.
   rich cards, details, and the configured issue/PR item guards.
 - Add last-good repository caching.
 
-Exit criteria: `r` produces a correct standalone-card board for an arbitrary
-GitHub repository; startup and idle make no network requests.
+Exit criteria: startup and `r` produce a correct standalone-card board for an
+arbitrary GitHub repository; idle makes no network requests.
 
 ### Milestone 3 — Tracker hierarchy
+
+Core checklist hierarchy implemented. Native GitHub sub-issue membership and
+explicit malformed-tracker diagnostics remain follow-up slices.
 
 - Detect configured epic/tracker issues.
 - Structure membership resolution as ordered sources so native GitHub
@@ -828,13 +864,12 @@ version.
 - Tag the first release only after real tmux and SSH use.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
-idle CPU is effectively zero, and every network call is attributable to an
-explicit refresh key.
+idle CPU is effectively zero, and every network call is attributable to startup
+or an explicit refresh key.
 
 ## 20. Deferred ideas
 
 - Configurable keybindings.
-- Collapsible tracker groups.
 - OSC 52 URL copy support for remote terminals.
 - Optional `gh issue view --web`/`gh pr view --web` local-only action.
 - GitHub mutations such as assignment or label changes.

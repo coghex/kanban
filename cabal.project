@@ -1,0 +1,4 @@
+packages: .
+
+package kanban
+  ghc-options: -Werror
