@@ -4,9 +4,10 @@ Status: implementation in progress. The warning-clean GHC2024/Cabal foundation,
 local repository resolution, event-driven Brick/Vty dashboard, standalone-card
 workflow, explicit GitHub refresh, and last-good repository cache are
 implemented. Checklist-based tracker hierarchy, inherited PR membership, and
-tracker progress are also implemented. Native GitHub sub-issue membership,
-malformed-tracker diagnostics, and Codex/Claude usage providers remain for
-subsequent slices.
+tracker progress and the on-demand Codex usage provider are also implemented.
+Native GitHub sub-issue membership, malformed-tracker diagnostics, the external
+usage-command escape hatch, and the Claude usage provider remain for subsequent
+slices.
 
 ## 1. Purpose
 
@@ -177,7 +178,7 @@ Initial bindings:
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
 | `r` | Refresh GitHub board data |
-| `u` | Refresh Codex and Claude usage |
+| `u` | Refresh implemented usage providers (currently Codex) |
 | `R` | Refresh board and usage |
 | `s` | Toggle the usage sidebar |
 | `?` | Open a help overlay listing all bindings |
@@ -537,9 +538,9 @@ shown to the user while retaining the last good snapshot.
 Usage is global rather than repository-specific and refreshes only when the user
 presses `u` or `R`.
 
-Both usage providers are best-effort observers of unstable interfaces. A
-failed or unsupported provider never affects the board or the other provider,
-and each can be replaced by a user-configured external command (below).
+Usage providers are best-effort observers of unstable interfaces. A failed or
+unsupported provider never affects the board or another provider, and each can
+eventually be replaced by a user-configured external command (below).
 
 ### Codex
 
@@ -548,10 +549,10 @@ protocol, request `account/rateLimits/read`, decode the primary and secondary
 windows, and terminate the child. The response provides used percentages,
 window durations, and reset timestamps.
 
-The app-server interface is currently experimental. The provider must check
-the CLI version, decode defensively, use a timeout, and report an unsupported
-protocol without inventing values. Captured protocol fixtures cover supported
-versions.
+The app-server interface is currently experimental. The provider decodes
+defensively, uses a timeout, and reports an unsupported protocol without
+inventing values. Captured protocol fixtures cover known response shapes;
+broader version fixtures remain follow-up work.
 
 ### Claude
 
@@ -828,6 +829,9 @@ intended `A1`, `A2`, `B1`, `C1` implementation order across all four columns.
 
 ### Milestone 4 — Codex usage
 
+Core built-in provider and cache implemented. The external-command escape hatch
+and broader version fixtures remain follow-up slices.
+
 - Implement on-demand app-server startup and JSON-RPC initialization.
 - Request and decode account rate limits.
 - Render five-hour/weekly percentages and reset timestamps.
@@ -845,11 +849,11 @@ running processes, and leaves cached data intact on failure.
 - Strip terminal sequences and parse supported plan-usage layouts.
 - Add strict version-aware fixtures, timeouts, cleanup, and diagnostics.
 
-Exit criteria: `u` obtains Claude five-hour and weekly limits through the
-official client, makes no unrelated model request, and fails closed on unknown
-output. Automated CI covers fixtures without a live account; the first release
-requires a successful manual refresh against the current supported Claude
-version.
+Exit criteria: the Claude provider obtains five-hour and weekly limits through
+the official client, makes no unrelated model request, and fails closed on
+unknown output. Automated CI covers fixtures without a live account; the first
+release requires a successful manual refresh against the current supported
+Claude version.
 
 ### Milestone 6 — Hardening and release
 

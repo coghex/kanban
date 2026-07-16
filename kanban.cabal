@@ -39,6 +39,7 @@ library
   exposed-modules:
     Kanban.CLI
     Kanban.Cache
+    Kanban.Codex
     Kanban.Domain
     Kanban.Fixture
     Kanban.GlyphTest

@@ -185,7 +185,7 @@ data RepoSnapshot = RepoSnapshot
 
 data UsageProvider = Codex | Claude
   deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, FromJSONKey, ToJSONKey)
 
 data UsageWindow = UsageWindow
   { usageWindowLabel :: Text,

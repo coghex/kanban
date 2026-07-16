@@ -21,8 +21,16 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, defaultTimeLocale, diffUTCTime, formatTime, getCurrentTime)
 import qualified Graphics.Vty as Vty
-import Kanban.Cache (CacheLoad (..), loadRepositoryCache, writeRepositoryCache)
+import Kanban.Cache
+  ( CacheLoad (..),
+    UsageCacheLoad (..),
+    loadRepositoryCache,
+    loadUsageCache,
+    writeRepositoryCache,
+    writeUsageCache,
+  )
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
+import Kanban.Codex (fetchCodexUsage)
 import Kanban.Domain
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
@@ -40,12 +48,15 @@ data Name
 data Overlay = HelpOverlay | DetailsOverlay BoardItem
   deriving stock (Eq, Show)
 
-newtype AppEvent = BoardRefreshFinished (Either ProviderError GitHubResult)
+data AppEvent
+  = BoardRefreshFinished (Either ProviderError GitHubResult)
+  | CodexRefreshFinished (Either ProviderError (UsageSnapshot, [Text]))
 
 data AppState = AppState
   { appRepository :: Repository,
     appBoard :: Board,
     appUsage :: Map UsageProvider UsageSnapshot,
+    appUsageFreshness :: Map UsageProvider Freshness,
     appSelectedColumn :: BoardColumn,
     appSelectedRows :: Map BoardColumn Int,
     appExpandedTrackers :: Set Int,
@@ -66,19 +77,25 @@ runDashboard options repository = do
     if options.optionNoCache
       then pure CacheAbsent
       else loadRepositoryCache repository
+  usageCacheLoad <-
+    if options.optionNoCache
+      then pure UsageCacheAbsent
+      else loadUsageCache
   eventChannel <- newBChan 4
   let (initialBoard, initialFreshness, initialFetchedAt, initialNotice) = initialBoardState now cacheLoad
+      (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
         AppState
           { appRepository = repository,
             appBoard = initialBoard,
-            appUsage = Map.empty,
+            appUsage = initialUsage,
+            appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
             appSelectedRows = Map.fromList [(column, 0) | column <- allColumns],
             appExpandedTrackers = Set.empty,
             appSidebarVisible = True,
             appOverlay = Nothing,
-            appNotice = Just initialNotice,
+            appNotice = Just (initialNotice <> maybe "" (" · " <>) usageNotice),
             appBoardFreshness = initialFreshness,
             appLastSuccessfulFetch = initialFetchedAt,
             appEventChannel = eventChannel,
@@ -108,6 +125,19 @@ initialBoardState now cacheLoad = case cacheLoad of
       Nothing,
       warning <> " · press r to refresh"
     )
+
+initialUsageState :: UsageCacheLoad -> (Map UsageProvider UsageSnapshot, Map UsageProvider Freshness, Maybe Text)
+initialUsageState cacheLoad = case cacheLoad of
+  UsageCacheAbsent -> (Map.empty, defaultFreshness Map.empty, Nothing)
+  UsageCacheLoaded snapshots -> (snapshots, defaultFreshness snapshots, Nothing)
+  UsageCacheInvalid warning -> (Map.empty, defaultFreshness Map.empty, Just warning)
+  where
+    defaultFreshness :: Map UsageProvider UsageSnapshot -> Map UsageProvider Freshness
+    defaultFreshness snapshots =
+      Map.fromList
+        [ (Codex, maybe NotLoaded (Fresh . (.usageFetchedAt)) (Map.lookup Codex snapshots)),
+          (Claude, maybe (Unsupported "provider not implemented") (Fresh . (.usageFetchedAt)) (Map.lookup Claude snapshots))
+        ]
 
 application :: App AppState AppEvent Name
 application =
@@ -163,17 +193,38 @@ drawUsage state
 
 drawProvider :: AppState -> UsageProvider -> Widget Name
 drawProvider state provider =
-  case Map.lookup provider state.appUsage of
-    Nothing -> vBox [withAttr providerAttr (txt providerName), withAttr dimAttr (txt "press u to refresh")]
-    Just snapshot ->
-      vBox
-        ( withAttr providerAttr (txt providerName)
-            : map (drawUsageWindow state) snapshot.usageWindows
-        )
+  vBox
+    ( withAttr providerAttr (txt providerName)
+        : case Map.lookup provider state.appUsage of
+          Nothing -> [withAttr (usageStatusAttribute freshness) (txtWrap (usageStatusText provider freshness))]
+          Just snapshot -> map (drawUsageWindow state) snapshot.usageWindows <> usageSnapshotStatus freshness
+    )
   where
+    freshness = Map.findWithDefault NotLoaded provider state.appUsageFreshness
     providerName = case provider of
       Codex -> "Codex"
       Claude -> "Claude"
+
+usageSnapshotStatus :: Freshness -> [Widget Name]
+usageSnapshotStatus Loading = [withAttr noticeAttr (txt "refreshing…")]
+usageSnapshotStatus (Stale _ message) = [withAttr pendingAttr (txtWrap ("stale · " <> message))]
+usageSnapshotStatus _ = []
+
+usageStatusText :: UsageProvider -> Freshness -> Text
+usageStatusText _ Loading = "refreshing…"
+usageStatusText _ (Fresh _) = "loaded"
+usageStatusText _ (Stale _ message) = "stale · " <> message
+usageStatusText _ (Unavailable message) = message
+usageStatusText _ (Unsupported message) = message
+usageStatusText Codex NotLoaded = "press u to refresh"
+usageStatusText Claude NotLoaded = "not available"
+
+usageStatusAttribute :: Freshness -> AttrName
+usageStatusAttribute Loading = noticeAttr
+usageStatusAttribute (Stale _ _) = pendingAttr
+usageStatusAttribute (Unavailable _) = problemAttr
+usageStatusAttribute (Unsupported _) = dimAttr
+usageStatusAttribute _ = dimAttr
 
 drawUsageWindow :: AppState -> UsageWindow -> Widget Name
 drawUsageWindow state usageWindow =
@@ -628,6 +679,7 @@ handleEvent event = do
   state <- get
   case (state.appOverlay, event) of
     (_, AppEvent (BoardRefreshFinished result)) -> applyBoardRefresh result
+    (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
     (_, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> halt
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
@@ -650,13 +702,18 @@ handleEvent event = do
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> toggleSelectedTracker
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 's') [])) -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startBoardRefresh
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> setNotice "Usage providers are not wired yet; no network request was made"
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'R') [])) -> startBoardRefresh
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> startCodexRefresh
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'R') [])) -> startAllRefreshes
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> setNotice "Terminal repaint requested"
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
 setNotice message = modify (\state -> state {appNotice = Just message})
+
+startAllRefreshes :: EventM Name AppState ()
+startAllRefreshes = do
+  startBoardRefresh
+  startCodexRefresh
 
 startBoardRefresh :: EventM Name AppState ()
 startBoardRefresh = do
@@ -691,6 +748,38 @@ runBoardRefresh options repository eventChannel = do
             Right () -> githubResult
   writeBChan eventChannel (BoardRefreshFinished result)
 
+startCodexRefresh :: EventM Name AppState ()
+startCodexRefresh = do
+  state <- get
+  case Map.findWithDefault NotLoaded Codex state.appUsageFreshness of
+    Loading -> setNotice "Codex usage refresh is already running"
+    _ -> do
+      modify
+        ( \current ->
+            current
+              { appUsageFreshness = Map.insert Codex Loading current.appUsageFreshness,
+                appNotice = Just "Refreshing Codex usage…"
+              }
+        )
+      void
+        . liftIO
+        . forkIO
+        $ runCodexRefresh state.appOptions state.appUsage state.appEventChannel
+
+runCodexRefresh :: Options -> Map UsageProvider UsageSnapshot -> BChan AppEvent -> IO ()
+runCodexRefresh options existingSnapshots eventChannel = do
+  providerResult <- fetchCodexUsage
+  result <- case providerResult of
+    Left providerError -> pure (Left providerError)
+    Right snapshot
+      | options.optionNoCache -> pure (Right (snapshot, []))
+      | otherwise -> do
+          cacheResult <- writeUsageCache (Map.insert Codex snapshot existingSnapshots)
+          pure $ case cacheResult of
+            Left warning -> Right (snapshot, [warning])
+            Right () -> Right (snapshot, [])
+  writeBChan eventChannel (CodexRefreshFinished result)
+
 boardRefreshTimeoutMicros :: Int
 boardRefreshTimeoutMicros = 30 * 1000 * 1000
 
@@ -717,6 +806,31 @@ applyBoardRefresh result = modify $ \state -> case result of
             appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
           }
 
+applyCodexRefresh :: Either ProviderError (UsageSnapshot, [Text]) -> EventM Name AppState ()
+applyCodexRefresh result = modify $ \state -> case result of
+  Left providerError ->
+    state
+      { appUsageFreshness = Map.insert Codex (usageFailureFreshness state providerError) state.appUsageFreshness,
+        appNotice = Just ("Codex usage refresh failed: " <> renderProviderErrorMessage providerError)
+      }
+  Right (snapshot, warnings) ->
+    state
+      { appUsage = Map.insert Codex snapshot state.appUsage,
+        appUsageFreshness = Map.insert Codex (Fresh snapshot.usageFetchedAt) state.appUsageFreshness,
+        appNotice = Just ("Codex usage refreshed" <> renderWarnings warnings)
+      }
+
+usageFailureFreshness :: AppState -> ProviderError -> Freshness
+usageFailureFreshness state providerError = case Map.lookup Codex state.appUsage of
+  Just snapshot -> Stale snapshot.usageFetchedAt providerError.providerErrorMessage
+  Nothing -> case providerError.providerErrorKind of
+    UnsupportedVersion -> Unsupported providerError.providerErrorMessage
+    _ -> Unavailable providerError.providerErrorMessage
+
+renderWarnings :: [Text] -> Text
+renderWarnings [] = ""
+renderWarnings warnings = " · " <> Text.intercalate " · " warnings
+
 failureFreshness :: AppState -> ProviderError -> Freshness
 failureFreshness state providerError = case state.appLastSuccessfulFetch of
   Just fetchedAt -> Stale fetchedAt providerError.providerErrorMessage
@@ -724,15 +838,19 @@ failureFreshness state providerError = case state.appLastSuccessfulFetch of
 
 renderProviderError :: ProviderError -> Text
 renderProviderError providerError =
-  "GitHub refresh failed (" <> kind <> "): " <> providerError.providerErrorMessage
+  "GitHub refresh failed: " <> renderProviderErrorMessage providerError
+
+renderProviderErrorMessage :: ProviderError -> Text
+renderProviderErrorMessage providerError =
+  kind <> ": " <> providerError.providerErrorMessage
   where
     kind = case providerError.providerErrorKind of
-      AuthenticationRequired -> "authentication required"
-      ExecutableMissing -> "gh unavailable"
-      UnsupportedVersion -> "unsupported gh version"
-      RequestTimedOut -> "timeout"
-      InvalidResponse -> "invalid response"
-      RequestFailed -> "request error"
+      AuthenticationRequired -> "AUTH REQUIRED"
+      ExecutableMissing -> "NOT INSTALLED"
+      UnsupportedVersion -> "UNSUPPORTED VERSION"
+      RequestTimedOut -> "TIMED OUT"
+      InvalidResponse -> "INVALID RESPONSE"
+      RequestFailed -> "REQUEST ERROR"
 
 refreshSuccessNotice :: RepoSnapshot -> [Text] -> Text
 refreshSuccessNotice snapshot warnings =

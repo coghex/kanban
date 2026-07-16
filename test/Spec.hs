@@ -7,7 +7,16 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Kanban.Cache (CacheLoad (..), loadRepositoryCache, repositoryCachePath, writeRepositoryCache)
+import Kanban.Cache
+  ( CacheLoad (..),
+    UsageCacheLoad (..),
+    loadRepositoryCache,
+    loadUsageCache,
+    repositoryCachePath,
+    writeRepositoryCache,
+    writeUsageCache,
+  )
+import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Domain
 import Kanban.GitHub (decodeGitHubItems)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
@@ -135,6 +144,20 @@ main = hspec $ do
       decodeGitHubItems "{\"errors\":[{\"message\":\"boom\"}],\"data\":{}}"
         `shouldSatisfy` isLeft
 
+  describe "Codex app-server decoding" $ do
+    it "maps returned windows by duration and computes percentage left" $ do
+      case decodeCodexUsageResponse epoch codexRateLimitResponse of
+        Left providerError -> expectationFailure (show providerError)
+        Right snapshot -> do
+          map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["5 hour", "week"]
+          map (.usagePercentLeft) snapshot.usageWindows `shouldBe` [78, 59]
+          snapshot.usageFetchedAt `shouldBe` epoch
+
+    it "accepts an account that currently exposes only a weekly window" $ do
+      case decodeCodexUsageResponse epoch codexWeeklyOnlyResponse of
+        Left providerError -> expectationFailure (show providerError)
+        Right snapshot -> map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["week"]
+
   describe "repository snapshot cache" $ do
     it "round-trips a versioned snapshot and ignores corrupt JSON" $
       withTemporaryCacheRoot $ \cacheRoot ->
@@ -147,6 +170,14 @@ main = hspec $ do
           LazyByteString.writeFile cachePath "not JSON"
           invalid <- loadRepositoryCache repository
           invalid `shouldSatisfy` isInvalidCache
+
+    it "round-trips global usage snapshots" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let usage = UsageSnapshot [UsageWindow "week" 77 epoch] epoch
+              snapshots = Map.singleton Codex usage
+          writeUsageCache snapshots `shouldReturn` Right ()
+          loadUsageCache `shouldReturn` UsageCacheLoaded snapshots
 
   describe "pull request status" $ do
     it "makes conflicts red even when approved and CI passed" $ do
@@ -262,3 +293,11 @@ githubResponse =
       "  }",
       "}"
     ]
+
+codexRateLimitResponse :: LazyByteString.ByteString
+codexRateLimitResponse =
+  "{\"id\":1,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":99,\"windowDurationMins\":10080,\"resetsAt\":1784810495},\"secondary\":null},\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"usedPercent\":22,\"windowDurationMins\":300,\"resetsAt\":1784010000},\"secondary\":{\"usedPercent\":41,\"windowDurationMins\":10080,\"resetsAt\":1784810495}}}}}"
+
+codexWeeklyOnlyResponse :: LazyByteString.ByteString
+codexWeeklyOnlyResponse =
+  "{\"id\":1,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":23,\"windowDurationMins\":10080,\"resetsAt\":1784810495},\"secondary\":null},\"rateLimitsByLimitId\":null}}"
