@@ -19,6 +19,7 @@ import Kanban.Cache
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Domain
+import Kanban.Drainer (DrainerState (..), DrainerStatus (..), decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Repository (parseRepositoryName)
@@ -217,6 +218,25 @@ main = hspec $ do
     it "fails closed when the interactive usage request fails" $
       decodeClaudeUsageText (minutesToTimeZone (-420)) epoch "Current session\nFailed to load usage data"
         `shouldSatisfy` isLeft
+
+  describe "PR drainer status decoding" $ do
+    it "maps a running managed drainer to green/on" $ do
+      let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":null}"
+      result `shouldBe` Right (DrainerStatus DrainerOn "on")
+      result `shouldSatisfy` either (const False) drainerIsRunning
+
+    it "makes a running drainer with an unresolved incident a warning" $ do
+      let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
+      result `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
+      result `shouldSatisfy` either (const False) drainerIsRunning
+
+    it "makes a stopped drainer with an unresolved incident an error" $
+      decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
+        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+
+    it "rejects unsupported controller output" $
+      decodeDrainerStatus "{\"state\":\"paused\"}"
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused")
 
   describe "repository snapshot cache" $ do
     it "round-trips a versioned snapshot and ignores corrupt JSON" $

@@ -42,6 +42,7 @@ library
     Kanban.Claude
     Kanban.Codex
     Kanban.Domain
+    Kanban.Drainer
     Kanban.Fixture
     Kanban.GlyphTest
     Kanban.GitHub

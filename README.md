@@ -2,7 +2,8 @@
 
 `kanban` is an event-driven Haskell terminal dashboard for GitHub work and
 on-demand Codex and Claude usage limits. It is designed for macOS terminals,
-tmux, and SSH, and it performs no background polling.
+tmux, and SSH. GitHub and usage providers never poll in the background; the
+local launchd status of the PR drainer is checked every ten seconds.
 
 The current implementation resolves the local Git repository, renders its last
 cached snapshot immediately, and starts one asynchronous GitHub refresh. Later
@@ -16,6 +17,12 @@ GitHub pagination limits and nested connection caps are surfaced with `+`/`+N`
 markers and amber warnings rather than silently dropping data.
 Malformed epic checklists retain every valid child, leave unparsed children
 standalone, and show line-specific amber diagnostics.
+
+The bottom of the sidebar contains an ASCII `drain_prs.py` button backed by the
+installed `com.coghex.drain-prs` LaunchAgent. White means stopped, green means
+running, yellow means a transition or warning, and red means an error. Click it
+or press `d` to start or stop the managed drainer. Status checks are local and
+make no network request.
 
 Epics are purple and collapsed by default. Focus a collapsed epic with `j`/`k`
 and press `x` to expand or collapse it.

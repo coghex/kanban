@@ -6,7 +6,8 @@ workflow, explicit GitHub refresh, and last-good repository cache are
 implemented. Checklist-based tracker hierarchy, inherited PR membership,
 tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
-valid membership and standalone fallbacks. Native GitHub sub-issue membership,
+valid membership and standalone fallbacks. The sidebar also controls and
+monitors the local launchd-managed PR drainer. Native GitHub sub-issue membership,
 the external usage-command escape hatch, and broader provider-version fixtures
 remain for subsequent slices.
 
@@ -25,10 +26,12 @@ The dashboard combines:
   assignees, linked work, mergeability, and CI state.
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
+- Local status and start/stop control for the launchd-managed PR drainer.
 
-The initial application is read-only. It observes GitHub and the installed
+Repository behavior is read-only. The application observes GitHub and the installed
 Codex and Claude clients, but does not assign issues, edit labels, update
-branches, merge pull requests, or otherwise mutate remote state.
+branches, merge pull requests, or otherwise mutate remote state. Its one local
+mutation is explicitly starting or stopping the configured PR drainer service.
 
 ## 2. Goals
 
@@ -38,7 +41,8 @@ branches, merge pull requests, or otherwise mutate remote state.
 - Support an arbitrary GitHub repository without repository-specific code.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
-- Remain entirely keyboard-driven; mouse handling is out of scope initially.
+- Remain fully keyboard-operable; the PR drainer button is the only initial
+  mouse target.
 - Perform one asynchronous GitHub refresh at startup, then block on terminal
   events while idle and redraw only after input, resize, or provider
   completion.
@@ -53,7 +57,7 @@ branches, merge pull requests, or otherwise mutate remote state.
 - A web UI, GUI, Electron application, or background service.
 - Automatic network polling.
 - GitHub webhooks or a local HTTP server.
-- Mouse interaction.
+- General mouse navigation, card selection, and drag-and-drop interaction.
 - Drag-and-drop workflow mutation.
 - Editing issues, labels, assignments, reviews, or pull requests.
 - Merging pull requests.
@@ -143,8 +147,12 @@ scrollable four-column board.
 ║  resets  16:05      ║              ║              ║              ║              ║
 ║ week     22% left   ║              ║              ║              ║              ║
 ║  resets  Fri 09:10  ║              ║              ║              ║              ║
+║                     ║              ║              ║              ║              ║
+║ +--------------+    ║              ║              ║              ║              ║
+║ | drain_prs.py |    ║              ║              ║              ║              ║
+║ +--------------+    ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/k item  h/l column  x epic  enter  r board  u usage  R all  s sidebar  ? help  q quit
+ j/k item  h/l column  x epic  enter  r board  u usage  R all  d drainer  s sidebar  ? help  q quit
 ```
 
 Responsive behavior:
@@ -181,6 +189,7 @@ Initial bindings:
 | `r` | Refresh GitHub board data |
 | `u` | Refresh Codex and Claude usage |
 | `R` | Refresh board and usage |
+| `d` or click | Start or stop the launchd-managed PR drainer |
 | `s` | Toggle the usage sidebar |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
@@ -649,10 +658,14 @@ a countdown.
 - The GitHub provider runs once in a short-lived startup worker and again only
   after an explicit refresh. Usage providers run only after an explicit
   refresh.
+- The PR drainer controller discovers the installed LaunchAgent, reads its
+  wrapper's JSON status every ten seconds, and never contacts a network. Start
+  and stop operations run asynchronously and expose transitional UI state.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, or explicit
   terminal repaint.
-- There are no periodic network, filesystem, Git, or wall-clock polls.
+- There are no periodic network or Git polls. The sole timer is the ten-second
+  local PR drainer status check.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,
@@ -796,8 +809,9 @@ and the pure domain/test packages build warning-clean.
 - Add the golden-frame rendering suite over the fixture boards.
 
 Exit criteria: a fixture board is attractive and fully navigable in macOS
-Terminal, tmux, and SSH, with no mouse support, no idle redraw loop, and a
-passing golden-frame suite at wide, minimum four-column, and narrow sizes.
+Terminal, tmux, and SSH, with no mouse-dependent navigation, no idle redraw
+loop, and a passing golden-frame suite at wide, minimum four-column, and narrow
+sizes.
 
 ### Milestone 2 — GitHub snapshot and workflow board
 
@@ -864,7 +878,17 @@ unknown output. Automated CI covers fixtures without a live account; the first
 release requires a successful manual refresh against the current supported
 Claude version.
 
-### Milestone 6 — Hardening and release
+### Milestone 6 — Local PR drainer control
+
+Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
+
+- Discover the controller command from the LaunchAgent plist.
+- Decode the managed wrapper's structured status and incident data.
+- Refresh local status every ten seconds without network traffic.
+- Render the bottom-left ASCII button with off/on/warning/error colors.
+- Support both click and `d` start/stop actions with transition states.
+
+### Milestone 7 — Hardening and release
 
 - Complete config loading and per-repository overrides.
 - Exercise stale caches, missing tools, auth failures, signals, and subprocess
@@ -877,8 +901,9 @@ Claude version.
 - Tag the first release only after real tmux and SSH use.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
-idle CPU is effectively zero, and every network call is attributable to startup
-or an explicit refresh key.
+idle CPU is effectively zero apart from the inexpensive local service status
+timer, and every network call is attributable to startup or an explicit
+refresh key.
 
 ## 20. Deferred ideas
 

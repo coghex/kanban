@@ -9,8 +9,8 @@ import Brick.Widgets.Border (borderWithLabel, hBorder, hBorderWithLabel, vBorder
 import Brick.Widgets.Border.Style (BorderStyle (..), ascii, unicode, unicodeBold)
 import Brick.Widgets.Center (centerLayer)
 import qualified Brick.Types as BrickTypes
-import Control.Concurrent (forkIO)
-import Control.Monad (void)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (findIndex, intersperse)
 import Data.Map.Strict (Map)
@@ -33,6 +33,15 @@ import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Domain
+import Kanban.Drainer
+  ( DrainerController,
+    DrainerState (..),
+    DrainerStatus (..),
+    discoverDrainerController,
+    drainerIsRunning,
+    queryDrainerStatus,
+    setDrainerRunning,
+  )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
@@ -45,6 +54,7 @@ data Name
   = BoardViewport
   | ColumnViewport BoardColumn
   | DetailsViewport
+  | DrainerButton
   deriving stock (Eq, Ord, Show)
 
 data Overlay = HelpOverlay | DetailsOverlay BoardItem
@@ -54,6 +64,8 @@ data AppEvent
   = BoardRefreshFinished (Either ProviderError GitHubResult)
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
+  | DrainerStatusRefreshed (Either Text DrainerStatus)
+  | DrainerToggleFinished (Either Text DrainerStatus)
 
 data AppState = AppState
   { appRepository :: Repository,
@@ -70,6 +82,9 @@ data AppState = AppState
     appLastSuccessfulFetch :: Maybe UTCTime,
     appIssuesTruncated :: Bool,
     appPullRequestsTruncated :: Bool,
+    appDrainerController :: Either Text DrainerController,
+    appDrainerStatus :: DrainerStatus,
+    appDrainerBusy :: Bool,
     appEventChannel :: BChan AppEvent,
     appNow :: UTCTime,
     appTimeZone :: TimeZone,
@@ -88,7 +103,8 @@ runDashboard options repository = do
     if options.optionNoCache
       then pure UsageCacheAbsent
       else loadUsageCache
-  eventChannel <- newBChan 4
+  drainerController <- discoverDrainerController
+  eventChannel <- newBChan 8
   let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState now cacheLoad
       (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
@@ -107,6 +123,12 @@ runDashboard options repository = do
             appLastSuccessfulFetch = initialFetchedAt,
             appIssuesTruncated = issuesTruncated,
             appPullRequestsTruncated = pullRequestsTruncated,
+            appDrainerController = drainerController,
+            appDrainerStatus =
+              case drainerController of
+                Right _ -> DrainerStatus DrainerStarting "checking…"
+                Left message -> DrainerStatus DrainerError (sanitizeText message),
+            appDrainerBusy = False,
             appEventChannel = eventChannel,
             appNow = now,
             appTimeZone = timeZone,
@@ -161,7 +183,7 @@ application =
     { appDraw = drawApplication,
       appChooseCursor = neverShowCursor,
       appHandleEvent = handleEvent,
-      appStartEvent = startBoardRefresh,
+      appStartEvent = startApplication,
       appAttrMap = themeFor . (.appOptions)
     }
 
@@ -205,7 +227,35 @@ drawUsage state
         . padLeftRight 1
         $ usageContents
   where
-    usageContents = vBox [drawProvider state Codex, txt "", drawProvider state Claude]
+    usageContents =
+      vBox
+        [ vBox [drawProvider state Codex, txt "", drawProvider state Claude],
+          padTop Max (drawDrainerButton state)
+        ]
+
+drawDrainerButton :: AppState -> Widget Name
+drawDrainerButton state =
+  vBox
+    [ clickable DrainerButton
+        . withAttr (drainerStatusAttr status)
+        . vBox
+        $ [ txt "+--------------+",
+            txt "| drain_prs.py |",
+            txt "+--------------+"
+          ],
+      withAttr (drainerStatusAttr status) (txtWrap status.drainerDetail)
+    ]
+  where
+    status = state.appDrainerStatus
+
+drainerStatusAttr :: DrainerStatus -> AttrName
+drainerStatusAttr status = case status.drainerState of
+  DrainerOff -> neutralAttr
+  DrainerOn -> readyAttr
+  DrainerStarting -> pendingAttr
+  DrainerStopping -> pendingAttr
+  DrainerWarning -> pendingAttr
+  DrainerError -> problemAttr
 
 drawProvider :: AppState -> UsageProvider -> Widget Name
 drawProvider state provider =
@@ -605,7 +655,7 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    $ [ withAttr footerAttr (txt "j/k item  h/l column  x epic  enter details  r board  u usage  R all  s sidebar  ? help  q quit"),
+    $ [ withAttr footerAttr (txt "j/k item  h/l column  x epic  enter details  r board  u usage  R all  d drainer  s sidebar  ? help  q quit"),
         withAttr dimAttr (txt (boardFreshnessText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
@@ -646,6 +696,7 @@ drawHelp =
       txt "x            expand / collapse focused epic",
       txt "Enter        details",
       txt "r / u / R    board / usage / all refresh",
+      txt "d / click    start or stop PR drainer",
       txt "s            toggle sidebar",
       txt "Ctrl-L       repaint",
       txt "Esc          close overlay",
@@ -751,6 +802,8 @@ handleEvent event = do
     (_, AppEvent (BoardRefreshFinished result)) -> applyBoardRefresh result
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
+    (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
+    (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
     (_, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> halt
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
@@ -775,11 +828,79 @@ handleEvent event = do
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startBoardRefresh
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> startUsageRefreshes
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'R') [])) -> startAllRefreshes
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'd') [])) -> toggleDrainer
+    (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> setNotice "Terminal repaint requested"
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
 setNotice message = modify (\state -> state {appNotice = Just message})
+
+startApplication :: EventM Name AppState ()
+startApplication = do
+  vty <- getVtyHandle
+  liftIO (Vty.setMode (Vty.outputIface vty) Vty.Mouse True)
+  startBoardRefresh
+  state <- get
+  case state.appDrainerController of
+    Left _ -> pure ()
+    Right controller ->
+      void
+        . liftIO
+        . forkIO
+        $ monitorDrainer controller state.appEventChannel
+
+monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
+monitorDrainer controller eventChannel = forever $ do
+  queryDrainerStatus controller >>= writeBChan eventChannel . DrainerStatusRefreshed
+  threadDelay drainerRefreshIntervalMicros
+
+drainerRefreshIntervalMicros :: Int
+drainerRefreshIntervalMicros = 10 * 1000 * 1000
+
+toggleDrainer :: EventM Name AppState ()
+toggleDrainer = do
+  state <- get
+  if state.appDrainerBusy
+    then setNotice "PR drainer is already starting or stopping"
+    else case state.appDrainerController of
+      Left message -> setNotice ("PR drainer control unavailable: " <> sanitizeText message)
+      Right controller -> do
+        let shouldRun = not (drainerIsRunning state.appDrainerStatus)
+            transition = if shouldRun then DrainerStatus DrainerStarting "starting…" else DrainerStatus DrainerStopping "stopping…"
+        modify
+          ( \current ->
+              current
+                { appDrainerStatus = transition,
+                  appDrainerBusy = True,
+                  appNotice = Just (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
+                }
+          )
+        void
+          . liftIO
+          . forkIO
+          $ setDrainerRunning controller shouldRun >>= writeBChan state.appEventChannel . DrainerToggleFinished
+
+applyDrainerStatus :: Either Text DrainerStatus -> EventM Name AppState ()
+applyDrainerStatus result = modify $ \state ->
+  if state.appDrainerBusy
+    then state
+    else state {appDrainerStatus = either drainerErrorStatus id result}
+
+applyDrainerToggle :: Either Text DrainerStatus -> EventM Name AppState ()
+applyDrainerToggle result = modify $ \state ->
+  let status = either drainerErrorStatus id result
+      notice = case result of
+        Left message -> "PR drainer control failed: " <> sanitizeText message
+        Right _ -> "PR drainer is " <> status.drainerDetail
+   in state
+        { appDrainerStatus = status,
+          appDrainerBusy = False,
+          appNotice = Just notice
+        }
+
+drainerErrorStatus :: Text -> DrainerStatus
+drainerErrorStatus message = DrainerStatus DrainerError (sanitizeText message)
 
 startAllRefreshes :: EventM Name AppState ()
 startAllRefreshes = do
