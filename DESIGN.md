@@ -41,8 +41,8 @@ mutation is explicitly starting or stopping the configured PR drainer service.
 - Support an arbitrary GitHub repository without repository-specific code.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
-- Remain fully keyboard-operable; the PR drainer button is the only initial
-  mouse target.
+- Remain fully keyboard-operable; mouse support is limited to card selection,
+  details dismissal, and the PR drainer button.
 - Perform one asynchronous GitHub refresh at startup, then block on terminal
   events while idle and redraw only after input, resize, or provider
   completion.
@@ -57,7 +57,8 @@ mutation is explicitly starting or stopping the configured PR drainer service.
 - A web UI, GUI, Electron application, or background service.
 - Automatic network polling.
 - GitHub webhooks or a local HTTP server.
-- General mouse navigation, card selection, and drag-and-drop interaction.
+- Drag-and-drop, hover actions, mouse-driven column navigation, and general
+  pointer interaction beyond the deliberately small contract in section 7.
 - Drag-and-drop workflow mutation.
 - Editing issues, labels, assignments, reviews, or pull requests.
 - Merging pull requests.
@@ -198,6 +199,19 @@ Initial bindings:
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
 small fixed set.
+
+Mouse interaction is intentionally complete but narrow:
+
+- Left-clicking an unselected issue or PR card selects it.
+- Left-clicking the selected card opens its details panel.
+- Left-clicking outside an open details panel closes it.
+- Right-clicking anywhere while a details panel is open closes it.
+- The mouse wheel scrolls the board column under the pointer by three rows per
+  wheel event.
+- The launchd PR drainer button remains directly clickable.
+
+Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
+or pointer-only behavior.
 
 ## 8. Board state model
 

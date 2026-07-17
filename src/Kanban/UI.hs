@@ -54,6 +54,8 @@ data Name
   = BoardViewport
   | ColumnViewport BoardColumn
   | DetailsViewport
+  | CardTarget BoardColumn Int
+  | DetailsPanel
   | DrainerButton
   deriving stock (Eq, Ord, Show)
 
@@ -74,6 +76,7 @@ data AppState = AppState
     appUsageFreshness :: Map UsageProvider Freshness,
     appSelectedColumn :: BoardColumn,
     appSelectedRows :: Map BoardColumn Int,
+    appEnsureSelectionVisible :: Bool,
     appExpandedTrackers :: Set Int,
     appSidebarVisible :: Bool,
     appOverlay :: Maybe Overlay,
@@ -115,6 +118,7 @@ runDashboard options repository = do
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
             appSelectedRows = Map.fromList [(column, 0) | column <- allColumns],
+            appEnsureSelectionVisible = True,
             appExpandedTrackers = Set.empty,
             appSidebarVisible = True,
             appOverlay = Nothing,
@@ -385,6 +389,7 @@ drawColumn :: AppState -> Int -> BoardColumn -> Widget Name
 drawColumn state columnWidth column =
   columnVisibility
     . hLimit columnWidth
+    . clickable (ColumnViewport column)
     . viewport (ColumnViewport column) Vertical
     . padTop (Pad 1)
     . vBox
@@ -426,10 +431,13 @@ structuralGlyph state boxGlyph
 
 drawCard :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
 drawCard state column row entry =
-  padLeftRight 1 . padBottom (Pad 1) $ visibility card
+  padLeftRight 1
+    . padBottom (Pad 1)
+    . clickable (CardTarget column row)
+    $ visibility card
   where
     selected = state.appSelectedColumn == column && selectedRow state column == row
-    visibility = if selected then visible else id
+    visibility = if selected && state.appEnsureSelectionVisible then visible else id
     card =
       (if selected then withAttr selectedAttr (txt marker) else txt " ")
         <+> branchPrefix state column row entry
@@ -493,7 +501,7 @@ drawTrackerHeader state column row tracker expanded =
     $ marker <+> withAttr headerAttribute (txtWrap headerText)
   where
     selected = not expanded && state.appSelectedColumn == column && selectedRow state column == row
-    visibility = if selected then visible else id
+    visibility = if selected && state.appEnsureSelectionVisible then visible else id
     marker
       | selected = withAttr selectedAttr (txt (if state.appOptions.optionAscii then ">" else "▌"))
       | otherwise = txt " "
@@ -672,6 +680,7 @@ boardFreshnessText state = "board: " <> case state.appBoardFreshness of
 drawOverlay :: AppState -> Overlay -> Widget Name
 drawOverlay state overlay =
   centerLayer
+    . panelExtent
     . hLimit 88
     . vLimit 32
     . withBorderStyle (innerBorderStyle state)
@@ -681,6 +690,9 @@ drawOverlay state overlay =
       HelpOverlay -> drawHelp
       DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails state item)
   where
+    panelExtent = case overlay of
+      HelpOverlay -> id
+      DetailsOverlay _ -> clickable DetailsPanel
     overlayTitle = case overlay of
       HelpOverlay -> " HELP "
       DetailsOverlay item -> " " <> itemHeading item <> " "
@@ -697,6 +709,9 @@ drawHelp =
       txt "Enter        details",
       txt "r / u / R    board / usage / all refresh",
       txt "d / click    start or stop PR drainer",
+      txt "left click   select card; click selected card for details",
+      txt "mouse wheel scroll column under pointer",
+      txt "right/outside click closes card details",
       txt "s            toggle sidebar",
       txt "Ctrl-L       repaint",
       txt "Esc          close overlay",
@@ -805,6 +820,10 @@ handleEvent event = do
     (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
     (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
     (_, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> halt
+    (Just (DetailsOverlay _), MouseDown DetailsPanel Vty.BRight _ _) -> closeOverlay
+    (Just (DetailsOverlay _), MouseDown DetailsPanel _ _ _) -> pure ()
+    (Just (DetailsOverlay _), MouseDown _ _ _ _) -> closeOverlay
+    (Just (DetailsOverlay _), VtyEvent (Vty.EvMouseDown _ _ _ _)) -> closeOverlay
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> vScrollBy (viewportScroll DetailsViewport) 1
@@ -830,11 +849,38 @@ handleEvent event = do
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'R') [])) -> startAllRefreshes
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'd') [])) -> toggleDrainer
     (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
+    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _) -> selectOrOpenCard column row
+    (Nothing, MouseDown (CardTarget column _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
+    (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
+    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
+    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> setNotice "Terminal repaint requested"
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
 setNotice message = modify (\state -> state {appNotice = Just message})
+
+closeOverlay :: EventM Name AppState ()
+closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
+
+scrollColumn :: BoardColumn -> Int -> EventM Name AppState ()
+scrollColumn column amount = do
+  modify (\state -> state {appEnsureSelectionVisible = False})
+  vScrollBy (viewportScroll (ColumnViewport column)) amount
+
+selectOrOpenCard :: BoardColumn -> Int -> EventM Name AppState ()
+selectOrOpenCard column row = modify $ \state ->
+  if state.appSelectedColumn == column && selectedRow state column == row
+    then case safeIndex row (entriesFor state column) of
+      Just entry -> state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
+      Nothing -> state
+    else
+      state
+        { appSelectedColumn = column,
+          appSelectedRows = Map.insert column row state.appSelectedRows,
+          appEnsureSelectionVisible = True,
+          appNotice = Nothing
+        }
 
 startApplication :: EventM Name AppState ()
 startApplication = do
@@ -1164,15 +1210,15 @@ moveCard delta = modify $ \state ->
       currentPosition = maybe 0 id (findIndex (== selectedRow state column) rows)
       nextPosition = max 0 (min (length rows - 1) (currentPosition + delta))
    in case safeIndex nextPosition rows of
-        Nothing -> state {appNotice = Nothing}
-        Just nextRow -> state {appSelectedRows = Map.insert column nextRow state.appSelectedRows, appNotice = Nothing}
+        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
+        Just nextRow -> state {appSelectedRows = Map.insert column nextRow state.appSelectedRows, appEnsureSelectionVisible = True, appNotice = Nothing}
 
 moveColumn :: Int -> EventM Name AppState ()
 moveColumn delta = modify $ \state ->
   let current = fromEnum state.appSelectedColumn
       maximumColumn = fromEnum (maxBound :: BoardColumn)
       next = max 0 (min maximumColumn (current + delta))
-   in state {appSelectedColumn = toEnum next, appNotice = Nothing}
+   in state {appSelectedColumn = toEnum next, appEnsureSelectionVisible = True, appNotice = Nothing}
 
 selectBoundary :: Bool -> EventM Name AppState ()
 selectBoundary selectLast = modify $ \state ->
@@ -1180,8 +1226,8 @@ selectBoundary selectLast = modify $ \state ->
       rows = visibleSelectionRows state column
       target = if selectLast then safeLast rows else safeIndex 0 rows
    in case target of
-        Nothing -> state {appNotice = Nothing}
-        Just row -> state {appSelectedRows = Map.insert column row state.appSelectedRows, appNotice = Nothing}
+        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
+        Just row -> state {appSelectedRows = Map.insert column row state.appSelectedRows, appEnsureSelectionVisible = True, appNotice = Nothing}
 
 toggleSelectedTracker :: EventM Name AppState ()
 toggleSelectedTracker = modify $ \state ->
@@ -1189,18 +1235,20 @@ toggleSelectedTracker = modify $ \state ->
       entries = entriesFor state column
       currentRow = selectedRow state column
    in case safeIndex currentRow entries >>= entryPrimaryTrackerNumber of
-        Nothing -> state {appNotice = Just "Focus an epic header or child before pressing x"}
+        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Just "Focus an epic header or child before pressing x"}
         Just trackerNumber
           | trackerNumber `Set.member` state.appExpandedTrackers ->
               let firstRow = maybe currentRow id (findIndex ((== Just trackerNumber) . entryPrimaryTrackerNumber) entries)
                in state
                     { appExpandedTrackers = Set.delete trackerNumber state.appExpandedTrackers,
                       appSelectedRows = Map.insert column firstRow state.appSelectedRows,
+                      appEnsureSelectionVisible = True,
                       appNotice = Just ("Collapsed epic #" <> showText trackerNumber)
                     }
           | otherwise ->
               state
                 { appExpandedTrackers = Set.insert trackerNumber state.appExpandedTrackers,
+                  appEnsureSelectionVisible = True,
                   appNotice = Just ("Expanded epic #" <> showText trackerNumber)
                 }
 

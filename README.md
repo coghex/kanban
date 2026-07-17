@@ -24,6 +24,12 @@ running, yellow means a transition or warning, and red means an error. Click it
 or press `d` to start or stop the managed drainer. Status checks are local and
 make no network request.
 
+Cards support a deliberately small mouse contract: click once to select, click
+the selected card to open its details, click outside the details panel to close
+it, right-click anywhere while details are open to close it, or use the mouse
+wheel to scroll the column under the pointer. Every action also remains
+available from the keyboard.
+
 Epics are purple and collapsed by default. Focus a collapsed epic with `j`/`k`
 and press `x` to expand or collapse it.
 
