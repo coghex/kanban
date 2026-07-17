@@ -1748,6 +1748,7 @@ handleEvent event = do
     (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, _) -> pure ()
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
     (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
     (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
@@ -1780,7 +1781,7 @@ handleEvent event = do
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> setNotice "Terminal repaint requested"
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> suspendAndResume (pure ())
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
@@ -1956,7 +1957,7 @@ killSelectedWorkingProcess :: EventM Name AppState ()
 killSelectedWorkingProcess = do
   state <- get
   case selectedReviewItem state of
-    Nothing -> setNotice "Select a working issue or PR before pressing k"
+    Nothing -> setNotice "Select a working issue or PR before pressing x"
     Just item -> killItemWorkingProcess item
 
 killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
