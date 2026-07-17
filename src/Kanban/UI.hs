@@ -33,10 +33,11 @@ import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Domain
-import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot)
+import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Text (excerpt, sanitizeText)
+import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, pullRequestStatus)
 import System.Timeout (timeout)
 
@@ -67,6 +68,8 @@ data AppState = AppState
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
     appLastSuccessfulFetch :: Maybe UTCTime,
+    appIssuesTruncated :: Bool,
+    appPullRequestsTruncated :: Bool,
     appEventChannel :: BChan AppEvent,
     appNow :: UTCTime,
     appTimeZone :: TimeZone,
@@ -86,7 +89,7 @@ runDashboard options repository = do
       then pure UsageCacheAbsent
       else loadUsageCache
   eventChannel <- newBChan 4
-  let (initialBoard, initialFreshness, initialFetchedAt, initialNotice) = initialBoardState now cacheLoad
+  let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState now cacheLoad
       (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
         AppState
@@ -102,6 +105,8 @@ runDashboard options repository = do
             appNotice = Just (initialNotice <> maybe "" (" · " <>) usageNotice),
             appBoardFreshness = initialFreshness,
             appLastSuccessfulFetch = initialFetchedAt,
+            appIssuesTruncated = issuesTruncated,
+            appPullRequestsTruncated = pullRequestsTruncated,
             appEventChannel = eventChannel,
             appNow = now,
             appTimeZone = timeZone,
@@ -110,24 +115,30 @@ runDashboard options repository = do
   (_, finalVty) <- customMainWithDefaultVty (Just eventChannel) application initialState
   Vty.shutdown finalVty
 
-initialBoardState :: UTCTime -> CacheLoad -> (Board, Freshness, Maybe UTCTime, Text)
+initialBoardState :: UTCTime -> CacheLoad -> (Board, Freshness, Maybe UTCTime, Bool, Bool, Text)
 initialBoardState now cacheLoad = case cacheLoad of
   CacheLoaded snapshot ->
     ( deriveBoard defaultWorkflowConfig snapshot,
       Fresh snapshot.snapshotFetchedAt,
       Just snapshot.snapshotFetchedAt,
-      "Cached GitHub snapshot loaded · press r to refresh"
+      snapshot.snapshotIssuesTruncated,
+      snapshot.snapshotPullRequestsTruncated,
+      appendWarnings "Cached GitHub snapshot loaded · press r to refresh" (snapshotWarnings snapshot)
     )
   CacheAbsent ->
-    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now),
+    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now False False),
       NotLoaded,
       Nothing,
+      False,
+      False,
       "No cached GitHub snapshot · press r to refresh"
     )
   CacheInvalid warning ->
-    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now),
+    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now False False),
       NotLoaded,
       Nothing,
+      False,
+      False,
       warning <> " · press r to refresh"
     )
 
@@ -281,7 +292,7 @@ drawOpenBoard state columnWidths =
         . hBorderWithLabel
         . withAttr (columnHeadingAttr column)
         . txt
-        $ " " <> columnName column <> "  " <> showText (length (entriesFor state column)) <> " "
+        $ " " <> columnName column <> "  " <> columnCountText state column <> " "
 
 drawBoardTop :: AppState -> [Int] -> Widget Name
 drawBoardTop state columnWidths =
@@ -295,7 +306,7 @@ drawBoardTop state columnWidths =
           . hBorderWithLabel
           . withAttr (columnHeadingAttr column)
           . txt
-          $ " " <> columnName column <> "  " <> showText (length (entriesFor state column)) <> " ",
+          $ " " <> columnName column <> "  " <> columnCountText state column <> " ",
         txt (if index == length allColumns - 1 then boardTopRight state else boardTopJunction state)
       ]
 
@@ -408,7 +419,7 @@ cardLines :: AppState -> Bool -> ColumnEntry -> [Widget Name]
 cardLines state selected entry =
   trackingLine
     <> [ withAttr (if selected then selectedTitleAttr else cardTitleAttr) (txtWrap (itemHeading item)),
-    hBox (map (drawLabel state) (take 4 (itemLabels item))),
+    drawCardLabels state item,
     withAttr dimAttr (txtWrap (itemMetadata state item)),
     txtWrap (excerpt (itemBody item))
        ]
@@ -419,7 +430,9 @@ cardLines state selected entry =
       Standalone _ -> []
       Tracked context _ -> [drawTrackingLine context]
     statusLine = case item of
-      IssueItem _ -> []
+      IssueItem issue -> case trackerDiagnosticsForIssue defaultWorkflowConfig issue of
+        [] -> []
+        diagnostic : _ -> [withAttr pendingAttr (txtWrap ("TRACKER · " <> renderTrackerDiagnostic diagnostic))]
       PullRequestItem _ -> [withAttr (statusTextAttr item) (txt (itemStatusText item))]
 
 drawTrackerHeader :: AppState -> BoardColumn -> Int -> Tracker -> Bool -> Widget Name
@@ -434,7 +447,9 @@ drawTrackerHeader state column row tracker expanded =
     marker
       | selected = withAttr selectedAttr (txt (if state.appOptions.optionAscii then ">" else "▌"))
       | otherwise = txt " "
-    headerAttribute = trackerAttr
+    headerAttribute
+      | null tracker.trackerDiagnostics = trackerAttr
+      | otherwise = pendingAttr
     disclosure
       | state.appOptions.optionAscii = if expanded then "v" else ">"
       | expanded = "▾"
@@ -450,6 +465,7 @@ drawTrackerHeader state column row tracker expanded =
         <> "/"
         <> showText tracker.trackerTotal
         <> " complete"
+        <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
 
 drawTrackingLine :: TrackingContext -> Widget Name
 drawTrackingLine context =
@@ -486,6 +502,16 @@ primaryTrackerNumber context = context.trackingPrimary.membershipTracker.tracker
 drawLabel :: AppState -> Label -> Widget Name
 drawLabel _ label = withAttr (labelAttribute label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
 
+drawCardLabels :: AppState -> BoardItem -> Widget Name
+drawCardLabels state item = hBox (map (drawLabel state) visibleLabels <> overflowMarker)
+  where
+    labels = itemLabels item
+    visibleLabels = take 4 labels
+    hiddenLabels = max 0 (length labels - length visibleLabels) + itemLabelOverflow item
+    overflowMarker
+      | hiddenLabels > 0 = [withAttr pendingAttr (txt ("+" <> showText hiddenLabels))]
+      | otherwise = []
+
 itemHeading :: BoardItem -> Text
 itemHeading (IssueItem issue) = "#" <> showText issue.issueNumber <> "  " <> sanitizeText issue.issueTitle
 itemHeading (PullRequestItem pullRequest) =
@@ -503,14 +529,26 @@ itemMetadata :: AppState -> BoardItem -> Text
 itemMetadata state (IssueItem issue) = ownership <> " · updated " <> relativeAge state.appNow issue.issueUpdatedAt
   where
     ownership
-      | null issue.issueAssignees = "unassigned"
-      | otherwise = Text.intercalate ", " ["@" <> assignee.assigneeLogin | assignee <- issue.issueAssignees]
+      | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = "unassigned"
+      | otherwise =
+          Text.intercalate ", " ["@" <> assignee.assigneeLogin | assignee <- issue.issueAssignees]
+            <> overflowText issue.issueAssigneeOverflow
 itemMetadata state (PullRequestItem pullRequest) =
   linked <> pullRequest.pullRequestAuthor <> " → " <> pullRequest.pullRequestBase <> " · updated " <> relativeAge state.appNow pullRequest.pullRequestUpdatedAt
   where
     linked = case pullRequest.pullRequestLinkedIssues of
-      [] -> "UNLINKED · "
-      numbers -> Text.intercalate "," (map (("#" <>) . showText) (take 2 numbers)) <> " · "
+      []
+        | pullRequest.pullRequestLinkedIssueOverflow > 0 -> "+" <> showText pullRequest.pullRequestLinkedIssueOverflow <> " linked · "
+        | otherwise -> "UNLINKED · "
+      numbers ->
+        let visibleNumbers = take 2 numbers
+            hiddenNumbers = max 0 (length numbers - length visibleNumbers) + pullRequest.pullRequestLinkedIssueOverflow
+         in Text.intercalate "," (map (("#" <>) . showText) visibleNumbers) <> overflowText hiddenNumbers <> " · "
+
+overflowText :: Int -> Text
+overflowText count
+  | count > 0 = " +" <> showText count
+  | otherwise = ""
 
 itemStatusText :: BoardItem -> Text
 itemStatusText (IssueItem _) = ""
@@ -535,6 +573,7 @@ mergeText MergeUnknown = "calculating"
 cardStatusAttribute :: BoardItem -> AttrName
 cardStatusAttribute item
   | isProblem defaultWorkflowConfig item = problemAttr
+  | itemHasAmberWarning item = pendingAttr
   | isApproved defaultWorkflowConfig item = approvedAttr
 cardStatusAttribute (PullRequestItem pullRequest) = case pullRequestStatus defaultWorkflowConfig pullRequest of
   StatusPending _ -> pendingAttr
@@ -546,12 +585,21 @@ cardStatusAttribute _ = neutralAttr
 statusTextAttr :: BoardItem -> AttrName
 statusTextAttr item
   | isProblem defaultWorkflowConfig item = problemAttr
+  | itemHasAmberWarning item = pendingAttr
 statusTextAttr (PullRequestItem pullRequest) = case pullRequestStatus defaultWorkflowConfig pullRequest of
   StatusPending _ -> pendingAttr
   StatusReady -> readyAttr
   StatusProblem _ -> problemAttr
   StatusNeutral -> dimAttr
 statusTextAttr _ = dimAttr
+
+itemHasAmberWarning :: BoardItem -> Bool
+itemHasAmberWarning (IssueItem issue) =
+  issue.issueLabelOverflow > 0
+    || issue.issueAssigneeOverflow > 0
+    || not (null (trackerDiagnosticsForIssue defaultWorkflowConfig issue))
+itemHasAmberWarning (PullRequestItem pullRequest) =
+  pullRequest.pullRequestLabelOverflow > 0 || pullRequest.pullRequestLinkedIssueOverflow > 0
 
 drawFooter :: AppState -> Widget Name
 drawFooter state =
@@ -609,12 +657,13 @@ drawDetails state item =
   vBox
     ( [ withAttr cardTitleAttr (txtWrap (itemHeading item)),
         txt "",
-        hBox (map drawLabelForDetails (itemLabels item)),
+        hBox (map drawLabelForDetails (itemLabels item) <> detailsOverflowMarker),
         txt "",
         withAttr headingAttr (txt "Metadata"),
         txtWrap (itemMetadata state item)
       ]
         <> trackingDetails
+        <> trackerDiagnosticDetails
         <> [ txt "",
              withAttr headingAttr (txt "Body"),
              txtWrap (sanitizeText (itemBody item)),
@@ -625,9 +674,21 @@ drawDetails state item =
     )
   where
     drawLabelForDetails label = withAttr (labelAttribute label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
+    detailsOverflowMarker
+      | itemLabelOverflow item > 0 = [withAttr pendingAttr (txt ("+" <> showText (itemLabelOverflow item) <> " labels omitted"))]
+      | otherwise = []
     trackingDetails = case findEntry state.appBoard (itemId item) of
       Just (Tracked context _) -> drawTrackingDetails context
       _ -> []
+    trackerDiagnosticDetails = case item of
+      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue defaultWorkflowConfig issue)
+      PullRequestItem _ -> []
+
+drawTrackerDiagnosticDetails :: [TrackerDiagnostic] -> [Widget Name]
+drawTrackerDiagnosticDetails [] = []
+drawTrackerDiagnosticDetails diagnostics =
+  [txt "", withAttr pendingAttr (txt "Tracker warnings")]
+    <> map (withAttr pendingAttr . txtWrap . ("• " <>) . renderTrackerDiagnostic) diagnostics
 
 drawTrackingDetails :: TrackingContext -> [Widget Name]
 drawTrackingDetails context =
@@ -638,6 +699,7 @@ drawTrackingDetails context =
     <> map drawMembership context.trackingAdditional
     <> completionWarning
     <> multiTrackerWarning
+    <> trackerWarnings
   where
     drawMembership membership =
       let tracker = membership.membershipTracker
@@ -662,6 +724,10 @@ drawTrackingDetails context =
     multiTrackerWarning
       | null context.trackingAdditional = []
       | otherwise = [withAttr pendingAttr (txtWrap "MULTI-TRACKED: memberships are listed in deterministic priority order")]
+    trackerWarnings =
+      concatMap
+        (drawTrackerDiagnosticDetails . (.membershipTracker.trackerDiagnostics))
+        (context.trackingPrimary : context.trackingAdditional)
 
 relativeAge :: UTCTime -> UTCTime -> Text
 relativeAge now thenTime
@@ -823,6 +889,8 @@ applyBoardRefresh result = modify $ \state -> case result of
             appOverlay = refreshedOverlay,
             appBoardFreshness = Fresh snapshot.snapshotFetchedAt,
             appLastSuccessfulFetch = Just snapshot.snapshotFetchedAt,
+            appIssuesTruncated = snapshot.snapshotIssuesTruncated,
+            appPullRequestsTruncated = snapshot.snapshotPullRequestsTruncated,
             appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
           }
 
@@ -889,15 +957,30 @@ renderProviderErrorMessage providerError =
 refreshSuccessNotice :: RepoSnapshot -> [Text] -> Text
 refreshSuccessNotice snapshot warnings =
   "GitHub refreshed · "
-    <> counted "issue" (length snapshot.snapshotIssues)
+    <> countedSource "issue" (length snapshot.snapshotIssues) snapshot.snapshotIssuesTruncated
     <> " · "
-    <> counted "PR" (length snapshot.snapshotPullRequests)
+    <> countedSource "PR" (length snapshot.snapshotPullRequests) snapshot.snapshotPullRequestsTruncated
     <> case warnings of
       [] -> ""
       values -> " · " <> Text.intercalate " · " values
 
-counted :: Text -> Int -> Text
-counted noun count = showText count <> " " <> noun <> if count == 1 then "" else "s"
+countedSource :: Text -> Int -> Bool -> Text
+countedSource noun count truncated =
+  showText count <> (if truncated then "+" else "") <> " " <> noun <> if count == 1 then "" else "s"
+
+columnCountText :: AppState -> BoardColumn -> Text
+columnCountText state column =
+  showText (length (entriesFor state column)) <> if columnMayBeTruncated then "+" else ""
+  where
+    columnMayBeTruncated = case column of
+      Issues -> state.appIssuesTruncated
+      Active -> state.appIssuesTruncated
+      Reviewing -> state.appPullRequestsTruncated
+      Done -> state.appPullRequestsTruncated
+
+appendWarnings :: Text -> [Text] -> Text
+appendWarnings message [] = message
+appendWarnings message warnings = message <> " · " <> Text.intercalate " · " warnings
 
 preserveSelection :: AppState -> Board -> (BoardColumn, Map BoardColumn Int)
 preserveSelection state board =

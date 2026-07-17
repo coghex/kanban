@@ -19,11 +19,11 @@ import Kanban.Cache
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Domain
-import Kanban.GitHub (decodeGitHubItems)
+import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Repository (parseRepositoryName)
 import Kanban.Text (excerpt, sanitizeText)
-import Kanban.Tracker (implementationSortKey, parseTrackerChildren)
+import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import System.Directory (createDirectory, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -48,27 +48,32 @@ main = hspec $ do
 
   describe "workflow classification" $ do
     it "classifies assigned issues as Active and removes linked issue cards" $ do
-      let snapshot = RepoSnapshot [baseIssue 1 [], baseIssue 2 [Assignee "agent"]] [basePullRequest 10 [1] False []] epoch
+      let snapshot = RepoSnapshot [baseIssue 1 [], baseIssue 2 [Assignee "agent"]] [basePullRequest 10 [1] False []] epoch False False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` []
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [2]
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10]
 
+    it "treats a truncated non-empty assignee connection as Active" $ do
+      let issue = (baseIssue 1 []) {issueAssigneeOverflow = 1}
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch False False)
+      map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [1]
+
     it "keeps draft approved pull requests in Reviewing" $ do
       let pullRequest = basePullRequest 10 [] True [Label "reviewed:approve" "00ff00"]
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
       Map.size columns `shouldBe` 4
       length (Map.findWithDefault [] Reviewing columns) `shouldBe` 1
       Map.findWithDefault [] Done columns `shouldBe` []
 
     it "classifies non-draft approved pull requests as Done" $ do
       let pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
       length (Map.findWithDefault [] Done columns) `shouldBe` 1
 
     it "keeps tracker issues visible as standalone cards before hierarchy is applied" $ do
       let tracker = (baseIssue 12 []) {issueLabels = [Label "epic" "5319e7"]}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [12]
 
     it "groups tracker children in natural implementation order" $ do
@@ -77,7 +82,7 @@ main = hspec $ do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #2 — A10: Later\n- [ ] #1 — A2: Earlier"
               }
-          snapshot = RepoSnapshot [tracker, baseIssue 1 [], baseIssue 2 []] [] epoch
+          snapshot = RepoSnapshot [tracker, baseIssue 1 [], baseIssue 2 []] [] epoch False False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
           entries = Map.findWithDefault [] Issues columns
       map (itemNumber . entryItem) entries `shouldBe` [1, 2]
@@ -89,7 +94,7 @@ main = hspec $ do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Phase plan\n- [ ] #1 — B1: Child"
               }
-          snapshot = RepoSnapshot [tracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch
+          snapshot = RepoSnapshot [tracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch False False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       case Map.findWithDefault [] Reviewing columns of
         [Tracked trackingContext item] -> do
@@ -108,7 +113,7 @@ main = hspec $ do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #1 — A2: Child"
               }
-          snapshot = RepoSnapshot [laterTracker, earlierTracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch
+          snapshot = RepoSnapshot [laterTracker, earlierTracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch False False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       case Map.findWithDefault [] Reviewing columns of
         [Tracked trackingContext _] -> do
@@ -127,6 +132,33 @@ main = hspec $ do
       map (.trackerChildComplete) children `shouldBe` [False, True]
       map (.trackerChildImplementationKey) (sortOn implementationSortKey children) `shouldBe` [Just "A2", Just "A10"]
 
+    it "reports structural checklist loss while retaining valid children" $ do
+      let body = "## Children\n- [ ] #2 — A1: Valid\n- [ ] missing reference\n- [?] #3\n- [x] #2 — duplicate"
+          (children, diagnostics) = parseTrackerBody body
+      map (.trackerChildIssueNumber) children `shouldBe` [2]
+      diagnostics
+        `shouldBe` [ TrackerIssueReferenceMissing 3,
+                     TrackerMalformedCheckbox 4,
+                     TrackerDuplicateChild 5 2
+                   ]
+
+    it "keeps children from malformed rows standalone on the board" $ do
+      let tracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #2 — A1: Valid\n- [?] #3 — A2: Malformed"
+              }
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 2 [], baseIssue 3 []] [] epoch False False)
+          entries = Map.findWithDefault [] Issues columns
+      entries `shouldSatisfy` any (isStandaloneIssue 3)
+
+    it "diagnoses a labeled tracker without a tracker section" $ do
+      let body = "## Context\n- [ ] #2 — A1: Not authoritative"
+          tracker = (baseIssue 100 []) {issueLabels = [Label "epic" "5319e7"], issueBody = body}
+      snd (parseTrackerBody body) `shouldBe` [TrackerSectionMissing]
+      snapshotWarnings (RepoSnapshot [tracker] [] epoch False False)
+        `shouldSatisfy` any (Data.Text.isInfixOf "1 tracker")
+
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
       case decodeGitHubItems (LazyByteString.pack githubResponse) of
@@ -135,15 +167,30 @@ main = hspec $ do
           issue.issueNumber `shouldBe` 41
           issue.issueAssignees `shouldBe` [Assignee "worker"]
           issue.issueLabels `shouldBe` [Label "blocked" "d73a4a"]
+          issue.issueLabelOverflow `shouldBe` 2
+          issue.issueAssigneeOverflow `shouldBe` 1
           pullRequest.pullRequestLinkedIssues `shouldBe` [41]
+          pullRequest.pullRequestLinkedIssueOverflow `shouldBe` 3
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
           pullRequest.pullRequestChecks `shouldBe` ChecksFailed 0 3
+          let warnings = snapshotWarnings (RepoSnapshot [issue] [pullRequest] epoch True True)
+          length warnings `shouldBe` 3
+          warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
     it "rejects GraphQL error responses" $
       decodeGitHubItems "{\"errors\":[{\"message\":\"boom\"}],\"data\":{}}"
         `shouldSatisfy` isLeft
+
+    it "marks a capped connection incomplete instead of requesting beyond its limit" $
+      paginationDecision 250 250 True (Just "next") `shouldBe` Right (False, Nothing, True)
+
+    it "does not mark an exact cap incomplete when GitHub reports no next page" $
+      paginationDecision 250 250 False Nothing `shouldBe` Right (False, Nothing, False)
+
+    it "requires a cursor whenever another page is needed" $
+      paginationDecision 250 100 True Nothing `shouldSatisfy` isLeft
 
   describe "Codex app-server decoding" $ do
     it "maps returned windows by duration and computes percentage left" $ do
@@ -176,7 +223,7 @@ main = hspec $ do
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
-              snapshot = RepoSnapshot [baseIssue 7 []] [] epoch
+              snapshot = RepoSnapshot [baseIssue 7 []] [] epoch False False
           writeRepositoryCache repository snapshot `shouldReturn` Right ()
           loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
           cachePath <- repositoryCachePath repository
@@ -211,7 +258,7 @@ main = hspec $ do
 
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
-  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch
+  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0
 
 basePullRequest :: Int -> [Int] -> Bool -> [Label] -> PullRequest
 basePullRequest number linked draft labels =
@@ -231,10 +278,16 @@ basePullRequest number linked draft labels =
     ChecksUnknown
     epoch
     epoch
+    0
+    0
 
 itemNumber :: BoardItem -> Int
 itemNumber (IssueItem issue) = issue.issueNumber
 itemNumber (PullRequestItem pullRequest) = pullRequest.pullRequestNumber
+
+isStandaloneIssue :: Int -> ColumnEntry -> Bool
+isStandaloneIssue expectedNumber (Standalone (IssueItem issue)) = issue.issueNumber == expectedNumber
+isStandaloneIssue _ _ = False
 
 entryImplementationKey :: ColumnEntry -> Maybe Text
 entryImplementationKey (Tracked trackingContext _) = trackingContext.trackingPrimary.membershipChild.trackerChildImplementationKey
@@ -283,8 +336,8 @@ githubResponse =
       "        \"nodes\": [{",
       "          \"number\": 41, \"title\": \"Blocked issue\", \"body\": \"Details\",",
       "          \"url\": \"https://example.test/issues/41\",",
-      "          \"labels\": {\"nodes\": [{\"name\": \"blocked\", \"color\": \"d73a4a\"}]},",
-      "          \"assignees\": {\"nodes\": [{\"login\": \"worker\"}]},",
+      "          \"labels\": {\"totalCount\": 3, \"nodes\": [{\"name\": \"blocked\", \"color\": \"d73a4a\"}]},",
+      "          \"assignees\": {\"totalCount\": 2, \"nodes\": [{\"login\": \"worker\"}]},",
       "          \"createdAt\": \"2026-01-01T00:00:00Z\", \"updatedAt\": \"2026-01-02T00:00:00Z\"",
       "        }],",
       "        \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}",
@@ -292,10 +345,10 @@ githubResponse =
       "      \"pullRequests\": {",
       "        \"nodes\": [{",
       "          \"number\": 9, \"title\": \"Fix it\", \"body\": \"PR details\",",
-      "          \"url\": \"https://example.test/pull/9\", \"labels\": {\"nodes\": []},",
+      "          \"url\": \"https://example.test/pull/9\", \"labels\": {\"totalCount\": 0, \"nodes\": []},",
       "          \"author\": {\"login\": \"author\"}, \"isDraft\": false,",
       "          \"baseRefName\": \"master\", \"headRefName\": \"fix\",",
-      "          \"closingIssuesReferences\": {\"nodes\": [{\"number\": 41}]},",
+      "          \"closingIssuesReferences\": {\"totalCount\": 4, \"nodes\": [{\"number\": 41}]},",
       "          \"reviewDecision\": \"APPROVED\", \"mergeable\": \"CONFLICTING\",",
       "          \"mergeStateStatus\": \"DIRTY\",",
       "          \"statusCheckRollup\": {\"state\": \"FAILURE\", \"contexts\": {\"totalCount\": 3}},",

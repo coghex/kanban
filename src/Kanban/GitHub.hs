@@ -2,6 +2,8 @@ module Kanban.GitHub
   ( GitHubResult (..),
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    paginationDecision,
+    snapshotWarnings,
   )
 where
 
@@ -27,6 +29,7 @@ import qualified Data.Text.Lazy.Encoding as LazyTextEncoding
 import Data.Time (getCurrentTime)
 import Kanban.Domain
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
+import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -78,11 +81,14 @@ fetchGitHubSnapshot repository = fetchPages initialState
     fetchPages state
       | not state.fetchMoreIssues && not state.fetchMorePullRequests = do
           fetchedAt <- getCurrentTime
-          let repoSnapshot = RepoSnapshot state.fetchedIssues state.fetchedPullRequests fetchedAt
-              warnings =
-                ["250+ open issues; board is truncated" | state.issuesTruncated]
-                  <> ["100+ open pull requests; board is truncated" | state.pullRequestsTruncated]
-          pure (Right (GitHubResult repoSnapshot warnings))
+          let repoSnapshot =
+                RepoSnapshot
+                  state.fetchedIssues
+                  state.fetchedPullRequests
+                  fetchedAt
+                  state.issuesTruncated
+                  state.pullRequestsTruncated
+          pure (Right (GitHubResult repoSnapshot (snapshotWarnings repoSnapshot)))
       | otherwise = do
           pageResult <- fetchPage repository state
           case pageResult of
@@ -167,21 +173,24 @@ requireConnection _ True connection = Right connection
 
 advanceConnection :: Int -> Int -> Bool -> Maybe (Connection item) -> Either ProviderError (Bool, Maybe Text, Bool)
 advanceConnection _ _ False _ = Right (False, Nothing, False)
-advanceConnection limit currentCount True (Just connection)
-  | not pageInfo.pageHasNext = Right (False, Nothing, False)
-  | currentCount >= limit = Right (False, Nothing, True)
-  | otherwise = case pageInfo.pageEndCursor of
-      Nothing ->
-        Left
-          ProviderError
-            { providerErrorKind = InvalidResponse,
-              providerErrorMessage = "GitHub pagination indicated another page without a cursor"
-            }
-      Just cursor -> Right (True, Just cursor, False)
+advanceConnection limit currentCount True (Just connection) =
+  paginationDecision limit currentCount pageInfo.pageHasNext pageInfo.pageEndCursor
   where
     pageInfo = connection.connectionPageInfo
 advanceConnection _ _ True Nothing =
   Left (ProviderError InvalidResponse "GitHub response omitted a requested connection")
+
+paginationDecision :: Int -> Int -> Bool -> Maybe Text -> Either ProviderError (Bool, Maybe Text, Bool)
+paginationDecision _ _ False _ = Right (False, Nothing, False)
+paginationDecision limit currentCount True _
+  | currentCount >= limit = Right (False, Nothing, True)
+paginationDecision _ _ True Nothing =
+  Left
+    ProviderError
+      { providerErrorKind = InvalidResponse,
+        providerErrorMessage = "GitHub pagination indicated another page without a cursor"
+      }
+paginationDecision _ _ True (Just cursor) = Right (True, Just cursor, False)
 
 graphqlArguments :: Repository -> FetchState -> [String]
 graphqlArguments repository state =
@@ -267,43 +276,58 @@ parseAssignee :: Value -> Parser Assignee
 parseAssignee = withObject "assignee" $ \object -> Assignee <$> object .: "login"
 
 parseIssue :: Value -> Parser Issue
-parseIssue = withObject "issue" $ \object ->
-    Issue
-      <$> object .: "number"
-      <*> object .: "title"
-      <*> object .:? "body" .!= ""
-      <*> object .: "url"
-      <*> parseNodes parseLabel object "labels"
-      <*> parseNodes parseAssignee object "assignees"
-      <*> object .: "createdAt"
-      <*> object .: "updatedAt"
+parseIssue = withObject "issue" $ \object -> do
+  (labels, labelOverflow) <- parseNodes parseLabel object "labels"
+  (assignees, assigneeOverflow) <- parseNodes parseAssignee object "assignees"
+  Issue
+    <$> object .: "number"
+    <*> object .: "title"
+    <*> object .:? "body" .!= ""
+    <*> object .: "url"
+    <*> pure labels
+    <*> pure assignees
+    <*> object .: "createdAt"
+    <*> object .: "updatedAt"
+    <*> pure labelOverflow
+    <*> pure assigneeOverflow
 
 parsePullRequest :: Value -> Parser PullRequest
 parsePullRequest = withObject "pull request" $ \object -> do
-    mergeable <- object .: "mergeable"
-    mergeStateStatus <- object .: "mergeStateStatus"
-    PullRequest
+  mergeable <- object .: "mergeable"
+  mergeStateStatus <- object .: "mergeStateStatus"
+  (labels, labelOverflow) <- parseNodes parseLabel object "labels"
+  (linkedIssues, linkedIssueOverflow) <- parseNodes parseIssueNumber object "closingIssuesReferences"
+  PullRequest
       <$> object .: "number"
       <*> object .: "title"
       <*> object .:? "body" .!= ""
       <*> object .: "url"
-      <*> parseNodes parseLabel object "labels"
+      <*> pure labels
       <*> parseAuthor object
       <*> object .: "isDraft"
       <*> object .: "baseRefName"
       <*> object .: "headRefName"
-      <*> parseNodes parseIssueNumber object "closingIssuesReferences"
+      <*> pure linkedIssues
       <*> (parseReviewDecision <$> object .:? "reviewDecision")
       <*> pure (parseMergeState mergeable mergeStateStatus)
       <*> parseChecks object
       <*> object .: "createdAt"
       <*> object .: "updatedAt"
+      <*> pure labelOverflow
+      <*> pure linkedIssueOverflow
 
-parseNodes :: (Value -> Parser item) -> Object -> Key -> Parser [item]
+parseNodes :: (Value -> Parser item) -> Object -> Key -> Parser ([item], Int)
 parseNodes itemParser object fieldName = do
   connection <- object .: fieldName
-  nodeValues <- withObject "nested connection" (\nested -> nested .:? "nodes" .!= []) connection
-  traverse itemParser nodeValues
+  withObject "nested connection" parseNested connection
+  where
+    parseNested nested = do
+      nodeValues <- nested .:? "nodes" .!= []
+      totalCount <- nested .: "totalCount"
+      nodes <- traverse itemParser nodeValues
+      if totalCount < length nodes
+        then fail "nested connection totalCount was smaller than its node list"
+        else pure (nodes, totalCount - length nodes)
 
 parseIssueNumber :: Value -> Parser Int
 parseIssueNumber = withObject "issue reference" (.: "number")
@@ -366,8 +390,8 @@ graphqlQuery =
       "    issues(first: $issuePageSize, after: $issueCursor, states: OPEN) @include(if: $fetchIssues) {",
       "      nodes {",
       "        number title body url createdAt updatedAt",
-      "        labels(first: 20) { nodes { name color } }",
-      "        assignees(first: 10) { nodes { login } }",
+      "        labels(first: 20) { totalCount nodes { name color } }",
+      "        assignees(first: 10) { totalCount nodes { login } }",
       "      }",
       "      pageInfo { hasNextPage endCursor }",
       "    }",
@@ -375,13 +399,45 @@ graphqlQuery =
       "      nodes {",
       "        number title body url createdAt updatedAt isDraft",
       "        baseRefName headRefName author { login }",
-      "        labels(first: 20) { nodes { name color } }",
-      "        closingIssuesReferences(first: 20) { nodes { number } }",
+      "        labels(first: 20) { totalCount nodes { name color } }",
+      "        closingIssuesReferences(first: 20) { totalCount nodes { number } }",
       "        reviewDecision mergeable mergeStateStatus",
-      "        statusCheckRollup { state contexts(first: 100) { totalCount } }",
+      "        statusCheckRollup { state contexts(first: 1) { totalCount } }",
       "      }",
       "      pageInfo { hasNextPage endCursor }",
       "    }",
       "  }",
       "}"
     ]
+
+snapshotWarnings :: RepoSnapshot -> [Text]
+snapshotWarnings snapshot =
+  [showText issueLimit <> "+ open issues; board is truncated" | snapshot.snapshotIssuesTruncated]
+    <> [showText pullRequestLimit <> "+ open pull requests; board is truncated" | snapshot.snapshotPullRequestsTruncated]
+    <> [ nestedCountText nestedOverflowItems
+           <> " contain truncated labels, assignees, or linked issues; +N markers show omitted values"
+       | nestedOverflowItems > 0
+       ]
+    <> [ trackerCountText malformedTrackers
+           <> " have malformed or missing child checklists; amber diagnostics show the cause"
+       | malformedTrackers > 0
+       ]
+  where
+    nestedOverflowItems =
+      length (filter issueHasOverflow snapshot.snapshotIssues)
+        + length (filter pullRequestHasOverflow snapshot.snapshotPullRequests)
+    issueHasOverflow issue = issue.issueLabelOverflow > 0 || issue.issueAssigneeOverflow > 0
+    pullRequestHasOverflow pullRequest = pullRequest.pullRequestLabelOverflow > 0 || pullRequest.pullRequestLinkedIssueOverflow > 0
+    malformedTrackers =
+      length
+        ( filter
+            (not . null . trackerDiagnosticsForIssue defaultWorkflowConfig)
+            snapshot.snapshotIssues
+        )
+    nestedCountText 1 = "1 card"
+    nestedCountText count = showText count <> " cards"
+    trackerCountText 1 = "1 tracker"
+    trackerCountText count = showText count <> " trackers"
+
+showText :: Show value => value -> Text
+showText = Text.pack . show

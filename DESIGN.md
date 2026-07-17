@@ -5,7 +5,8 @@ local repository resolution, event-driven Brick/Vty dashboard, standalone-card
 workflow, explicit GitHub refresh, and last-good repository cache are
 implemented. Checklist-based tracker hierarchy, inherited PR membership,
 tracker progress, and the on-demand Codex and Claude usage providers are also
-implemented. Native GitHub sub-issue membership, malformed-tracker diagnostics,
+implemented. Malformed tracker diagnostics now fail visibly while preserving
+valid membership and standalone fallbacks. Native GitHub sub-issue membership,
 the external usage-command escape hatch, and broader provider-version fixtures
 remain for subsequent slices.
 
@@ -524,11 +525,13 @@ the configured cap followed by `+` — by default `250+` for issues and `100+`
 for pull requests — and a visible truncation warning rather than silently
 presenting an incomplete board.
 
-Nested connections — labels, assignees, closing-issue references, and
-status-check contexts — carry explicit `first:` limits sized to the card and
-overlay requirements, with a `+N` overflow indicator when a limit is reached.
-GitHub scores GraphQL cost by requested node count, so these caps are what
-keep the single-query refresh inside rate and node limits.
+Nested connections that return nodes — labels, assignees, and closing-issue
+references — carry explicit `first:` limits and request `totalCount`; cards and
+details show a `+N` overflow indicator when GitHub reports omitted nodes. The
+status-check rollup requests only its aggregate state and `totalCount`, not
+individual context nodes, so it remains exact without an overflow marker.
+GitHub scores GraphQL cost by requested node count, so these caps keep the
+single-query refresh inside rate and node limits.
 
 No request is retried in a tight loop. Rate limits and transient failures are
 shown to the user while retaining the last good snapshot.
@@ -798,8 +801,9 @@ passing golden-frame suite at wide, minimum four-column, and narrow sizes.
 
 ### Milestone 2 — GitHub snapshot and workflow board
 
-Core slice implemented; truncation counters and nested-connection overflow
-indicators remain to finish the milestone.
+Implemented, including cached top-level truncation state, `+` column/count
+markers, nested `totalCount` decoding, amber incomplete-card outlines, and
+`+N` label/assignee/linked-issue indicators.
 
 - Implement local remote resolution and authenticated `gh` GraphQL execution.
 - Fetch and paginate open issues and PRs.
@@ -813,8 +817,8 @@ arbitrary GitHub repository; idle makes no network requests.
 
 ### Milestone 3 — Tracker hierarchy
 
-Core checklist hierarchy implemented. Native GitHub sub-issue membership and
-explicit malformed-tracker diagnostics remain follow-up slices.
+Checklist hierarchy and explicit malformed-tracker diagnostics are implemented.
+Native GitHub sub-issue membership remains a follow-up slice.
 
 - Detect configured epic/tracker issues.
 - Structure membership resolution as ordered sources so native GitHub

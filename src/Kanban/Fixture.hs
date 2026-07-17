@@ -54,7 +54,9 @@ fixtureSnapshot =
           pullRequest 847 "Prototype native sub-issue import" "An early draft of the native GitHub sub-issue membership adapter." [label "experimental" "fbca04"] True [756] ReviewUnknown MergeUnknown ChecksUnknown,
           pullRequest 851 "Resolve save envelope conflict" "Updates the branch after the persistence registry changed on master." [label "reviewed:approve" "2f9e44"] False [] ReviewApproved MergeConflicting (ChecksPassed 12)
         ],
-      snapshotFetchedAt = at 12 0
+      snapshotFetchedAt = at 12 0,
+      snapshotIssuesTruncated = False,
+      snapshotPullRequestsTruncated = False
     }
 
 issue :: Int -> Text -> Text -> [Label] -> [Assignee] -> Issue
@@ -67,7 +69,9 @@ issue number title body labels assignees =
       issueLabels = labels,
       issueAssignees = assignees,
       issueCreatedAt = onDay (number `mod` 12 + 1) 9 0,
-      issueUpdatedAt = at 10 (number `mod` 60)
+      issueUpdatedAt = at 10 (number `mod` 60),
+      issueLabelOverflow = 0,
+      issueAssigneeOverflow = 0
     }
 
 pullRequest :: Int -> Text -> Text -> [Label] -> Bool -> [Int] -> ReviewDecision -> MergeState -> CheckSummary -> PullRequest
@@ -87,7 +91,9 @@ pullRequest number title body labels draft linkedIssues review mergeState checks
       pullRequestMergeState = mergeState,
       pullRequestChecks = checks,
       pullRequestCreatedAt = onDay (number `mod` 12 + 1) 10 0,
-      pullRequestUpdatedAt = at 11 (number `mod` 60)
+      pullRequestUpdatedAt = at 11 (number `mod` 60),
+      pullRequestLabelOverflow = 0,
+      pullRequestLinkedIssueOverflow = 0
     }
 
 label :: Text -> Text -> Label

@@ -78,8 +78,9 @@ instance ToJSON UsageCacheEnvelope where
         "snapshots" .= envelope.usageSnapshots
       ]
 
-cacheSchemaVersion :: Int
-cacheSchemaVersion = 1
+repositoryCacheSchemaVersion, usageCacheSchemaVersion :: Int
+repositoryCacheSchemaVersion = 2
+usageCacheSchemaVersion = 1
 
 repositoryCachePath :: Repository -> IO FilePath
 repositoryCachePath repository = do
@@ -103,7 +104,7 @@ loadRepositoryCache repository = do
         Left exception -> CacheInvalid ("cache ignored: " <> Text.pack (show exception))
         Right (Left message) -> CacheInvalid ("cache ignored: " <> Text.pack message)
         Right (Right envelope)
-          | envelope.schemaVersion /= cacheSchemaVersion -> CacheInvalid "cache ignored: unsupported schema version"
+          | envelope.schemaVersion /= repositoryCacheSchemaVersion -> CacheInvalid "cache ignored: unsupported schema version"
           | envelope.repositoryKey /= repositoryIdentity repository -> CacheInvalid "cache ignored: repository identity mismatch"
           | otherwise -> CacheLoaded envelope.snapshot
 
@@ -119,19 +120,19 @@ loadUsageCache = do
         Left exception -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack (show exception))
         Right (Left message) -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
         Right (Right envelope)
-          | envelope.usageSchemaVersion /= cacheSchemaVersion -> UsageCacheInvalid "usage cache ignored: unsupported schema version"
+          | envelope.usageSchemaVersion /= usageCacheSchemaVersion -> UsageCacheInvalid "usage cache ignored: unsupported schema version"
           | otherwise -> UsageCacheLoaded envelope.usageSnapshots
 
 writeRepositoryCache :: Repository -> RepoSnapshot -> IO (Either Text ())
 writeRepositoryCache repository repoSnapshot = do
   path <- repositoryCachePath repository
-  let envelope = CacheEnvelope cacheSchemaVersion (repositoryIdentity repository) repoSnapshot
+  let envelope = CacheEnvelope repositoryCacheSchemaVersion (repositoryIdentity repository) repoSnapshot
   writeCacheFile path envelope
 
 writeUsageCache :: Map UsageProvider UsageSnapshot -> IO (Either Text ())
 writeUsageCache snapshots = do
   path <- usageCachePath
-  writeCacheFile path (UsageCacheEnvelope cacheSchemaVersion snapshots)
+  writeCacheFile path (UsageCacheEnvelope usageCacheSchemaVersion snapshots)
 
 writeCacheFile :: ToJSON value => FilePath -> value -> IO (Either Text ())
 writeCacheFile path value = do

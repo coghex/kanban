@@ -12,6 +12,10 @@ workflow columns, preserves the last good board after refresh failures, and
 supports keyboard navigation plus details/help overlays. Press `u` to refresh
 Codex through the local app-server and Claude through the official client's
 interactive `/usage` screen. Each provider refreshes and fails independently.
+GitHub pagination limits and nested connection caps are surfaced with `+`/`+N`
+markers and amber warnings rather than silently dropping data.
+Malformed epic checklists retain every valid child, leave unparsed children
+standalone, and show line-specific amber diagnostics.
 
 Epics are purple and collapsed by default. Focus a collapsed epic with `j`/`k`
 and press `x` to expand or collapse it.

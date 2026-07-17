@@ -1,7 +1,10 @@
 module Kanban.Tracker
   ( implementationSortKey,
     membershipSortKey,
+    parseTrackerBody,
     parseTrackerChildren,
+    renderTrackerDiagnostic,
+    trackerDiagnosticsForIssue,
     trackerFromIssue,
   )
 where
@@ -16,34 +19,45 @@ import Kanban.Domain
 data ParseState = ParseState
   { activeHeadingLevel :: Maybe Int,
     sectionExcluded :: Bool,
+    trackerHeadingSeen :: Bool,
     nextChecklistOrder :: Int,
-    parsedChildren :: [TrackerChild]
+    parsedChildren :: [TrackerChild],
+    parseDiagnostics :: [TrackerDiagnostic]
   }
 
 trackerFromIssue :: WorkflowConfig -> Issue -> Maybe Tracker
 trackerFromIssue config issue
   | not (hasTrackerLabel config issue.issueLabels) = Nothing
   | otherwise =
-      let children = parseTrackerChildren issue.issueBody
+      let (children, diagnostics) = parseTrackerBody issue.issueBody
           childMap = Map.fromList [(child.trackerChildIssueNumber, child) | child <- children]
        in Just
             Tracker
               { trackerIssue = issue,
                 trackerCompleted = length (filter (.trackerChildComplete) children),
                 trackerTotal = length children,
-                trackerChildren = childMap
+                trackerChildren = childMap,
+                trackerDiagnostics = diagnostics
               }
 
 parseTrackerChildren :: Text -> [TrackerChild]
-parseTrackerChildren body =
-  reverse . (.parsedChildren) $ foldl' parseLine initialState (Text.lines body)
-  where
-    initialState = ParseState Nothing False 0 []
+parseTrackerChildren = fst . parseTrackerBody
 
-parseLine :: ParseState -> Text -> ParseState
-parseLine state rawLine = case parseHeading rawLine of
+parseTrackerBody :: Text -> ([TrackerChild], [TrackerDiagnostic])
+parseTrackerBody body =
+  (reverse finalState.parsedChildren, finalizeDiagnostics finalState)
+  where
+    initialState = ParseState Nothing False False 0 [] []
+    finalState = foldl' parseLine initialState (zip [1 ..] (Text.lines body))
+    finalizeDiagnostics state
+      | not state.trackerHeadingSeen = [TrackerSectionMissing]
+      | null state.parsedChildren = reverse state.parseDiagnostics <> [TrackerChildrenMissing]
+      | otherwise = reverse state.parseDiagnostics
+
+parseLine :: ParseState -> (Int, Text) -> ParseState
+parseLine state (lineNumber, rawLine) = case parseHeading rawLine of
   Just (level, heading)
-    | isTrackerHeading heading -> state {activeHeadingLevel = Just level, sectionExcluded = False}
+    | isTrackerHeading heading -> state {activeHeadingLevel = Just level, sectionExcluded = False, trackerHeadingSeen = True}
     | otherwise -> case state.activeHeadingLevel of
         Just activeLevel
           | level <= activeLevel -> state {activeHeadingLevel = Nothing, sectionExcluded = False}
@@ -51,33 +65,42 @@ parseLine state rawLine = case parseHeading rawLine of
         Nothing -> state
   Nothing
     | isExcludedSubsection rawLine && state.activeHeadingLevel /= Nothing -> state {sectionExcluded = True}
-    | state.activeHeadingLevel /= Nothing && not state.sectionExcluded -> parseChecklist state rawLine
+    | state.activeHeadingLevel /= Nothing && not state.sectionExcluded -> parseChecklist lineNumber state rawLine
     | otherwise -> state
 
-parseChecklist :: ParseState -> Text -> ParseState
-parseChecklist state line = case parseChecklistItem state.nextChecklistOrder line of
-  Nothing -> state
-  Just child
-    | child.trackerChildIssueNumber `Set.member` existingNumbers -> state
-    | otherwise ->
-        state
-          { nextChecklistOrder = state.nextChecklistOrder + 1,
-            parsedChildren = child : state.parsedChildren
-          }
+parseChecklist :: Int -> ParseState -> Text -> ParseState
+parseChecklist lineNumber state line = case stripCheckbox line of
+  Nothing
+    | looksLikeCheckbox line -> addDiagnostic (TrackerMalformedCheckbox lineNumber) state
+    | otherwise -> state
+  Just (complete, contents) -> case findIssueNumber contents of
+    Nothing -> addDiagnostic (TrackerIssueReferenceMissing lineNumber) state
+    Just issueNumber
+      | issueNumber `Set.member` existingNumbers -> addDiagnostic (TrackerDuplicateChild lineNumber issueNumber) state
+      | otherwise ->
+          state
+            { nextChecklistOrder = state.nextChecklistOrder + 1,
+              parsedChildren =
+                TrackerChild
+                  { trackerChildIssueNumber = issueNumber,
+                    trackerChildImplementationKey = findImplementationKey contents,
+                    trackerChildChecklistOrder = state.nextChecklistOrder,
+                    trackerChildComplete = complete
+                  }
+                  : state.parsedChildren
+            }
   where
     existingNumbers = Set.fromList (map (.trackerChildIssueNumber) state.parsedChildren)
 
-parseChecklistItem :: Int -> Text -> Maybe TrackerChild
-parseChecklistItem order line = do
-  (complete, contents) <- stripCheckbox line
-  issueNumber <- findIssueNumber contents
-  pure
-    TrackerChild
-      { trackerChildIssueNumber = issueNumber,
-        trackerChildImplementationKey = findImplementationKey contents,
-        trackerChildChecklistOrder = order,
-        trackerChildComplete = complete
-      }
+addDiagnostic :: TrackerDiagnostic -> ParseState -> ParseState
+addDiagnostic diagnostic state = state {parseDiagnostics = diagnostic : state.parseDiagnostics}
+
+looksLikeCheckbox :: Text -> Bool
+looksLikeCheckbox rawLine = case Text.stripPrefix "-" stripped <|> Text.stripPrefix "*" stripped of
+  Just afterBullet -> "[" `Text.isPrefixOf` Text.stripStart afterBullet
+  Nothing -> False
+  where
+    stripped = Text.dropWhile isSpace rawLine
 
 stripCheckbox :: Text -> Maybe (Bool, Text)
 stripCheckbox rawLine = do
@@ -180,6 +203,22 @@ hasTrackerLabel config labels =
     $ Set.intersection
       (Set.map Text.toCaseFold config.trackerLabels)
       (Set.fromList (map (Text.toCaseFold . (.labelName)) labels))
+
+trackerDiagnosticsForIssue :: WorkflowConfig -> Issue -> [TrackerDiagnostic]
+trackerDiagnosticsForIssue config issue
+  | hasTrackerLabel config issue.issueLabels = snd (parseTrackerBody issue.issueBody)
+  | otherwise = []
+
+renderTrackerDiagnostic :: TrackerDiagnostic -> Text
+renderTrackerDiagnostic TrackerSectionMissing = "missing a Children or Phase section"
+renderTrackerDiagnostic TrackerChildrenMissing = "tracker section has no valid child issues"
+renderTrackerDiagnostic (TrackerMalformedCheckbox lineNumber) = "line " <> showText lineNumber <> ": malformed checklist checkbox"
+renderTrackerDiagnostic (TrackerIssueReferenceMissing lineNumber) = "line " <> showText lineNumber <> ": checklist item has no issue reference"
+renderTrackerDiagnostic (TrackerDuplicateChild lineNumber issueNumber) =
+  "line " <> showText lineNumber <> ": duplicate child #" <> showText issueNumber
+
+showText :: Show value => value -> Text
+showText = Text.pack . show
 
 firstJust :: [Maybe value] -> Maybe value
 firstJust = caseMap

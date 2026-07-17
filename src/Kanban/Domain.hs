@@ -20,6 +20,7 @@ module Kanban.Domain
     ReviewDecision (..),
     Tracker (..),
     TrackerChild (..),
+    TrackerDiagnostic (..),
     TrackerMembership (..),
     TrackingContext (..),
     UsageProvider (..),
@@ -29,6 +30,7 @@ module Kanban.Domain
     defaultWorkflowConfig,
     itemCreatedAt,
     itemId,
+    itemLabelOverflow,
     itemLabels,
     itemTitle,
   )
@@ -69,7 +71,9 @@ data Issue = Issue
     issueLabels :: [Label],
     issueAssignees :: [Assignee],
     issueCreatedAt :: UTCTime,
-    issueUpdatedAt :: UTCTime
+    issueUpdatedAt :: UTCTime,
+    issueLabelOverflow :: Int,
+    issueAssigneeOverflow :: Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -116,7 +120,9 @@ data PullRequest = PullRequest
     pullRequestMergeState :: MergeState,
     pullRequestChecks :: CheckSummary,
     pullRequestCreatedAt :: UTCTime,
-    pullRequestUpdatedAt :: UTCTime
+    pullRequestUpdatedAt :: UTCTime,
+    pullRequestLabelOverflow :: Int,
+    pullRequestLinkedIssueOverflow :: Int
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -137,7 +143,8 @@ data Tracker = Tracker
   { trackerIssue :: Issue,
     trackerCompleted :: Int,
     trackerTotal :: Int,
-    trackerChildren :: Map Int TrackerChild
+    trackerChildren :: Map Int TrackerChild,
+    trackerDiagnostics :: [TrackerDiagnostic]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -149,6 +156,15 @@ data TrackerChild = TrackerChild
     trackerChildComplete :: Bool
   }
   deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+data TrackerDiagnostic
+  = TrackerSectionMissing
+  | TrackerChildrenMissing
+  | TrackerMalformedCheckbox Int
+  | TrackerIssueReferenceMissing Int
+  | TrackerDuplicateChild Int Int
+  deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
 data TrackerMembership = TrackerMembership
@@ -178,7 +194,9 @@ newtype Board = Board {boardColumns :: Map BoardColumn [ColumnEntry]}
 data RepoSnapshot = RepoSnapshot
   { snapshotIssues :: [Issue],
     snapshotPullRequests :: [PullRequest],
-    snapshotFetchedAt :: UTCTime
+    snapshotFetchedAt :: UTCTime,
+    snapshotIssuesTruncated :: Bool,
+    snapshotPullRequestsTruncated :: Bool
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -247,6 +265,10 @@ itemTitle (PullRequestItem pullRequest) = pullRequest.pullRequestTitle
 itemLabels :: BoardItem -> [Label]
 itemLabels (IssueItem issue) = issue.issueLabels
 itemLabels (PullRequestItem pullRequest) = pullRequest.pullRequestLabels
+
+itemLabelOverflow :: BoardItem -> Int
+itemLabelOverflow (IssueItem issue) = issue.issueLabelOverflow
+itemLabelOverflow (PullRequestItem pullRequest) = pullRequest.pullRequestLabelOverflow
 
 itemCreatedAt :: BoardItem -> UTCTime
 itemCreatedAt (IssueItem issue) = issue.issueCreatedAt

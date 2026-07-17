@@ -54,7 +54,7 @@ deriveBoard config snapshot =
         )
         snapshot.snapshotIssues
     issueEntries =
-      [ ( if null issue.issueAssignees then Issues else Active,
+      [ ( if null issue.issueAssignees && issue.issueAssigneeOverflow == 0 then Issues else Active,
           trackedEntry (Map.findWithDefault [] issue.issueNumber membershipsByChild) (IssueItem issue)
         )
         | issue <- ordinaryIssues
