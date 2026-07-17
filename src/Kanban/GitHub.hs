@@ -22,6 +22,7 @@ import Data.Aeson
 import Data.Aeson.Key (Key)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -67,6 +68,16 @@ data FetchState = FetchState
     issuesTruncated :: Bool,
     pullRequestsTruncated :: Bool
   }
+
+data CheckState = CheckPassed | CheckPending | CheckFailed
+  deriving stock (Eq, Show)
+
+data CheckContext = CheckContext
+  { checkContextKey :: Text,
+    checkContextStartedAt :: Text,
+    checkContextState :: CheckState
+  }
+  deriving stock (Eq, Show)
 
 issueLimit, pullRequestLimit, pageLimit :: Int
 issueLimit = 250
@@ -350,6 +361,7 @@ parseMergeState "CONFLICTING" _ = MergeConflicting
 parseMergeState _ "DIRTY" = MergeConflicting
 parseMergeState _ "CLEAN" = MergeClean
 parseMergeState _ "BEHIND" = MergeBehind
+parseMergeState "MERGEABLE" "BLOCKED" = MergeProtected
 parseMergeState _ "BLOCKED" = MergeBlocked
 parseMergeState _ "UNSTABLE" = MergeUnstable
 parseMergeState _ _ = MergeUnknown
@@ -362,16 +374,91 @@ parseChecks object = do
     Just value -> withObject "status check rollup" parseRollup value
   where
     parseRollup rollup = do
-      state <- rollup .: "state"
       contexts <- rollup .: "contexts"
-      total <- withObject "check contexts" (.: "totalCount") contexts
-      pure $ case (state :: Text) of
-        "SUCCESS" -> ChecksPassed total
-        "FAILURE" -> ChecksFailed 0 total
-        "ERROR" -> ChecksFailed 0 total
-        "PENDING" -> ChecksPending 0 total
-        "EXPECTED" -> ChecksPending 0 total
-        _ -> ChecksUnknown
+      withObject "check contexts" parseContexts contexts
+    parseContexts contexts = do
+      totalCount <- contexts .: "totalCount"
+      values <- contexts .:? "nodes" .!= []
+      parsed <- traverse parseCheckContext values
+      if totalCount > length values
+        then pure ChecksUnknown
+        else pure (summarizeChecks parsed)
+
+parseCheckContext :: Value -> Parser CheckContext
+parseCheckContext = withObject "status check context" $ \context -> do
+  contextType <- context .: "__typename"
+  case (contextType :: Text) of
+    "CheckRun" -> do
+      name <- context .: "name"
+      status <- context .: "status"
+      conclusion <- context .:? "conclusion"
+      startedAt <- context .:? "startedAt" .!= ""
+      completedAt <- context .:? "completedAt" .!= ""
+      app <- parseCheckRunApp context
+      pure
+        CheckContext
+          { checkContextKey = "check:" <> app <> ":" <> name,
+            checkContextStartedAt = if Text.null startedAt then completedAt else startedAt,
+            checkContextState = classifyCheckRun status conclusion
+          }
+    "StatusContext" -> do
+      name <- context .: "context"
+      state <- context .: "state"
+      createdAt <- context .:? "createdAt" .!= ""
+      creator <- parseStatusCreator context
+      pure
+        CheckContext
+          { checkContextKey = "status:" <> creator <> ":" <> name,
+            checkContextStartedAt = createdAt,
+            checkContextState = classifyStatusContext state
+          }
+    other -> fail ("unsupported status check context type: " <> Text.unpack other)
+
+parseCheckRunApp :: Object -> Parser Text
+parseCheckRunApp context = do
+  suite <- context .:? "checkSuite"
+  case suite of
+    Nothing -> pure "unknown"
+    Just value -> withObject "check suite" parseSuite value
+  where
+    parseSuite suite = do
+      app <- suite .:? "app"
+      case app of
+        Nothing -> pure "unknown"
+        Just value -> withObject "check app" (\object -> object .:? "slug" .!= "unknown") value
+
+parseStatusCreator :: Object -> Parser Text
+parseStatusCreator context = do
+  creator <- context .:? "creator"
+  case creator of
+    Nothing -> pure "unknown"
+    Just value -> withObject "status creator" (\object -> object .:? "login" .!= "unknown") value
+
+classifyCheckRun :: Text -> Maybe Text -> CheckState
+classifyCheckRun "COMPLETED" (Just conclusion)
+  | conclusion `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] = CheckPassed
+  | otherwise = CheckFailed
+classifyCheckRun _ _ = CheckPending
+
+classifyStatusContext :: Text -> CheckState
+classifyStatusContext "SUCCESS" = CheckPassed
+classifyStatusContext "PENDING" = CheckPending
+classifyStatusContext "EXPECTED" = CheckPending
+classifyStatusContext _ = CheckFailed
+
+summarizeChecks :: [CheckContext] -> CheckSummary
+summarizeChecks [] = ChecksNone
+summarizeChecks contexts
+  | any ((== CheckFailed) . (.checkContextState)) latest = ChecksFailed passed total
+  | any ((== CheckPending) . (.checkContextState)) latest = ChecksPending passed total
+  | otherwise = ChecksPassed total
+  where
+    latest = Map.elems (Map.fromListWith latestContext [(context.checkContextKey, context) | context <- contexts])
+    total = length latest
+    passed = length (filter ((== CheckPassed) . (.checkContextState)) latest)
+    latestContext left right
+      | left.checkContextStartedAt >= right.checkContextStartedAt = left
+      | otherwise = right
 
 graphqlQuery :: Text
 graphqlQuery =
@@ -402,7 +489,16 @@ graphqlQuery =
       "        labels(first: 20) { totalCount nodes { name color } }",
       "        closingIssuesReferences(first: 20) { totalCount nodes { number } }",
       "        reviewDecision mergeable mergeStateStatus",
-      "        statusCheckRollup { state contexts(first: 1) { totalCount } }",
+      "        statusCheckRollup {",
+      "          contexts(first: 100) {",
+      "            totalCount",
+      "            nodes {",
+      "              __typename",
+      "              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { slug } } }",
+      "              ... on StatusContext { context state createdAt creator { login } }",
+      "            }",
+      "          }",
+      "        }",
       "      }",
       "      pageInfo { hasNextPage endCursor }",
       "    }",

@@ -9,8 +9,8 @@ homepage:           https://github.com/coghex/kanban
 bug-reports:        https://github.com/coghex/kanban/issues
 license:            MIT
 license-file:       LICENSE
-author:             Vincent Coghlan
-maintainer:         Vincent Coghlan
+author:             coghex
+maintainer:         coghex
 category:           Development
 build-type:         Simple
 extra-doc-files:    DESIGN.md
@@ -47,11 +47,18 @@ library
     Kanban.GlyphTest
     Kanban.GitHub
     Kanban.Layout
+    Kanban.Process
     Kanban.Provider
+    Kanban.PullRequestFlow
     Kanban.Repository
+    Kanban.Review
+    Kanban.Settings
+    Kanban.Solve
     Kanban.Text
+    Kanban.Transcript
     Kanban.Tracker
     Kanban.UI
+    Kanban.Worker
     Kanban.Workflow
   build-depends:
     aeson                 >= 2.2 && < 2.3,
@@ -87,11 +94,15 @@ test-suite kanban-test
   hs-source-dirs: test
   main-is: Spec.hs
   build-depends:
+    aeson,
     base,
     bytestring,
     containers,
     directory,
+    filepath,
     hspec                 >= 2.11 && < 2.12,
     kanban,
+    process,
     text,
-    time
+    time,
+    unix

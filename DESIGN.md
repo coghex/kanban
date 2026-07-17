@@ -8,15 +8,18 @@ tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
 monitors the local launchd-managed PR drainer. Native GitHub sub-issue membership,
-the external usage-command escape hatch, and broader provider-version fixtures
-remain for subsequent slices.
+canonical v2 issue-review sessions, embedded revision questions, and
+the first resumable issue-solve flow are implemented. The external
+usage-command escape hatch and broader provider-version fixtures remain for
+subsequent slices.
 
 ## 1. Purpose
 
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
 repository. It is intended to live comfortably in tmux, work over SSH, remain
 idle without consuming meaningful CPU, and make no network requests unless the
-application starts or the user explicitly refreshes a data source.
+application starts, the user explicitly updates data, or an explicitly started
+review/solve workflow performs its bounded work.
 
 The dashboard combines:
 
@@ -27,11 +30,18 @@ The dashboard combines:
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
 - Local status and start/stop control for the launchd-managed PR drainer.
+- Hideable issue-review sessions backed by the canonical v2 reviewer, with
+  interactive specification revision backed by Codex app-server.
+- Hideable, resumable issue-solve sessions backed by the selected canonical
+  Codex or Claude CLI, plus a process/session inspector.
 
-Repository behavior is read-only. The application observes GitHub and the installed
-Codex and Claude clients, but does not assign issues, edit labels, update
-branches, merge pull requests, or otherwise mutate remote state. Its one local
-mutation is explicitly starting or stopping the configured PR drainer service.
+Board observation is read-only. An explicitly started issue review may post its
+review comment and switch review labels; an explicitly started solve invokes
+the existing solve workflow, which may claim an issue and create a worktree,
+branch, and PR. Autosolve invokes the same ordinary solve workflow, then Kanban
+owns the bounded review/revision/rereview state machine and its label handoffs.
+Ordinary navigation and updates never mutate GitHub.
+Starting or stopping the configured PR drainer is the other explicit mutation.
 
 ## 2. Goals
 
@@ -42,10 +52,11 @@ mutation is explicitly starting or stopping the configured PR drainer service.
 - Render a polished Unicode interface with truecolor when available and a
   usable 256-color fallback.
 - Remain fully keyboard-operable; mouse support is limited to card selection,
-  details dismissal, and the PR drainer button.
-- Perform one asynchronous GitHub refresh at startup, then block on terminal
-  events while idle and redraw only after input, resize, or provider
-  completion.
+  live-session opening, details dismissal, panel/column scrolling, and the PR
+  drainer button.
+- Perform one asynchronous unified board-and-usage update at startup, then block
+  on terminal events while idle and redraw only after input, resize, provider
+  completion, or an active review event.
 - Keep usage and GitHub refreshes independent so one failing source does not
   hide valid data from another.
 - Preserve the last good snapshot when a refresh fails.
@@ -54,13 +65,16 @@ mutation is explicitly starting or stopping the configured PR drainer service.
 
 ## 3. Non-goals
 
-- A web UI, GUI, Electron application, or background service.
+- A web UI, GUI, Electron application, or permanently resident daemon. An
+  explicitly started agent may use a bounded detached worker so it can survive
+  a dashboard restart.
 - Automatic network polling.
 - GitHub webhooks or a local HTTP server.
 - Drag-and-drop, hover actions, mouse-driven column navigation, and general
   pointer interaction beyond the deliberately small contract in section 7.
 - Drag-and-drop workflow mutation.
-- Editing issues, labels, assignments, reviews, or pull requests.
+- Direct board editing and drag/drop mutation. Review and solve workflows may
+  perform their explicitly documented GitHub mutations.
 - Merging pull requests.
 - A permanent archive of merged or closed work.
 - Multi-repository aggregation in one running board. Each invocation represents
@@ -72,7 +86,9 @@ mutation is explicitly starting or stopping the configured PR drainer service.
 - TUI: `brick` on `vty`/`vty-unix`.
 - CLI parsing: `optparse-applicative`.
 - JSON: `aeson`.
-- Concurrency: lightweight worker threads plus a bounded Brick `BChan`.
+- Concurrency: lightweight TUI threads plus a bounded Brick `BChan`; explicitly
+  started solve and PR jobs run in detached, repository-scoped worker
+  supervisors with durable JSONL event journals.
 - GitHub access: the authenticated `gh` CLI, preferably through one GraphQL
   query per explicit board refresh.
 - Git inspection: local `git -C PATH ...` commands only; these do not contact a
@@ -114,7 +130,7 @@ Initial options:
 --help
 ```
 
-Startup performs only local work:
+Startup sequence:
 
 1. Canonicalize `--path`.
 2. Resolve the repository root with `git rev-parse --show-toplevel`.
@@ -123,11 +139,11 @@ Startup performs only local work:
    The flag is the escape hatch for unusual setups: SSH host aliases, multiple
    remotes, and bare mirrors.
 5. Load configuration and the last cached snapshot, if enabled.
-6. Enter the TUI immediately and start one asynchronous GitHub refresh. Startup
-   never contacts OpenAI or Anthropic.
+6. Enter the TUI immediately and asynchronously update GitHub plus both usage
+   providers once. The providers remain independent and failure-isolated.
 
-If there is no cached data, the board starts empty while the initial GitHub
-refresh runs. The usage sidebar shows a clear prompt to press its refresh key.
+If there is no cached data, the board and usage panes start empty while the
+initial update runs.
 
 ## 6. Layout
 
@@ -153,12 +169,12 @@ scrollable four-column board.
 ║ | drain_prs.py |    ║              ║              ║              ║              ║
 ║ +--------------+    ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/k item  h/l column  x epic  enter  r board  u usage  R all  d drainer  s sidebar  ? help  q quit
+ j/Down next  k/Up previous  x kill  h/l column  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  s settings  ? help  q quit
 ```
 
 Responsive behavior:
 
-- The sidebar is 28 columns by default and toggles with `s`.
+- The sidebar is 28 columns by default and toggles with `c`.
 - Board columns have a readable minimum width rather than being compressed
   until their contents become useless. The initial minimum is 32 cells per
   column.
@@ -180,20 +196,25 @@ Initial bindings:
 |---|---|
 | `j` / Down | Select next visible card or collapsed epic |
 | `k` / Up | Select previous visible card or collapsed epic |
+| `x` | Kill the selected working issue/PR process group and its child processes |
 | `h` / Left | Select previous column |
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
 | `G` | Select last visible item in the column |
-| `x` | Expand or collapse the focused epic |
+| `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
-| `r` | Refresh GitHub board data |
-| `u` | Refresh Codex and Claude usage |
-| `R` | Refresh board and usage |
+| `r` | Start or reopen the selected issue's review session |
+| `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
+| `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
+| `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
+| `u` | Update GitHub board data and both usage providers |
 | `d` or click | Start or stop the launchd-managed PR drainer |
-| `s` | Toggle the usage sidebar |
+| `c` | Collapse or expand the usage sidebar |
+| `s` | Open settings, including chat-output verbosity |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
+| `Ctrl-C` | Interrupt the current turn in an open live-agent overlay, then accept user guidance for a resumable session |
 | `q` | Quit and restore the terminal |
 
 Refresh keys are ignored for a provider that already has a request in flight.
@@ -204,7 +225,11 @@ Mouse interaction is intentionally complete but narrow:
 
 - Left-clicking an unselected issue or PR card selects it.
 - Left-clicking the selected card opens its details panel.
+- Left-clicking an epic title expands or collapses that epic.
 - Left-clicking outside an open details panel closes it.
+- Right-clicking a board card opens its live issue-review, solve,
+  autosolve-bound PR review, or direct PR session. With no live session it only
+  selects the card and never opens details.
 - Right-clicking anywhere while a details panel is open closes it.
 - The mouse wheel scrolls the board column under the pointer by three rows per
   wheel event.
@@ -212,6 +237,94 @@ Mouse interaction is intentionally complete but narrow:
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
+
+### Embedded issue reviews
+
+Pressing `r` on an issue or from its open details starts its label-selected
+review stage, or reopens the issue's existing session. Canonical review and
+rereview use the synchronous v2 reviewer; interactive revision uses one
+persistent Codex app-server. Pressing `r` on a collapsed epic targets the epic
+itself. On a PR, `r` is the unified
+review/revise key: it starts review, revision, or rereview according to the
+durable review labels. App-server starts on demand and one process hosts all
+interactive revision threads for the running dashboard; PR actions use resumable
+canonical-model CLI sessions because their permissions include PR comments,
+labels, worktree edits, commits, and pushes.
+
+PR routing mirrors issue routing while keeping implementation and review
+separate:
+
+1. With no workflow label, the opposite brand runs `pr-review`.
+2. `reviewed:changes` switches to the PR-origin solver brand. It locates the
+   existing issue worktree, addresses every canonical review blocker, runs
+   targeted checks, commits and pushes, then replaces the verdict labels with
+   `reviewed:revised` without reviewing its own work.
+3. `reviewed:revised` switches back to the opposite brand for `pr-rereview`,
+   publishes the new verdict, and removes the transient revised label.
+
+Codex-origin PRs use Opus 4.8 xhigh for review and GPT-5.4 high for revision;
+Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 high for
+revision. A missing or contradictory `pr-origin` marker fails visibly rather
+than guessing.
+
+The review is a direct, explicit workflow and never starts an approval daemon.
+Initial review and rereview synchronously invoke `approve-issues.py` as the
+canonical `issue-review:v2` fingerprint publisher so the existing solve gate
+accepts Kanban-reviewed issues. Interactive revision remains inside Kanban.
+Each `r` invocation advances exactly one durable label-driven stage:
+
+1. With neither workflow label, the opposite brand performs the initial review.
+   Claude-origin issues route to GPT-5.6-Terra xhigh, Codex-origin issues route
+   to Claude Opus 4.8 xhigh, and unmarked issues require both.
+2. `reviewed:changes` switches back to the author brand for revision:
+   GPT-5.4 high for Codex-origin issues and Claude Sonnet 5 high for
+   Claude-origin issues. Unmarked issues default to GPT-5.4 high. The
+   agent writes one canonical specification
+   amendment as an issue comment, then replaces `reviewed:changes` with
+   `reviewed:revised` without approving.
+3. `reviewed:revised` routes back to the same opposite-brand reviewer set. A
+   passing rereview replaces it with `reviewed:approve`; a failing rereview
+   returns to `reviewed:changes` for another cycle.
+
+Revision agents resolve mechanical or repository-verifiable omissions directly.
+Any product, compatibility, scope, policy, migration, or user-visible decision
+with multiple reasonable answers must pause for a structured user question.
+Required agents are never silently substituted. No stage edits the checkout,
+the issue body, or implements the issue.
+
+Kanban registers a client-side `kanban_prompt_user` dynamic tool on every
+thread. Developer instructions require every user-facing question to call this
+tool rather than place a question in prose. Choice and free-text requests pause
+only their owning turn. Kanban renders the request, returns the selected answer
+as the tool result, and lets other sessions and the board remain usable.
+Command and file-change approval requests use the same waiting-state UI.
+
+Kanban also registers `kanban_run_claude`. Sonnet-authored revision stages use
+this tool instead of launching `claude` through a Codex command: the latter runs
+inside Codex's sandbox and cannot reliably reach the macOS keychain-backed
+Claude login. The client tool starts the official CLI directly from Kanban with
+`--model claude-sonnet-5 --effort high --permission-mode plan --safe-mode`,
+streams a standalone prompt over stdin, and returns its output to the coordinator. It has
+a ten-minute deadline, terminates its process group on timeout, and cannot edit
+the checkout or mutate GitHub directly.
+
+The third client tool, `kanban_github_issue`, owns authenticated issue I/O.
+Codex is forbidden from invoking `gh`, `curl`, or GitHub APIs through the generic
+command path. The tool can read one issue and its comments, post one issue
+comment, and add/remove only `reviewed:approve`, `reviewed:changes`, and
+`reviewed:revised`; every other mutation is rejected before `gh` runs. The
+review overlay reports when the bounded operation starts and whether it returns
+successfully, so normal review transitions never present a generic command
+approval prompt.
+
+Review overlays contain a bounded, mouse-wheel-scrollable transcript, one-line
+input, structured questions, command approvals, and tabs for all in-memory
+sessions. `Esc` or an outside click hides the overlay without interrupting work;
+selecting the issue
+and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
+follow-up turn, and Ctrl-C interrupts the active turn. Only running turns chain
+short spinner ticks; completed, hidden, and idle sessions schedule no redraws.
+Quitting terminates the owned app-server process.
 
 ## 8. Board state model
 
@@ -221,12 +334,14 @@ as tracker group headers (section 12).
 
 ### Issues
 
-Open, unassigned issues with no associated open pull request.
+Open, unassigned issues. A linked pull request does not suppress the issue
+card; the issue and PR represent different workflow objects.
 
 ### Active
 
-Open issues with at least one GitHub assignee and no associated open pull
-request. Any assignee counts as active; there is no agent-name allowlist.
+Open issues with at least one GitHub assignee. Any assignee counts as active;
+there is no agent-name allowlist. The issue remains Active after its PR is
+created, while the PR appears independently in Reviewing or Done.
 
 ### Reviewing
 
@@ -245,10 +360,9 @@ The approval predicate is configurable: the approval label (default
 `reviewed:approve`), GitHub's native `reviewDecision == APPROVED`, or either.
 The default is label-only, matching label-driven review workflows.
 
-When an issue has an associated open pull request, its issue card is removed
-from Issues/Active and the pull request card represents the work. Explicit
-GitHub closing-issue relationships are authoritative. Title and branch-name
-guessing are not used.
+Explicit GitHub closing-issue relationships connect issue and PR cards for
+tracker inheritance, but never collapse the two cards into one. Title and
+branch-name guessing are not used.
 
 ## 9. Pull-request readiness and outline colors
 
@@ -263,17 +377,20 @@ Priority from strongest to weakest:
 3. Red or amber: explicit blocking state such as `reviewed:changes`; exact
    severity is configurable, with red as the default.
 4. Yellow: approval exists but checks are pending, queued, or in progress.
-5. Yellow: approval exists but the branch is behind, blocked, or GitHub is still
-   calculating mergeability.
-6. Green: approval exists, the PR is cleanly mergeable/current, and the status
-   rollup is successful.
+5. Yellow: approval exists but the branch is behind, non-mergeably blocked, or
+   GitHub is still calculating mergeability.
+6. Green: approval exists, the PR is cleanly mergeable/current (including a
+   `MERGEABLE` head reported `BLOCKED` only by repository policy and handled by
+   the configured admin drainer), and the latest unique checks are successful.
 7. Green: approval exists and the PR is cleanly mergeable/current when the
    repository has no checks configured.
 
 The implementation uses GitHub's `mergeable`, `mergeStateStatus`, and
 `statusCheckRollup` fields. A `CONFLICTING` mergeability result is always red.
-An `UNKNOWN` result remains yellow until a later user-requested refresh; the
-application does not poll for GitHub's background mergeability calculation.
+`MERGEABLE` plus `BLOCKED` is rendered `protected`, distinguishing an
+admin-drainer-ready policy block from a conflict. An `UNKNOWN` result remains
+yellow until a later user-requested refresh; the application does not poll for
+GitHub's background mergeability calculation.
 
 An open PR without a linked issue remains in Reviewing or Done but receives an
 amber `UNLINKED` warning.
@@ -489,9 +606,9 @@ indents that column's children beneath it:
 ```
 
 Epic headers use a purple accent and start collapsed. A collapsed header is a
-keyboard focus target; `x` expands or collapses that epic everywhere it appears
-across the board. Child cards rejoin the ordinary `j`/`k` focus order only while
-their epic is expanded.
+keyboard focus target; `e` or a left click on its title expands or collapses
+that epic everywhere it appears across the board. Child cards rejoin the
+ordinary `j`/`k` focus order only while their epic is expanded.
 
 Tracker progress is derived from checklist marks in the authoritative tracker
 body: checked entries divided by total recognized child entries. It is labeled
@@ -551,18 +668,20 @@ presenting an incomplete board.
 Nested connections that return nodes — labels, assignees, and closing-issue
 references — carry explicit `first:` limits and request `totalCount`; cards and
 details show a `+N` overflow indicator when GitHub reports omitted nodes. The
-status-check rollup requests only its aggregate state and `totalCount`, not
-individual context nodes, so it remains exact without an overflow marker.
-GitHub scores GraphQL cost by requested node count, so these caps keep the
-single-query refresh inside rate and node limits.
+status-check rollup requests up to 100 context nodes and deduplicates reruns by
+check app/name (or status creator/context), retaining the newest start time.
+This avoids treating superseded failures as current and permits real
+passed/total counts. A rollup beyond that cap fails closed as unknown. GitHub
+scores GraphQL cost by requested node count, so these caps keep the single-query
+refresh inside rate and node limits.
 
 No request is retried in a tight loop. Rate limits and transient failures are
 shown to the user while retaining the last good snapshot.
 
 ## 14. Usage acquisition
 
-Usage is global rather than repository-specific and refreshes only when the user
-presses `u` or `R`.
+Usage is global rather than repository-specific and refreshes once at startup
+and when the user presses `u`.
 
 Usage providers are best-effort observers of unstable interfaces. A failed or
 unsupported provider never affects the board or another provider, and each can
@@ -669,15 +788,18 @@ a countdown.
 ## 15. Refresh and event model
 
 - Brick owns the blocking terminal event loop.
-- The GitHub provider runs once in a short-lived startup worker and again only
-  after an explicit refresh. Usage providers run only after an explicit
-  refresh.
+- The GitHub and usage providers each run once in short-lived startup workers
+  and again only after an explicit unified update.
 - The PR drainer controller discovers the installed LaunchAgent, reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
   and stop operations run asynchronously and expose transitional UI state.
+- The canonical drainer implementation is versioned with Kanban at
+  `tools/drain_prs.py`; the LaunchAgent wrapper invokes the stable
+  `~/work/drain_prs.py` symlink so repository relocation does not change its
+  service contract.
 - Worker results enter the UI through a bounded `BChan`.
-- The UI redraws after a key event, resize, provider result, or explicit
-  terminal repaint.
+- The UI redraws after a key event, resize, provider result, active review
+  event/spinner tick, or explicit terminal repaint.
 - There are no periodic network or Git polls. The sole timer is the ten-second
   local PR drainer status check.
 - Board and usage refresh independently.
@@ -697,13 +819,21 @@ Suggested paths:
 
 ```text
 ~/.config/kanban/config.toml
+~/.config/kanban/settings.json
 ~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
+~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ```
 
 Defaults:
 
 - Cache only the latest good snapshot.
+- Persist lightweight UI preferences separately from future repository
+  semantics. Chat verbosity defaults to Standard and offers Compact, Standard,
+  and Full display modes.
+- Record every managed agent provider line before parsing or display filtering.
+  Raw workflow logs always remain full; changing display verbosity never
+  changes their contents. Directories use `0700` and files use `0600`.
 - Create cache files with user-only permissions (`0600`).
 - Cache issue and PR bodies regardless of repository visibility so startup can
   render rich cards without network access; user-only permissions protect
@@ -840,7 +970,7 @@ markers, nested `totalCount` decoding, amber incomplete-card outlines, and
   rich cards, details, and the configured issue/PR item guards.
 - Add last-good repository caching.
 
-Exit criteria: startup and `r` produce a correct standalone-card board for an
+Exit criteria: startup and `u` produce a correct standalone-card board for an
 arbitrary GitHub repository; idle makes no network requests.
 
 ### Milestone 3 — Tracker hierarchy
@@ -896,13 +1026,108 @@ Claude version.
 
 Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
 
+- Track the canonical implementation at `tools/drain_prs.py` while preserving
+  the service-facing `~/work/drain_prs.py` symlink.
 - Discover the controller command from the LaunchAgent plist.
 - Decode the managed wrapper's structured status and incident data.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.
 
-### Milestone 7 — Hardening and release
+### Milestone 7 — Embedded issue reviews
+
+The first direct, one-off review slice is implemented.
+
+- Start one Codex app-server on demand and host one thread per issue.
+- Stream agent and command output through the bounded Brick event channel.
+- Register `kanban_prompt_user` and return structured choice/text answers.
+- Register `kanban_run_claude` so Opus uses the terminal user's authenticated
+  CLI outside the Codex command sandbox while remaining read-only.
+- Register `kanban_github_issue` for bounded, approval-free issue reads,
+  comments, and review-label transitions.
+- Render hideable session overlays, status markers, approvals, feedback, and
+  turn interruption without terminal emulation.
+- Route canonical reviewer families through the synchronous v2 publisher while
+  never starting its background daemon.
+- Advance review, author-brand revision, and opposite-brand rereview as three
+  explicit stages using `reviewed:changes` and `reviewed:revised` handoffs.
+- Bound transcript and input memory and stop animation ticks when turns idle.
+
+Follow-up hardening should add broader fake app-server fixtures,
+protocol-version diagnostics, and persisted review-session mapping/resume.
+
+### Milestone 8 — Embedded issue solving
+
+The first solve/autosolve-compatible slice is implemented.
+
+- Capital `S` opens the model chooser and invokes the existing solve workflow,
+  stopping after PR creation. Capital `A` opens the same chooser and invokes
+  that ordinary solve workflow while Kanban owns the subsequent bounded
+  review/fix loop. Escape cancels either chooser.
+- Canonical solvers are GPT-5.4 high and Sonnet 5 high.
+- Canonical opposite-brand PR reviewers are Opus 4.8 xhigh for Codex-origin
+  work and GPT-5.6-Terra xhigh for Claude-origin work.
+- Solver processes stream structured CLI output into a bounded, hideable
+  overlay, retain their resumable session identifiers, and run as owned process
+  groups. Solve and PR providers are owned by detached, repository-scoped
+  supervisors, so quitting the TUI leaves explicitly started work visible and
+  bounded rather than terminating it.
+- Each detached supervisor writes a private specification, atomic heartbeat
+  state, and append-only event journal under the XDG cache. A restarted TUI
+  discovers only workers for its repository, reconstructs the session and
+  autosolve parent state, and replays output without rerunning the provider.
+  Terminal journals remain discoverable until a newer worker is durable proof
+  that their workflow step was superseded, closing the crash window between a
+  terminal event and its GitHub-refresh handoff.
+- An atomic repository-scoped lease permits only one live solve worker per
+  issue and one live review/revision worker per PR. A live lease refuses the
+  duplicate launch; a stale lease is retired so an interrupted worktree can be
+  recovered without erasing its commits or uncommitted changes.
+- The supervisor snapshots its provider process tree every 250 ms and persists
+  each observed PID, process group, start identity, and command. A provider
+  cannot reach terminal state while a matching recorded descendant survives:
+  the worker remains alive in an explicit red `orphaned` state, visible after a
+  TUI restart, until the child exits or the user kills it.
+- Persistent workers have a four-hour hard deadline. The process inspector
+  marks them persistent and shows the remaining bound. If a stale supervisor
+  is confirmed dead, Kanban kills its recorded provider process group and all
+  still-matching census groups, then publishes a visible terminal failure. `x`
+  terminates those groups and the supervisor with TERM/KILL escalation and
+  verifies the supervisor stopped before writing terminal state.
+- App-server issue revisions and the synchronous canonical issue gate remain
+  TUI-owned for now. Quitting is refused while either has a live turn, avoiding
+  accidental invisible work until their protocol state is also durable.
+- Live solve and PR overlays render the animated activity pip beside a
+  provider-independent activity timer. Codex command events and Claude Bash
+  tool calls expose their sanitized one-line command, keeping long silent
+  builds and probes visibly distinct from a frozen agent.
+- Ctrl-C in a live solve or PR overlay sends INT to the current process group.
+  Once it exits, the overlay becomes an input prompt and Enter resumes the same
+  returned agent session with the user's corrective guidance.
+- Active autosolve cards use a blue outline. A terminal
+  `KANBAN_NEEDS_INPUT: <question>` handoff turns either workflow orange; an
+  answer in the overlay resumes the same agent session. Process errors are red
+  and completed sessions are white.
+- Both modes preserve the existing solve contract: readiness gate, worktree
+  rules, effective specification, targeted testing, and PR creation. Autosolve
+  binds only to a newly linked PR with the selected solver's origin marker,
+  launches a fresh opposite-brand reviewer, resumes the original solver on
+  `reviewed:changes`, and launches a fresh rereviewer after
+  `reviewed:revised`. Approval or five review rounds terminates the loop; Kanban
+  never merges.
+- Kanban refreshes the board after startup and at explicit workflow handoffs
+  rather than polling the solver or GitHub continuously.
+- Linked issue and PR cards remain visible simultaneously so the issue stays
+  Active while its new PR advances through Reviewing and Done.
+- `p` opens a scrollable process/session inspector. Each retained session has a
+  one-line provider, lifecycle state, activity summary, and shortened session
+  identifier; live solve and PR rows include the current activity elapsed time.
+  Enter opens its existing interactive overlay, while `x`
+  terminates the selected worker and provider process groups and descendants. Completed and
+  latest failed or completed session for each item remains available for
+  debugging until replacement or exit.
+
+### Milestone 9 — Hardening and release
 
 - Complete config loading and per-repository overrides.
 - Exercise stale caches, missing tools, auth failures, signals, and subprocess

@@ -44,14 +44,9 @@ deriveBoard config snapshot =
           | tracker <- trackers,
             child <- Map.elems tracker.trackerChildren
         ]
-    linkedIssueNumbers =
-      Set.fromList (concatMap (.pullRequestLinkedIssues) snapshot.snapshotPullRequests)
     ordinaryIssues =
       filter
-        ( \issue ->
-            issue.issueNumber `Set.notMember` linkedIssueNumbers
-              && issue.issueNumber `Set.notMember` structuralTrackerNumbers
-        )
+        (\issue -> issue.issueNumber `Set.notMember` structuralTrackerNumbers)
         snapshot.snapshotIssues
     issueEntries =
       [ ( if null issue.issueAssignees && issue.issueAssigneeOverflow == 0 then Issues else Active,
@@ -132,7 +127,7 @@ pullRequestStatus config pullRequest
   | checksFailed pullRequest.pullRequestChecks = StatusProblem "CI failed"
   | hasProblemLabel config pullRequest.pullRequestLabels = StatusProblem "blocked"
   | not (approvedPullRequest config pullRequest) = StatusNeutral
-  | pullRequest.pullRequestMergeState /= MergeClean = StatusPending "merge pending"
+  | not (mergeStateReady pullRequest.pullRequestMergeState) = StatusPending "merge pending"
   | checksReady pullRequest.pullRequestChecks = StatusReady
   | otherwise = StatusPending "checks pending"
 
@@ -183,6 +178,11 @@ checksReady :: CheckSummary -> Bool
 checksReady ChecksNone = True
 checksReady (ChecksPassed _) = True
 checksReady _ = False
+
+mergeStateReady :: MergeState -> Bool
+mergeStateReady MergeClean = True
+mergeStateReady MergeProtected = True
+mergeStateReady _ = False
 
 entryItem :: ColumnEntry -> BoardItem
 entryItem (Standalone item) = item

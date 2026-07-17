@@ -90,6 +90,7 @@ data MergeState
   = MergeClean
   | MergeBehind
   | MergeBlocked
+  | MergeProtected
   | MergeConflicting
   | MergeUnstable
   | MergeUnknown

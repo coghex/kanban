@@ -1,9 +1,14 @@
 module Main (main) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (bracket)
+import Control.Monad (void)
+import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
+import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.List (sortOn)
+import Data.List (find, sortOn)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), fromGregorian, minutesToTimeZone, secondsToDiffTime)
@@ -22,17 +27,497 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerState (..), DrainerStatus (..), decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
+import Kanban.Process (ProcessIdentity (..), descendantProcesses, interruptManagedProcess, killManagedProcess, liveProcesses, managedProcess, managedProcessGroup)
 import Kanban.Repository (parseRepositoryName)
+import Kanban.PullRequestFlow
+  ( PullRequestAction (..),
+    PullRequestOrigin (..),
+    actionForLabels,
+    agentForAction,
+    originFromBody,
+    pullRequestArguments,
+  )
+import Kanban.Review
+  ( CanonicalIssueReviewResult (..),
+    GitHubIssueOperation (..),
+    GitHubIssueToolRequest (..),
+    ReviewChoice (..),
+    ReviewQuestion (..),
+    ReviewQuestionKind (..),
+    ReviewResult (..),
+    ReviewStage (..),
+    ReviewWireMessage (..),
+    decodeCanonicalIssueReviewResult,
+    decodeClaudeToolPrompt,
+    decodeGitHubIssueToolRequest,
+    decodeReviewQuestion,
+    decodeReviewResult,
+    decodeReviewWireMessage,
+    reviewStageForLabels,
+    renderCanonicalIssueReviewResult,
+    renderReviewResult,
+  )
+import Kanban.Solve
+  ( AgentEvent (..),
+    SolveOutcome (..),
+    SolveWorkflow (..),
+    SolverBrand (..),
+    claudeReviewerModel,
+    claudeSolverModel,
+    codexReviewerModel,
+    codexSolverModel,
+    parseSolveOutputLine,
+    renderAgentEvent,
+    solveArguments,
+  )
+import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.Text (excerpt, sanitizeText)
+import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
-import System.Directory (createDirectory, getTemporaryDirectory, removeFile, removePathForcibly)
+import Kanban.Worker
+  ( PullRequestWorkerTask (..),
+    SolveWorkerTask (..),
+    WorkerEvent (..),
+    WorkerDescriptor (..),
+    WorkerId (..),
+    WorkerParent (..),
+    WorkerSpec (..),
+    WorkerState (..),
+    WorkerStatus (..),
+    WorkerTask (..),
+    acquireWorkerLease,
+    discoverWorkerHistory,
+    releaseWorkerLease,
+    runWorker,
+  )
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Exit (ExitCode (..))
+import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import System.Posix.Files (setFileMode)
+import System.Process (CreateProcess (..), ProcessHandle, createProcess, proc, waitForProcess)
+import System.Timeout (timeout)
 import Test.Hspec
 
 main :: IO ()
 main = hspec $ do
+  describe "managed agent processes" $ do
+    it "delivers Ctrl-C to the worker process group" $
+      withManagedShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        interruptManagedProcess (managedProcess process)
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure 42)
+
+    it "escalates a TERM-resistant worker tree to SIGKILL" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        killManagedProcess (managedProcess process)
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "round-trips the durable worker protocol including autosolve parent identity" $ do
+      let parent =
+            WorkerParent
+              { workerParentIssueNumber = 782,
+                workerParentReviewRound = 2,
+                workerParentSolverBrand = CodexSolver,
+                workerParentSolverSession = Just "solver-session",
+                workerParentSolverLogPath = Just "/tmp/solver.jsonl",
+                workerParentStartedAt = epoch,
+                workerParentKnownPullRequests = Set.fromList [857, 858]
+              }
+          spec =
+            WorkerSpec
+              { workerId = WorkerId "pr-858-test",
+                workerRepository = Repository "/tmp/repo" "coghex" "synarchy",
+                workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 858 PullRequestCodex PullRequestRereview),
+                workerExistingSession = Just "review-session",
+                workerExistingLogPath = Just "/tmp/review.jsonl",
+                workerUserMessage = "continue",
+                workerParent = Just parent,
+                workerCreatedAt = epoch,
+                workerMaxRuntimeSeconds = 14400
+              }
+      eitherDecode (encode spec) `shouldBe` Right spec
+      eitherDecode (encode (WorkerFinished (SolveNeedsInput "choose a branch")))
+        `shouldBe` Right (WorkerFinished (SolveNeedsInput "choose a branch"))
+      let orphan = processIdentity 901 1 901 "diagnostic engine"
+      eitherDecode (encode (WorkerOrphansDetected SolveCompleted [orphan]))
+        `shouldBe` Right (WorkerOrphansDetected SolveCompleted [orphan])
+
+    it "loads pre-census worker state with an empty process inventory" $ do
+      let legacyState =
+            object
+              [ "workerStateId" .= WorkerId "legacy-worker",
+                "workerStateStatus" .= WorkerRunning,
+                "workerStateWorkerPid" .= (42 :: Int),
+                "workerStateProviderPid" .= (Nothing :: Maybe Int),
+                "workerStateSessionId" .= (Nothing :: Maybe Text),
+                "workerStateLogPath" .= (Nothing :: Maybe FilePath),
+                "workerStateHeartbeatAt" .= epoch,
+                "workerStateLastActivity" .= ("running" :: Text)
+              ]
+      let decodedState = eitherDecode (encode legacyState) :: Either String WorkerState
+      case decodedState of
+        Left message -> expectationFailure message
+        Right state -> state.workerStateKnownProcesses `shouldBe` []
+
+    it "finds the full descendant tree without sweeping unrelated processes" $ do
+      let root = processIdentity 100 1 100 "provider"
+          child = processIdentity 101 100 100 "shell"
+          grandchild = processIdentity 102 101 102 "engine"
+          unrelated = processIdentity 200 1 200 "interactive agent"
+      descendantProcesses [100] [unrelated, grandchild, root, child]
+        `shouldBe` [grandchild, root, child]
+
+    it "atomically refuses a second live lease for the same issue" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-782-first") 782
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-782-second") 782
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-782-first.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-782-second.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              acquireWorkerLease first `shouldReturn` Right ()
+              acquireWorkerLease second `shouldReturn` Left "issue #782 already has a live solve worker; open it from Processes or kill it before starting another"
+              releaseWorkerLease first
+              acquireWorkerLease second `shouldReturn` Right ()
+              releaseWorkerLease second
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "persists a worker heartbeat, provider identity, journal, and terminal outcome" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            identifier = WorkerId "solve-782-fixture"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec =
+              WorkerSpec
+                { workerId = identifier,
+                  workerRepository = repository,
+                  workerTask = SolveWorkerTaskKind (SolveWorkerTask 782 SolveOnly CodexSolver),
+                  workerExistingSession = Nothing,
+                  workerExistingLogPath = Nothing,
+                  workerUserMessage = "",
+                  workerParent = Nothing,
+                  workerCreatedAt = epoch,
+                  workerMaxRuntimeSeconds = 60
+                }
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-782-fixture.spec.json"
+            statePath = workerRoot </> "solve-782-fixture.state.json"
+            eventPath = workerRoot </> "solve-782-fixture.events.jsonl"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"fixture-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            runWorker specPath `shouldReturn` Right ()
+            stateBytes <- LazyByteString.readFile statePath
+            let decodedState = eitherDecode stateBytes :: Either String WorkerState
+            case decodedState of
+              Left message -> expectationFailure message
+              Right workerState -> do
+                workerState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+                workerState.workerStateSessionId `shouldBe` Just "fixture-session"
+                workerState.workerStateProviderPid `shouldBe` Nothing
+            eventBytes <- ByteString.readFile eventPath
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerProviderStarted"
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "fixture-session"
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+    it "marks a completed provider orphaned until its surviving child exits" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec = workerFixtureSpec repository (WorkerId "solve-783-orphan-fixture") 783
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-783-orphan-fixture.spec.json"
+            statePath = workerRoot </> "solve-783-orphan-fixture.state.json"
+            eventPath = workerRoot </> "solve-783-orphan-fixture.events.jsonl"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"orphan-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'",
+                "sleep 1"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            finished <- newEmptyMVar
+            void . forkIO $ runWorker specPath >>= putMVar finished
+            orphanState <- waitForWorkerState statePath isOrphaned 80
+            orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
+            surviving <- liveProcesses orphanState.workerStateKnownProcesses
+            surviving `shouldNotBe` []
+            let groups = Set.toList (Set.fromList (map processIdentityGroupPid surviving))
+            mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
+            timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            terminalState <- waitForWorkerState statePath isTerminal 30
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+            eventBytes <- ByteString.readFile eventPath
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+  describe "Codex app-server protocol" $ do
+    it "decodes streamed notifications without scraping their payload" $ do
+      let payload = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"delta\":\"hello\"}}"
+      decodeReviewWireMessage payload
+        `shouldBe` Right
+          ( WireNotification
+              "item/agentMessage/delta"
+              (object ["threadId" .= ("thread-1" :: Text), "delta" .= ("hello" :: Text)])
+          )
+
+    it "distinguishes server requests that require a client response" $ do
+      let payload = "{\"id\":41,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"kanban_prompt_user\"}}"
+      decodeReviewWireMessage payload
+        `shouldBe` Right
+          ( WireRequest
+              (Number 41)
+              "item/tool/call"
+              (object ["tool" .= ("kanban_prompt_user" :: Text)])
+          )
+
+    it "validates structured multiple-choice questions" $ do
+      let payload =
+            "{\"id\":\"scope\",\"header\":\"SCOPE\",\"question\":\"Which contract?\",\"kind\":\"choice\",\"options\":[{\"id\":\"keep\",\"label\":\"Keep compatibility\",\"description\":\"Preserve callers\"},{\"id\":\"break\",\"label\":\"Break compatibility\"}]}"
+      decodeReviewQuestion payload
+        `shouldBe` Right
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "Which contract?",
+              reviewQuestionKind = QuestionChoice,
+              reviewQuestionChoices =
+                [ ReviewChoice "keep" "Keep compatibility" "Preserve callers",
+                  ReviewChoice "break" "Break compatibility" ""
+                ],
+              reviewQuestionAllowOther = False,
+              reviewQuestionMultiple = False
+            }
+
+    it "rejects a choice question with fewer than two options" $ do
+      let payload = "{\"id\":\"scope\",\"question\":\"Which contract?\",\"kind\":\"choice\",\"options\":[{\"id\":\"keep\",\"label\":\"Keep\"}]}"
+      decodeReviewQuestion payload `shouldBe` Left "Choice questions must provide at least two options"
+
+    it "decodes and presents the final structured result as readable review metadata" $ do
+      let payload =
+            "{\"issue\":844,\"stage\":\"review\",\"approved\":false,\"reviewerRoute\":\"codex-origin → Opus 4.8\",\"models\":[\"Opus 4.8 xhigh\"],\"commentUrl\":\"https://example.test/issues/844#issuecomment-1\",\"blockingReasons\":[\"Clarify the save-version migration.\",\"Name the regression probe.\"]}"
+          expected =
+            ReviewResult
+              { reviewResultIssue = 844,
+                reviewResultStage = InitialReview,
+                reviewResultApproved = False,
+                reviewResultReviewerRoute = "codex-origin → Opus 4.8",
+                reviewResultModels = ["Opus 4.8 xhigh"],
+                reviewResultCommentUrl = Just "https://example.test/issues/844#issuecomment-1",
+                reviewResultBlockingReasons = ["Clarify the save-version migration.", "Name the regression probe."]
+              }
+      decodeReviewResult payload `shouldBe` Right expected
+      renderReviewResult expected
+        `shouldBe` Data.Text.unlines
+          [ "Review result",
+            "  Outcome: CHANGES REQUESTED",
+            "  Reviewer route: codex-origin → Opus 4.8",
+            "  Models: Opus 4.8 xhigh",
+            "  Comment: https://example.test/issues/844#issuecomment-1",
+            "  Blocking reasons:",
+            "    • Clarify the save-version migration.",
+            "    • Name the regression probe."
+          ]
+
+    it "selects revision and rereview stages from durable workflow labels" $ do
+      reviewStageForLabels [] `shouldBe` InitialReview
+      reviewStageForLabels ["reviewed:changes"] `shouldBe` IssueRevision
+      reviewStageForLabels ["REVIEWED:REVISED", "reviewed:changes"] `shouldBe` IssueRereview
+
+    it "formats the canonical v2 gate without exposing raw JSON" $ do
+      let payload =
+            "{\"approved\":false,\"issue\":844,\"origin\":\"codex\",\"required_reviewers\":\"claude\",\"required_models\":\"claude-opus-4-8@xhigh\",\"reasons\":[\"latest current review verdict is CHANGES_REQUESTED\"]}"
+          expected =
+            CanonicalIssueReviewResult
+              { canonicalReviewApproved = False,
+                canonicalReviewIssue = 844,
+                canonicalReviewOrigin = "codex",
+                canonicalReviewRequiredReviewers = Just "claude",
+                canonicalReviewRequiredModels = Just "claude-opus-4-8@xhigh",
+                canonicalReviewReasons = ["latest current review verdict is CHANGES_REQUESTED"]
+              }
+      decodeCanonicalIssueReviewResult payload `shouldBe` Right expected
+      renderCanonicalIssueReviewResult InitialReview expected
+        `shouldBe` Data.Text.unlines
+          [ "Review result",
+            "  Outcome: CHANGES REQUESTED",
+            "  Origin: codex",
+            "  Reviewer route: claude",
+            "  Models: claude-opus-4-8@xhigh",
+            "  Blocking reasons:",
+            "    • latest current review verdict is CHANGES_REQUESTED"
+          ]
+
+    it "validates standalone prompts for the authenticated Claude client tool" $ do
+      decodeClaudeToolPrompt (object ["prompt" .= ("Review issue #844" :: Text)])
+        `shouldBe` Right "Review issue #844"
+      decodeClaudeToolPrompt (object ["prompt" .= ("   " :: Text)])
+        `shouldBe` Left "kanban_run_claude requires a non-empty prompt"
+
+    it "bounds authenticated GitHub updates to issue comments and review labels" $ do
+      let request =
+            object
+              [ "operation" .= ("update" :: Text),
+                "issue" .= (844 :: Int),
+                "comment" .= ("## Review result\nApproved." :: Text),
+                "addLabels" .= (["reviewed:approve"] :: [Text]),
+                "removeLabels" .= (["reviewed:changes", "reviewed:revised"] :: [Text])
+              ]
+      decodeGitHubIssueToolRequest request
+        `shouldBe` Right
+          GitHubIssueToolRequest
+            { githubToolOperation = GitHubIssueUpdate,
+              githubToolIssue = 844,
+              githubToolComment = Just "## Review result\nApproved.",
+              githubToolAddLabels = ["reviewed:approve"],
+              githubToolRemoveLabels = ["reviewed:changes", "reviewed:revised"]
+            }
+      decodeGitHubIssueToolRequest (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["bug"] :: [Text])])
+        `shouldBe` Left "kanban_github_issue may only change reviewed:approve, reviewed:changes, and reviewed:revised"
+
+  describe "solve process protocol" $ do
+    it "pins the canonical solver and reviewer model contract" $ do
+      codexSolverModel `shouldBe` "gpt-5.4 high"
+      claudeSolverModel `shouldBe` "Sonnet 5 high"
+      codexReviewerModel `shouldBe` "GPT-5.6-Terra xhigh"
+      claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
+
+    it "launches each solver with its pinned model and effort" $ do
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing ""
+      codexArguments `shouldContain` ["--model", "gpt-5.4"]
+      codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
+      codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
+      claudeArguments `shouldContain` ["--model", "claude-sonnet-5"]
+      claudeArguments `shouldContain` ["--effort", "high"]
+
+    it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing "")
+      codexSolvePrompt `shouldContain` "$solve"
+      codexAutoSolvePrompt `shouldContain` "$solve"
+      codexAutoSolvePrompt `shouldNotContain` "$autosolve"
+      codexAutoSolvePrompt `shouldContain` "Kanban owns the bounded review/fix loop"
+      claudeSolvePrompt `shouldContain` "/solve"
+      claudeAutoSolvePrompt `shouldContain` "/solve"
+      claudeAutoSolvePrompt `shouldNotContain` "/autosolve"
+      codexSolvePrompt `shouldContain` "Do not run issue-review"
+
+    it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing "")
+      solvePrompt `shouldContain` "existing worktree for issue #782"
+      solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
+      solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
+      solvePrompt `shouldContain` "Do not discard, reset, or overwrite unfinished changes merely to start clean"
+      solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
+
+    it "extracts Codex session ids and readable agent output" $ do
+      parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
+        `shouldBe` Right (Just "019f-session", [])
+      parseSolveOutputLine "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #42\"}}"
+        `shouldBe` Right (Nothing, [AgentEvent "message" "Created PR #42" "" (Just "Created PR #42")])
+
+    it "extracts Claude session ids and assistant text" $ do
+      parseSolveOutputLine "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}"
+        `shouldBe` Right (Just "claude-session", [])
+      parseSolveOutputLine "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Working in issue-42\"}]}}"
+        `shouldBe` Right (Nothing, [AgentEvent "message" "Working in issue-42" "" (Just "Working in issue-42")])
+
+    it "promotes Claude Bash tools to visible running commands while retaining full input" $ do
+      let toolLine = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git status --short\"}}]}}"
+      case parseSolveOutputLine toolLine of
+        Right (_, [agentEvent]) -> do
+          agentEvent.agentEventKind `shouldBe` "command"
+          renderAgentEvent CompactChat agentEvent `shouldBe` Just "[command] git status --short"
+          renderAgentEvent StandardChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "git status --short")
+          renderAgentEvent FullChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "command")
+        result -> expectationFailure ("unexpected parsed tool event: " <> show result)
+
+  describe "settings" $ do
+    it "defaults chat output to standard and persists a selected verbosity" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          loadSettings `shouldReturn` (defaultSettings, Nothing)
+          saveSettings (Settings FullChat) `shouldReturn` Right ()
+          loadSettings `shouldReturn` (Settings FullChat, Nothing)
+
+  describe "full agent transcripts" $ do
+    it "records raw provider lines independently of display verbosity" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/example" "coghex" "example"
+              providerLine = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git status\"}}]}}"
+          opened <- openSessionLog repository "solve-claude" 42 Nothing
+          case opened of
+            Left message -> expectationFailure (Data.Text.unpack message)
+            Right sessionLog -> do
+              logRawLine sessionLog "stdout" providerLine
+              closeSessionLog sessionLog
+              contents <- ByteString.readFile sessionLog.sessionLogPath
+              contents `shouldSatisfy` ByteString.isInfixOf "git status"
+
+  describe "pull request review/revision routing" $ do
+    it "requires one unambiguous PR origin marker" $ do
+      originFromBody "body\n<!-- pr-origin:codex -->" `shouldBe` Right PullRequestCodex
+      originFromBody "body\n<!-- pr-origin:claude -->" `shouldBe` Right PullRequestClaude
+      originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
+
+    it "advances review, revision, and rereview from durable labels" $ do
+      actionForLabels [] `shouldBe` PullRequestReview
+      actionForLabels ["reviewed:changes"] `shouldBe` PullRequestRevision
+      actionForLabels ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
+
+    it "uses the opposite brand to review and the origin brand to revise" $ do
+      agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
+      agentForAction PullRequestCodex PullRequestRevision `shouldBe` CodexSolver
+      agentForAction PullRequestClaude PullRequestReview `shouldBe` CodexSolver
+      agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
+
+    it "pins canonical reviewer and reviser models" $ do
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.4"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.6-terra"]
+
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
       parseRepositoryName "https://github.com/coghex/kanban.git" `shouldBe` Right ("coghex", "kanban")
@@ -48,10 +533,10 @@ main = hspec $ do
       excerpt "\n\n  First\tparagraph\nwraps.  \n\nSecond paragraph." `shouldBe` "First paragraph wraps."
 
   describe "workflow classification" $ do
-    it "classifies assigned issues as Active and removes linked issue cards" $ do
+    it "keeps linked issues visible while showing their pull requests as separate cards" $ do
       let snapshot = RepoSnapshot [baseIssue 1 [], baseIssue 2 [Assignee "agent"]] [basePullRequest 10 [1] False []] epoch False False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
-      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` []
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1]
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [2]
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10]
 
@@ -174,10 +659,19 @@ main = hspec $ do
           pullRequest.pullRequestLinkedIssueOverflow `shouldBe` 3
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
-          pullRequest.pullRequestChecks `shouldBe` ChecksFailed 0 3
+          pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2
           let warnings = snapshotWarnings (RepoSnapshot [issue] [pullRequest] epoch True True)
           length warnings `shouldBe` 3
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    it "deduplicates rerun checks and treats mergeable policy blocks as protected" $ do
+      case decodeGitHubItems (LazyByteString.pack githubRerunResponse) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> do
+          pullRequest.pullRequestChecks `shouldBe` ChecksPassed 3
+          pullRequest.pullRequestMergeState `shouldBe` MergeProtected
+          pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusReady
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
     it "rejects GraphQL error responses" $
@@ -346,6 +840,60 @@ withEnvironmentValue name value action =
     (maybe (unsetEnv name) (setEnv name))
     (const action)
 
+withManagedShell :: String -> (ProcessHandle -> IO result) -> IO result
+withManagedShell command = bracket start stop
+  where
+    start = do
+      (_, _, _, process) <- createProcess (proc "sh" ["-c", command]) {create_group = True}
+      pure process
+    stop process = do
+      killManagedProcess (managedProcess process)
+      void (timeout 3000000 (waitForProcess process))
+
+processIdentity :: Int -> Int -> Int -> Text -> ProcessIdentity
+processIdentity processId parentId groupId command =
+  ProcessIdentity
+    { processIdentityPid = processId,
+      processIdentityParentPid = parentId,
+      processIdentityGroupPid = groupId,
+      processIdentityStartedAt = "Fri Jul 17 12:00:00 2026",
+      processIdentityCommand = command
+    }
+
+workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
+workerFixtureSpec repository identifier issueNumber =
+  WorkerSpec
+    { workerId = identifier,
+      workerRepository = repository,
+      workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly CodexSolver),
+      workerExistingSession = Nothing,
+      workerExistingLogPath = Nothing,
+      workerUserMessage = "",
+      workerParent = Nothing,
+      workerCreatedAt = epoch,
+      workerMaxRuntimeSeconds = 60
+    }
+
+waitForWorkerState :: FilePath -> (WorkerState -> Bool) -> Int -> IO WorkerState
+waitForWorkerState path predicate attempts = do
+  exists <- doesFileExist path
+  decoded <- if exists then eitherDecode <$> LazyByteString.readFile path else pure (Left "state not created")
+  case decoded of
+    Right state | predicate state -> pure state
+    _
+      | attempts <= 0 -> fail ("worker state did not reach the expected condition: " <> show decoded)
+      | otherwise -> threadDelay 100000 >> waitForWorkerState path predicate (attempts - 1)
+
+isOrphaned :: WorkerState -> Bool
+isOrphaned state = case state.workerStateStatus of
+  WorkerOrphaned _ -> True
+  _ -> False
+
+isTerminal :: WorkerState -> Bool
+isTerminal state = case state.workerStateStatus of
+  WorkerTerminal _ -> True
+  _ -> False
+
 githubResponse :: String
 githubResponse =
   unlines
@@ -371,7 +919,11 @@ githubResponse =
       "          \"closingIssuesReferences\": {\"totalCount\": 4, \"nodes\": [{\"number\": 41}]},",
       "          \"reviewDecision\": \"APPROVED\", \"mergeable\": \"CONFLICTING\",",
       "          \"mergeStateStatus\": \"DIRTY\",",
-      "          \"statusCheckRollup\": {\"state\": \"FAILURE\", \"contexts\": {\"totalCount\": 3}},",
+      "          \"statusCheckRollup\": {\"contexts\": {\"totalCount\": 3, \"nodes\": [",
+      "            {\"__typename\": \"CheckRun\", \"name\": \"build-test\", \"status\": \"COMPLETED\", \"conclusion\": \"SUCCESS\", \"startedAt\": \"2026-01-03T00:00:00Z\", \"completedAt\": \"2026-01-03T00:01:00Z\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}}},",
+      "            {\"__typename\": \"CheckRun\", \"name\": \"review-approved\", \"status\": \"COMPLETED\", \"conclusion\": \"SUCCESS\", \"startedAt\": \"2026-01-03T00:00:00Z\", \"completedAt\": \"2026-01-03T00:01:00Z\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}}},",
+      "            {\"__typename\": \"CheckRun\", \"name\": \"review-approved\", \"status\": \"COMPLETED\", \"conclusion\": \"FAILURE\", \"startedAt\": \"2026-01-03T00:02:00Z\", \"completedAt\": \"2026-01-03T00:03:00Z\", \"checkSuite\": {\"app\": {\"slug\": \"github-actions\"}}}",
+      "          ]}},",
       "          \"createdAt\": \"2026-01-03T00:00:00Z\", \"updatedAt\": \"2026-01-04T00:00:00Z\"",
       "        }],",
       "        \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}",
@@ -380,6 +932,45 @@ githubResponse =
       "  }",
       "}"
     ]
+
+githubRerunResponse :: String
+githubRerunResponse =
+  unlines
+    [ "{\"data\":{\"repository\":{",
+      "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
+      "\"pullRequests\":{\"nodes\":[{",
+      "\"number\":858,\"title\":\"Ready after rerun\",\"body\":\"Closes #844\",\"url\":\"https://example.test/pull/858\",",
+      "\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"reviewed:approve\",\"color\":\"0e8a16\"}]},",
+      "\"author\":{\"login\":\"author\"},\"isDraft\":false,\"baseRefName\":\"master\",\"headRefName\":\"fix\",",
+      "\"closingIssuesReferences\":{\"totalCount\":1,\"nodes\":[{\"number\":844}]},",
+      "\"reviewDecision\":null,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"BLOCKED\",",
+      "\"statusCheckRollup\":{\"contexts\":{\"totalCount\":5,\"nodes\":[",
+      checkRunJson "review-approved" "FAILURE" "2026-07-17T14:43:13Z",
+      ",",
+      checkRunJson "review-approved" "SUCCESS" "2026-07-17T14:48:53Z",
+      ",",
+      checkRunJson "build-test" "SUCCESS" "2026-07-17T14:43:35Z",
+      ",",
+      checkRunJson "dismiss-stale-approval" "SKIPPED" "2026-07-17T14:48:50Z",
+      ",",
+      checkRunJson "dismiss-stale-approval" "SKIPPED" "2026-07-17T14:43:16Z",
+      "]}},",
+      "\"createdAt\":\"2026-07-17T13:21:31Z\",\"updatedAt\":\"2026-07-17T14:48:47Z\"",
+      "}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
+      "}}}"
+    ]
+
+checkRunJson :: String -> String -> String -> String
+checkRunJson name conclusion startedAt =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"COMPLETED\",\"conclusion\":\""
+    <> conclusion
+    <> "\",\"startedAt\":\""
+    <> startedAt
+    <> "\",\"completedAt\":\""
+    <> startedAt
+    <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
 
 codexRateLimitResponse :: LazyByteString.ByteString
 codexRateLimitResponse =

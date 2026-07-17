@@ -22,7 +22,8 @@ data Options = Options
     optionGlyphTest :: Bool,
     optionAscii :: Bool,
     optionNoCache :: Bool,
-    optionConfig :: Maybe FilePath
+    optionConfig :: Maybe FilePath,
+    optionWorkerSpec :: Maybe FilePath
   }
   deriving stock (Eq, Show)
 
@@ -79,6 +80,13 @@ optionsParser =
           ( long "config"
               <> metavar "FILE"
               <> help "Override the global configuration path"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "worker-spec"
+              <> metavar "FILE"
+              <> internal
           )
       )
 
