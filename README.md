@@ -9,9 +9,9 @@ cached snapshot immediately, and starts one asynchronous GitHub refresh. Later
 refreshes happen only when `r` is pressed; there is no polling. It renders
 standalone and tracker-grouped issues plus open pull requests across the four
 workflow columns, preserves the last good board after refresh failures, and
-supports keyboard navigation plus details/help overlays. Press `u` to read the
-currently available Codex usage windows through the local Codex app-server;
-the Claude provider is not wired yet.
+supports keyboard navigation plus details/help overlays. Press `u` to refresh
+Codex through the local app-server and Claude through the official client's
+interactive `/usage` screen. Each provider refreshes and fails independently.
 
 Epics are purple and collapsed by default. Focus a collapsed epic with `j`/`k`
 and press `x` to expand or collapse it.

@@ -39,6 +39,7 @@ library
   exposed-modules:
     Kanban.CLI
     Kanban.Cache
+    Kanban.Claude
     Kanban.Codex
     Kanban.Domain
     Kanban.Fixture

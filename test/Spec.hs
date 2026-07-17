@@ -6,7 +6,7 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), fromGregorian, minutesToTimeZone, secondsToDiffTime)
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
@@ -16,6 +16,7 @@ import Kanban.Cache
     writeRepositoryCache,
     writeUsageCache,
   )
+import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Domain
 import Kanban.GitHub (decodeGitHubItems)
@@ -158,6 +159,18 @@ main = hspec $ do
         Left providerError -> expectationFailure (show providerError)
         Right snapshot -> map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["week"]
 
+  describe "Claude /usage decoding" $ do
+    it "selects the last complete screen-reader update" $ do
+      case decodeClaudeUsageText (minutesToTimeZone (-420)) epoch claudeUsageOutput of
+        Left providerError -> expectationFailure (show providerError)
+        Right snapshot -> do
+          map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["5 hour", "week"]
+          map (.usagePercentLeft) snapshot.usageWindows `shouldBe` [79, 86]
+
+    it "fails closed when the interactive usage request fails" $
+      decodeClaudeUsageText (minutesToTimeZone (-420)) epoch "Current session\nFailed to load usage data"
+        `shouldSatisfy` isLeft
+
   describe "repository snapshot cache" $ do
     it "round-trips a versioned snapshot and ignores corrupt JSON" $
       withTemporaryCacheRoot $ \cacheRoot ->
@@ -174,8 +187,9 @@ main = hspec $ do
     it "round-trips global usage snapshots" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let usage = UsageSnapshot [UsageWindow "week" 77 epoch] epoch
-              snapshots = Map.singleton Codex usage
+          let codexUsage = UsageSnapshot [UsageWindow "week" 77 epoch] epoch
+              claudeUsage = UsageSnapshot [UsageWindow "5 hour" 65 epoch] epoch
+              snapshots = Map.fromList [(Codex, codexUsage), (Claude, claudeUsage)]
           writeUsageCache snapshots `shouldReturn` Right ()
           loadUsageCache `shouldReturn` UsageCacheLoaded snapshots
 
@@ -301,3 +315,23 @@ codexRateLimitResponse =
 codexWeeklyOnlyResponse :: LazyByteString.ByteString
 codexWeeklyOnlyResponse =
   "{\"id\":1,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":23,\"windowDurationMins\":10080,\"resetsAt\":1784810495},\"secondary\":null},\"rateLimitsByLimitId\":null}}"
+
+claudeUsageOutput :: Text
+claudeUsageOutput =
+  Data.Text.unlines
+    [ "Current session",
+      "20% 20% used",
+      "Resets 8:40pm (America/Los_Angeles)",
+      "Current week (all models)",
+      "13% 13% used",
+      "Resets Jul 22 at 11pm (America/Los_Angeles)",
+      "Refreshing…",
+      "21% 21% used",
+      "Resets 8:39pm (America/Los_Angeles)",
+      "Current week (all models)",
+      "14% 14% used",
+      "Resets Jul 22 at 10:59pm (America/Los_Angeles)",
+      "Usage credits",
+      "78% 78% used",
+      "$156.37 / $200.00 spent · Resets Aug 1 (America/Los_Angeles)"
+    ]

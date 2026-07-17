@@ -3,11 +3,11 @@
 Status: implementation in progress. The warning-clean GHC2024/Cabal foundation,
 local repository resolution, event-driven Brick/Vty dashboard, standalone-card
 workflow, explicit GitHub refresh, and last-good repository cache are
-implemented. Checklist-based tracker hierarchy, inherited PR membership, and
-tracker progress and the on-demand Codex usage provider are also implemented.
-Native GitHub sub-issue membership, malformed-tracker diagnostics, the external
-usage-command escape hatch, and the Claude usage provider remain for subsequent
-slices.
+implemented. Checklist-based tracker hierarchy, inherited PR membership,
+tracker progress, and the on-demand Codex and Claude usage providers are also
+implemented. Native GitHub sub-issue membership, malformed-tracker diagnostics,
+the external usage-command escape hatch, and broader provider-version fixtures
+remain for subsequent slices.
 
 ## 1. Purpose
 
@@ -178,7 +178,7 @@ Initial bindings:
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
 | `r` | Refresh GitHub board data |
-| `u` | Refresh implemented usage providers (currently Codex) |
+| `u` | Refresh Codex and Claude usage |
 | `R` | Refresh board and usage |
 | `s` | Toggle the usage sidebar |
 | `?` | Open a help overlay listing all bindings |
@@ -562,16 +562,17 @@ machine-readable shell command for the same plan limits.
 
 The built-in provider therefore:
 
-1. Starts the official `claude` client in a private pseudo-terminal only after
-   an explicit refresh, in a dedicated scratch directory such as
-   `~/.cache/kanban/claude-probe/` rather than the user's repository. A fixed
-   scratch directory means the client's folder-trust prompt happens at most
-   once, and session history lands outside the user's project.
-2. Sets environment variables that disable the auto-updater and other
-   non-essential startup behavior.
-3. Recognizes known startup interstitials — trust prompts, first-run theme
-   selection, update notices — explicitly; an unrecognized screen is a parse
-   failure, never something to answer blindly.
+1. Starts the official `claude` client through macOS `script` in a private
+   pseudo-terminal only after an explicit refresh, in a dedicated scratch
+   directory such as `~/.cache/kanban/claude-probe/` rather than the user's
+   repository. A fixed scratch directory means the client's folder-trust prompt
+   happens at most once, and session history lands outside the user's project.
+2. Uses `--safe-mode` and `--ax-screen-reader`, disables the auto-updater,
+   telemetry, prompt history, and CLAUDE.md loading, and leaves normal OAuth
+   access intact.
+3. Recognizes the trust prompt only for its own scratch directory and otherwise
+   requires the expected screen-reader prompt; an unrecognized screen is a
+   parse failure, never something to answer blindly.
 4. Sends `/usage`.
 5. Captures and strips terminal control sequences.
 6. Parses five-hour and weekly percentages and reset timestamps.
@@ -842,6 +843,10 @@ Exit criteria: `u` obtains Codex limits once, returns the provider to zero
 running processes, and leaves cached data intact on failure.
 
 ### Milestone 5 — Claude usage (experimental)
+
+Core built-in provider, independent refresh, cache integration, and live
+Claude Code 2.1.211 verification implemented. Broader client-version fixtures
+remain follow-up work.
 
 - Implement private pseudo-terminal execution in the dedicated scratch
   directory, with the auto-updater disabled and known interstitials handled.
