@@ -13,7 +13,7 @@ import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
-import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
@@ -107,13 +107,15 @@ import Kanban.Worker
     acquireWorkerLease,
     discoverWorkerHistory,
     monitorWorker,
+    recordLaunchedSupervisorIdentity,
     recoverIfWorkerStoppedWith,
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
     terminateWorkerWith,
+    waitForWorkerStart,
   )
-import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -784,6 +786,216 @@ main = hspec $ do
                 finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "persistent worker stopped unexpectedly; its provider process group was terminated")
                 leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseReleased `shouldBe` False
+
+    it "keeps a stalled launch's lease held until its timed-out supervisor is confirmed dead, then allows a fresh launch" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              firstSpec = workerFixtureSpec repository (WorkerId "solve-796-stalled") 796
+              secondSpec = workerFixtureSpec repository (WorkerId "solve-796-fresh") 796
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-796-stalled.spec.json") (encode firstSpec)
+          LazyByteString.writeFile (workerRoot </> "solve-796-fresh.spec.json") (encode secondSpec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+              (Just first, Just second) -> do
+                -- Mirrors launchWorker's own order: the lease is acquired
+                -- before the supervisor is spawned.
+                acquireWorkerLease first `shouldReturn` Right ()
+                -- Mirrors launchWorker recording the freshly spawned
+                -- supervisor's identity onto the lease immediately after
+                -- spawn, before it has any chance to write a state file.
+                recordLaunchedSupervisorIdentity first process
+                -- Backdate the lease directory well past its recency grace
+                -- window: only the durably recorded supervisor identity —
+                -- not elapsed time — should still be blocking a same-issue
+                -- relaunch here.
+                past <- addUTCTime (-30) <$> getCurrentTime
+                setModificationTime first.workerDescriptorLeasePath past
+                acquireWorkerLease second `shouldReturn` Left "issue #796 already has a live solve worker; open it from Processes or kill it before starting another"
+                -- No state file is ever written for `first`, simulating a
+                -- supervisor that stalls past the startup deadline; a
+                -- handful of attempts keeps the test fast.
+                result <- waitForWorkerStart first process 3
+                result `shouldBe` Left "persistent worker did not initialize within three seconds"
+                -- waitForWorkerStart must not return until the stalled
+                -- supervisor is actually confirmed dead, not merely
+                -- signalled: a single TERM only stops work the supervisor
+                -- has already recorded as its own (see 'runWorkerWith'), not
+                -- a task already in flight.
+                getProcessExitCode process `shouldReturn` Just (ExitFailure (-9))
+                -- Mirrors launchWorker's own release gate, which only
+                -- releases once the exit code confirms the supervisor gone.
+                releaseWorkerLease first
+                acquireWorkerLease second `shouldReturn` Right ()
+                releaseWorkerLease second
+              _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "refuses to retire a running-status lease while a recorded descendant survives its dead supervisor" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \descendantProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              firstSpec = workerFixtureSpec repository (WorkerId "solve-797-running-descendant") 797
+              secondSpec = workerFixtureSpec repository (WorkerId "solve-797-fresh") 797
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              statePath = workerRoot </> "solve-797-running-descendant.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-797-running-descendant.spec.json") (encode firstSpec)
+          LazyByteString.writeFile (workerRoot </> "solve-797-fresh.spec.json") (encode secondSpec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+              (Just first, Just second) -> do
+                acquireWorkerLease first `shouldReturn` Right ()
+                ownPid <- fromIntegral <$> getProcessID
+                snapshot <- readProcessSnapshot
+                case snapshot of
+                  Left message -> expectationFailure (Data.Text.unpack message)
+                  Right identities -> case identityForPid ownPid identities of
+                    Nothing -> expectationFailure "could not find this test process in a process snapshot"
+                    Just realIdentity -> do
+                      descendantIdentity <- identityForProcess descendantProcess
+                      -- Status stays WorkerRunning (never WorkerOrphaned) to
+                      -- exercise the generalized non-orphan branch: only the
+                      -- supervisor's own identity used to be checked there,
+                      -- so a dead supervisor with a still-live recorded
+                      -- descendant was previously (incorrectly) treated as
+                      -- retireable.
+                      let deadSupervisor = realIdentity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
+                          state =
+                            (runningWorkerState firstSpec.workerId ownPid (Just deadSupervisor))
+                              {workerStateKnownProcesses = [descendantIdentity]}
+                      LazyByteString.writeFile statePath (encode state)
+                      acquireWorkerLease second `shouldReturn` Left "issue #797 already has a live solve worker; open it from Processes or kill it before starting another"
+                      managedProcessFor descendantProcess >>= killManagedProcess
+                      void (timeout 3000000 (waitForProcess descendantProcess))
+                      acquireWorkerLease second `shouldReturn` Right ()
+                      releaseWorkerLease second
+              _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "retires a stale orphaned lease once every recorded identity is confirmed gone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-798-orphan-stale") 798
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-798-fresh") 798
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-798-orphan-stale.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-798-orphan-stale.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-798-fresh.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              acquireWorkerLease first `shouldReturn` Right ()
+              ownPid <- fromIntegral <$> getProcessID
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure (Data.Text.unpack message)
+                Right identities -> case identityForPid ownPid identities of
+                  Nothing -> expectationFailure "could not find this test process in a process snapshot"
+                  Just realIdentity -> do
+                    let deadSupervisor = realIdentity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
+                        state =
+                          (runningWorkerState firstSpec.workerId ownPid (Just deadSupervisor))
+                            { workerStateStatus = WorkerOrphaned SolveCompleted,
+                              workerStateKnownProcesses = []
+                            }
+                    LazyByteString.writeFile statePath (encode state)
+                    -- Previously WorkerOrphaned unconditionally kept the
+                    -- lease active regardless of whether its recorded
+                    -- survivors were actually still alive, permanently
+                    -- blocking a same-issue relaunch even once everything
+                    -- was confirmed gone (e.g. the supervisor itself died
+                    -- without ever writing a terminal state).
+                    acquireWorkerLease second `shouldReturn` Right ()
+                    releaseWorkerLease second
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "abandoning orphan-wait on TERM never releases the lease while a live recorded survivor remains, and permits relaunch once it exits" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec = workerFixtureSpec repository (WorkerId "solve-799-term-orphan-fixture") 799
+            freshSpec = workerFixtureSpec repository (WorkerId "solve-799-fresh") 799
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-799-term-orphan-fixture.spec.json"
+            statePath = workerRoot </> "solve-799-term-orphan-fixture.state.json"
+            eventPath = workerRoot </> "solve-799-term-orphan-fixture.events.jsonl"
+            leasePath = workerRoot </> "issue-799.lease"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"term-orphan-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'",
+                "sleep 1"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        LazyByteString.writeFile (workerRoot </> "solve-799-fresh.spec.json") (encode freshSpec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            descriptors <- discoverWorkerHistory repository
+            case (find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== freshSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+              (Just descriptor, Just freshDescriptor) -> do
+                acquireWorkerLease descriptor `shouldReturn` Right ()
+                finished <- newEmptyMVar
+                let cleanup = do
+                      stateBytes <- LazyByteString.readFile statePath
+                      case (eitherDecode stateBytes :: Either String WorkerState) of
+                        Right state -> do
+                          let groups = Set.toList (Set.fromList (map processIdentityGroupPid state.workerStateKnownProcesses))
+                          mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
+                        Left _ -> pure ()
+                      timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+                void . forkIO $ runWorker specPath >>= putMVar finished
+                ( do
+                    orphanState <- waitForWorkerState statePath isOrphaned 80
+                    orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
+                    -- A genuinely live survivor (not an inconclusive
+                    -- snapshot, already covered elsewhere) is present before
+                    -- signalling.
+                    survivingResult <- liveProcesses orphanState.workerStateKnownProcesses
+                    surviving <- case survivingResult of
+                      Left message -> fail ("expected a successful snapshot, not a query failure: " <> Data.Text.unpack message)
+                      Right identities -> pure identities
+                    surviving `shouldNotBe` []
+                    raiseSignal sigTERM
+                    threadDelay 300000
+                    stillOrphaned <- waitForWorkerState statePath isOrphaned 30
+                    stillOrphaned.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
+                    leaseHeldDuringSignal <- doesDirectoryExist leasePath
+                    leaseHeldDuringSignal `shouldBe` True
+                    eventBytesWhileOrphaned <- ByteString.readFile eventPath
+                    eventBytesWhileOrphaned `shouldNotSatisfy` ByteString.isInfixOf "WorkerFinished"
+                  )
+                  `finally` cleanup
+                terminalState <- waitForWorkerState statePath isTerminal 30
+                terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+                eventBytes <- ByteString.readFile eventPath
+                eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+                leaseReleased <- doesDirectoryExist leasePath
+                leaseReleased `shouldBe` False
+                -- The one-live-worker invariant is what this whole sequence
+                -- protects: a fresh worker for the same issue must now be
+                -- able to launch.
+                acquireWorkerLease freshDescriptor `shouldReturn` Right ()
+                releaseWorkerLease freshDescriptor
+              _ -> expectationFailure "worker fixtures were not discoverable"
 
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
