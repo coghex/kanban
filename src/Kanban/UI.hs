@@ -2578,8 +2578,19 @@ applySolveEvent solveEvent = case solveEvent of
     whenSolveOverlayOpen issueNumber (vScrollToEnd (viewportScroll SolveViewport))
   SolveDiagnostic issueNumber diagnostic -> do
     now <- (.appNow) <$> get
+    -- A diagnostic arriving while this session shows the optimistic
+    -- "killed by user" phase means that kill could not actually be
+    -- verified (see Kanban.Worker's pending-termination marker): reflect
+    -- that the work is still unresolved rather than leave it looking done.
     modifySolveSession issueNumber
-      (setSolveActivity now "diagnostic output" . (\session -> session {solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("[solver] " <> sanitizeText diagnostic <> "\n")}))
+      ( setSolveActivity now "diagnostic output"
+          . ( \session ->
+                session
+                  { solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("[solver] " <> sanitizeText diagnostic <> "\n"),
+                    solveSessionPhase = if session.solveSessionPhase == SolveKilledPhase then SolveOrphanedPhase else session.solveSessionPhase
+                  }
+            )
+      )
     whenSolveOverlayOpen issueNumber (vScrollToEnd (viewportScroll SolveViewport))
   SolveProcessFinished issueNumber outcome -> do
     state <- get
@@ -3196,7 +3207,14 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
   PullRequestFlowDiagnostic number output -> do
     now <- (.appNow) <$> get
     appendOutput number ("[agent] " <> sanitizeText output <> "\n")
-    modifyPullRequestSession number (setPullRequestActivity now "diagnostic output")
+    -- A diagnostic arriving while this session shows the optimistic
+    -- "killed by user" phase means that kill could not actually be
+    -- verified (see Kanban.Worker's pending-termination marker): reflect
+    -- that the work is still unresolved rather than leave it looking done.
+    modifyPullRequestSession number
+      ( setPullRequestActivity now "diagnostic output"
+          . (\session -> session {pullRequestSessionPhase = if session.pullRequestSessionPhase == SolveKilledPhase then SolveOrphanedPhase else session.pullRequestSessionPhase})
+      )
   PullRequestProcessFinished number outcome -> do
     state <- get
     let priorPhase = (.pullRequestSessionPhase) <$> Map.lookup number state.appPullRequestReviewSessions

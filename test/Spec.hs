@@ -119,7 +119,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
-import System.Posix.Signals (raiseSignal, sigTERM)
+import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcessGroup)
 import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -138,6 +138,21 @@ main = hspec $ do
         threadDelay 100000
         killManagedProcess (managedProcess process)
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "excludes a killed process from a snapshot even before its parent reaps it" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        -- Signal the group directly, bypassing killManagedProcess/waitForProcess,
+        -- so the process becomes a zombie this test process never reaps: a
+        -- signalled process must not appear to survive its own confirmed kill
+        -- merely because nothing has called wait() on it yet.
+        signalProcessGroup sigKILL (fromIntegral identity.processIdentityGroupPid)
+        threadDelay 500000
+        snapshot <- readProcessSnapshot
+        case snapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right identities -> identityForPid identity.processIdentityPid identities `shouldBe` Nothing
 
     it "round-trips the durable worker protocol including autosolve parent identity" $ do
       let parent =

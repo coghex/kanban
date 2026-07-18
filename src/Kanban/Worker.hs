@@ -839,8 +839,7 @@ terminateWorkerSelfWith takeSnapshot state = case state.workerStateWorkerIdentit
             case final of
               IdentityPresent -> do
                 ignoreSignal (signalProcessGroup sigKILL (fromIntegral groupPid))
-                void (waitForGroupMembershipStop takeSnapshot groupPid [workerIdentity] workerTerminationAttempts)
-                pure True
+                waitForGroupMembershipStop takeSnapshot groupPid [workerIdentity] workerTerminationAttempts
               IdentityAbsent -> pure True
               IdentitySnapshotFailed _ -> pure False
 

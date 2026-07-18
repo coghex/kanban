@@ -74,7 +74,7 @@ managedProcessStopsWithDashboard (PersistentManagedProcess _) = False
 
 readProcessSnapshot :: IO (Either Text [ProcessIdentity])
 readProcessSnapshot = do
-  result <- try @IOException (readCreateProcessWithExitCode (proc "ps" ["-axo", "pid=,ppid=,pgid=,lstart=,command="]) "")
+  result <- try @IOException (readCreateProcessWithExitCode (proc "ps" ["-axo", "pid=,ppid=,pgid=,stat=,lstart=,command="]) "")
   pure $ case result of
     Left exception -> Left (Text.pack (show exception))
     Right (ExitFailure code, _, diagnostics) -> Left ("ps exited " <> Text.pack (show code) <> ": " <> Text.strip (Text.pack diagnostics))
@@ -223,21 +223,32 @@ readProcessSnapshotRetrying attempts = do
 mapMaybeProcessLine :: [Text] -> [ProcessIdentity]
 mapMaybeProcessLine = foldr (maybe id (:)) [] . map parseProcessLine
 
+-- | A zombie has already been terminated by the kernel and can do no further
+-- work; it is excluded here so every liveness/census check throughout this
+-- module treats it as gone, rather than as a still-present process merely
+-- awaiting its parent's `wait()`. A signalled process that becomes a zombie
+-- (e.g. a killed supervisor whose parent process never reaps it) would
+-- otherwise appear to survive its own confirmed kill indefinitely.
 parseProcessLine :: Text -> Maybe ProcessIdentity
 parseProcessLine line = case Text.words line of
-  pidText : parentText : groupText : weekday : month : day : clock : year : commandParts -> do
-    pid <- readMaybe (Text.unpack pidText)
-    parentPid <- readMaybe (Text.unpack parentText)
-    groupPid <- readMaybe (Text.unpack groupText)
-    pure
-      ProcessIdentity
-        { processIdentityPid = pid,
-          processIdentityParentPid = parentPid,
-          processIdentityGroupPid = groupPid,
-          processIdentityStartedAt = Text.unwords [weekday, month, day, clock, year],
-          processIdentityCommand = Text.unwords commandParts
-        }
+  pidText : parentText : groupText : statText : weekday : month : day : clock : year : commandParts
+    | isZombieStat statText -> Nothing
+    | otherwise -> do
+        pid <- readMaybe (Text.unpack pidText)
+        parentPid <- readMaybe (Text.unpack parentText)
+        groupPid <- readMaybe (Text.unpack groupText)
+        pure
+          ProcessIdentity
+            { processIdentityPid = pid,
+              processIdentityParentPid = parentPid,
+              processIdentityGroupPid = groupPid,
+              processIdentityStartedAt = Text.unwords [weekday, month, day, clock, year],
+              processIdentityCommand = Text.unwords commandParts
+            }
   _ -> Nothing
+
+isZombieStat :: Text -> Bool
+isZombieStat = Text.isInfixOf "Z"
 
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle) = signalOwnedGroup sigINT processHandle
