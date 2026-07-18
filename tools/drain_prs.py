@@ -322,6 +322,23 @@ def drain_state_path(ctx: RepoContext) -> Path:
     return ctx.path / ".git" / "drain_prs_state.json"
 
 
+def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]:
+    if not isinstance(state.get("prs"), dict):
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    if state.get("version") == 1:
+        state["version"] = STATE_VERSION
+        state["attempt_counter"] = 0
+    elif state.get("version") != STATE_VERSION:
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    state.setdefault("attempt_counter", 0)
+    for entry in state["prs"].values():
+        entry.setdefault("consecutive_failures", 0)
+        entry.setdefault("retry_after_attempt", 0)
+        entry.setdefault("last_attempt", 0)
+        entry.setdefault("last_error", None)
+    return state
+
+
 def load_drain_state(ctx: RepoContext) -> dict[str, Any]:
     path = drain_state_path(ctx)
     if not path.exists():
@@ -330,20 +347,7 @@ def load_drain_state(ctx: RepoContext) -> dict[str, Any]:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DrainError(f"Failed to read drain state from {path}: {exc}") from exc
-    if not isinstance(state.get("prs"), dict):
-        raise DrainError(f"Unsupported drain state in {path}; inspect or remove it.")
-    if state.get("version") == 1:
-        state["version"] = STATE_VERSION
-        state["attempt_counter"] = 0
-    elif state.get("version") != STATE_VERSION:
-        raise DrainError(f"Unsupported drain state in {path}; inspect or remove it.")
-    state.setdefault("attempt_counter", 0)
-    for entry in state["prs"].values():
-        entry.setdefault("consecutive_failures", 0)
-        entry.setdefault("retry_after_attempt", 0)
-        entry.setdefault("last_attempt", 0)
-        entry.setdefault("last_error", None)
-    return state
+    return migrate_drain_state(state, source=str(path))
 
 
 def save_drain_state(ctx: RepoContext, state: dict[str, Any], *, dry_run: bool) -> None:
@@ -825,14 +829,10 @@ def close_linked_issues(
         )
 
 
-def parse_worktrees(ctx: RepoContext) -> list[dict[str, str]]:
-    proc = run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=ctx.path,
-    )
+def parse_worktree_porcelain(output: str) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
     current: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
+    for line in output.splitlines():
         if not line.strip():
             if current:
                 entries.append(current)
@@ -845,6 +845,14 @@ def parse_worktrees(ctx: RepoContext) -> list[dict[str, str]]:
     return entries
 
 
+def parse_worktrees(ctx: RepoContext) -> list[dict[str, str]]:
+    proc = run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=ctx.path,
+    )
+    return parse_worktree_porcelain(proc.stdout)
+
+
 def extract_issue_numbers(pr: dict[str, Any]) -> list[int]:
     numbers = {issue["number"] for issue in pr.get("closingIssuesReferences", [])}
     branch = pr.get("headRefName", "")
@@ -853,13 +861,18 @@ def extract_issue_numbers(pr: dict[str, Any]) -> list[int]:
     return sorted(numbers)
 
 
-def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
-    main_path = ctx.path.resolve()
-    branch_name = pr["headRefName"]
-    issue_numbers = extract_issue_numbers(pr)
+def select_matching_worktree(
+    entries: list[dict[str, str]],
+    *,
+    main_path: Path,
+    repo_name: str,
+    branch_name: str,
+    issue_numbers: list[int],
+    pr_number: int,
+) -> Path | None:
     candidates: list[tuple[int, Path]] = []
 
-    for entry in parse_worktrees(ctx):
+    for entry in entries:
         path = Path(entry["worktree"]).resolve()
         if path == main_path:
             continue
@@ -872,7 +885,7 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
         for number in issue_numbers:
             if f"issue-{number}" in base:
                 score = max(score, 80)
-            if base == f"{ctx.repo_name}-{number}":
+            if base == f"{repo_name}-{number}":
                 score = max(score, 70)
             if base.endswith(f"-{number}"):
                 score = max(score, 40)
@@ -887,10 +900,19 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
     best_paths = [path for score, path in candidates if score == best_score]
     if len(best_paths) > 1:
         joined = ", ".join(str(path) for path in best_paths)
-        raise DrainError(
-            f"Multiple worktrees match PR #{pr['number']}: {joined}"
-        )
+        raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
     return best_paths[0]
+
+
+def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
+    return select_matching_worktree(
+        parse_worktrees(ctx),
+        main_path=ctx.path.resolve(),
+        repo_name=ctx.repo_name,
+        branch_name=pr["headRefName"],
+        issue_numbers=extract_issue_numbers(pr),
+        pr_number=pr["number"],
+    )
 
 
 def prepare_review_worktree(
