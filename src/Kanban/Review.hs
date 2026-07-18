@@ -1002,7 +1002,9 @@ runCanonicalCommand repository issueNumber executable arguments processStarted =
   case started of
     Left exception -> finishLog sessionLog >> pure (Left ("Could not start canonical issue reviewer: " <> exceptionText exception))
     Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-      processStarted (managedProcess processHandle)
+      (managed, groupLeaderProblem) <- managedProcess processHandle
+      mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) sessionLog
+      processStarted managed
       outputResult <- newEmptyMVar
       errorResult <- newEmptyMVar
       void . forkIO $ captureHandle outputHandle outputResult
@@ -1062,7 +1064,9 @@ runAuthenticatedClaude client threadId prompt = do
       case started of
         Left exception -> pure (Left ("Could not start authenticated Claude CLI: " <> exceptionText exception))
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-          modifyMVar_ client.reviewToolProcesses (pure . Map.insert threadId (managedProcess processHandle))
+          (managed, groupLeaderProblem) <- managedProcess processHandle
+          mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+          modifyMVar_ client.reviewToolProcesses (pure . Map.insert threadId managed)
           outputResult <- newEmptyMVar
           errorResult <- newEmptyMVar
           void . forkIO $ captureHandle outputHandle outputResult

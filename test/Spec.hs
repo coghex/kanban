@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (bracket, finally)
+import Control.Exception (IOException, bracket, finally, try)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -31,6 +31,7 @@ import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Process
   ( IdentityPresence (..),
+    ManagedProcess,
     ProcessIdentity (..),
     checkGroupMembershipWith,
     descendantProcesses,
@@ -119,7 +120,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
-import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -130,13 +131,31 @@ main = hspec $ do
     it "delivers Ctrl-C to the worker process group" $
       withManagedShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
-        interruptManagedProcess (managedProcess process)
+        managed <- managedProcessFor process
+        interruptManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure 42)
 
     it "escalates a TERM-resistant worker tree to SIGKILL" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
-        killManagedProcess (managedProcess process)
+        managed <- managedProcessFor process
+        killManagedProcess managed
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
+      withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        (managed, groupLeaderProblem) <- managedProcess process
+        groupLeaderProblem `shouldSatisfy` isJust
+        interruptManagedProcess managed
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure 42)
+
+    it "flags a non-group-leader child at registration, then still escalates to SIGKILL via the per-PID fallback" $
+      withNonLeaderShell "trap '' INT TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        (managed, groupLeaderProblem) <- managedProcess process
+        groupLeaderProblem `shouldSatisfy` isJust
+        killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
 
     it "excludes a killed process from a snapshot even before its parent reaps it" $
@@ -699,7 +718,7 @@ main = hspec $ do
                   terminateWorkerWith failingSnapshot descriptor
                   eventBytesAfterRetry <- ByteString.readFile descriptor.workerDescriptorEventPath
                   length (filter (ByteString.isInfixOf "could not verify recorded descendants") (ByteString.lines eventBytesAfterRetry)) `shouldBe` 1
-                  killManagedProcess (managedProcess descendantProcess)
+                  managedProcessFor descendantProcess >>= killManagedProcess
                   void (timeout 3000000 (waitForProcess descendantProcess))
                   collected <- newIORef []
                   let collect _ _ event = modifyIORef collected (event :)
@@ -757,7 +776,7 @@ main = hspec $ do
                 recovered2 `shouldBe` False
                 diagnosticsSoFar <- reverse <$> readIORef collected
                 length (filter isDiagnosticEvent diagnosticsSoFar) `shouldBe` 1
-                killManagedProcess (managedProcess descendantProcess)
+                managedProcessFor descendantProcess >>= killManagedProcess
                 void (timeout 3000000 (waitForProcess descendantProcess))
                 recovered3 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
                 recovered3 `shouldBe` True
@@ -1389,7 +1408,28 @@ withManagedShell command = bracket start stop
       (_, _, _, process) <- createProcess (proc "sh" ["-c", command]) {create_group = True}
       pure process
     stop process = do
-      killManagedProcess (managedProcess process)
+      managedProcessFor process >>= killManagedProcess
+      void (timeout 3000000 (waitForProcess process))
+
+managedProcessFor :: ProcessHandle -> IO ManagedProcess
+managedProcessFor process = fst <$> managedProcess process
+
+-- | Like 'withManagedShell', but deliberately spawns the child *without*
+-- becoming its own process group leader, to exercise the
+-- signal-the-individual-PID fallback ('signalOwnedGroup' in
+-- "Kanban.Process"). Cleanup signals the child's own PID directly with
+-- SIGKILL rather than going through 'killManagedProcess' — the very
+-- operation under test — so a failing assertion in the fallback it tests
+-- still cannot leak this intentionally non-grouped child.
+withNonLeaderShell :: String -> (ProcessHandle -> IO result) -> IO result
+withNonLeaderShell command = bracket start stop
+  where
+    start = do
+      (_, _, _, process) <- createProcess (proc "sh" ["-c", command]) {create_group = False}
+      pure process
+    stop process = do
+      maybePid <- getPid process
+      mapM_ (\pid -> void (try (signalProcess sigKILL pid) :: IO (Either IOException ()))) maybePid
       void (timeout 3000000 (waitForProcess process))
 
 processIdentity :: Int -> Int -> Int -> Text -> ProcessIdentity

@@ -39,8 +39,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import System.Exit (ExitCode (..))
+import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
-import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, terminateProcess)
 import Text.Read (readMaybe)
 
@@ -58,8 +59,38 @@ data ManagedProcess
   = LocalManagedProcess ProcessHandle
   | PersistentManagedProcess CPid
 
-managedProcess :: ProcessHandle -> ManagedProcess
-managedProcess = LocalManagedProcess
+-- | Wraps a freshly spawned local process handle as a 'ManagedProcess'.
+-- Local kill/interrupt signal the process *group* led by the child's PID
+-- (see 'signalOwnedGroup'), which only reaches the whole group when the
+-- child was itself spawned as that group's leader (@create_group = True@) —
+-- a non-leader is still reachable, but only itself, via the
+-- ESRCH-triggered per-PID fallback. Registration always succeeds — refusing
+-- to track an already-running process would leave it with no supervision at
+-- all — but leadership is checked against a fresh process snapshot first,
+-- so a violated precondition is surfaced immediately via the 'Just' case
+-- rather than only showing up later as an inexplicably unkillable process
+-- tree.
+managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
+managedProcess processHandle = do
+  problem <- verifyGroupLeader processHandle
+  pure (LocalManagedProcess processHandle, problem)
+
+-- | Confirms, via a fresh process snapshot, that a freshly spawned local
+-- process leads its own process group.
+verifyGroupLeader :: ProcessHandle -> IO (Maybe Text)
+verifyGroupLeader processHandle = do
+  maybePid <- getPid processHandle
+  case maybePid of
+    Nothing -> pure (Just "process has no PID to verify group leadership")
+    Just pid -> do
+      snapshot <- defaultProcessSnapshot
+      pure $ case snapshot of
+        Left message -> Just ("could not take a process snapshot to verify group leadership: " <> message)
+        Right processes -> case identityForPid (fromIntegral pid) processes of
+          Nothing -> Just "process was not found in a fresh process snapshot"
+          Just identity
+            | identity.processIdentityGroupPid == identity.processIdentityPid -> Nothing
+            | otherwise -> Just "process is not the leader of its own process group"
 
 managedProcessGroup :: CPid -> ManagedProcess
 managedProcessGroup = PersistentManagedProcess
@@ -275,8 +306,23 @@ signalOwnedGroup :: Signal -> ProcessHandle -> IO ()
 signalOwnedGroup signal processHandle = do
   processId <- getPid processHandle
   case processId of
-    Just pid -> ignoreIOException (signalProcessGroup signal pid)
+    Just pid -> signalGroupOrOwnedPid signal pid
     Nothing -> ignoreIOException (terminateProcess processHandle)
+
+-- | Signals the process group led by `pid`; when no such group exists
+-- (ESRCH — e.g. `pid` was never actually a group leader), falls back to
+-- signalling `pid` itself, so a child that slipped past 'managedProcess'
+-- without leading its own group is still reachable rather than silently
+-- un-signalled. Any other failure is ignored, same as the group signal
+-- itself: the process being already gone counts as success either way.
+signalGroupOrOwnedPid :: Signal -> CPid -> IO ()
+signalGroupOrOwnedPid signal pid = do
+  result <- try (signalProcessGroup signal pid) :: IO (Either IOException ())
+  case result of
+    Right () -> pure ()
+    Left exception
+      | isDoesNotExistError exception -> ignoreIOException (signalProcess signal pid)
+      | otherwise -> pure ()
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try action :: IO (Either IOException ()))

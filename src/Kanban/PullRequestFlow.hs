@@ -102,7 +102,9 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
       case started of
         Left exception -> closeWithOutcome sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          eventSink (PullRequestProcessStarted pullRequestNumber action brand (managedProcess processHandle))
+          (managed, groupLeaderProblem) <- managedProcess processHandle
+          mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
+          eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession
