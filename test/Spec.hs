@@ -6,8 +6,10 @@ import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.IORef (modifyIORef, newIORef, readIORef)
 import Data.List (find, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
@@ -27,7 +29,22 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerState (..), DrainerStatus (..), decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
-import Kanban.Process (ProcessIdentity (..), descendantProcesses, interruptManagedProcess, killManagedProcess, liveProcesses, managedProcess, managedProcessGroup)
+import Kanban.Process
+  ( IdentityPresence (..),
+    ProcessIdentity (..),
+    checkGroupMembershipWith,
+    descendantProcesses,
+    identityForPid,
+    interruptManagedProcess,
+    killManagedProcess,
+    killVerifiedGroupWith,
+    liveProcesses,
+    managedProcess,
+    managedProcessGroup,
+    matchingIdentities,
+    membersStillInGroup,
+    readProcessSnapshot,
+  )
 import Kanban.Repository (parseRepositoryName)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -88,6 +105,7 @@ import Kanban.Worker
     WorkerTask (..),
     acquireWorkerLease,
     discoverWorkerHistory,
+    monitorWorker,
     releaseWorkerLease,
     runWorker,
   )
@@ -97,7 +115,8 @@ import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
-import System.Process (CreateProcess (..), ProcessHandle, createProcess, proc, waitForProcess)
+import System.Posix.Process (getProcessID)
+import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -161,7 +180,10 @@ main = hspec $ do
       let decodedState = eitherDecode (encode legacyState) :: Either String WorkerState
       case decodedState of
         Left message -> expectationFailure message
-        Right state -> state.workerStateKnownProcesses `shouldBe` []
+        Right state -> do
+          state.workerStateKnownProcesses `shouldBe` []
+          state.workerStateWorkerIdentity `shouldBe` Nothing
+          state.workerStateProviderIdentity `shouldBe` Nothing
 
     it "finds the full descendant tree without sweeping unrelated processes" $ do
       let root = processIdentity 100 1 100 "provider"
@@ -170,6 +192,62 @@ main = hspec $ do
           unrelated = processIdentity 200 1 200 "interactive agent"
       descendantProcesses [100] [unrelated, grandchild, root, child]
         `shouldBe` [grandchild, root, child]
+
+    it "drops a recorded identity whose PID now belongs to a different process or has exited" $ do
+      let alive = processIdentity 100 1 100 "provider"
+          reused = processIdentity 101 1 101 "recorded-child"
+          reusedNow = reused {processIdentityCommand = "unrelated-process", processIdentityStartedAt = "Fri Jul 17 13:00:00 2026"}
+          exited = processIdentity 102 1 102 "exited-child"
+          snapshot = [alive, reusedNow]
+      matchingIdentities snapshot [alive, reused, exited] `shouldBe` [alive]
+
+    it "drops a matching identity that changed process groups" $ do
+      let anchor = processIdentity 100 1 100 "provider"
+          movedGroup = anchor {processIdentityGroupPid = 105}
+      membersStillInGroup 100 [anchor] [anchor] `shouldBe` [anchor]
+      membersStillInGroup 100 [movedGroup] [anchor] `shouldBe` []
+
+    it "sends the KILL once the grace window elapses and the group still matches" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        let takeSnapshot = pure (Right [identity])
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "omits the KILL when the group's identity no longer matches after the grace window" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        callCount <- newIORef (0 :: Int)
+        let takeSnapshot = do
+              count <- readIORef callCount
+              modifyIORef callCount (+ 1)
+              pure (if count == 0 then Right [identity] else Right [])
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
+        getProcessExitCode process `shouldReturn` Nothing
+
+    it "omits the KILL when the same PID and start time have moved to a different, recyclable group" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        callCount <- newIORef (0 :: Int)
+        let movedGroup = identity {processIdentityGroupPid = identity.processIdentityGroupPid + 1}
+            takeSnapshot = do
+              count <- readIORef callCount
+              modifyIORef callCount (+ 1)
+              pure (Right [if count == 0 then identity else movedGroup])
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
+        getProcessExitCode process `shouldReturn` Nothing
+
+    it "omits every signal when the verification snapshot fails" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        let takeSnapshot = pure (Left "ps unavailable")
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Left "ps unavailable"
+        getProcessExitCode process `shouldReturn` Nothing
+        checkGroupMembershipWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` IdentitySnapshotFailed "ps unavailable"
 
     it "atomically refuses a second live lease for the same issue" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -191,6 +269,88 @@ main = hspec $ do
               acquireWorkerLease second `shouldReturn` Right ()
               releaseWorkerLease second
             _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "retires a stale lease once its recorded worker no longer matches its identity" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-783-stale") 783
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-783-fresh") 783
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-783-stale.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-783-stale.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-783-fresh.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              acquireWorkerLease first `shouldReturn` Right ()
+              ownPid <- fromIntegral <$> getProcessID
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure (Data.Text.unpack message)
+                Right identities -> case identityForPid ownPid identities of
+                  Nothing -> expectationFailure "could not find this test process in a process snapshot"
+                  Just realIdentity -> do
+                    let mismatched = realIdentity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
+                    LazyByteString.writeFile statePath (encode (runningWorkerState firstSpec.workerId ownPid (Just mismatched)))
+                    acquireWorkerLease second `shouldReturn` Right ()
+                    releaseWorkerLease second
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "does not retire a lease when the recorded worker has no verifiable identity" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-784-legacy") 784
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-784-fresh") 784
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-784-legacy.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-784-legacy.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-784-fresh.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              acquireWorkerLease first `shouldReturn` Right ()
+              LazyByteString.writeFile statePath (encode (runningWorkerState firstSpec.workerId 999999 Nothing))
+              acquireWorkerLease second `shouldReturn` Left "issue #784 already has a live solve worker; open it from Processes or kill it before starting another"
+              releaseWorkerLease first
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "fails a worker closed once its heartbeat is stale and its recorded identity no longer matches" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec repository (WorkerId "solve-785-mismatch") 785
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-785-mismatch.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-785-mismatch.spec.json") (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> do
+              ownPid <- fromIntegral <$> getProcessID
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure (Data.Text.unpack message)
+                Right identities -> case identityForPid ownPid identities of
+                  Nothing -> expectationFailure "could not find this test process in a process snapshot"
+                  Just realIdentity -> do
+                    let mismatched = realIdentity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
+                    LazyByteString.writeFile statePath (encode (runningWorkerState spec.workerId ownPid (Just mismatched)))
+                    collected <- newIORef []
+                    let collect _ _ event = modifyIORef collected (event :)
+                    timeout 5000000 (monitorWorker descriptor collect) `shouldReturn` Just ()
+                    events <- reverse <$> readIORef collected
+                    events `shouldSatisfy` any isDiagnosticEvent
+                    events `shouldSatisfy` any isWorkerFailedEvent
+                    finalState <- waitForWorkerState statePath isTerminal 30
+                    finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "persistent worker stopped unexpectedly; its provider process group was terminated")
 
     it "persists a worker heartbeat, provider identity, journal, and terminal outcome" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -240,6 +400,8 @@ main = hspec $ do
                 workerState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
                 workerState.workerStateSessionId `shouldBe` Just "fixture-session"
                 workerState.workerStateProviderPid `shouldBe` Nothing
+                workerState.workerStateProviderIdentity `shouldBe` Nothing
+                workerState.workerStateWorkerIdentity `shouldSatisfy` isJust
             eventBytes <- ByteString.readFile eventPath
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerProviderStarted"
             eventBytes `shouldSatisfy` ByteString.isInfixOf "fixture-session"
@@ -859,6 +1021,41 @@ processIdentity processId parentId groupId command =
       processIdentityStartedAt = "Fri Jul 17 12:00:00 2026",
       processIdentityCommand = command
     }
+
+identityForProcess :: ProcessHandle -> IO ProcessIdentity
+identityForProcess process = do
+  processId <- getPid process
+  pid <- maybe (fail "managed shell exited before it could be identified") (pure . fromIntegral) processId
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities -> case identityForPid pid identities of
+      Just identity -> pure identity
+      Nothing -> fail "spawned process was not present in a process snapshot"
+
+runningWorkerState :: WorkerId -> Int -> Maybe ProcessIdentity -> WorkerState
+runningWorkerState identifier pid identity =
+  WorkerState
+    { workerStateId = identifier,
+      workerStateStatus = WorkerRunning,
+      workerStateWorkerPid = pid,
+      workerStateWorkerIdentity = identity,
+      workerStateProviderPid = Nothing,
+      workerStateProviderIdentity = Nothing,
+      workerStateSessionId = Nothing,
+      workerStateLogPath = Nothing,
+      workerStateHeartbeatAt = epoch,
+      workerStateLastActivity = "running",
+      workerStateKnownProcesses = []
+    }
+
+isDiagnosticEvent :: WorkerEvent -> Bool
+isDiagnosticEvent (WorkerDiagnostic _) = True
+isDiagnosticEvent _ = False
+
+isWorkerFailedEvent :: WorkerEvent -> Bool
+isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
+isWorkerFailedEvent _ = False
 
 workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
 workerFixtureSpec repository identifier issueNumber =
