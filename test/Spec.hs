@@ -1147,6 +1147,50 @@ main = hspec $ do
                   releaseWorkerLease second
                 _ -> expectationFailure "worker fixtures were not discoverable"
 
+    it "does not release a terminal lease's recovery pass while a recorded identity is still live" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \descendantProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = workerFixtureSpec repository (WorkerId "solve-803-terminal-recovery") 803
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              statePath = workerRoot </> "solve-803-terminal-recovery.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-803-terminal-recovery.spec.json") (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> do
+                acquireWorkerLease descriptor `shouldReturn` Right ()
+                descendantIdentity <- identityForProcess descendantProcess
+                -- Mirrors leaseIsActive's own WorkerTerminal re-check: a
+                -- recovery pass over an already-terminal state must not
+                -- trust the label alone while a recorded descendant is
+                -- still live.
+                let liveTerminalState =
+                      (runningWorkerState spec.workerId 999999 Nothing)
+                        { workerStateStatus = WorkerTerminal SolveCompleted,
+                          workerStateKnownProcesses = [descendantIdentity]
+                        }
+                LazyByteString.writeFile statePath (encode liveTerminalState)
+                collected <- newIORef []
+                let collect _ _ event = modifyIORef collected (event :)
+                recovered1 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                recovered1 `shouldBe` False
+                leaseHeld <- doesDirectoryExist descriptor.workerDescriptorLeasePath
+                leaseHeld `shouldBe` True
+                pendingEvents <- readIORef collected
+                pendingEvents `shouldBe` []
+                managedProcessFor descendantProcess >>= killManagedProcess
+                void (timeout 3000000 (waitForProcess descendantProcess))
+                recovered2 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                recovered2 `shouldBe` True
+                leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
+                leaseReleased `shouldBe` False
+                finalEvents <- readIORef collected
+                finalEvents `shouldBe` [WorkerFinished SolveCompleted]
+
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
       let payload = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"delta\":\"hello\"}}"

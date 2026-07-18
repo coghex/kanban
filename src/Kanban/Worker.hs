@@ -663,10 +663,23 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
         Just IdentityAbsent -> finalizeMissingState
         _ -> pure False
     Right state -> case state.workerStateStatus of
+      -- Mirrors leaseIsActive's own re-check for WorkerTerminal: every path
+      -- that writes it has already verified zero survivors, so this is
+      -- normally immediate, but releasing here unconditionally would be the
+      -- one place in this module that trusts the status label over a
+      -- recorded identity. A live match (e.g. this pass racing the narrow
+      -- window between the terminal write and the writer's own release)
+      -- leaves the lease untouched and lets the monitor loop retry rather
+      -- than free it out from under something still recorded as present.
       WorkerTerminal outcome -> do
-        releaseWorkerLease descriptor
-        eventSink spec.workerId spec (WorkerFinished outcome)
-        pure True
+        let identities = catMaybes [state.workerStateWorkerIdentity, state.workerStateProviderIdentity] <> state.workerStateKnownProcesses
+        presence <- if null identities then pure IdentityAbsent else checkIdentityPresenceWith takeSnapshot identities
+        case presence of
+          IdentityAbsent -> do
+            releaseWorkerLease descriptor
+            eventSink spec.workerId spec (WorkerFinished outcome)
+            pure True
+          _ -> pure False
       _ -> do
         now <- getCurrentTime
         if diffUTCTime now state.workerStateHeartbeatAt < workerStaleHeartbeatSeconds
