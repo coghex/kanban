@@ -123,6 +123,7 @@ import Kanban.Worker
     launchPullRequestWorker,
     launchSolveWorker,
     monitorWorker,
+    pendingTerminationDiagnosticPrefix,
     terminateWorker,
   )
 import System.Timeout (timeout)
@@ -2578,16 +2579,19 @@ applySolveEvent solveEvent = case solveEvent of
     whenSolveOverlayOpen issueNumber (vScrollToEnd (viewportScroll SolveViewport))
   SolveDiagnostic issueNumber diagnostic -> do
     now <- (.appNow) <$> get
-    -- A diagnostic arriving while this session shows the optimistic
-    -- "killed by user" phase means that kill could not actually be
-    -- verified (see Kanban.Worker's pending-termination marker): reflect
-    -- that the work is still unresolved rather than leave it looking done.
+    -- This specific diagnostic means a user-requested kill could not be
+    -- verified (see Kanban.Worker's pending-termination marker) and the
+    -- worker is still alive and retrying: render it orphaned rather than
+    -- running or optimistically "killed". Matched by text, not by the
+    -- session's current phase, so a TUI restart that replays this same
+    -- event from a fresh session (which never ran the "killed by user" UI
+    -- transition) still renders it correctly.
     modifySolveSession issueNumber
       ( setSolveActivity now "diagnostic output"
           . ( \session ->
                 session
                   { solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("[solver] " <> sanitizeText diagnostic <> "\n"),
-                    solveSessionPhase = if session.solveSessionPhase == SolveKilledPhase then SolveOrphanedPhase else session.solveSessionPhase
+                    solveSessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` diagnostic then SolveOrphanedPhase else session.solveSessionPhase
                   }
             )
       )
@@ -3207,13 +3211,16 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
   PullRequestFlowDiagnostic number output -> do
     now <- (.appNow) <$> get
     appendOutput number ("[agent] " <> sanitizeText output <> "\n")
-    -- A diagnostic arriving while this session shows the optimistic
-    -- "killed by user" phase means that kill could not actually be
-    -- verified (see Kanban.Worker's pending-termination marker): reflect
-    -- that the work is still unresolved rather than leave it looking done.
+    -- This specific diagnostic means a user-requested kill could not be
+    -- verified (see Kanban.Worker's pending-termination marker) and the
+    -- worker is still alive and retrying: render it orphaned rather than
+    -- running or optimistically "killed". Matched by text, not by the
+    -- session's current phase, so a TUI restart that replays this same
+    -- event from a fresh session (which never ran the "killed by user" UI
+    -- transition) still renders it correctly.
     modifyPullRequestSession number
       ( setPullRequestActivity now "diagnostic output"
-          . (\session -> session {pullRequestSessionPhase = if session.pullRequestSessionPhase == SolveKilledPhase then SolveOrphanedPhase else session.pullRequestSessionPhase})
+          . (\session -> session {pullRequestSessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` output then SolveOrphanedPhase else session.pullRequestSessionPhase})
       )
   PullRequestProcessFinished number outcome -> do
     state <- get

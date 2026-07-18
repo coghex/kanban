@@ -21,6 +21,7 @@ module Kanban.Worker
     launchPullRequestWorker,
     launchSolveWorker,
     monitorWorker,
+    pendingTerminationDiagnosticPrefix,
     readWorkerState,
     recoverIfWorkerStoppedWith,
     releaseWorkerLease,
@@ -775,7 +776,16 @@ recordPendingTermination descriptor = do
       Left _ -> pure ()
       Right () -> setFileMode descriptor.workerDescriptorPendingTerminationPath 0o600
     lock <- newMVar ()
-    appendWorkerEvent descriptor lock (WorkerDiagnostic "user termination: could not verify recorded descendants are gone; retaining lease and retrying")
+    appendWorkerEvent descriptor lock (WorkerDiagnostic (pendingTerminationDiagnosticPrefix <> "; retaining lease and retrying"))
+
+-- | Shared with the UI layer so it can recognize this specific diagnostic
+-- (by text, since 'WorkerDiagnostic' carries free-form text) and render the
+-- session as orphaned rather than running — both live and when a durable
+-- worker event journal is replayed fresh after a TUI restart, since a
+-- restart never re-runs the optimistic "killed by user" UI transition this
+-- diagnostic would otherwise be correcting.
+pendingTerminationDiagnosticPrefix :: Text
+pendingTerminationDiagnosticPrefix = "user termination: could not verify recorded descendants are gone"
 
 -- | Attempts to complete a requested termination: verifies the provider and
 -- recorded-descendant groups are gone, and only then signals the
