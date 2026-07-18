@@ -146,6 +146,19 @@ cabal run kanban -- --border open # optional borderless column gutters
 cabal run kanban -- --glyph-test  # compare line glyphs in this terminal/font
 ```
 
+`tools/drain_prs.py` has a Python test suite covering its pure decision logic
+(check classification, PR selection, backoff arithmetic, review-marker
+parsing, worktree scoring, drain-state migration) and one full happy-path
+integration cycle against a real temporary Git repository with a scriptable
+fake `gh`. Run it with:
+
+```console
+python3 -m unittest discover -s tools -p 'test_*.py'
+```
+
+It requires no network access and no `gh` login. This is independent of the
+Haskell `cabal test` suite.
+
 Board refresh uses the authenticated GitHub CLI. Run `gh auth login` first if
 `gh` is not already authenticated. Cache files live under
 `~/.cache/kanban/repos/`; the global usage snapshot lives at
