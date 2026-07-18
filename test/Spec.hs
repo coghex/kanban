@@ -997,46 +997,119 @@ main = hspec $ do
                 releaseWorkerLease freshDescriptor
               _ -> expectationFailure "worker fixtures were not discoverable"
 
-    it "re-verifies a terminal lease's recorded identity rather than trusting the status label alone" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            firstSpec = workerFixtureSpec repository (WorkerId "solve-800-terminal-live") 800
-            secondSpec = workerFixtureSpec repository (WorkerId "solve-800-fresh") 800
-            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
-            statePath = workerRoot </> "solve-800-terminal-live.state.json"
-        createDirectory repository.repositoryRoot
-        createDirectoryIfMissing True workerRoot
-        LazyByteString.writeFile (workerRoot </> "solve-800-terminal-live.spec.json") (encode firstSpec)
-        LazyByteString.writeFile (workerRoot </> "solve-800-fresh.spec.json") (encode secondSpec)
-        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          descriptors <- discoverWorkerHistory repository
-          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
-            (Just first, Just second) -> do
-              ownPid <- fromIntegral <$> getProcessID
-              snapshot <- readProcessSnapshot
-              realIdentity <- case snapshot of
-                Left message -> fail ("could not find this test process in a process snapshot: " <> Data.Text.unpack message)
-                Right identities -> case identityForPid ownPid identities of
-                  Nothing -> fail "could not find this test process in a process snapshot"
-                  Just identity -> pure identity
-              -- A Terminal write is only ever reached after every recorded
-              -- identity has been verified absent; this constructs the
-              -- anomalous case directly to prove the re-check — not the
-              -- WorkerTerminal label alone — is what decides.
-              acquireWorkerLease first `shouldReturn` Right ()
-              let liveTerminalState = (runningWorkerState firstSpec.workerId ownPid (Just realIdentity)) {workerStateStatus = WorkerTerminal SolveCompleted}
-              LazyByteString.writeFile statePath (encode liveTerminalState)
-              acquireWorkerLease second `shouldReturn` Left "issue #800 already has a live solve worker; open it from Processes or kill it before starting another"
-              releaseWorkerLease first
-              -- A terminal state with no recorded identity at all keeps the
-              -- prior unconditional release: nothing to re-verify, and
-              -- Terminal already means done.
-              acquireWorkerLease first `shouldReturn` Right ()
-              let noIdentityTerminalState = (runningWorkerState firstSpec.workerId 999999 Nothing) {workerStateStatus = WorkerTerminal SolveCompleted}
-              LazyByteString.writeFile statePath (encode noIdentityTerminalState)
-              acquireWorkerLease second `shouldReturn` Right ()
-              releaseWorkerLease second
-            _ -> expectationFailure "worker fixtures were not discoverable"
+    it "re-verifies every recorded identity of a terminal lease rather than trusting the status label or supervisor alone" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \descendantProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              firstSpec = workerFixtureSpec repository (WorkerId "solve-800-terminal-live") 800
+              secondSpec = workerFixtureSpec repository (WorkerId "solve-800-fresh") 800
+              -- Each stale-retirement in this test renames the shared lease
+              -- directory to a target keyed only by the acquiring workerId
+              -- ('retireStaleLease' never cleans up that trail), so reusing
+              -- one acquirer across more than one retirement in the same
+              -- test collides with its own earlier rename target; a third,
+              -- distinct fixture keeps the final scenario's retirement
+              -- independent of the second's.
+              thirdSpec = workerFixtureSpec repository (WorkerId "solve-800-fresh-2") 800
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              statePath = workerRoot </> "solve-800-terminal-live.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-800-terminal-live.spec.json") (encode firstSpec)
+          LazyByteString.writeFile (workerRoot </> "solve-800-fresh.spec.json") (encode secondSpec)
+          LazyByteString.writeFile (workerRoot </> "solve-800-fresh-2.spec.json") (encode thirdSpec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case ( find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors,
+                   find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors,
+                   find ((== thirdSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors
+                 ) of
+              (Just first, Just second, Just third) -> do
+                ownPid <- fromIntegral <$> getProcessID
+                snapshot <- readProcessSnapshot
+                realIdentity <- case snapshot of
+                  Left message -> fail ("could not find this test process in a process snapshot: " <> Data.Text.unpack message)
+                  Right identities -> case identityForPid ownPid identities of
+                    Nothing -> fail "could not find this test process in a process snapshot"
+                    Just identity -> pure identity
+                descendantIdentity <- identityForProcess descendantProcess
+                -- A Terminal write is only ever reached after every recorded
+                -- identity has been verified absent; this constructs the
+                -- anomalous case directly to prove the re-check — not the
+                -- WorkerTerminal label alone — is what decides.
+                acquireWorkerLease first `shouldReturn` Right ()
+                let liveTerminalState = (runningWorkerState firstSpec.workerId ownPid (Just realIdentity)) {workerStateStatus = WorkerTerminal SolveCompleted}
+                LazyByteString.writeFile statePath (encode liveTerminalState)
+                acquireWorkerLease second `shouldReturn` Left "issue #800 already has a live solve worker; open it from Processes or kill it before starting another"
+                releaseWorkerLease first
+                -- The supervisor identity is absent, but a recorded
+                -- descendant is still alive: the check must consult
+                -- workerStateKnownProcesses too, not stop at the missing
+                -- supervisor and assume retireable.
+                acquireWorkerLease first `shouldReturn` Right ()
+                let descendantOnlyTerminalState =
+                      (runningWorkerState firstSpec.workerId 999999 Nothing)
+                        { workerStateStatus = WorkerTerminal SolveCompleted,
+                          workerStateKnownProcesses = [descendantIdentity]
+                        }
+                LazyByteString.writeFile statePath (encode descendantOnlyTerminalState)
+                acquireWorkerLease second `shouldReturn` Left "issue #800 already has a live solve worker; open it from Processes or kill it before starting another"
+                managedProcessFor descendantProcess >>= killManagedProcess
+                void (timeout 3000000 (waitForProcess descendantProcess))
+                acquireWorkerLease second `shouldReturn` Right ()
+                releaseWorkerLease second
+                -- A terminal state with no recorded identity anywhere keeps
+                -- the prior unconditional release: nothing to re-verify, and
+                -- Terminal already means done.
+                acquireWorkerLease first `shouldReturn` Right ()
+                let noIdentityTerminalState = (runningWorkerState firstSpec.workerId 999999 Nothing) {workerStateStatus = WorkerTerminal SolveCompleted}
+                LazyByteString.writeFile statePath (encode noIdentityTerminalState)
+                acquireWorkerLease third `shouldReturn` Right ()
+                releaseWorkerLease third
+              _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "keeps a lease active indefinitely, with no time-based escape hatch, when capturing the launched supervisor's identity never once succeeds" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "true" $ \reapedProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              firstSpec = workerFixtureSpec repository (WorkerId "solve-802-capture-fails") 802
+              secondSpec = workerFixtureSpec repository (WorkerId "solve-802-fresh") 802
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-802-capture-fails.spec.json") (encode firstSpec)
+          LazyByteString.writeFile (workerRoot </> "solve-802-fresh.spec.json") (encode secondSpec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+              (Just first, Just second) -> do
+                acquireWorkerLease first `shouldReturn` Right ()
+                -- A reaped process handle makes getPid return Nothing on
+                -- every call: a deterministic stand-in for a launch whose
+                -- best-effort identity capture never once succeeds, tried
+                -- repeatedly as 'waitForWorkerStart' would across its poll.
+                void (waitForProcess reapedProcess)
+                recordLaunchedSupervisorIdentity first reapedProcess
+                recordLaunchedSupervisorIdentity first reapedProcess
+                recordLaunchedSupervisorIdentity first reapedProcess
+                -- Unlike a merely-slow lease, this must stay blocked no
+                -- matter how far past any recency window it is backdated:
+                -- elapsed time can never distinguish a still-alive
+                -- supervisor whose identity we simply never captured from a
+                -- dead one.
+                past <- addUTCTime (-3600) <$> getCurrentTime
+                setModificationTime first.workerDescriptorLeasePath past
+                acquireWorkerLease second `shouldReturn` Left "issue #802 already has a live solve worker; open it from Processes or kill it before starting another"
+                -- The independent missing-state recovery path must likewise
+                -- never finalize this launch on elapsed time alone.
+                collected <- newIORef []
+                let collect _ _ event = modifyIORef collected (event :)
+                resolved <- recoverIfWorkerStoppedWith readProcessSnapshot first collect
+                resolved `shouldBe` False
+                events <- readIORef collected
+                events `shouldBe` []
+                releaseWorkerLease first
+              _ -> expectationFailure "worker fixtures were not discoverable"
 
     it "never lets a later identity-recording attempt overwrite a lease's already-recorded supervisor" $
       withTemporaryCacheRoot $ \temporaryRoot ->

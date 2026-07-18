@@ -373,12 +373,19 @@ leaseIsActive descriptor = do
           -- unconditionally) so a live identity match at this exact moment —
           -- e.g. a PID somehow reused with the same recorded start time in
           -- the narrow window right after that verified write — still blocks
-          -- a relaunch instead of racing it. A state with no recorded
-          -- identity at all (nothing to re-verify) keeps the prior
-          -- unconditional release, since Terminal already means done.
-          WorkerTerminal _ -> case state.workerStateWorkerIdentity of
-            Nothing -> pure False
-            Just _ -> recordedIdentitiesActive state pendingTerminationPath
+          -- a relaunch instead of racing it. Every recorded identity is
+          -- consulted, not only the supervisor's, since a terminal write
+          -- clears the supervisor's own fields on some paths while a
+          -- provider or other descendant identity can still be present in
+          -- 'workerStateKnownProcesses'; only when nothing at all is
+          -- recorded is there nothing left to re-verify.
+          WorkerTerminal _ -> do
+            let identities = catMaybes [state.workerStateWorkerIdentity, state.workerStateProviderIdentity] <> state.workerStateKnownProcesses
+            if null identities
+              then pure False
+              else do
+                presence <- checkIdentityPresenceWith defaultProcessSnapshot identities
+                pure (presence /= IdentityAbsent)
           -- Every other status — including Orphaned — is judged by whether
           -- any durably recorded identity for this worker still matches a
           -- process, not by the status label alone: a blanket "Orphaned is
@@ -391,14 +398,16 @@ leaseIsActive descriptor = do
           _ -> recordedIdentitiesActive state pendingTerminationPath
         Left _ -> do
           -- No state file has been written yet: fall back to the
-          -- supervisor's identity recorded directly on the lease at launch,
-          -- so a still-live pre-state supervisor is never mistaken for
-          -- stale merely because the recency grace window elapsed.
+          -- supervisor's identity recorded directly on the lease at launch.
+          -- Unlike every other fallback in this function, there is no
+          -- elapsed-time escape hatch here: elapsed time cannot distinguish
+          -- a still-slow-but-alive supervisor from a dead one, and the
+          -- one-live-worker invariant must hold even in the rare case where
+          -- identity capture itself never succeeds — a lease that can never
+          -- be proven dead stays active rather than risk a concurrent
+          -- worker.
           presence <- supervisorLaunchIdentityPresenceWith defaultProcessSnapshot descriptor
-          case presence of
-            Just IdentityAbsent -> pure False
-            Just _ -> pure True
-            Nothing -> leaseIsRecent descriptor
+          pure (presence /= Just IdentityAbsent)
 
 -- | A lease stays active while any durably recorded identity for its
 -- worker — the supervisor itself, its provider, or any other recorded
@@ -643,18 +652,16 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
       -- fall back to the identity recorded directly on the lease at launch
       -- (see 'recordLaunchedSupervisorIdentity'), which is available to
       -- this independent recovery pass exactly because the state file is
-      -- not. Only when no identity was ever recorded (a legacy lease, or a
-      -- launch whose best-effort recording failed) does this revert to the
-      -- prior elapsed-time heuristic.
+      -- not. Unlike the prior elapsed-time heuristic this replaces, there is
+      -- no time-based escape hatch: elapsed time cannot distinguish a
+      -- still-slow-but-alive supervisor from a dead one, so a launch whose
+      -- identity was never recorded (a legacy lease, or best-effort capture
+      -- that never succeeded) is left pending rather than finalized on a
+      -- guess.
       identityPresence <- supervisorLaunchIdentityPresenceWith takeSnapshot descriptor
       case identityPresence of
         Just IdentityAbsent -> finalizeMissingState
-        Just _ -> pure False
-        Nothing -> do
-          now <- getCurrentTime
-          if diffUTCTime now spec.workerCreatedAt < workerMissingStateGraceSeconds
-            then pure False
-            else finalizeMissingState
+        _ -> pure False
     Right state -> case state.workerStateStatus of
       WorkerTerminal outcome -> do
         releaseWorkerLease descriptor
@@ -1293,9 +1300,6 @@ workerStartupIntervalMicros = 50 * 1000
 
 workerStaleHeartbeatSeconds :: NominalDiffTime
 workerStaleHeartbeatSeconds = 20
-
-workerMissingStateGraceSeconds :: NominalDiffTime
-workerMissingStateGraceSeconds = 10
 
 workerDiscoveryStartupGraceSeconds :: NominalDiffTime
 workerDiscoveryStartupGraceSeconds = 30
