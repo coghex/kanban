@@ -22,9 +22,12 @@ module Kanban.Worker
     launchSolveWorker,
     monitorWorker,
     readWorkerState,
+    recoverIfWorkerStoppedWith,
     releaseWorkerLease,
     runWorker,
+    runWorkerWith,
     terminateWorker,
+    terminateWorkerWith,
   )
 where
 
@@ -50,13 +53,14 @@ import Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
     ProcessIdentity (..),
-    checkGroupMembership,
-    checkIdentityPresence,
+    checkGroupMembershipWith,
+    checkIdentityPresenceWith,
+    defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     killManagedProcess,
-    killVerifiedGroup,
-    liveProcesses,
+    killVerifiedGroupWith,
+    liveProcessesWith,
     managedProcessPid,
     matchingIdentities,
     readProcessSnapshot,
@@ -162,7 +166,14 @@ data WorkerState = WorkerState
     workerStateLogPath :: Maybe FilePath,
     workerStateHeartbeatAt :: UTCTime,
     workerStateLastActivity :: Text,
-    workerStateKnownProcesses :: [ProcessIdentity]
+    workerStateKnownProcesses :: [ProcessIdentity],
+    -- | Durably records that a user requested termination ('terminateWorker')
+    -- but a snapshot failure kept recorded-descendant verification
+    -- inconclusive, so the supervisor's own group was never signaled. A
+    -- later recovery pass ('recoverIfWorkerStoppedWith') retries the same
+    -- verification and finalizes the pending "killed by user" outcome once
+    -- it succeeds.
+    workerStatePendingTermination :: Bool
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
@@ -181,6 +192,7 @@ instance FromJSON WorkerState where
       <*> object .: "workerStateHeartbeatAt"
       <*> object .: "workerStateLastActivity"
       <*> object .:? "workerStateKnownProcesses" .!= []
+      <*> object .:? "workerStatePendingTermination" .!= False
 
 data WorkerLease = WorkerLease
   { workerLeaseId :: WorkerId,
@@ -325,7 +337,7 @@ leaseIsActive descriptor = do
             -- closed as active rather than risk a concurrent worker.
             Nothing -> pure True
             Just workerIdentity -> do
-              presence <- checkIdentityPresence [workerIdentity]
+              presence <- checkIdentityPresenceWith defaultProcessSnapshot [workerIdentity]
               pure $ case presence of
                 IdentityAbsent -> False
                 IdentityPresent -> True
@@ -371,7 +383,10 @@ workerLeaseConflictMessage task = case task of
   PullRequestWorkerTaskKind pullRequestTask -> "PR #" <> Text.pack (show pullRequestTask.pullRequestWorkerNumber) <> " already has a live worker; open it from Processes or kill it before starting another"
 
 runWorker :: FilePath -> IO (Either Text ())
-runWorker specPath = do
+runWorker = runWorkerWith readProcessSnapshot
+
+runWorkerWith :: IO (Either Text [ProcessIdentity]) -> FilePath -> IO (Either Text ())
+runWorkerWith takeSnapshot specPath = do
   decoded <- decodeFile specPath
   case decoded of
     Left message -> pure (Left message)
@@ -396,7 +411,8 @@ runWorker specPath = do
             workerStateLogPath = Nothing,
             workerStateHeartbeatAt = now,
             workerStateLastActivity = "starting",
-            workerStateKnownProcesses = []
+            workerStateKnownProcesses = [],
+            workerStatePendingTermination = False
           }
       eventLock <- newMVar ()
       providerRef <- newIORef Nothing
@@ -420,12 +436,18 @@ runWorker specPath = do
               _ -> pure ()
           complete outcome = do
             refreshProcessCensus descriptor stateLock
-            survivors <- liveRecordedProcesses stateLock
-            if null survivors
-              then emitRaw (WorkerFinished outcome)
-              else do
+            result <- liveRecordedProcessesWith takeSnapshot stateLock
+            case result of
+              Left message -> do
+                known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
                 writeIORef pendingOutcomeRef (Just outcome)
-                emitRaw (WorkerOrphansDetected outcome survivors)
+                emitRaw (WorkerDiagnostic ("completion: could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                emitRaw (WorkerOrphansDetected outcome known)
+              Right survivors
+                | null survivors -> emitRaw (WorkerFinished outcome)
+                | otherwise -> do
+                    writeIORef pendingOutcomeRef (Just outcome)
+                    emitRaw (WorkerOrphansDetected outcome survivors)
           emit event = case event of
             WorkerFinished outcome -> complete outcome
             _ -> emitRaw event
@@ -468,7 +490,11 @@ runWorker specPath = do
             emitRaw (WorkerDiagnostic message)
             complete (SolveFailed message)
       pending <- readIORef pendingOutcomeRef
-      mapM_ (waitForOrphanResolution descriptor stateLock stoppedRef emitRaw) pending
+      -- Verification always runs to a real conclusion here regardless of
+      -- `stoppedRef`: a signal-triggered shutdown already set that flag
+      -- true (to stop the heartbeat/census loops), and gating this wait on
+      -- it too would let the lease below release on an unverified kill.
+      mapM_ (waitForOrphanResolution descriptor stateLock takeSnapshot emitRaw) pending
       writeIORef stoppedRef True
       releaseWorkerLease descriptor
       void (installHandler sigTERM previousTermHandler Nothing)
@@ -521,7 +547,10 @@ monitorWorker descriptor eventSink = loop 0
 -- that supervisor disappears, fail closed instead of leaving an invisible
 -- model process able to consume tokens indefinitely.
 recoverIfWorkerStopped :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> IO Bool
-recoverIfWorkerStopped descriptor eventSink = do
+recoverIfWorkerStopped = recoverIfWorkerStoppedWith defaultProcessSnapshot
+
+recoverIfWorkerStoppedWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> IO Bool
+recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
   stateResult <- readWorkerState descriptor
   case stateResult of
     Left _ -> do
@@ -542,39 +571,74 @@ recoverIfWorkerStopped descriptor eventSink = do
       _ -> do
         now <- getCurrentTime
         if diffUTCTime now state.workerStateHeartbeatAt < workerStaleHeartbeatSeconds
-          then pure False
+          then retryPendingTermination state
           else case state.workerStateWorkerIdentity of
             -- No recorded identity to verify against: fail closed as still
             -- active rather than guess the worker is gone from a bare PID.
             Nothing -> pure False
             Just workerIdentity -> do
-              presence <- checkIdentityPresence [workerIdentity]
+              presence <- checkIdentityPresenceWith takeSnapshot [workerIdentity]
               case presence of
                 IdentityPresent -> pure False
                 IdentitySnapshotFailed _ -> pure False
                 IdentityAbsent -> do
-                  providerOk <- terminateProviderGroup state
-                  recordedOk <- terminateRecordedStateProcesses state
+                  providerOk <- terminateProviderGroupWith takeSnapshot state
+                  recordedOk <- terminateRecordedStateProcessesWith takeSnapshot state
                   if not (providerOk && recordedOk)
-                    then pure False
+                    then reportStaleRecoveryPending state
                     else do
-                      let message = "persistent worker stopped unexpectedly; its provider process group was terminated"
-                          outcome = SolveFailed message
+                      -- A pending user termination that outlived its supervisor
+                      -- (the kill request was recorded but never reached a
+                      -- supervisor that has since died on its own) still
+                      -- finalizes as "killed by user" rather than the generic
+                      -- unexpected-stop outcome.
+                      let pendingTermination = state.workerStatePendingTermination
+                          diagnostic
+                            | pendingTermination = "stale-supervisor recovery: completing a pending user termination"
+                            | otherwise = "persistent worker stopped unexpectedly; its provider process group was terminated"
+                          outcome
+                            | pendingTermination = SolveFailed "killed by user"
+                            | otherwise = SolveFailed diagnostic
                           terminalState =
                             state
                               { workerStateStatus = WorkerTerminal outcome,
                                 workerStateProviderPid = Nothing,
                                 workerStateProviderIdentity = Nothing,
+                                workerStatePendingTermination = False,
                                 workerStateHeartbeatAt = now,
                                 workerStateLastActivity = "worker failed closed"
                               }
                       writeState descriptor terminalState
                       releaseWorkerLease descriptor
-                      eventSink spec.workerId spec (WorkerDiagnostic message)
+                      eventSink spec.workerId spec (WorkerDiagnostic diagnostic)
                       eventSink spec.workerId spec (WorkerFinished outcome)
                       pure True
   where
     spec = descriptor.workerDescriptorSpec
+    -- A pending user termination ('terminateWorkerWith' left it unverified)
+    -- is retried here even while the supervisor's heartbeat is still fresh,
+    -- since an unverified termination never signaled the supervisor and it
+    -- has no reason to retry the kill itself.
+    retryPendingTermination state
+      | not state.workerStatePendingTermination = pure False
+      | otherwise = do
+          completed <- finalizeUserTermination takeSnapshot descriptor state
+          if completed
+            then do
+              releaseWorkerLease descriptor
+              eventSink spec.workerId spec (WorkerFinished (SolveFailed "killed by user"))
+              pure True
+            else pure False
+    -- Reports the stale-supervisor verification failure once, on the
+    -- transition into this state, rather than on every ~200ms recovery poll;
+    -- the unresolved state itself remains visible via 'WorkerOrphaned'.
+    reportStaleRecoveryPending state = do
+      let message = "stale-supervisor recovery: could not verify recorded descendants are gone; retaining orphan state and lease"
+          pendingOutcome = SolveFailed message
+      unless (state.workerStateStatus == WorkerOrphaned pendingOutcome) $ do
+        writeState descriptor state {workerStateStatus = WorkerOrphaned pendingOutcome, workerStateLastActivity = "stale-recovery verification pending"}
+        eventSink spec.workerId spec (WorkerDiagnostic message)
+      pure False
 
 waitForWorkerStart :: WorkerDescriptor -> ProcessHandle -> Int -> IO (Either Text WorkerDescriptor)
 waitForWorkerStart descriptor processHandle attempts = do
@@ -661,40 +725,67 @@ taskSupersedes current previous = case current.workerTask of
       maybe False ((== oldTask.solveWorkerIssueNumber) . (.workerParentIssueNumber)) current.workerParent
 
 terminateWorker :: WorkerDescriptor -> IO ()
-terminateWorker descriptor = do
+terminateWorker = terminateWorkerWith defaultProcessSnapshot
+
+terminateWorkerWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> IO ()
+terminateWorkerWith takeSnapshot descriptor = do
   stateResult <- readWorkerState descriptor
   case stateResult of
     Left _ -> pure ()
     Right state -> case state.workerStateStatus of
       WorkerTerminal _ -> pure ()
       _ -> do
-        providerOk <- terminateProviderGroup state
-        recordedOk <- terminateRecordedStateProcesses state
-        -- The supervisor itself must never be signaled until its provider
-        -- and recorded children are confirmed handled: a real TERM here
-        -- lets the supervisor's own shutdown path release its lease
-        -- independently of this function's later checks, so an earlier
-        -- inconclusive (snapshot-failed) step has to stop everything, not
-        -- just the final state write.
-        if not (providerOk && recordedOk)
-          then pure ()
-          else do
-            selfOk <- terminateWorkerSelf state
-            if selfOk
-              then do
-                now <- getCurrentTime
-                let outcome = SolveFailed "killed by user"
-                writeState
-                  descriptor
-                  state
-                    { workerStateStatus = WorkerTerminal outcome,
-                      workerStateProviderPid = Nothing,
-                      workerStateProviderIdentity = Nothing,
-                      workerStateHeartbeatAt = now,
-                      workerStateLastActivity = "killed by user"
-                    }
-                releaseWorkerLease descriptor
-              else pure ()
+        completed <- finalizeUserTermination takeSnapshot descriptor state
+        if completed
+          then releaseWorkerLease descriptor
+          else recordPendingTermination descriptor state
+
+-- | Marks a user-requested termination that a snapshot failure kept
+-- inconclusive, so a later recovery pass ('recoverIfWorkerStoppedWith')
+-- retries it once the worker's heartbeat is next observed. Reports a
+-- diagnostic only on the transition into this state, so pressing kill again
+-- while it is still pending does not duplicate the message; the pending
+-- state itself remains visible via 'workerStatePendingTermination'.
+recordPendingTermination :: WorkerDescriptor -> WorkerState -> IO ()
+recordPendingTermination descriptor state =
+  unless state.workerStatePendingTermination $ do
+    writeState descriptor state {workerStatePendingTermination = True, workerStateLastActivity = "termination requested; verification pending"}
+    lock <- newMVar ()
+    appendWorkerEvent descriptor lock (WorkerDiagnostic "user termination: could not verify recorded descendants are gone; retaining lease and retrying")
+
+-- | Attempts to complete a requested termination: verifies the provider and
+-- recorded-descendant groups are gone, and only then signals the
+-- supervisor's own group and writes the terminal "killed by user" outcome.
+-- The supervisor itself must never be signaled until its provider and
+-- recorded children are confirmed handled: a real TERM there lets the
+-- supervisor's own shutdown path race this function's later checks, so an
+-- earlier inconclusive (snapshot-failed) step has to stop everything, not
+-- just the final state write. Shared by the initial 'terminateWorkerWith'
+-- call and by 'recoverIfWorkerStoppedWith' retrying a pending termination.
+finalizeUserTermination :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> WorkerState -> IO Bool
+finalizeUserTermination takeSnapshot descriptor state = do
+  providerOk <- terminateProviderGroupWith takeSnapshot state
+  recordedOk <- terminateRecordedStateProcessesWith takeSnapshot state
+  if not (providerOk && recordedOk)
+    then pure False
+    else do
+      selfOk <- terminateWorkerSelfWith takeSnapshot state
+      if selfOk
+        then do
+          now <- getCurrentTime
+          let outcome = SolveFailed "killed by user"
+          writeState
+            descriptor
+            state
+              { workerStateStatus = WorkerTerminal outcome,
+                workerStateProviderPid = Nothing,
+                workerStateProviderIdentity = Nothing,
+                workerStatePendingTermination = False,
+                workerStateHeartbeatAt = now,
+                workerStateLastActivity = "killed by user"
+              }
+          pure True
+        else pure False
 
 -- | The worker supervisor is its own process-group leader (`new_session =
 -- True` at launch), so its recorded identity's group id is the signal
@@ -705,38 +796,38 @@ terminateWorker descriptor = do
 -- keeps the longer, more patient exit-poll this supervisor's own graceful
 -- shutdown (which itself terminates its provider and recorded children) can
 -- need.
-terminateWorkerSelf :: WorkerState -> IO Bool
-terminateWorkerSelf state = case state.workerStateWorkerIdentity of
+terminateWorkerSelfWith :: IO (Either Text [ProcessIdentity]) -> WorkerState -> IO Bool
+terminateWorkerSelfWith takeSnapshot state = case state.workerStateWorkerIdentity of
   Nothing -> pure False
   Just workerIdentity -> do
     let groupPid = workerIdentity.processIdentityGroupPid
-    initial <- checkGroupMembership groupPid [workerIdentity]
+    initial <- checkGroupMembershipWith takeSnapshot groupPid [workerIdentity]
     case initial of
       IdentitySnapshotFailed _ -> pure False
       IdentityAbsent -> pure True
       IdentityPresent -> do
         ignoreSignal (signalProcessGroup sigTERM (fromIntegral groupPid))
-        stopped <- waitForGroupMembershipStop groupPid [workerIdentity] workerTerminationAttempts
+        stopped <- waitForGroupMembershipStop takeSnapshot groupPid [workerIdentity] workerTerminationAttempts
         if stopped
           then pure True
           else do
-            final <- checkGroupMembership groupPid [workerIdentity]
+            final <- checkGroupMembershipWith takeSnapshot groupPid [workerIdentity]
             case final of
               IdentityPresent -> do
                 ignoreSignal (signalProcessGroup sigKILL (fromIntegral groupPid))
-                void (waitForGroupMembershipStop groupPid [workerIdentity] workerTerminationAttempts)
+                void (waitForGroupMembershipStop takeSnapshot groupPid [workerIdentity] workerTerminationAttempts)
                 pure True
               IdentityAbsent -> pure True
               IdentitySnapshotFailed _ -> pure False
 
-waitForGroupMembershipStop :: Int -> [ProcessIdentity] -> Int -> IO Bool
-waitForGroupMembershipStop groupPid expected attempts = do
-  presence <- checkGroupMembership groupPid expected
+waitForGroupMembershipStop :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> Int -> IO Bool
+waitForGroupMembershipStop takeSnapshot groupPid expected attempts = do
+  presence <- checkGroupMembershipWith takeSnapshot groupPid expected
   case presence of
     IdentityAbsent -> pure True
     _
       | attempts <= 0 -> pure False
-      | otherwise -> threadDelay workerTerminationPollMicros >> waitForGroupMembershipStop groupPid expected (attempts - 1)
+      | otherwise -> threadDelay workerTerminationPollMicros >> waitForGroupMembershipStop takeSnapshot groupPid expected (attempts - 1)
 
 ignoreSignal :: IO () -> IO ()
 ignoreSignal action = void (try @IOException action)
@@ -881,8 +972,8 @@ refreshProcessCensus descriptor stateLock = do
   where
     processKey process = (process.processIdentityPid, process.processIdentityStartedAt)
 
-liveRecordedProcesses :: MVar WorkerState -> IO [ProcessIdentity]
-liveRecordedProcesses stateLock = withMVar stateLock (liveProcesses . (.workerStateKnownProcesses))
+liveRecordedProcessesWith :: IO (Either Text [ProcessIdentity]) -> MVar WorkerState -> IO (Either Text [ProcessIdentity])
+liveRecordedProcessesWith takeSnapshot stateLock = withMVar stateLock (liveProcessesWith takeSnapshot . (.workerStateKnownProcesses))
 
 terminateRecordedProcesses :: MVar WorkerState -> IO ()
 terminateRecordedProcesses stateLock = withMVar stateLock (void . terminateRecordedStateProcesses)
@@ -892,11 +983,11 @@ terminateRecordedProcesses stateLock = withMVar stateLock (void . terminateRecor
 -- no-op success, while one that was started but has no recorded identity
 -- (only possible from an unverifiable legacy state) is left unsignaled and
 -- reported as inconclusive so the caller does not finalize on a guess.
-terminateProviderGroup :: WorkerState -> IO Bool
-terminateProviderGroup state = case (state.workerStateProviderPid, state.workerStateProviderIdentity) of
+terminateProviderGroupWith :: IO (Either Text [ProcessIdentity]) -> WorkerState -> IO Bool
+terminateProviderGroupWith takeSnapshot state = case (state.workerStateProviderPid, state.workerStateProviderIdentity) of
   (Nothing, _) -> pure True
   (Just _, Nothing) -> pure False
-  (Just _, Just providerIdentity) -> isRight <$> killVerifiedGroup providerIdentity.processIdentityGroupPid [providerIdentity]
+  (Just _, Just providerIdentity) -> isRight <$> killVerifiedGroupWith takeSnapshot providerIdentity.processIdentityGroupPid [providerIdentity]
 
 -- | Re-verifies each recorded process's identity before signaling its group,
 -- and again before the KILL that follows the grace window, so a group that
@@ -904,8 +995,11 @@ terminateProviderGroup state = case (state.workerStateProviderPid, state.workerS
 -- targeted. Returns False if any group's verification hit a snapshot
 -- failure (inconclusive; the caller should retry rather than finalize).
 terminateRecordedStateProcesses :: WorkerState -> IO Bool
-terminateRecordedStateProcesses state = do
-  results <- mapM (uncurry killVerifiedGroup) (Map.toList groups)
+terminateRecordedStateProcesses = terminateRecordedStateProcessesWith defaultProcessSnapshot
+
+terminateRecordedStateProcessesWith :: IO (Either Text [ProcessIdentity]) -> WorkerState -> IO Bool
+terminateRecordedStateProcessesWith takeSnapshot state = do
+  results <- mapM (uncurry (killVerifiedGroupWith takeSnapshot)) (Map.toList groups)
   pure (all isRight results)
   where
     groups =
@@ -917,17 +1011,32 @@ terminateRecordedStateProcesses state = do
             process.processIdentityGroupPid /= state.workerStateWorkerPid
         ]
 
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IORef Bool -> (WorkerEvent -> IO ()) -> SolveOutcome -> IO ()
-waitForOrphanResolution descriptor stateLock stoppedRef emit outcome = loop
+-- | Polls until a fresh snapshot verifies every recorded descendant is gone,
+-- then emits the terminal outcome. Runs to a real conclusion unconditionally
+-- — it takes no "stop requested" signal — because its caller relies on this
+-- to gate the worker's lease release: a signal-triggered shutdown must not
+-- let an in-flight stop request short-circuit verification. A snapshot
+-- failure retains the pending state and reports a diagnostic once per
+-- distinct failure message rather than once per poll.
+waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> (WorkerEvent -> IO ()) -> SolveOutcome -> IO ()
+waitForOrphanResolution descriptor stateLock takeSnapshot emit outcome = loop Nothing
   where
-    loop = do
-      stopped <- readIORef stoppedRef
-      unless stopped $ do
-        refreshProcessCensus descriptor stateLock
-        surviving <- liveRecordedProcesses stateLock
-        if null surviving
-          then emit (WorkerFinished outcome)
-          else threadDelay workerOrphanCheckIntervalMicros >> loop
+    loop lastDiagnostic = do
+      refreshProcessCensus descriptor stateLock
+      result <- liveRecordedProcessesWith takeSnapshot stateLock
+      case result of
+        Left message -> do
+          reported <-
+            if lastDiagnostic == Just message
+              then pure lastDiagnostic
+              else do
+                emit (WorkerDiagnostic ("orphan poll: could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                pure (Just message)
+          threadDelay workerOrphanCheckIntervalMicros
+          loop reported
+        Right surviving
+          | null surviving -> emit (WorkerFinished outcome)
+          | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
 
 watchdogLoop :: WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> IO ()
 watchdogLoop spec providerRef stoppedRef = do

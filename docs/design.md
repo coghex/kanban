@@ -1093,15 +1093,28 @@ The first solve/autosolve-compatible slice is implemented.
   recovered without erasing its commits or uncommitted changes.
 - The supervisor snapshots its provider process tree every 250 ms and persists
   each observed PID, process group, start identity, and command. A provider
-  cannot reach terminal state while a matching recorded descendant survives:
-  the worker remains alive in an explicit red `orphaned` state, visible after a
-  TUI restart, until the child exits or the user kills it.
-- Persistent workers have a four-hour hard deadline. The process inspector
-  marks them persistent and shows the remaining bound. If a stale supervisor
-  is confirmed dead, Kanban kills its recorded provider process group and all
-  still-matching census groups, then publishes a visible terminal failure. `x`
-  terminates those groups and the supervisor with TERM/KILL escalation and
-  verifies the supervisor stopped before writing terminal state.
+  cannot reach terminal state while a matching recorded descendant survives,
+  or while a process-snapshot failure leaves that survival unverifiable: the
+  worker remains alive in an explicit red `orphaned` state, visible after a
+  TUI restart, until a successful snapshot confirms the child exited or the
+  user kills it. A snapshot failure is always reported as an explicit
+  failure, never silently treated as a verified empty survivor list.
+- Persistent workers have a four-hour hard deadline on signalling their
+  provider process; the process inspector marks them persistent and shows the
+  remaining bound. That kill deadline is distinct from verified terminal
+  state and lease release, which require a successful snapshot proving every
+  recorded descendant is gone — a persistent process-snapshot failure can
+  keep a worker orphaned and its lease held well beyond four hours, since the
+  watchdog is not an outer bound on termination verification. If a stale
+  supervisor is confirmed dead, Kanban kills its recorded provider process
+  group and all still-matching census groups, then publishes a visible
+  terminal failure once a snapshot verifies they are gone; an unresolved
+  verification leaves it visibly unresolved for a later recovery pass to
+  retry. `x` terminates those groups and the supervisor with TERM/KILL
+  escalation and verifies the supervisor stopped before writing terminal
+  state; if a snapshot failure leaves recorded descendants unverified, it
+  reports a visible diagnostic and retains the lease instead, and a later
+  successful snapshot completes the pending "killed by user" outcome.
 - App-server issue revisions and the synchronous canonical issue gate remain
   TUI-owned for now. Quitting is refused while either has a live turn, avoiding
   accidental invisible work until their protocol state is also durable.
