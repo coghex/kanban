@@ -91,12 +91,12 @@ sortColumnEntries config entries =
           | entry@(Tracked context _) <- tracked
         ]
     sortedGroups =
-      sortOn fst
-        [ (trackerGroupKey config tracker groupEntries, sortOn trackedChildKey groupEntries)
+      sortOn (\(tracker, groupEntries) -> trackerGroupKey config tracker groupEntries)
+        [ (tracker, sortOn trackedChildKey groupEntries)
           | (tracker, groupEntries) <- Map.elems grouped
         ]
-    rereviewGroups = filter (any (needsRereview . entryItem) . snd) sortedGroups
-    ordinaryGroups = filter (not . any (needsRereview . entryItem) . snd) sortedGroups
+    rereviewGroups = filter (uncurry groupNeedsRereview) sortedGroups
+    ordinaryGroups = filter (not . uncurry groupNeedsRereview) sortedGroups
     rereviewStandalone = sortOn (attentionKey config . entryItem) (filter (needsRereview . entryItem) standalone)
     ordinaryStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) standalone)
     combineGroup (_, newEntries) (tracker, existingEntries) = (tracker, newEntries <> existingEntries)
@@ -109,6 +109,11 @@ partitionEntries = foldr split ([], [])
 
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
+
+groupNeedsRereview :: Tracker -> [ColumnEntry] -> Bool
+groupNeedsRereview tracker entries =
+  needsRereview (IssueItem tracker.trackerIssue)
+    || any (needsRereview . entryItem) entries
 
 trackedChildKey :: ColumnEntry -> (Int, Int, Text, Int, Int)
 trackedChildKey entry@(Tracked context _) =

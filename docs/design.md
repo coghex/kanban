@@ -638,7 +638,8 @@ Global attention sorting and implementation order interact as follows:
 - Issues labeled `reviewed:revised` form the strongest attention tier. A
   standalone revised issue appears before ordinary tracker groups and
   standalone cards. A tracked revised issue promotes its tracker group and
-  appears before that group's ordinary children.
+  appears before that group's ordinary children. A tracker issue that is itself
+  labeled `reviewed:revised` also promotes its group.
 - Tracker groups are ordered by their strongest visible attention state:
   problems first, then groups containing approved work, then oldest tracker
   first.
