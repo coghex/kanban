@@ -1782,8 +1782,8 @@ handleEvent event = do
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> do
-      state <- get
-      suspendAndResume (pure state)
+      currState <- get
+      suspendAndResume (pure currState)
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
