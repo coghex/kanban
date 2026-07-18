@@ -315,6 +315,43 @@ main = hspec $ do
                     releaseWorkerLease second
             _ -> expectationFailure "worker fixtures were not discoverable"
 
+    it "does not retire a lease with a pending user termination even once its supervisor identity is gone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-791-pending") 791
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-791-fresh") 791
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-791-pending.state.json"
+            pendingTerminationPath = workerRoot </> "solve-791-pending.pending-termination"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-791-pending.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-791-fresh.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              acquireWorkerLease first `shouldReturn` Right ()
+              ownPid <- fromIntegral <$> getProcessID
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure (Data.Text.unpack message)
+                Right identities -> case identityForPid ownPid identities of
+                  Nothing -> expectationFailure "could not find this test process in a process snapshot"
+                  Just realIdentity -> do
+                    -- Status stays WorkerRunning (never reaches WorkerOrphaned):
+                    -- the supervisor exited before it ever learned about a
+                    -- pending user termination it could not verify, so only
+                    -- the marker file records that intent.
+                    let mismatched = realIdentity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
+                    LazyByteString.writeFile statePath (encode (runningWorkerState firstSpec.workerId ownPid (Just mismatched)))
+                    ByteString.writeFile pendingTerminationPath "pending\n"
+                    acquireWorkerLease second `shouldReturn` Left "issue #791 already has a live solve worker; open it from Processes or kill it before starting another"
+                    removeFile pendingTerminationPath
+                    acquireWorkerLease second `shouldReturn` Right ()
+                    releaseWorkerLease second
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
     it "does not retire a lease when the recorded worker has no verifiable identity" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"

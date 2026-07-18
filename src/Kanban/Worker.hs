@@ -324,7 +324,9 @@ leaseIsActive descriptor = do
   leaseResult <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
   case leaseResult of
     Right lease -> do
-      let statePath = takeDirectory descriptor.workerDescriptorLeasePath </> Text.unpack lease.workerLeaseId.unWorkerId <> ".state.json"
+      let ownerBase = takeDirectory descriptor.workerDescriptorLeasePath </> Text.unpack lease.workerLeaseId.unWorkerId
+          statePath = ownerBase <> ".state.json"
+          pendingTerminationPath = ownerBase <> ".pending-termination"
       stateResult <- decodeFile statePath :: IO (Either Text WorkerState)
       case stateResult of
         Right state -> case state.workerStateStatus of
@@ -342,10 +344,16 @@ leaseIsActive descriptor = do
             Nothing -> pure True
             Just workerIdentity -> do
               presence <- checkIdentityPresenceWith defaultProcessSnapshot [workerIdentity]
-              pure $ case presence of
-                IdentityAbsent -> False
-                IdentityPresent -> True
-                IdentitySnapshotFailed _ -> True
+              case presence of
+                IdentityPresent -> pure True
+                IdentitySnapshotFailed _ -> pure True
+                IdentityAbsent -> do
+                  -- The supervisor is confirmed gone, but if it never got to
+                  -- signal a pending user termination (recorded only in this
+                  -- marker file, not the state it stopped updating), that
+                  -- termination's recorded descendants are still unverified:
+                  -- never retire the lease out from under them.
+                  doesFileExist pendingTerminationPath
         Left _ -> leaseIsRecent descriptor
     Left _ -> leaseIsRecent descriptor
 
