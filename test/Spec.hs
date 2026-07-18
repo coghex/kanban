@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, bracket, finally, try)
+import Control.Exception (IOException, SomeException, bracket, finally, try)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -92,6 +92,7 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
+import Kanban.UI (failureActivity, orphanMessage)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -906,6 +907,39 @@ main = hspec $ do
             finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
             finalState.workerStateProviderPid `shouldBe` Nothing
 
+    it "keeps the deadline outcome even when the cancelled task itself tries to report success afterward" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec now 1 repository (WorkerId "solve-799-race-completion-fixture") 799
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-799-race-completion-fixture.spec.json") (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> do
+              acquireWorkerLease descriptor `shouldReturn` Right ()
+              -- Simulates a task that, once cancelled by the deadline,
+              -- still tries to report its own successful outcome from
+              -- inside its cancellation handler. The watchdog claims the
+              -- completion slot before it ever cancels the task (see
+              -- 'watchdogLoop'), so this later report — which necessarily
+              -- runs only after that cancellation is delivered — is
+              -- deterministically too late to replace it.
+              let raceCompletion _spec _remember emit = do
+                    outcome <- try @SomeException (threadDelay 30000000)
+                    case outcome of
+                      Left _ -> emit (WorkerFinished SolveCompleted)
+                      Right () -> pure ()
+              finished <- newEmptyMVar
+              void . forkIO $ runWorkerWithTask readProcessSnapshot raceCompletion descriptor.workerDescriptorSpecPath >>= putMVar finished
+              timeout 8000000 (takeMVar finished) `shouldReturn` Just (Right ())
+              finalState <- waitForWorkerState descriptor.workerDescriptorStatePath isTerminal 5
+              finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+
     it "retains the lease and pending deadline outcome while verification fails, then completes exactly once a snapshot succeeds" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
@@ -1261,6 +1295,22 @@ main = hspec $ do
         `shouldBe` sanitizeText "First paragraph.\nstill first.\n\nSecond paragraph."
     it "normalizes a lone carriage return to a line break" $
       sanitizeText "left\rright" `shouldBe` "left\nright"
+
+  describe "persistent worker deadline UI projection" $ do
+    it "shows the deadline distinctly from a generic failure for both solve and PR worker activity" $ do
+      failureActivity "persistent worker deadline exceeded" `shouldBe` "deadline exceeded"
+      failureActivity "provider crashed" `shouldBe` "failed"
+      failureActivity "persistent worker stopped unexpectedly; its provider process group was terminated" `shouldBe` "failed"
+
+    it "labels an orphan-pending deadline distinctly from ordinary solver or PR agent survivors" $ do
+      orphanMessage (SolveFailed "persistent worker deadline exceeded") "2" "the solver"
+        `shouldBe` "deadline exceeded; 2 subprocesses survived termination; press x to terminate the orphaned process tree"
+      orphanMessage (SolveFailed "persistent worker deadline exceeded") "2" "the PR agent"
+        `shouldBe` "deadline exceeded; 2 subprocesses survived termination; press x to terminate the orphaned process tree"
+      orphanMessage SolveCompleted "2" "the solver"
+        `shouldBe` "2 subprocesses survived the solver; press x to terminate the orphaned process tree"
+      orphanMessage SolveCompleted "2" "the PR agent"
+        `shouldBe` "2 subprocesses survived the PR agent; press x to terminate the orphaned process tree"
 
   describe "workflow classification" $ do
     it "keeps linked issues visible while showing their pull requests as separate cards" $ do

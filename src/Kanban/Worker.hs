@@ -36,7 +36,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import Control.Exception (IOException, SomeException, try)
+import Control.Exception (IOException, SomeException, try, uninterruptibleMask_)
 import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
 import qualified Data.ByteString as ByteString
@@ -470,30 +470,32 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             case event of
               WorkerFinished _ -> writeIORef stoppedRef True
               _ -> pure ()
-          -- Only the first caller ever runs the body below: the deadline
-          -- watchdog and a genuine task-reported outcome can both reach
-          -- `complete` around the same instant, and once one of them has
-          -- committed a terminal/orphan outcome, the other must not
-          -- resurrect or replace it.
+          -- Only the first caller ever runs `completeBody`: the deadline
+          -- watchdog and a genuine task-reported outcome can both reach it
+          -- around the same instant, and once one of them has committed a
+          -- terminal/orphan outcome, the other must not resurrect or
+          -- replace it. The watchdog claims this atomically for itself
+          -- before it even cancels the task (see 'watchdogLoop'), so a
+          -- deadline reliably wins that race instead of merely attempting
+          -- to afterward.
           claimCompletion = atomicModifyIORef' completedRef (\done -> (True, not done))
-          complete outcome = do
-            won <- claimCompletion
-            when won $ do
-              refreshProcessCensus descriptor stateLock
-              result <- liveRecordedProcessesWith takeSnapshot stateLock
-              case result of
-                Left message -> do
-                  known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
-                  signalTriggered <- readIORef signalShutdownRef
-                  let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
-                  writeIORef pendingOutcomeRef (Just outcome)
-                  emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
-                  emitRaw (WorkerOrphansDetected outcome known)
-                Right survivors
-                  | null survivors -> emitRaw (WorkerFinished outcome)
-                  | otherwise -> do
-                      writeIORef pendingOutcomeRef (Just outcome)
-                      emitRaw (WorkerOrphansDetected outcome survivors)
+          completeBody outcome = do
+            refreshProcessCensus descriptor stateLock
+            result <- liveRecordedProcessesWith takeSnapshot stateLock
+            case result of
+              Left message -> do
+                known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
+                signalTriggered <- readIORef signalShutdownRef
+                let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
+                writeIORef pendingOutcomeRef (Just outcome)
+                emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                emitRaw (WorkerOrphansDetected outcome known)
+              Right survivors
+                | null survivors -> emitRaw (WorkerFinished outcome)
+                | otherwise -> do
+                    writeIORef pendingOutcomeRef (Just outcome)
+                    emitRaw (WorkerOrphansDetected outcome survivors)
+          complete outcome = claimCompletion >>= \won -> when won (completeBody outcome)
           emit event = case event of
             WorkerFinished outcome -> complete outcome
             _ -> emitRaw event
@@ -514,13 +516,26 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                     emit (WorkerDiagnostic message)
                     killManagedProcess process
           runTask = buildRunTask spec rememberProvider emit
-      taskThreadId <- forkIO $ try @SomeException runTask >>= putMVar taskResultVar
+      -- The result handoff itself is masked so a deadline's `killThread`
+      -- (delivered any time after `runTask` starts, including the instant
+      -- between `try` returning and `putMVar` running) can never leave this
+      -- thread having computed a result but never delivered it, which would
+      -- block the supervisor on `takeMVar taskResultVar` forever. The
+      -- `uninterruptibleMask_` is safe here specifically because
+      -- `taskResultVar` is always empty at this point (this is its one and
+      -- only producer), so `putMVar` cannot itself block.
+      taskThreadId <- forkIO $ do
+        result <- try @SomeException runTask
+        uninterruptibleMask_ (putMVar taskResultVar result)
       writeIORef taskThreadIdRef (Just taskThreadId)
-      void . forkIO $ watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef
+      void . forkIO $ watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody
       taskResult <- takeMVar taskResultVar
       forcedOutcome <- readIORef forcedOutcomeRef
       case forcedOutcome of
-        Just deadlineOutcome -> void . try @SomeException $ complete deadlineOutcome
+        -- The watchdog already claimed completion and ran `completeBody`
+        -- itself before ever cancelling the task (see 'watchdogLoop'), so
+        -- there is nothing left to commit here.
+        Just _ -> pure ()
         Nothing -> case taskResult of
           Right () -> do
             stopped <- readIORef stoppedRef
@@ -1112,17 +1127,27 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
 -- an already-overdue spec fires immediately instead of waiting a full
 -- 'workerMaxRuntimeSeconds' from scratch. On firing, this claims the same
 -- stop guard 'rememberProvider' already checks (so a provider that starts
--- after the deadline is killed immediately as it registers), cancels the
--- task thread itself so a pre-provider hang cannot keep the supervisor
--- alive indefinitely, then kills the current provider and every recorded
--- census group. The task is cancelled first, before that process cleanup —
--- which has its own multi-hundred-millisecond TERM/KILL grace windows — so
--- a hung task is never kept alive waiting on cleanup that does not concern
--- it. 'stoppedRef' is claimed atomically so a task that already finished
--- (or was already stopped by a signal) around the same instant wins the
--- race instead of this firing redundantly.
-watchdogLoop :: WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO ()
-watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef = do
+-- after the deadline is killed immediately as it registers), claims the
+-- completion slot 'complete' itself contends for, cancels the task thread
+-- so a pre-provider hang cannot keep the supervisor alive indefinitely, and
+-- kills the current provider and every recorded census group. Completion is
+-- claimed immediately after the stop guard — before cancelling the task or
+-- touching any process — so a genuine, already-in-flight task completion
+-- reaching 'complete' around the same instant cannot win that race and
+-- replace the deadline outcome; only whichever caller claims the completion
+-- slot ever runs its verify-and-emit body. That body runs immediately on
+-- claiming it, before any of this function's own killing — the same way a
+-- genuine completion's census check always predates a deliberate kill —
+-- so it reports what the census actually holds at the moment of firing
+-- (typically still-live survivors, landing on the orphan-pending path) and
+-- leaves confirming they are actually gone to the existing
+-- 'waitForOrphanResolution' poll once the killing below completes, rather
+-- than duplicating that verification here. 'stoppedRef' itself is claimed
+-- atomically so a task that already finished (or was already stopped by a
+-- signal) around the same instant wins the race instead of this firing
+-- redundantly.
+watchdogLoop :: WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO Bool -> (SolveOutcome -> IO ()) -> IO ()
+watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody = do
   now <- getCurrentTime
   let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
@@ -1130,6 +1155,8 @@ watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcome
   won <- atomicModifyIORef' stoppedRef (\stopped -> (True, not stopped))
   when won $ do
     writeIORef forcedOutcomeRef (Just workerDeadlineOutcome)
+    wonCompletion <- claimCompletion
+    when wonCompletion (completeBody workerDeadlineOutcome)
     readIORef taskThreadIdRef >>= mapM_ killThread
     readIORef providerRef >>= mapM_ killManagedProcess
     terminateRecordedProcesses stateLock

@@ -1,5 +1,7 @@
 module Kanban.UI
-  ( runDashboard,
+  ( failureActivity,
+    orphanMessage,
+    runDashboard,
   )
 where
 
