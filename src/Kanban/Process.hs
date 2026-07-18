@@ -5,6 +5,8 @@ module Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
     ProcessIdentity (..),
+    checkGroupMembership,
+    checkGroupMembershipWith,
     checkIdentityPresence,
     checkIdentityPresenceWith,
     descendantProcesses,
@@ -19,6 +21,7 @@ module Kanban.Process
     managedProcessPid,
     managedProcessStopsWithDashboard,
     matchingIdentities,
+    membersStillInGroup,
     readProcessSnapshot,
   )
 where
@@ -126,24 +129,57 @@ checkIdentityPresenceWith takeSnapshot expected = do
       | null (matchingIdentities snapshot expected) -> IdentityAbsent
       | otherwise -> IdentityPresent
 
+-- | Like `matchingIdentities`, but additionally requires the *live* process
+-- (its current snapshot entry, not the possibly-stale recorded one) to still
+-- belong to `groupPid`. A process that kept its PID and start time but moved
+-- to a different group must not keep the old, now up-for-reuse group id
+-- looking "owned".
+membersStillInGroup :: Int -> [ProcessIdentity] -> [ProcessIdentity] -> [ProcessIdentity]
+membersStillInGroup groupPid snapshot expected =
+  [ process
+    | process <- expected,
+      Just live <- [Map.lookup process.processIdentityPid snapshotByPid],
+      live.processIdentityStartedAt == process.processIdentityStartedAt,
+      live.processIdentityGroupPid == groupPid
+  ]
+  where
+    snapshotByPid = Map.fromList [(process.processIdentityPid, process) | process <- snapshot]
+
+-- | As 'checkIdentityPresence', but for checks that gate a signal to a
+-- specific process group: presence also requires the live snapshot to still
+-- show the identity as a member of that exact group.
+checkGroupMembership :: Int -> [ProcessIdentity] -> IO IdentityPresence
+checkGroupMembership = checkGroupMembershipWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+
+checkGroupMembershipWith :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> IO IdentityPresence
+checkGroupMembershipWith takeSnapshot groupPid expected = do
+  result <- takeSnapshot
+  pure $ case result of
+    Left message -> IdentitySnapshotFailed message
+    Right snapshot
+      | null (membersStillInGroup groupPid snapshot expected) -> IdentityAbsent
+      | otherwise -> IdentityPresent
+
 -- | TERM, wait out the grace window, then KILL a persisted process group —
 -- but only ever signal it while a fresh snapshot shows an identity-matching
--- member still present. A snapshot failure at either checkpoint omits the
--- signal and is reported so the caller can retry rather than assume the
--- group is gone.
+-- member still present *in that group*, so a member that kept its PID and
+-- start time but changed groups (freeing the old group id for reuse) is
+-- never mistaken for still owning it. A snapshot failure at either
+-- checkpoint omits the signal and is reported so the caller can retry
+-- rather than assume the group is gone.
 killVerifiedGroup :: Int -> [ProcessIdentity] -> IO (Either Text ())
 killVerifiedGroup = killVerifiedGroupWith (readProcessSnapshotRetrying snapshotRetryAttempts)
 
 killVerifiedGroupWith :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> IO (Either Text ())
 killVerifiedGroupWith takeSnapshot groupPid expected = do
-  before <- checkIdentityPresenceWith takeSnapshot expected
+  before <- checkGroupMembershipWith takeSnapshot groupPid expected
   case before of
     IdentitySnapshotFailed message -> pure (Left message)
     IdentityAbsent -> pure (Right ())
     IdentityPresent -> do
       ignoreIOException (signalProcessGroup sigTERM (fromIntegral groupPid))
       threadDelay terminationGraceMicros
-      after <- checkIdentityPresenceWith takeSnapshot expected
+      after <- checkGroupMembershipWith takeSnapshot groupPid expected
       case after of
         IdentitySnapshotFailed message -> pure (Left message)
         IdentityAbsent -> pure (Right ())

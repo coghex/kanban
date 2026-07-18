@@ -50,6 +50,7 @@ import Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
     ProcessIdentity (..),
+    checkGroupMembership,
     checkIdentityPresence,
     descendantProcesses,
     identityForPid,
@@ -669,65 +670,73 @@ terminateWorker descriptor = do
       _ -> do
         providerOk <- terminateProviderGroup state
         recordedOk <- terminateRecordedStateProcesses state
-        selfOk <- terminateWorkerSelf state
-        -- Only ever publish "killed by user" once every signal step either
-        -- confirmed its target gone or was itself identity-verified: a
-        -- snapshot failure anywhere must leave the state alone so the next
-        -- attempt (a later automatic poll, or another 'x' press) retries
-        -- rather than lie about having stopped a still-live process group.
-        if providerOk && recordedOk && selfOk
-          then do
-            now <- getCurrentTime
-            let outcome = SolveFailed "killed by user"
-            writeState
-              descriptor
-              state
-                { workerStateStatus = WorkerTerminal outcome,
-                  workerStateProviderPid = Nothing,
-                  workerStateProviderIdentity = Nothing,
-                  workerStateHeartbeatAt = now,
-                  workerStateLastActivity = "killed by user"
-                }
-            releaseWorkerLease descriptor
-          else pure ()
+        -- The supervisor itself must never be signaled until its provider
+        -- and recorded children are confirmed handled: a real TERM here
+        -- lets the supervisor's own shutdown path release its lease
+        -- independently of this function's later checks, so an earlier
+        -- inconclusive (snapshot-failed) step has to stop everything, not
+        -- just the final state write.
+        if not (providerOk && recordedOk)
+          then pure ()
+          else do
+            selfOk <- terminateWorkerSelf state
+            if selfOk
+              then do
+                now <- getCurrentTime
+                let outcome = SolveFailed "killed by user"
+                writeState
+                  descriptor
+                  state
+                    { workerStateStatus = WorkerTerminal outcome,
+                      workerStateProviderPid = Nothing,
+                      workerStateProviderIdentity = Nothing,
+                      workerStateHeartbeatAt = now,
+                      workerStateLastActivity = "killed by user"
+                    }
+                releaseWorkerLease descriptor
+              else pure ()
 
 -- | The worker supervisor is its own process-group leader (`new_session =
 -- True` at launch), so its recorded identity's group id is the signal
--- target. Uses the same grace-window TERM/KILL cadence as
--- 'Kanban.Process.killVerifiedGroup' but keeps the longer, more patient
--- exit-poll this supervisor's own graceful shutdown (which itself terminates
--- its provider and recorded children) can need.
+-- target; group membership (not just PID/start time) is re-verified at each
+-- checkpoint so a supervisor that kept its PID and start time but moved
+-- groups is never mistaken for still owning the old group id. Uses the same
+-- grace-window TERM/KILL cadence as 'Kanban.Process.killVerifiedGroup' but
+-- keeps the longer, more patient exit-poll this supervisor's own graceful
+-- shutdown (which itself terminates its provider and recorded children) can
+-- need.
 terminateWorkerSelf :: WorkerState -> IO Bool
 terminateWorkerSelf state = case state.workerStateWorkerIdentity of
   Nothing -> pure False
   Just workerIdentity -> do
-    initial <- checkIdentityPresence [workerIdentity]
+    let groupPid = workerIdentity.processIdentityGroupPid
+    initial <- checkGroupMembership groupPid [workerIdentity]
     case initial of
       IdentitySnapshotFailed _ -> pure False
       IdentityAbsent -> pure True
       IdentityPresent -> do
-        ignoreSignal (signalProcessGroup sigTERM (fromIntegral workerIdentity.processIdentityGroupPid))
-        stopped <- waitForIdentityStop [workerIdentity] workerTerminationAttempts
+        ignoreSignal (signalProcessGroup sigTERM (fromIntegral groupPid))
+        stopped <- waitForGroupMembershipStop groupPid [workerIdentity] workerTerminationAttempts
         if stopped
           then pure True
           else do
-            final <- checkIdentityPresence [workerIdentity]
+            final <- checkGroupMembership groupPid [workerIdentity]
             case final of
               IdentityPresent -> do
-                ignoreSignal (signalProcessGroup sigKILL (fromIntegral workerIdentity.processIdentityGroupPid))
-                void (waitForIdentityStop [workerIdentity] workerTerminationAttempts)
+                ignoreSignal (signalProcessGroup sigKILL (fromIntegral groupPid))
+                void (waitForGroupMembershipStop groupPid [workerIdentity] workerTerminationAttempts)
                 pure True
               IdentityAbsent -> pure True
               IdentitySnapshotFailed _ -> pure False
 
-waitForIdentityStop :: [ProcessIdentity] -> Int -> IO Bool
-waitForIdentityStop expected attempts = do
-  presence <- checkIdentityPresence expected
+waitForGroupMembershipStop :: Int -> [ProcessIdentity] -> Int -> IO Bool
+waitForGroupMembershipStop groupPid expected attempts = do
+  presence <- checkGroupMembership groupPid expected
   case presence of
     IdentityAbsent -> pure True
     _
       | attempts <= 0 -> pure False
-      | otherwise -> threadDelay workerTerminationPollMicros >> waitForIdentityStop expected (attempts - 1)
+      | otherwise -> threadDelay workerTerminationPollMicros >> waitForGroupMembershipStop groupPid expected (attempts - 1)
 
 ignoreSignal :: IO () -> IO ()
 ignoreSignal action = void (try @IOException action)

@@ -32,7 +32,7 @@ import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
-    checkIdentityPresenceWith,
+    checkGroupMembershipWith,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
@@ -42,6 +42,7 @@ import Kanban.Process
     managedProcess,
     managedProcessGroup,
     matchingIdentities,
+    membersStillInGroup,
     readProcessSnapshot,
   )
 import Kanban.Repository (parseRepositoryName)
@@ -200,6 +201,12 @@ main = hspec $ do
           snapshot = [alive, reusedNow]
       matchingIdentities snapshot [alive, reused, exited] `shouldBe` [alive]
 
+    it "drops a matching identity that changed process groups" $ do
+      let anchor = processIdentity 100 1 100 "provider"
+          movedGroup = anchor {processIdentityGroupPid = 105}
+      membersStillInGroup 100 [anchor] [anchor] `shouldBe` [anchor]
+      membersStillInGroup 100 [movedGroup] [anchor] `shouldBe` []
+
     it "sends the KILL once the grace window elapses and the group still matches" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
@@ -220,6 +227,19 @@ main = hspec $ do
         killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
         getProcessExitCode process `shouldReturn` Nothing
 
+    it "omits the KILL when the same PID and start time have moved to a different, recyclable group" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        callCount <- newIORef (0 :: Int)
+        let movedGroup = identity {processIdentityGroupPid = identity.processIdentityGroupPid + 1}
+            takeSnapshot = do
+              count <- readIORef callCount
+              modifyIORef callCount (+ 1)
+              pure (Right [if count == 0 then identity else movedGroup])
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
+        getProcessExitCode process `shouldReturn` Nothing
+
     it "omits every signal when the verification snapshot fails" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
@@ -227,7 +247,7 @@ main = hspec $ do
         let takeSnapshot = pure (Left "ps unavailable")
         killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Left "ps unavailable"
         getProcessExitCode process `shouldReturn` Nothing
-        checkIdentityPresenceWith takeSnapshot [identity] `shouldReturn` IdentitySnapshotFailed "ps unavailable"
+        checkGroupMembershipWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` IdentitySnapshotFailed "ps unavailable"
 
     it "atomically refuses a second live lease for the same issue" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
