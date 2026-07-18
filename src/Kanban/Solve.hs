@@ -126,7 +126,9 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath u
       case started of
         Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          eventSink (SolveProcessStarted issueNumber brand (managedProcess processHandle))
+          (managed, groupLeaderProblem) <- managedProcess processHandle
+          mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
+          eventSink (SolveProcessStarted issueNumber brand managed)
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession
