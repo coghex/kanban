@@ -9,6 +9,7 @@ module Kanban.Process
     checkGroupMembershipWith,
     checkIdentityPresence,
     checkIdentityPresenceWith,
+    defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
@@ -16,6 +17,7 @@ module Kanban.Process
     killVerifiedGroup,
     killVerifiedGroupWith,
     liveProcesses,
+    liveProcessesWith,
     managedProcess,
     managedProcessGroup,
     managedProcessPid,
@@ -72,7 +74,7 @@ managedProcessStopsWithDashboard (PersistentManagedProcess _) = False
 
 readProcessSnapshot :: IO (Either Text [ProcessIdentity])
 readProcessSnapshot = do
-  result <- try @IOException (readCreateProcessWithExitCode (proc "ps" ["-axo", "pid=,ppid=,pgid=,lstart=,command="]) "")
+  result <- try @IOException (readCreateProcessWithExitCode (proc "ps" ["-axo", "pid=,ppid=,pgid=,stat=,lstart=,command="]) "")
   pure $ case result of
     Left exception -> Left (Text.pack (show exception))
     Right (ExitFailure code, _, diagnostics) -> Left ("ps exited " <> Text.pack (show code) <> ": " <> Text.strip (Text.pack diagnostics))
@@ -105,10 +107,18 @@ descendantProcesses roots processes = filter ((`Set.member` descendants) . proce
           unseen = filter (`Set.notMember` known) children
        in expand (foldr Set.insert known unseen) (pending <> unseen)
 
-liveProcesses :: [ProcessIdentity] -> IO [ProcessIdentity]
-liveProcesses known = do
-  snapshot <- readProcessSnapshot
-  pure (either (const []) (`matchingIdentities` known) snapshot)
+-- | Whether each recorded identity in `known` still survives, as of a fresh
+-- snapshot. A `ps` failure is reported as an explicit 'Left' rather than
+-- collapsed into an empty survivor list, so a caller gating terminal state or
+-- a lease release on "no survivors" never mistakes "could not check" for
+-- "confirmed gone". Vacuously succeeds without taking a snapshot when there
+-- is nothing recorded to verify.
+liveProcesses :: [ProcessIdentity] -> IO (Either Text [ProcessIdentity])
+liveProcesses = liveProcessesWith readProcessSnapshot
+
+liveProcessesWith :: IO (Either Text [ProcessIdentity]) -> [ProcessIdentity] -> IO (Either Text [ProcessIdentity])
+liveProcessesWith _ [] = pure (Right [])
+liveProcessesWith takeSnapshot known = fmap (`matchingIdentities` known) <$> takeSnapshot
 
 -- | Whether a set of recorded identities still holds its PIDs, as of a fresh
 -- snapshot. A `ps` failure is reported distinctly from a clean snapshot that
@@ -117,8 +127,15 @@ liveProcesses known = do
 data IdentityPresence = IdentityPresent | IdentityAbsent | IdentitySnapshotFailed Text
   deriving stock (Eq, Show)
 
+-- | The retrying snapshot source shared by every default (non-`With`)
+-- liveness check in this module, exposed so callers in other modules (e.g.
+-- 'Kanban.Worker') can build their own retrying defaults on top of the same
+-- source rather than each hard-coding the retry count.
+defaultProcessSnapshot :: IO (Either Text [ProcessIdentity])
+defaultProcessSnapshot = readProcessSnapshotRetrying snapshotRetryAttempts
+
 checkIdentityPresence :: [ProcessIdentity] -> IO IdentityPresence
-checkIdentityPresence = checkIdentityPresenceWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+checkIdentityPresence = checkIdentityPresenceWith defaultProcessSnapshot
 
 checkIdentityPresenceWith :: IO (Either Text [ProcessIdentity]) -> [ProcessIdentity] -> IO IdentityPresence
 checkIdentityPresenceWith takeSnapshot expected = do
@@ -149,7 +166,7 @@ membersStillInGroup groupPid snapshot expected =
 -- specific process group: presence also requires the live snapshot to still
 -- show the identity as a member of that exact group.
 checkGroupMembership :: Int -> [ProcessIdentity] -> IO IdentityPresence
-checkGroupMembership = checkGroupMembershipWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+checkGroupMembership = checkGroupMembershipWith defaultProcessSnapshot
 
 checkGroupMembershipWith :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> IO IdentityPresence
 checkGroupMembershipWith takeSnapshot groupPid expected = do
@@ -164,11 +181,13 @@ checkGroupMembershipWith takeSnapshot groupPid expected = do
 -- but only ever signal it while a fresh snapshot shows an identity-matching
 -- member still present *in that group*, so a member that kept its PID and
 -- start time but changed groups (freeing the old group id for reuse) is
--- never mistaken for still owning it. A snapshot failure at either
--- checkpoint omits the signal and is reported so the caller can retry
--- rather than assume the group is gone.
+-- never mistaken for still owning it. A snapshot failure at any checkpoint,
+-- including the one after KILL, omits further signalling and is reported so
+-- the caller retries rather than assumes the group is gone: KILL cannot be
+-- blocked, but confirming its effect still takes a verified empty snapshot,
+-- not just the act of sending the signal.
 killVerifiedGroup :: Int -> [ProcessIdentity] -> IO (Either Text ())
-killVerifiedGroup = killVerifiedGroupWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+killVerifiedGroup = killVerifiedGroupWith defaultProcessSnapshot
 
 killVerifiedGroupWith :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> IO (Either Text ())
 killVerifiedGroupWith takeSnapshot groupPid expected = do
@@ -183,7 +202,14 @@ killVerifiedGroupWith takeSnapshot groupPid expected = do
       case after of
         IdentitySnapshotFailed message -> pure (Left message)
         IdentityAbsent -> pure (Right ())
-        IdentityPresent -> ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid)) >> pure (Right ())
+        IdentityPresent -> do
+          ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid))
+          threadDelay terminationGraceMicros
+          final <- checkGroupMembershipWith takeSnapshot groupPid expected
+          case final of
+            IdentitySnapshotFailed message -> pure (Left message)
+            IdentityAbsent -> pure (Right ())
+            IdentityPresent -> pure (Left "signalled group did not exit after SIGKILL")
 
 readProcessSnapshotRetrying :: Int -> IO (Either Text [ProcessIdentity])
 readProcessSnapshotRetrying attempts = do
@@ -197,21 +223,32 @@ readProcessSnapshotRetrying attempts = do
 mapMaybeProcessLine :: [Text] -> [ProcessIdentity]
 mapMaybeProcessLine = foldr (maybe id (:)) [] . map parseProcessLine
 
+-- | A zombie has already been terminated by the kernel and can do no further
+-- work; it is excluded here so every liveness/census check throughout this
+-- module treats it as gone, rather than as a still-present process merely
+-- awaiting its parent's `wait()`. A signalled process that becomes a zombie
+-- (e.g. a killed supervisor whose parent process never reaps it) would
+-- otherwise appear to survive its own confirmed kill indefinitely.
 parseProcessLine :: Text -> Maybe ProcessIdentity
 parseProcessLine line = case Text.words line of
-  pidText : parentText : groupText : weekday : month : day : clock : year : commandParts -> do
-    pid <- readMaybe (Text.unpack pidText)
-    parentPid <- readMaybe (Text.unpack parentText)
-    groupPid <- readMaybe (Text.unpack groupText)
-    pure
-      ProcessIdentity
-        { processIdentityPid = pid,
-          processIdentityParentPid = parentPid,
-          processIdentityGroupPid = groupPid,
-          processIdentityStartedAt = Text.unwords [weekday, month, day, clock, year],
-          processIdentityCommand = Text.unwords commandParts
-        }
+  pidText : parentText : groupText : statText : weekday : month : day : clock : year : commandParts
+    | isZombieStat statText -> Nothing
+    | otherwise -> do
+        pid <- readMaybe (Text.unpack pidText)
+        parentPid <- readMaybe (Text.unpack parentText)
+        groupPid <- readMaybe (Text.unpack groupText)
+        pure
+          ProcessIdentity
+            { processIdentityPid = pid,
+              processIdentityParentPid = parentPid,
+              processIdentityGroupPid = groupPid,
+              processIdentityStartedAt = Text.unwords [weekday, month, day, clock, year],
+              processIdentityCommand = Text.unwords commandParts
+            }
   _ -> Nothing
+
+isZombieStat :: Text -> Bool
+isZombieStat = Text.isInfixOf "Z"
 
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle) = signalOwnedGroup sigINT processHandle
