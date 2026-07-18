@@ -635,13 +635,18 @@ unlinked PR is necessarily standalone and carries `UNLINKED`.
 
 Global attention sorting and implementation order interact as follows:
 
+- Issues labeled `reviewed:revised` form the strongest attention tier. A
+  standalone revised issue appears before ordinary tracker groups and
+  standalone cards. A tracked revised issue promotes its tracker group and
+  appears before that group's ordinary children.
 - Tracker groups are ordered by their strongest visible attention state:
   problems first, then groups containing approved work, then oldest tracker
   first.
-- Inside a tracker group, implementation order is authoritative even if a later
-  child has a problem. Its red border remains visible in place.
+- Inside a tracker group, implementation order is authoritative after the
+  revised-issue tier, even if a later child has a problem. Its red border
+  remains visible in place.
 - Standalone cards are sorted problems first, then approved, then oldest first
-  within each group.
+  after the revised-issue tier.
 - Collapsed tracker headers participate in keyboard focus for expansion but do
   not open a details overlay. The details overlay for an expanded child includes
   its tracker context.
@@ -888,7 +893,7 @@ network, GitHub account, or installed AI client.
 
 - Issue/PR column classification.
 - Pull-request readiness and color priority.
-- Problems-first, approved-next, oldest-first sorting.
+- Rereview-first, problems-next, approved-next, oldest-first sorting.
 - Natural implementation-key ordering.
 - Tracker checklist parsing across supported formats.
 - Multiple trackers, unlinked PRs, and multiple linked issues.

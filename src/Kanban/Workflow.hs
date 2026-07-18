@@ -78,7 +78,11 @@ uniqueMemberships =
     . map (\membership -> ((membership.membershipTracker.trackerIssue.issueNumber, membership.membershipChild.trackerChildIssueNumber), membership))
 
 sortColumnEntries :: WorkflowConfig -> [ColumnEntry] -> [ColumnEntry]
-sortColumnEntries config entries = concatMap snd sortedGroups <> sortedStandalone
+sortColumnEntries config entries =
+  concatMap snd rereviewGroups
+    <> rereviewStandalone
+    <> concatMap snd ordinaryGroups
+    <> ordinaryStandalone
   where
     (tracked, standalone) = partitionEntries entries
     grouped =
@@ -91,7 +95,10 @@ sortColumnEntries config entries = concatMap snd sortedGroups <> sortedStandalon
         [ (trackerGroupKey config tracker groupEntries, sortOn trackedChildKey groupEntries)
           | (tracker, groupEntries) <- Map.elems grouped
         ]
-    sortedStandalone = sortOn (attentionKey config . entryItem) standalone
+    rereviewGroups = filter (any (needsRereview . entryItem) . snd) sortedGroups
+    ordinaryGroups = filter (not . any (needsRereview . entryItem) . snd) sortedGroups
+    rereviewStandalone = sortOn (attentionKey config . entryItem) (filter (needsRereview . entryItem) standalone)
+    ordinaryStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) standalone)
     combineGroup (_, newEntries) (tracker, existingEntries) = (tracker, newEntries <> existingEntries)
 
 partitionEntries :: [ColumnEntry] -> ([ColumnEntry], [ColumnEntry])
@@ -103,9 +110,11 @@ partitionEntries = foldr split ([], [])
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
 
-trackedChildKey :: ColumnEntry -> (Int, Text, Int, Int)
-trackedChildKey (Tracked context _) = implementationSortKey context.trackingPrimary.membershipChild
-trackedChildKey (Standalone _) = (1, "", 0, 0)
+trackedChildKey :: ColumnEntry -> (Int, Int, Text, Int, Int)
+trackedChildKey entry@(Tracked context _) =
+  let (kind, natural, number, order) = implementationSortKey context.trackingPrimary.membershipChild
+   in (if needsRereview (entryItem entry) then 0 else 1, kind, natural, number, order)
+trackedChildKey (Standalone _) = (1, 1, "", 0, 0)
 
 trackerGroupKey :: WorkflowConfig -> Tracker -> [ColumnEntry] -> (Int, Int, UTCTime, Int)
 trackerGroupKey config tracker entries =
@@ -157,6 +166,10 @@ attentionKey config item =
     if isApproved config item then 0 else 1,
     itemCreatedAt item
   )
+
+needsRereview :: BoardItem -> Bool
+needsRereview (IssueItem issue) = hasLabel "reviewed:revised" issue.issueLabels
+needsRereview (PullRequestItem _) = False
 
 hasProblemLabel :: WorkflowConfig -> [Label] -> Bool
 hasProblemLabel config labels =
