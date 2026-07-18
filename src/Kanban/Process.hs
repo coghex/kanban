@@ -2,16 +2,23 @@
 {-# LANGUAGE DerivingStrategies #-}
 
 module Kanban.Process
-  ( ManagedProcess,
+  ( IdentityPresence (..),
+    ManagedProcess,
     ProcessIdentity (..),
+    checkIdentityPresence,
+    checkIdentityPresenceWith,
     descendantProcesses,
+    identityForPid,
     interruptManagedProcess,
     killManagedProcess,
+    killVerifiedGroup,
+    killVerifiedGroupWith,
     liveProcesses,
     managedProcess,
     managedProcessGroup,
     managedProcessPid,
     managedProcessStopsWithDashboard,
+    matchingIdentities,
     readProcessSnapshot,
   )
 where
@@ -20,6 +27,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.List (find)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -67,6 +75,22 @@ readProcessSnapshot = do
     Right (ExitFailure code, _, diagnostics) -> Left ("ps exited " <> Text.pack (show code) <> ": " <> Text.strip (Text.pack diagnostics))
     Right (ExitSuccess, output, _) -> Right (mapMaybeProcessLine (Text.lines (Text.pack output)))
 
+-- | A recorded identity survives into `snapshot` only if the PID it names is
+-- still held by a process with the same start time; a reused PID never
+-- matches. Order follows the `known` list.
+matchingIdentities :: [ProcessIdentity] -> [ProcessIdentity] -> [ProcessIdentity]
+matchingIdentities snapshot known =
+  [ process
+    | process <- known,
+      Just live <- [Map.lookup process.processIdentityPid snapshotByPid],
+      live.processIdentityStartedAt == process.processIdentityStartedAt
+  ]
+  where
+    snapshotByPid = Map.fromList [(process.processIdentityPid, process) | process <- snapshot]
+
+identityForPid :: Int -> [ProcessIdentity] -> Maybe ProcessIdentity
+identityForPid processId = find ((== processId) . processIdentityPid)
+
 descendantProcesses :: [Int] -> [ProcessIdentity] -> [ProcessIdentity]
 descendantProcesses roots processes = filter ((`Set.member` descendants) . processIdentityPid) processes
   where
@@ -81,15 +105,58 @@ descendantProcesses roots processes = filter ((`Set.member` descendants) . proce
 liveProcesses :: [ProcessIdentity] -> IO [ProcessIdentity]
 liveProcesses known = do
   snapshot <- readProcessSnapshot
-  pure $ case snapshot of
-    Left _ -> []
-    Right current ->
-      let currentByPid = Map.fromList [(process.processIdentityPid, process) | process <- current]
-       in [ process
-            | process <- known,
-              Just live <- [Map.lookup process.processIdentityPid currentByPid],
-              live.processIdentityStartedAt == process.processIdentityStartedAt
-          ]
+  pure (either (const []) (`matchingIdentities` known) snapshot)
+
+-- | Whether a set of recorded identities still holds its PIDs, as of a fresh
+-- snapshot. A `ps` failure is reported distinctly from a clean snapshot that
+-- simply shows the identities gone, so destructive callers never mistake
+-- "could not check" for "confirmed gone".
+data IdentityPresence = IdentityPresent | IdentityAbsent | IdentitySnapshotFailed Text
+  deriving stock (Eq, Show)
+
+checkIdentityPresence :: [ProcessIdentity] -> IO IdentityPresence
+checkIdentityPresence = checkIdentityPresenceWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+
+checkIdentityPresenceWith :: IO (Either Text [ProcessIdentity]) -> [ProcessIdentity] -> IO IdentityPresence
+checkIdentityPresenceWith takeSnapshot expected = do
+  result <- takeSnapshot
+  pure $ case result of
+    Left message -> IdentitySnapshotFailed message
+    Right snapshot
+      | null (matchingIdentities snapshot expected) -> IdentityAbsent
+      | otherwise -> IdentityPresent
+
+-- | TERM, wait out the grace window, then KILL a persisted process group —
+-- but only ever signal it while a fresh snapshot shows an identity-matching
+-- member still present. A snapshot failure at either checkpoint omits the
+-- signal and is reported so the caller can retry rather than assume the
+-- group is gone.
+killVerifiedGroup :: Int -> [ProcessIdentity] -> IO (Either Text ())
+killVerifiedGroup = killVerifiedGroupWith (readProcessSnapshotRetrying snapshotRetryAttempts)
+
+killVerifiedGroupWith :: IO (Either Text [ProcessIdentity]) -> Int -> [ProcessIdentity] -> IO (Either Text ())
+killVerifiedGroupWith takeSnapshot groupPid expected = do
+  before <- checkIdentityPresenceWith takeSnapshot expected
+  case before of
+    IdentitySnapshotFailed message -> pure (Left message)
+    IdentityAbsent -> pure (Right ())
+    IdentityPresent -> do
+      ignoreIOException (signalProcessGroup sigTERM (fromIntegral groupPid))
+      threadDelay terminationGraceMicros
+      after <- checkIdentityPresenceWith takeSnapshot expected
+      case after of
+        IdentitySnapshotFailed message -> pure (Left message)
+        IdentityAbsent -> pure (Right ())
+        IdentityPresent -> ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid)) >> pure (Right ())
+
+readProcessSnapshotRetrying :: Int -> IO (Either Text [ProcessIdentity])
+readProcessSnapshotRetrying attempts = do
+  result <- readProcessSnapshot
+  case result of
+    Right snapshot -> pure (Right snapshot)
+    Left message
+      | attempts <= 1 -> pure (Left message)
+      | otherwise -> threadDelay snapshotRetryDelayMicros >> readProcessSnapshotRetrying (attempts - 1)
 
 mapMaybeProcessLine :: [Text] -> [ProcessIdentity]
 mapMaybeProcessLine = foldr (maybe id (:)) [] . map parseProcessLine
@@ -143,3 +210,9 @@ ignoreIOException action = void (try action :: IO (Either IOException ()))
 
 terminationGraceMicros :: Int
 terminationGraceMicros = 750 * 1000
+
+snapshotRetryAttempts :: Int
+snapshotRetryAttempts = 3
+
+snapshotRetryDelayMicros :: Int
+snapshotRetryDelayMicros = 150 * 1000
