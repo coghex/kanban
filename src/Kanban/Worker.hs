@@ -27,27 +27,29 @@ module Kanban.Worker
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
+    runWorkerWithTask,
     terminateWorker,
     terminateWorkerWith,
+    workerDeadlineReason,
   )
 where
 
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
+import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Exception (IOException, SomeException, try)
-import Control.Monad (filterM, unless, void)
+import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Either (isRight)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..))
 import Kanban.Process
@@ -399,7 +401,24 @@ runWorker :: FilePath -> IO (Either Text ())
 runWorker = runWorkerWith readProcessSnapshot
 
 runWorkerWith :: IO (Either Text [ProcessIdentity]) -> FilePath -> IO (Either Text ())
-runWorkerWith takeSnapshot specPath = do
+runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
+
+-- | Dispatches a worker's task to its real solve/PR-flow implementation.
+-- Factored out of 'runWorkerWithTask' so tests can substitute a fake task
+-- (e.g. one that stalls before ever registering a provider) while exercising
+-- the real supervisor lifecycle, the same way 'takeSnapshot' is already
+-- substituted for process verification.
+defaultRunTask :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+defaultRunTask spec rememberProvider emit = case spec.workerTask of
+  SolveWorkerTaskKind task ->
+    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
+      (translateSolveEvent rememberProvider emit)
+  PullRequestWorkerTaskKind task ->
+    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
+      (translatePullRequestEvent rememberProvider emit)
+
+runWorkerWithTask :: IO (Either Text [ProcessIdentity]) -> (WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()) -> FilePath -> IO (Either Text ())
+runWorkerWithTask takeSnapshot buildRunTask specPath = do
   decoded <- decodeFile specPath
   case decoded of
     Left message -> pure (Left message)
@@ -431,6 +450,10 @@ runWorkerWith takeSnapshot specPath = do
       stoppedRef <- newIORef False
       signalShutdownRef <- newIORef False
       pendingOutcomeRef <- newIORef Nothing
+      completedRef <- newIORef False
+      forcedOutcomeRef <- newIORef Nothing
+      taskThreadIdRef <- newIORef Nothing
+      taskResultVar <- newEmptyMVar
       let stopOwnedWork = do
             writeIORef stoppedRef True
             writeIORef signalShutdownRef True
@@ -440,7 +463,6 @@ runWorkerWith takeSnapshot specPath = do
       previousInterruptHandler <- installHandler sigINT (Catch stopOwnedWork) Nothing
       persistState descriptor stateLock
       void . forkIO $ heartbeatLoop descriptor stateLock stoppedRef
-      void . forkIO $ watchdogLoop spec providerRef stoppedRef
       void . forkIO $ processCensusLoop descriptor stateLock stoppedRef
       let emitRaw event = do
             appendWorkerEvent descriptor eventLock event
@@ -448,22 +470,30 @@ runWorkerWith takeSnapshot specPath = do
             case event of
               WorkerFinished _ -> writeIORef stoppedRef True
               _ -> pure ()
+          -- Only the first caller ever runs the body below: the deadline
+          -- watchdog and a genuine task-reported outcome can both reach
+          -- `complete` around the same instant, and once one of them has
+          -- committed a terminal/orphan outcome, the other must not
+          -- resurrect or replace it.
+          claimCompletion = atomicModifyIORef' completedRef (\done -> (True, not done))
           complete outcome = do
-            refreshProcessCensus descriptor stateLock
-            result <- liveRecordedProcessesWith takeSnapshot stateLock
-            case result of
-              Left message -> do
-                known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
-                signalTriggered <- readIORef signalShutdownRef
-                let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
-                writeIORef pendingOutcomeRef (Just outcome)
-                emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
-                emitRaw (WorkerOrphansDetected outcome known)
-              Right survivors
-                | null survivors -> emitRaw (WorkerFinished outcome)
-                | otherwise -> do
-                    writeIORef pendingOutcomeRef (Just outcome)
-                    emitRaw (WorkerOrphansDetected outcome survivors)
+            won <- claimCompletion
+            when won $ do
+              refreshProcessCensus descriptor stateLock
+              result <- liveRecordedProcessesWith takeSnapshot stateLock
+              case result of
+                Left message -> do
+                  known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
+                  signalTriggered <- readIORef signalShutdownRef
+                  let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
+                  writeIORef pendingOutcomeRef (Just outcome)
+                  emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                  emitRaw (WorkerOrphansDetected outcome known)
+                Right survivors
+                  | null survivors -> emitRaw (WorkerFinished outcome)
+                  | otherwise -> do
+                      writeIORef pendingOutcomeRef (Just outcome)
+                      emitRaw (WorkerOrphansDetected outcome survivors)
           emit event = case event of
             WorkerFinished outcome -> complete outcome
             _ -> emitRaw event
@@ -483,28 +513,28 @@ runWorkerWith takeSnapshot specPath = do
                     let message = "provider started without an observable process-group id; terminating it for safety"
                     emit (WorkerDiagnostic message)
                     killManagedProcess process
-          runTask = case spec.workerTask of
-            SolveWorkerTaskKind task ->
-              runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
-                (translateSolveEvent rememberProvider emit)
-            PullRequestWorkerTaskKind task ->
-              runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
-                (translatePullRequestEvent rememberProvider emit)
-      taskResult <- try @SomeException runTask
-      case taskResult of
-        Right () -> do
-          stopped <- readIORef stoppedRef
-          pending <- readIORef pendingOutcomeRef
-          if stopped || pending /= Nothing
-            then pure ()
-            else complete (SolveFailed "persistent worker task ended without a terminal provider event")
-        Left exception -> do
-          refreshProcessCensus descriptor stateLock
-          readIORef providerRef >>= mapM_ killManagedProcess
-          let message = "persistent worker failed: " <> Text.pack (show exception)
-          void . try @SomeException $ do
-            emitRaw (WorkerDiagnostic message)
-            complete (SolveFailed message)
+          runTask = buildRunTask spec rememberProvider emit
+      taskThreadId <- forkIO $ try @SomeException runTask >>= putMVar taskResultVar
+      writeIORef taskThreadIdRef (Just taskThreadId)
+      void . forkIO $ watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef
+      taskResult <- takeMVar taskResultVar
+      forcedOutcome <- readIORef forcedOutcomeRef
+      case forcedOutcome of
+        Just deadlineOutcome -> void . try @SomeException $ complete deadlineOutcome
+        Nothing -> case taskResult of
+          Right () -> do
+            stopped <- readIORef stoppedRef
+            pending <- readIORef pendingOutcomeRef
+            if stopped || pending /= Nothing
+              then pure ()
+              else complete (SolveFailed "persistent worker task ended without a terminal provider event")
+          Left exception -> do
+            refreshProcessCensus descriptor stateLock
+            readIORef providerRef >>= mapM_ killManagedProcess
+            let message = "persistent worker failed: " <> Text.pack (show exception)
+            void . try @SomeException $ do
+              emitRaw (WorkerDiagnostic message)
+              complete (SolveFailed message)
       pending <- readIORef pendingOutcomeRef
       -- Verification always runs to a real conclusion here regardless of
       -- `stoppedRef`: a signal-triggered shutdown already set that flag
@@ -1076,11 +1106,44 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
           | null surviving -> emit (WorkerFinished outcome)
           | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
 
-watchdogLoop :: WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> IO ()
-watchdogLoop spec providerRef stoppedRef = do
-  threadDelay (spec.workerMaxRuntimeSeconds * 1000 * 1000)
-  stopped <- readIORef stoppedRef
-  unless stopped $ readIORef providerRef >>= mapM_ killManagedProcess
+-- | Bounds the worker's whole lifetime (task execution, not just its
+-- provider) from 'workerCreatedAt', not from whenever this thread happened
+-- to start: the delay is the remainder of that window, clamped to zero so
+-- an already-overdue spec fires immediately instead of waiting a full
+-- 'workerMaxRuntimeSeconds' from scratch. On firing, this claims the same
+-- stop guard 'rememberProvider' already checks (so a provider that starts
+-- after the deadline is killed immediately as it registers), cancels the
+-- task thread itself so a pre-provider hang cannot keep the supervisor
+-- alive indefinitely, then kills the current provider and every recorded
+-- census group. The task is cancelled first, before that process cleanup —
+-- which has its own multi-hundred-millisecond TERM/KILL grace windows — so
+-- a hung task is never kept alive waiting on cleanup that does not concern
+-- it. 'stoppedRef' is claimed atomically so a task that already finished
+-- (or was already stopped by a signal) around the same instant wins the
+-- race instead of this firing redundantly.
+watchdogLoop :: WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO ()
+watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef = do
+  now <- getCurrentTime
+  let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
+      delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
+  threadDelay delayMicros
+  won <- atomicModifyIORef' stoppedRef (\stopped -> (True, not stopped))
+  when won $ do
+    writeIORef forcedOutcomeRef (Just workerDeadlineOutcome)
+    readIORef taskThreadIdRef >>= mapM_ killThread
+    readIORef providerRef >>= mapM_ killManagedProcess
+    terminateRecordedProcesses stateLock
+
+-- | The canonical externally visible reason a persistent worker's
+-- 'workerMaxRuntimeSeconds' bound fired, used consistently in worker state,
+-- journal events, and the UI's session/card and process-inspector
+-- projections so a deadline is never mistaken for a generic provider
+-- failure.
+workerDeadlineReason :: Text
+workerDeadlineReason = "persistent worker deadline exceeded"
+
+workerDeadlineOutcome :: SolveOutcome
+workerDeadlineOutcome = SolveFailed workerDeadlineReason
 
 writePrivateJson :: ToJSON value => FilePath -> value -> IO (Either Text ())
 writePrivateJson path value = do

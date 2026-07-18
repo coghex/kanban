@@ -13,7 +13,7 @@ import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
-import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
+import Data.Time (UTCTime (..), diffUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
@@ -111,7 +111,9 @@ import Kanban.Worker
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
+    runWorkerWithTask,
     terminateWorkerWith,
+    workerDeadlineReason,
   )
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -302,8 +304,8 @@ main = hspec $ do
     it "atomically refuses a second live lease for the same issue" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            firstSpec = workerFixtureSpec repository (WorkerId "solve-782-first") 782
-            secondSpec = workerFixtureSpec repository (WorkerId "solve-782-second") 782
+            firstSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-782-first") 782
+            secondSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-782-second") 782
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
         createDirectory repository.repositoryRoot
         createDirectoryIfMissing True workerRoot
@@ -323,8 +325,8 @@ main = hspec $ do
     it "retires a stale lease once its recorded worker no longer matches its identity" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            firstSpec = workerFixtureSpec repository (WorkerId "solve-783-stale") 783
-            secondSpec = workerFixtureSpec repository (WorkerId "solve-783-fresh") 783
+            firstSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-783-stale") 783
+            secondSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-783-fresh") 783
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-783-stale.state.json"
         createDirectory repository.repositoryRoot
@@ -352,8 +354,8 @@ main = hspec $ do
     it "does not retire a lease with a pending user termination even once its supervisor identity is gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            firstSpec = workerFixtureSpec repository (WorkerId "solve-791-pending") 791
-            secondSpec = workerFixtureSpec repository (WorkerId "solve-791-fresh") 791
+            firstSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-791-pending") 791
+            secondSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-791-fresh") 791
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-791-pending.state.json"
             pendingTerminationPath = workerRoot </> "solve-791-pending.pending-termination"
@@ -389,8 +391,8 @@ main = hspec $ do
     it "does not retire a lease when the recorded worker has no verifiable identity" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            firstSpec = workerFixtureSpec repository (WorkerId "solve-784-legacy") 784
-            secondSpec = workerFixtureSpec repository (WorkerId "solve-784-fresh") 784
+            firstSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-784-legacy") 784
+            secondSpec = workerFixtureSpec epoch 60 repository (WorkerId "solve-784-fresh") 784
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-784-legacy.state.json"
         createDirectory repository.repositoryRoot
@@ -410,7 +412,7 @@ main = hspec $ do
     it "fails a worker closed once its heartbeat is stale and its recorded identity no longer matches" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-785-mismatch") 785
+            spec = workerFixtureSpec epoch 60 repository (WorkerId "solve-785-mismatch") 785
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-785-mismatch.state.json"
         createDirectory repository.repositoryRoot
@@ -441,6 +443,7 @@ main = hspec $ do
 
     it "persists a worker heartbeat, provider identity, journal, and terminal outcome" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
@@ -455,7 +458,7 @@ main = hspec $ do
                   workerExistingLogPath = Nothing,
                   workerUserMessage = "",
                   workerParent = Nothing,
-                  workerCreatedAt = epoch,
+                  workerCreatedAt = now,
                   workerMaxRuntimeSeconds = 60
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
@@ -496,11 +499,12 @@ main = hspec $ do
 
     it "marks a completed provider orphaned until its surviving child exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-783-orphan-fixture") 783
+            spec = workerFixtureSpec now 60 repository (WorkerId "solve-783-orphan-fixture") 783
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-783-orphan-fixture.spec.json"
             statePath = workerRoot </> "solve-783-orphan-fixture.state.json"
@@ -543,11 +547,12 @@ main = hspec $ do
 
     it "keeps a completed provider pending while descendant verification fails, then completes once a snapshot succeeds" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-787-verify-fixture") 787
+            spec = workerFixtureSpec now 60 repository (WorkerId "solve-787-verify-fixture") 787
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-787-verify-fixture.spec.json"
             statePath = workerRoot </> "solve-787-verify-fixture.state.json"
@@ -612,11 +617,12 @@ main = hspec $ do
 
     it "keeps the lease held when a signal-triggered shutdown cannot verify recorded descendants are gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-788-signal-fixture") 788
+            spec = workerFixtureSpec now 60 repository (WorkerId "solve-788-signal-fixture") 788
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-788-signal-fixture.spec.json"
             statePath = workerRoot </> "solve-788-signal-fixture.state.json"
@@ -680,7 +686,7 @@ main = hspec $ do
     it "retains a pending user termination until a snapshot verifies recorded descendants are gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-789-terminate-fixture") 789
+            spec = workerFixtureSpec epoch 60 repository (WorkerId "solve-789-terminate-fixture") 789
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-789-terminate-fixture.state.json"
         createDirectory repository.repositoryRoot
@@ -734,7 +740,7 @@ main = hspec $ do
     it "retains orphan state during stale-supervisor recovery until a snapshot verifies recorded descendants are gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-790-stale-fixture") 790
+            spec = workerFixtureSpec epoch 60 repository (WorkerId "solve-790-stale-fixture") 790
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             statePath = workerRoot </> "solve-790-stale-fixture.state.json"
         createDirectory repository.repositoryRoot
@@ -784,6 +790,225 @@ main = hspec $ do
                 finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "persistent worker stopped unexpectedly; its provider process group was terminated")
                 leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseReleased `shouldBe` False
+
+    it "commits the distinct deadline outcome and kills the provider and its census group once the runtime bound fires" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec = workerFixtureSpec now 2 repository (WorkerId "solve-793-deadline-fixture") 793
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-793-deadline-fixture.spec.json"
+            statePath = workerRoot </> "solve-793-deadline-fixture.state.json"
+            eventPath = workerRoot </> "solve-793-deadline-fixture.events.jsonl"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"deadline-session\"}'",
+                "trap '' TERM",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            finished <- newEmptyMVar
+            void . forkIO $ runWorker specPath >>= putMVar finished
+            runningState <- waitForWorkerState statePath (\state -> case state.workerStateStatus of WorkerRunning -> not (null state.workerStateKnownProcesses); _ -> False) 80
+            runningState.workerStateKnownProcesses `shouldNotBe` []
+            let knownBeforeDeadline = runningState.workerStateKnownProcesses
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            finalState <- waitForWorkerState statePath isTerminal 10
+            finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            survivingResult <- liveProcesses knownBeforeDeadline
+            survivingResult `shouldBe` Right []
+            eventBytes <- ByteString.readFile eventPath
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "persistent worker deadline exceeded"
+
+    it "cancels a pre-provider task hang at the deadline and releases the lease promptly" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec now 1 repository (WorkerId "solve-794-pre-provider-fixture") 794
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            leasePath = workerRoot </> "issue-794.lease"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-794-pre-provider-fixture.spec.json") (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> do
+              acquireWorkerLease descriptor `shouldReturn` Right ()
+              -- Never registers a provider: exercises the case where the
+              -- deadline must cancel the task's own execution, not just a
+              -- provider process, before it has one to kill.
+              let hangBeforeProvider _spec _remember _emit = threadDelay 30000000
+              finished <- newEmptyMVar
+              void . forkIO $ runWorkerWithTask readProcessSnapshot hangBeforeProvider descriptor.workerDescriptorSpecPath >>= putMVar finished
+              timeout 8000000 (takeMVar finished) `shouldReturn` Just (Right ())
+              finalState <- waitForWorkerState descriptor.workerDescriptorStatePath isTerminal 5
+              finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+              finalState.workerStateProviderPid `shouldBe` Nothing
+              leaseReleased <- doesDirectoryExist leasePath
+              leaseReleased `shouldBe` False
+
+    it "kills a provider that registers around an already-fired deadline and keeps the deadline outcome" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            -- A zero-second runtime bound means the deadline is already
+            -- "now" by the time the watchdog thread starts, so the fake
+            -- provider's registration genuinely races the watchdog's
+            -- already-committed stop guard rather than a fixed ordering:
+            -- either the registration wins and the provider is then killed
+            -- through the normal provider/census path, or the watchdog
+            -- wins and 'rememberProvider' kills it immediately as it
+            -- registers. Both outcomes converge on the same terminal state.
+            spec = workerFixtureSpec now 0 repository (WorkerId "solve-798-race-fixture") 798
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-798-race-fixture.spec.json"
+            statePath = workerRoot </> "solve-798-race-fixture.state.json"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"race-session\"}'",
+                "trap '' TERM",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            finished <- newEmptyMVar
+            void . forkIO $ runWorker specPath >>= putMVar finished
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            finalState <- waitForWorkerState statePath isTerminal 5
+            finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            finalState.workerStateProviderPid `shouldBe` Nothing
+
+    it "retains the lease and pending deadline outcome while verification fails, then completes exactly once a snapshot succeeds" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec = workerFixtureSpec now 1 repository (WorkerId "solve-796-deadline-verify-fixture") 796
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-796-deadline-verify-fixture.spec.json"
+            statePath = workerRoot </> "solve-796-deadline-verify-fixture.state.json"
+            eventPath = workerRoot </> "solve-796-deadline-verify-fixture.events.jsonl"
+            leasePath = workerRoot </> "issue-796.lease"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"deadline-verify-session\"}'",
+                "trap '' TERM",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> do
+                acquireWorkerLease descriptor `shouldReturn` Right ()
+                failing <- newIORef True
+                let flakySnapshot = do
+                      stillFailing <- readIORef failing
+                      if stillFailing then pure (Left "simulated ps outage") else readProcessSnapshot
+                finished <- newEmptyMVar
+                void . forkIO $ runWorkerWith flakySnapshot specPath >>= putMVar finished
+                pendingState <- waitForWorkerState statePath isOrphaned 80
+                pendingState.workerStateStatus `shouldBe` WorkerOrphaned (SolveFailed workerDeadlineReason)
+                leaseHeldWhileUnverified <- doesDirectoryExist leasePath
+                leaseHeldWhileUnverified `shouldBe` True
+                eventBytesWhileFailing <- ByteString.readFile eventPath
+                eventBytesWhileFailing `shouldNotSatisfy` ByteString.isInfixOf "WorkerFinished"
+                survivingResult <- liveProcesses pendingState.workerStateKnownProcesses
+                case survivingResult of
+                  Left message -> fail ("expected a successful snapshot to identify the survivor to clean up: " <> Data.Text.unpack message)
+                  Right identities -> do
+                    let groups = Set.toList (Set.fromList (map processIdentityGroupPid identities))
+                    mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
+                writeIORef failing False
+                timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+                terminalState <- waitForWorkerState statePath isTerminal 30
+                terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+                eventBytesFinal <- ByteString.readFile eventPath
+                let finishedLines = filter (ByteString.isInfixOf "WorkerFinished") (ByteString.lines eventBytesFinal)
+                length finishedLines `shouldBe` 1
+                leaseReleased <- doesDirectoryExist leasePath
+                leaseReleased `shouldBe` False
+
+    it "fires immediately for an already-overdue workerCreatedAt instead of waiting a fresh full runtime window" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            -- Deadline (epoch + 60s) is deep in the past relative to "now";
+            -- the fake provider hangs forever, so only a delay computed
+            -- from workerCreatedAt (clamped to zero) reaches terminal state
+            -- quickly rather than actually waiting out 60 fresh seconds.
+            spec = workerFixtureSpec epoch 60 repository (WorkerId "solve-797-overdue-fixture") 797
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-797-overdue-fixture.spec.json"
+            statePath = workerRoot </> "solve-797-overdue-fixture.state.json"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"overdue-session\"}'",
+                "trap '' TERM",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            finished <- newEmptyMVar
+            startedAt <- getCurrentTime
+            void . forkIO $ runWorker specPath >>= putMVar finished
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            finishedAt <- getCurrentTime
+            diffUTCTime finishedAt startedAt `shouldSatisfy` (< 10)
+            finalState <- waitForWorkerState statePath isTerminal 5
+            finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
@@ -1486,8 +1711,8 @@ isWorkerFailedEvent :: WorkerEvent -> Bool
 isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
 isWorkerFailedEvent _ = False
 
-workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
-workerFixtureSpec repository identifier issueNumber =
+workerFixtureSpec :: UTCTime -> Int -> Repository -> WorkerId -> Int -> WorkerSpec
+workerFixtureSpec createdAt maxRuntimeSeconds repository identifier issueNumber =
   WorkerSpec
     { workerId = identifier,
       workerRepository = repository,
@@ -1496,8 +1721,8 @@ workerFixtureSpec repository identifier issueNumber =
       workerExistingLogPath = Nothing,
       workerUserMessage = "",
       workerParent = Nothing,
-      workerCreatedAt = epoch,
-      workerMaxRuntimeSeconds = 60
+      workerCreatedAt = createdAt,
+      workerMaxRuntimeSeconds = maxRuntimeSeconds
     }
 
 waitForWorkerState :: FilePath -> (WorkerState -> Bool) -> Int -> IO WorkerState

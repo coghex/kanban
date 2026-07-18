@@ -125,6 +125,7 @@ import Kanban.Worker
     monitorWorker,
     pendingTerminationDiagnosticPrefix,
     terminateWorker,
+    workerDeadlineReason,
   )
 import System.Timeout (timeout)
 
@@ -2653,7 +2654,7 @@ applySolveEvent solveEvent = case solveEvent of
       SolveFailed message ->
         session
           { solveSessionPhase = SolveFailedPhase,
-            solveSessionActivity = "failed",
+            solveSessionActivity = failureActivity message,
             solveSessionAutoProgress = markAutoSolveStopped <$> session.solveSessionAutoProgress,
             solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\n" <> sanitizeText message <> "\n")
           }
@@ -2745,7 +2746,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
       WorkerSessionIdentified sessionId -> applySolveEvent (SolveSessionIdentified task.solveWorkerIssueNumber sessionId)
       WorkerAgentOutput output -> applySolveEvent (SolveOutput task.solveWorkerIssueNumber output)
       WorkerDiagnostic message -> applySolveEvent (SolveDiagnostic task.solveWorkerIssueNumber message)
-      WorkerOrphansDetected _ processes -> applySolveOrphans task.solveWorkerIssueNumber processes
+      WorkerOrphansDetected outcome processes -> applySolveOrphans task.solveWorkerIssueNumber outcome processes
       WorkerFinished outcome -> applySolveEvent (SolveProcessFinished task.solveWorkerIssueNumber outcome)
     PullRequestWorkerTaskKind task ->
       let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
@@ -2756,7 +2757,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
             WorkerSessionIdentified sessionId -> applyPullRequestFlowEvent (PullRequestSessionIdentified task.pullRequestWorkerNumber sessionId)
             WorkerAgentOutput output -> applyPullRequestFlowEvent (PullRequestFlowOutput task.pullRequestWorkerNumber output)
             WorkerDiagnostic message -> applyPullRequestFlowEvent (PullRequestFlowDiagnostic task.pullRequestWorkerNumber message)
-            WorkerOrphansDetected _ processes -> applyPullRequestOrphans task.pullRequestWorkerNumber processes
+            WorkerOrphansDetected outcome processes -> applyPullRequestOrphans task.pullRequestWorkerNumber outcome processes
             WorkerFinished outcome -> applyPullRequestFlowEvent (PullRequestProcessFinished task.pullRequestWorkerNumber outcome)
   case workerEvent of
     WorkerFinished _ -> do
@@ -2769,10 +2770,10 @@ applyWorkerProtocolEvent descriptor workerEvent = do
         )
     _ -> pure ()
 
-applySolveOrphans :: Int -> [ProcessIdentity] -> EventM Name AppState ()
-applySolveOrphans issueNumber processes = do
+applySolveOrphans :: Int -> SolveOutcome -> [ProcessIdentity] -> EventM Name AppState ()
+applySolveOrphans issueNumber outcome processes = do
   let count = showText (length processes)
-      message = count <> " subprocesses survived the solver; press x to terminate the orphaned process tree"
+      message = orphanMessage outcome count "the solver"
   now <- (.appNow) <$> get
   modify
     ( \state ->
@@ -2794,10 +2795,10 @@ applySolveOrphans issueNumber processes = do
     )
   setNotice ("Solve #" <> showText issueNumber <> " is orphaned; press p to inspect it or x to kill it")
 
-applyPullRequestOrphans :: Int -> [ProcessIdentity] -> EventM Name AppState ()
-applyPullRequestOrphans number processes = do
+applyPullRequestOrphans :: Int -> SolveOutcome -> [ProcessIdentity] -> EventM Name AppState ()
+applyPullRequestOrphans number outcome processes = do
   let count = showText (length processes)
-      message = count <> " subprocesses survived the PR agent; press x to terminate the orphaned process tree"
+      message = orphanMessage outcome count "the PR agent"
   now <- (.appNow) <$> get
   modify
     ( \state ->
@@ -2819,6 +2820,27 @@ applyPullRequestOrphans number processes = do
     )
   modifyAutoSolveForPullRequest number (\session -> session {solveSessionActivity = "PR agent left orphaned subprocesses; press p"})
   setNotice ("PR workflow #" <> showText number <> " is orphaned; press p to inspect it or x to kill it")
+
+-- | The activity text for a terminal or pending 'SolveFailed' outcome,
+-- distinguishing the persistent-worker deadline from a generic provider
+-- failure so the process inspector and session/card projection never
+-- collapse the two.
+failureActivity :: Text -> Text
+failureActivity message
+  | isDeadlineOutcome (SolveFailed message) = "deadline exceeded"
+  | otherwise = "failed"
+
+-- | The orphan-pending activity text for a still-unverified outcome: a
+-- deadline that left survivors behind reads distinctly from ordinary
+-- subprocesses surviving a solver/PR agent that ran to completion.
+orphanMessage :: SolveOutcome -> Text -> Text -> Text
+orphanMessage outcome count subject
+  | isDeadlineOutcome outcome = "deadline exceeded; " <> count <> " subprocesses survived termination; press x to terminate the orphaned process tree"
+  | otherwise = count <> " subprocesses survived " <> subject <> "; press x to terminate the orphaned process tree"
+
+isDeadlineOutcome :: SolveOutcome -> Bool
+isDeadlineOutcome (SolveFailed message) = message == workerDeadlineReason
+isDeadlineOutcome _ = False
 
 attachDiscoveredWorker :: WorkerDescriptor -> EventM Name AppState ()
 attachDiscoveredWorker descriptor = do
@@ -3254,7 +3276,7 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
     finish (Just SolveKilledPhase) _ session = session {pullRequestSessionActivity = "killed"}
     finish _ SolveCompleted session = session {pullRequestSessionPhase = SolveFinished, pullRequestSessionActivity = "completed"}
     finish _ (SolveNeedsInput question) session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for input", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n")}
-    finish _ (SolveFailed message) session = session {pullRequestSessionPhase = SolveFailedPhase, pullRequestSessionActivity = "failed", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\n" <> sanitizeText message <> "\n")}
+    finish _ (SolveFailed message) session = session {pullRequestSessionPhase = SolveFailedPhase, pullRequestSessionActivity = failureActivity message, pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\n" <> sanitizeText message <> "\n")}
 
 modifyAutoSolveForPullRequest :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
 modifyAutoSolveForPullRequest pullRequestNumber update =

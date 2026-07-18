@@ -1105,14 +1105,26 @@ The first solve/autosolve-compatible slice is implemented.
   TUI restart, until a successful snapshot confirms the child exited or the
   user kills it. A snapshot failure is always reported as an explicit
   failure, never silently treated as a verified empty survivor list.
-- Persistent workers have a four-hour hard deadline on signalling their
-  provider process; the process inspector marks them persistent and shows the
-  remaining bound. That kill deadline is distinct from verified terminal
-  state and lease release, which require a successful snapshot proving every
-  recorded descendant is gone — a persistent process-snapshot failure can
-  keep a worker orphaned and its lease held well beyond four hours, since the
-  watchdog is not an outer bound on termination verification. If a stale
-  supervisor is confirmed dead, Kanban kills its recorded provider process
+- Persistent workers have a four-hour hard deadline on their active task and
+  provider execution as a whole, measured from worker creation rather than
+  from whenever the watchdog thread happened to start — an already-overdue
+  deadline fires immediately. On firing, the watchdog kills the current
+  provider group and every still-matching recorded census group, cancels the
+  worker's own task execution (so a hang before any provider ever starts
+  cannot keep the supervisor and lease alive indefinitely), and commits one
+  canonical, externally visible `persistent worker deadline exceeded`
+  outcome — shown distinctly from a generic provider failure in worker
+  state, the journal, session/card activity, and the process inspector,
+  rather than collapsing to it. A provider that registers after the deadline
+  has already fired is killed immediately through the same stop guard. The
+  process inspector marks persistent workers and shows the remaining bound.
+  That kill deadline is distinct from verified terminal state and lease
+  release, which require a successful snapshot proving every recorded
+  descendant is gone — a persistent process-snapshot failure can keep a
+  worker orphaned, with the deadline outcome recorded as pending, and its
+  lease held well beyond four hours, since the watchdog is not an outer
+  bound on termination verification. If a stale supervisor is confirmed
+  dead, Kanban kills its recorded provider process
   group and all still-matching census groups, then publishes a visible
   terminal failure once a snapshot verifies they are gone; an unresolved
   verification leaves it visibly unresolved for a later recovery pass to
