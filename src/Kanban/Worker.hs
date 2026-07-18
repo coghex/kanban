@@ -166,14 +166,7 @@ data WorkerState = WorkerState
     workerStateLogPath :: Maybe FilePath,
     workerStateHeartbeatAt :: UTCTime,
     workerStateLastActivity :: Text,
-    workerStateKnownProcesses :: [ProcessIdentity],
-    -- | Durably records that a user requested termination ('terminateWorker')
-    -- but a snapshot failure kept recorded-descendant verification
-    -- inconclusive, so the supervisor's own group was never signaled. A
-    -- later recovery pass ('recoverIfWorkerStoppedWith') retries the same
-    -- verification and finalizes the pending "killed by user" outcome once
-    -- it succeeds.
-    workerStatePendingTermination :: Bool
+    workerStateKnownProcesses :: [ProcessIdentity]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
@@ -192,7 +185,6 @@ instance FromJSON WorkerState where
       <*> object .: "workerStateHeartbeatAt"
       <*> object .: "workerStateLastActivity"
       <*> object .:? "workerStateKnownProcesses" .!= []
-      <*> object .:? "workerStatePendingTermination" .!= False
 
 data WorkerLease = WorkerLease
   { workerLeaseId :: WorkerId,
@@ -215,7 +207,13 @@ data WorkerDescriptor = WorkerDescriptor
     workerDescriptorStatePath :: FilePath,
     workerDescriptorAckPath :: FilePath,
     workerDescriptorLeasePath :: FilePath,
-    workerDescriptorLeaseOwnerPath :: FilePath
+    workerDescriptorLeaseOwnerPath :: FilePath,
+    -- | Marks a user-requested termination a snapshot failure left
+    -- unverified. Owned solely by 'terminateWorkerWith' and
+    -- 'recoverIfWorkerStoppedWith' (both outside the live supervisor
+    -- process), so unlike the state file it is never clobbered by the
+    -- supervisor's own heartbeat or census writes.
+    workerDescriptorPendingTerminationPath :: FilePath
   }
   deriving stock (Eq, Show)
 
@@ -331,6 +329,12 @@ leaseIsActive descriptor = do
       case stateResult of
         Right state -> case state.workerStateStatus of
           WorkerTerminal _ -> pure False
+          -- Orphaned means a recorded descendant has not yet been confirmed
+          -- gone, regardless of whether the supervisor itself is still
+          -- alive: a dead supervisor here must never retire the lease and
+          -- let a replacement worker start alongside that unverified
+          -- descendant.
+          WorkerOrphaned _ -> pure True
           _ -> case state.workerStateWorkerIdentity of
             -- An unverified identity (a pre-identity state file) must never
             -- authorize retiring a lease that might still be live: fail
@@ -411,15 +415,16 @@ runWorkerWith takeSnapshot specPath = do
             workerStateLogPath = Nothing,
             workerStateHeartbeatAt = now,
             workerStateLastActivity = "starting",
-            workerStateKnownProcesses = [],
-            workerStatePendingTermination = False
+            workerStateKnownProcesses = []
           }
       eventLock <- newMVar ()
       providerRef <- newIORef Nothing
       stoppedRef <- newIORef False
+      signalShutdownRef <- newIORef False
       pendingOutcomeRef <- newIORef Nothing
       let stopOwnedWork = do
             writeIORef stoppedRef True
+            writeIORef signalShutdownRef True
             readIORef providerRef >>= mapM_ killManagedProcess
             terminateRecordedProcesses stateLock
       previousTermHandler <- installHandler sigTERM (Catch stopOwnedWork) Nothing
@@ -440,8 +445,10 @@ runWorkerWith takeSnapshot specPath = do
             case result of
               Left message -> do
                 known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
+                signalTriggered <- readIORef signalShutdownRef
+                let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
                 writeIORef pendingOutcomeRef (Just outcome)
-                emitRaw (WorkerDiagnostic ("completion: could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
                 emitRaw (WorkerOrphansDetected outcome known)
               Right survivors
                 | null survivors -> emitRaw (WorkerFinished outcome)
@@ -494,7 +501,7 @@ runWorkerWith takeSnapshot specPath = do
       -- `stoppedRef`: a signal-triggered shutdown already set that flag
       -- true (to stop the heartbeat/census loops), and gating this wait on
       -- it too would let the lease below release on an unverified kill.
-      mapM_ (waitForOrphanResolution descriptor stateLock takeSnapshot emitRaw) pending
+      mapM_ (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw) pending
       writeIORef stoppedRef True
       releaseWorkerLease descriptor
       void (installHandler sigTERM previousTermHandler Nothing)
@@ -580,7 +587,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
               presence <- checkIdentityPresenceWith takeSnapshot [workerIdentity]
               case presence of
                 IdentityPresent -> pure False
-                IdentitySnapshotFailed _ -> pure False
+                IdentitySnapshotFailed _ -> reportStaleRecoveryPending state
                 IdentityAbsent -> do
                   providerOk <- terminateProviderGroupWith takeSnapshot state
                   recordedOk <- terminateRecordedStateProcessesWith takeSnapshot state
@@ -592,8 +599,8 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
                       -- supervisor that has since died on its own) still
                       -- finalizes as "killed by user" rather than the generic
                       -- unexpected-stop outcome.
-                      let pendingTermination = state.workerStatePendingTermination
-                          diagnostic
+                      pendingTermination <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+                      let diagnostic
                             | pendingTermination = "stale-supervisor recovery: completing a pending user termination"
                             | otherwise = "persistent worker stopped unexpectedly; its provider process group was terminated"
                           outcome
@@ -604,11 +611,11 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
                               { workerStateStatus = WorkerTerminal outcome,
                                 workerStateProviderPid = Nothing,
                                 workerStateProviderIdentity = Nothing,
-                                workerStatePendingTermination = False,
                                 workerStateHeartbeatAt = now,
                                 workerStateLastActivity = "worker failed closed"
                               }
                       writeState descriptor terminalState
+                      ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
                       releaseWorkerLease descriptor
                       eventSink spec.workerId spec (WorkerDiagnostic diagnostic)
                       eventSink spec.workerId spec (WorkerFinished outcome)
@@ -619,9 +626,11 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
     -- is retried here even while the supervisor's heartbeat is still fresh,
     -- since an unverified termination never signaled the supervisor and it
     -- has no reason to retry the kill itself.
-    retryPendingTermination state
-      | not state.workerStatePendingTermination = pure False
-      | otherwise = do
+    retryPendingTermination state = do
+      pending <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+      if not pending
+        then pure False
+        else do
           completed <- finalizeUserTermination takeSnapshot descriptor state
           if completed
             then do
@@ -633,7 +642,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
     -- transition into this state, rather than on every ~200ms recovery poll;
     -- the unresolved state itself remains visible via 'WorkerOrphaned'.
     reportStaleRecoveryPending state = do
-      let message = "stale-supervisor recovery: could not verify recorded descendants are gone; retaining orphan state and lease"
+      let message = "stale-supervisor recovery: a process snapshot failed while verifying the worker and its recorded descendants are gone; retaining orphan state and lease"
           pendingOutcome = SolveFailed message
       unless (state.workerStateStatus == WorkerOrphaned pendingOutcome) $ do
         writeState descriptor state {workerStateStatus = WorkerOrphaned pendingOutcome, workerStateLastActivity = "stale-recovery verification pending"}
@@ -738,18 +747,25 @@ terminateWorkerWith takeSnapshot descriptor = do
         completed <- finalizeUserTermination takeSnapshot descriptor state
         if completed
           then releaseWorkerLease descriptor
-          else recordPendingTermination descriptor state
+          else recordPendingTermination descriptor
 
 -- | Marks a user-requested termination that a snapshot failure kept
 -- inconclusive, so a later recovery pass ('recoverIfWorkerStoppedWith')
--- retries it once the worker's heartbeat is next observed. Reports a
--- diagnostic only on the transition into this state, so pressing kill again
--- while it is still pending does not duplicate the message; the pending
--- state itself remains visible via 'workerStatePendingTermination'.
-recordPendingTermination :: WorkerDescriptor -> WorkerState -> IO ()
-recordPendingTermination descriptor state =
-  unless state.workerStatePendingTermination $ do
-    writeState descriptor state {workerStatePendingTermination = True, workerStateLastActivity = "termination requested; verification pending"}
+-- retries it once the worker's heartbeat is next observed. This is a
+-- dedicated marker file rather than a 'WorkerState' field: the live
+-- supervisor still owns and periodically rewrites the state file from its
+-- own in-memory copy (heartbeat, census), which would otherwise clobber a
+-- flag set here from outside that process. Reports a diagnostic only on the
+-- transition into this state, so pressing kill again while it is still
+-- pending does not duplicate the message.
+recordPendingTermination :: WorkerDescriptor -> IO ()
+recordPendingTermination descriptor = do
+  alreadyPending <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+  unless alreadyPending $ do
+    result <- try @IOException (ByteString.writeFile descriptor.workerDescriptorPendingTerminationPath "pending\n")
+    case result of
+      Left _ -> pure ()
+      Right () -> setFileMode descriptor.workerDescriptorPendingTerminationPath 0o600
     lock <- newMVar ()
     appendWorkerEvent descriptor lock (WorkerDiagnostic "user termination: could not verify recorded descendants are gone; retaining lease and retrying")
 
@@ -780,10 +796,10 @@ finalizeUserTermination takeSnapshot descriptor state = do
               { workerStateStatus = WorkerTerminal outcome,
                 workerStateProviderPid = Nothing,
                 workerStateProviderIdentity = Nothing,
-                workerStatePendingTermination = False,
                 workerStateHeartbeatAt = now,
                 workerStateLastActivity = "killed by user"
               }
+          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
           pure True
         else pure False
 
@@ -845,7 +861,8 @@ descriptorForSpec spec = do
         workerDescriptorStatePath = directory </> base <> ".state.json",
         workerDescriptorAckPath = directory </> base <> ".ack",
         workerDescriptorLeasePath = leasePath,
-        workerDescriptorLeaseOwnerPath = leasePath </> "owner.json"
+        workerDescriptorLeaseOwnerPath = leasePath </> "owner.json",
+        workerDescriptorPendingTerminationPath = directory </> base <> ".pending-termination"
       }
 
 workerLeaseKey :: WorkerTask -> FilePath
@@ -1013,13 +1030,15 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 
 -- | Polls until a fresh snapshot verifies every recorded descendant is gone,
 -- then emits the terminal outcome. Runs to a real conclusion unconditionally
--- — it takes no "stop requested" signal — because its caller relies on this
--- to gate the worker's lease release: a signal-triggered shutdown must not
--- let an in-flight stop request short-circuit verification. A snapshot
--- failure retains the pending state and reports a diagnostic once per
--- distinct failure message rather than once per poll.
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> (WorkerEvent -> IO ()) -> SolveOutcome -> IO ()
-waitForOrphanResolution descriptor stateLock takeSnapshot emit outcome = loop Nothing
+-- — it does not stop early on a "stop requested" signal — because its
+-- caller relies on this to gate the worker's lease release: a
+-- signal-triggered shutdown must not let an in-flight stop request
+-- short-circuit verification. 'signalShutdownRef' is read only to label a
+-- failure diagnostic as signal-triggered, never to gate the loop itself. A
+-- snapshot failure retains the pending state and reports a diagnostic once
+-- per distinct failure message rather than once per poll.
+waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> SolveOutcome -> IO ()
+waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit outcome = loop Nothing
   where
     loop lastDiagnostic = do
       refreshProcessCensus descriptor stateLock
@@ -1030,7 +1049,9 @@ waitForOrphanResolution descriptor stateLock takeSnapshot emit outcome = loop No
             if lastDiagnostic == Just message
               then pure lastDiagnostic
               else do
-                emit (WorkerDiagnostic ("orphan poll: could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
+                signalTriggered <- readIORef signalShutdownRef
+                let operation = if signalTriggered then "signal shutdown" else "orphan poll" :: Text
+                emit (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
                 pure (Just message)
           threadDelay workerOrphanCheckIntervalMicros
           loop reported

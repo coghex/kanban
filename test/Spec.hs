@@ -211,13 +211,25 @@ main = hspec $ do
       membersStillInGroup 100 [anchor] [anchor] `shouldBe` [anchor]
       membersStillInGroup 100 [movedGroup] [anchor] `shouldBe` []
 
-    it "sends the KILL once the grace window elapses and the group still matches" $
+    it "sends the KILL once the grace window elapses and the group still matches, then verifies it exited" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        identity <- identityForProcess process
+        callCount <- newIORef (0 :: Int)
+        let takeSnapshot = do
+              count <- readIORef callCount
+              modifyIORef callCount (+ 1)
+              pure (if count < 2 then Right [identity] else Right [])
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "reports inconclusive when a group survives verification after SIGKILL" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
         identity <- identityForProcess process
         let takeSnapshot = pure (Right [identity])
-        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity] `shouldReturn` Right ()
-        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+        killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity]
+          `shouldReturn` Left "signalled group did not exit after SIGKILL"
 
     it "omits the KILL when the group's identity no longer matches after the grace window" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
@@ -622,7 +634,9 @@ main = hspec $ do
                   LazyByteString.writeFile statePath (encode state)
                   let failingSnapshot = pure (Left "simulated ps outage")
                   terminateWorkerWith failingSnapshot descriptor
-                  pendingState <- waitForWorkerState statePath (.workerStatePendingTermination) 30
+                  pendingMarkerExists <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+                  pendingMarkerExists `shouldBe` True
+                  pendingState <- waitForWorkerState statePath (const True) 1
                   pendingState `shouldNotSatisfy` isTerminal
                   leaseHeld <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                   leaseHeld `shouldBe` True
@@ -1316,8 +1330,7 @@ runningWorkerState identifier pid identity =
       workerStateLogPath = Nothing,
       workerStateHeartbeatAt = epoch,
       workerStateLastActivity = "running",
-      workerStateKnownProcesses = [],
-      workerStatePendingTermination = False
+      workerStateKnownProcesses = []
     }
 
 isDiagnosticEvent :: WorkerEvent -> Bool

@@ -181,9 +181,11 @@ checkGroupMembershipWith takeSnapshot groupPid expected = do
 -- but only ever signal it while a fresh snapshot shows an identity-matching
 -- member still present *in that group*, so a member that kept its PID and
 -- start time but changed groups (freeing the old group id for reuse) is
--- never mistaken for still owning it. A snapshot failure at either
--- checkpoint omits the signal and is reported so the caller can retry
--- rather than assume the group is gone.
+-- never mistaken for still owning it. A snapshot failure at any checkpoint,
+-- including the one after KILL, omits further signalling and is reported so
+-- the caller retries rather than assumes the group is gone: KILL cannot be
+-- blocked, but confirming its effect still takes a verified empty snapshot,
+-- not just the act of sending the signal.
 killVerifiedGroup :: Int -> [ProcessIdentity] -> IO (Either Text ())
 killVerifiedGroup = killVerifiedGroupWith defaultProcessSnapshot
 
@@ -200,7 +202,14 @@ killVerifiedGroupWith takeSnapshot groupPid expected = do
       case after of
         IdentitySnapshotFailed message -> pure (Left message)
         IdentityAbsent -> pure (Right ())
-        IdentityPresent -> ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid)) >> pure (Right ())
+        IdentityPresent -> do
+          ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid))
+          threadDelay terminationGraceMicros
+          final <- checkGroupMembershipWith takeSnapshot groupPid expected
+          case final of
+            IdentitySnapshotFailed message -> pure (Left message)
+            IdentityAbsent -> pure (Right ())
+            IdentityPresent -> pure (Left "signalled group did not exit after SIGKILL")
 
 readProcessSnapshotRetrying :: Int -> IO (Either Text [ProcessIdentity])
 readProcessSnapshotRetrying attempts = do
