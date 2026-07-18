@@ -16,11 +16,16 @@ excerpt :: Text -> Text
 excerpt = collapseWhitespace . firstParagraph . sanitizeText
 
 normalizeLineControls :: Text -> Text
-normalizeLineControls = Text.map replace
+normalizeLineControls = Text.map replaceTab . normalizeCarriageReturns
   where
-    replace '\t' = ' '
-    replace '\r' = '\n'
-    replace character = character
+    replaceTab '\t' = ' '
+    replaceTab character = character
+
+-- CRLF pairs must collapse to a single line break, not two: replacing "\r\n"
+-- with "\n" first (before touching lone "\r") keeps a CRLF pair from being
+-- read as a paragraph break.
+normalizeCarriageReturns :: Text -> Text
+normalizeCarriageReturns = Text.replace "\r" "\n" . Text.replace "\r\n" "\n"
 
 safeCharacter :: Char -> Bool
 safeCharacter '\n' = True
