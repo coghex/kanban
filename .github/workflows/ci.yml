@@ -4,23 +4,47 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  build-test:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: "9.12.2"
           cabal-version: "3.16.1.0"
+
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cabal/store
             dist-newstyle
-          key: ${{ runner.os }}-ghc-9.12.2-${{ hashFiles('**/*.cabal', 'cabal.project') }}
-      - run: cabal update
-      - run: cabal build all
-      - run: cabal test all --test-show-details=direct
-      - run: python3 -m unittest discover -s tools -p 'test_*.py'
+          key: cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-${{ hashFiles('kanban.cabal', 'cabal.project') }}
+          restore-keys: |
+            cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-
+
+      - name: Check package metadata
+        run: cabal check
+
+      - name: Update package index
+        run: cabal update
+
+      - name: Build
+        run: cabal build all
+
+      - name: Haskell tests
+        run: cabal test all --test-show-details=direct
+
+      - name: PR drainer tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'

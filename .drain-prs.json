@@ -1,4 +1,4 @@
 {
-  "required_ci_check": "build",
-  "required_review_check": null
+  "required_ci_check": "build-test",
+  "required_review_check": "review-approved"
 }

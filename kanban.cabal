@@ -13,7 +13,12 @@ author:             coghex
 maintainer:         coghex
 category:           Development
 build-type:         Simple
-extra-doc-files:    DESIGN.md
+extra-doc-files:
+  docs/README.md
+  docs/development.md
+  docs/design.md
+  docs/pr-drainer.md
+  docs/user-guide.md
 
 source-repository head
   type: git
