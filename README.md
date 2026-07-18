@@ -27,9 +27,9 @@ controller operation. The singleton service refuses to start or stop through a
 dashboard for a different repository while another repository's drainer is
 active.
 
-The canonical drainer implementation is tracked at `tools/drain_prs.py`.
-The macOS service continues to invoke the stable `~/work/drain_prs.py` path,
-which may be a symlink to this checked-in copy.
+The canonical drainer, LaunchAgent controller, and installer are tracked at
+`tools/drain_prs.py`, `tools/drain_prs_service.py`, and
+`tools/install_drainer.py`.
 
 Each repository may override the drainer's required status-check names with a
 tracked `.drain-prs.json` file. `required_ci_check` and
@@ -37,6 +37,29 @@ tracked `.drain-prs.json` file. `required_ci_check` and
 gate. Repositories without the file retain the `build-test` and
 `review-approved` defaults. The `reviewed:approve` label remains mandatory
 regardless of these settings.
+
+### Install the PR drainer
+
+Installation is per-user on macOS and never requires `sudo`. Preview every
+target first, then install the stopped LaunchAgent:
+
+```console
+python3 tools/install_drainer.py --dry-run --json
+python3 tools/install_drainer.py
+```
+
+The installer creates only two symlinks beneath
+`~/Library/Application Support/kanban/pr-drainer/` and installs
+`~/Library/LaunchAgents/com.coghex.drain-prs.plist`. It refuses to run while a
+drainer is active and refuses to overwrite an ordinary file at either link
+target. Installation loads the job but does not start it or merge anything;
+press `d` in Kanban when ready. Rerun the installer after moving the checkout.
+
+Crash notifications are disabled by default. To opt in, provide a private ntfy
+endpoint with `--ntfy-url https://your-server.example/topic` or the
+`KANBAN_DRAINER_NTFY_URL` environment variable. Logs and incident state live
+under the user's `~/Library/Logs/kanban/pr-drainer/` and Application Support
+directories.
 
 Cards support a deliberately small mouse contract: click once to select, click
 the selected card to open its details, click outside the details panel to close
@@ -156,7 +179,8 @@ cabal run kanban -- --border open # optional borderless column gutters
 cabal run kanban -- --glyph-test  # compare line glyphs in this terminal/font
 ```
 
-`tools/drain_prs.py` has a Python test suite covering its pure decision logic
+The three drainer tools have a Python test suite covering installer safety,
+controller configuration, and the drainer's pure decision logic
 (check classification, PR selection, backoff arithmetic, review-marker
 parsing, worktree scoring, drain-state migration) and one full happy-path
 integration cycle against a real temporary Git repository with a scriptable
@@ -166,7 +190,8 @@ fake `gh`. Run it with:
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
-It requires no network access and no `gh` login. This is independent of the
+It requires no network access, modifies no LaunchAgent, and needs no `gh`
+login. This is independent of the
 Haskell `cabal test` suite.
 
 Board refresh uses the authenticated GitHub CLI. Run `gh auth login` first if

@@ -40,7 +40,7 @@ CONFLICT_REVIEW_MODEL = os.environ.get(
     "DRAIN_PRS_CLAUDE_REVIEW_MODEL", "claude-opus-4-8"
 )
 CONFLICT_REVIEW_EFFORT = "xhigh"
-NTFY_URL = "https://ntfy.sh/coghex"
+NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
 PR_REVIEW_V1_RE = re.compile(
     r"<!--\s*pr-review:v1\s+reviewer=(claude|codex)\s+"
     r"head=([0-9a-fA-F]{40})\s+"
@@ -141,6 +141,9 @@ def notify_model_failure(
     if os.environ.get("DRAIN_PRS_MANAGED") == "1":
         # The service runner sends the one failure notice after this process
         # exits. Avoid sending the same event twice.
+        return
+    if not NTFY_URL:
+        log("ntfy delivery skipped; KANBAN_DRAINER_NTFY_URL is not configured")
         return
     message = (
         f"PR drainer stopped: selected model {model}@{effort} "
@@ -2035,8 +2038,8 @@ def parse_args() -> argparse.Namespace:
         "--log-dir",
         default=str(Path(__file__).resolve().parent / "drain_prs_logs"),
         help=(
-            "Directory for date-based log files (default: "
-            "~/work/drain_prs_logs when running the checked-in script)."
+            "Directory for date-based log files (default: drain_prs_logs "
+            "beside the invoked script)."
         ),
     )
     parser.add_argument(

@@ -23,3 +23,4 @@ jobs:
       - run: cabal update
       - run: cabal build all
       - run: cabal test all --test-show-details=direct
+      - run: python3 -m unittest discover -s tools -p 'test_*.py'

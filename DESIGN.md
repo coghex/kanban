@@ -796,10 +796,10 @@ a countdown.
   Every controller call includes the dashboard's resolved repository root; a
   singleton already serving another repository is reported as foreign and is
   never stopped or replaced implicitly.
-- The canonical drainer implementation is versioned with Kanban at
-  `tools/drain_prs.py`; the LaunchAgent wrapper invokes the stable
-  `~/work/drain_prs.py` symlink so repository relocation does not change its
-  service contract.
+- The canonical drainer, controller, and safety-first installer are versioned
+  with Kanban under `tools/`. The installer creates stable per-user links under
+  `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
+  those links after repository relocation.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
@@ -1029,8 +1029,10 @@ Claude version.
 
 Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
 
-- Track the canonical implementation at `tools/drain_prs.py` while preserving
-  the service-facing `~/work/drain_prs.py` symlink.
+- Track the canonical drainer and controller implementations under `tools/`.
+- Install stable per-user links and the LaunchAgent through an idempotent
+  installer that refuses active services and ordinary-file replacement, and
+  never starts the drainer implicitly.
 - Discover the controller command from the LaunchAgent plist.
 - Bind controller status and start/stop operations to the current repository.
 - Reinstall the stopped singleton LaunchAgent with that repository path before
