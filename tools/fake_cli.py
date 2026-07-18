@@ -65,7 +65,7 @@ class FakeCli:
         fake = FakeCli(tmp_path)
         fake.install("gh")
         fake.script("gh", ["pr", "view", "42"], stdout=json.dumps({...}))
-        with fake.patched_environ():
+        with mock.patch.dict(os.environ, fake.environ_overrides()):
             drain_prs.process_pr(...)
         fake.calls("gh")  # -> recorded invocations for assertions
     """
