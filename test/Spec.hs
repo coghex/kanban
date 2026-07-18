@@ -1039,6 +1039,50 @@ main = hspec $ do
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [12]
 
+    it "sorts standalone issues awaiting rereview ahead of tracker groups and problems" $ do
+      let tracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #2 — A1: Tracked"
+              }
+          revised = (baseIssue 3 []) {issueLabels = [Label "ReViEwEd:ReViSeD" "8250DF"]}
+          problem = (baseIssue 4 []) {issueLabels = [Label "blocked" "d73a4a"]}
+          snapshot = RepoSnapshot [tracker, baseIssue 2 [], revised, problem] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [3, 2, 4]
+
+    it "promotes tracker groups containing rereview issues and puts those children first" $ do
+      let revisedTracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #1 — A1: First\n- [ ] #2 — A2: Revised"
+              }
+          ordinaryTracker =
+            (baseIssue 200 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #3 — A1: Ordinary"
+              }
+          revised = (baseIssue 2 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
+          snapshot = RepoSnapshot [revisedTracker, ordinaryTracker, baseIssue 1 [], revised, baseIssue 3 []] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [2, 1, 3]
+
+    it "promotes groups whose tracker issue is awaiting rereview" $ do
+      let problemTracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #1 — A1: Problem"
+              }
+          revisedTracker =
+            (baseIssue 200 [])
+              { issueLabels = [Label "epic" "5319e7", Label "reviewed:revised" "8250DF"],
+                issueBody = "## Children\n- [ ] #2 — A1: Revised tracker child"
+              }
+          problem = (baseIssue 1 []) {issueLabels = [Label "blocked" "d73a4a"]}
+          snapshot = RepoSnapshot [problemTracker, revisedTracker, problem, baseIssue 2 []] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [2, 1]
+
     it "groups tracker children in natural implementation order" $ do
       let tracker =
             (baseIssue 100 [])
