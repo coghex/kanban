@@ -26,7 +26,7 @@ import Kanban.Cache
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Domain
-import Kanban.Drainer (DrainerState (..), DrainerStatus (..), decodeDrainerStatus, drainerIsRunning)
+import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Process
@@ -149,7 +149,7 @@ main = hspec $ do
           spec =
             WorkerSpec
               { workerId = WorkerId "pr-858-test",
-                workerRepository = Repository "/tmp/repo" "coghex" "synarchy",
+                workerRepository = Repository "/tmp/repo" "example" "project",
                 workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 858 PullRequestCodex PullRequestRereview),
                 workerExistingSession = Just "review-session",
                 workerExistingLogPath = Just "/tmp/review.jsonl",
@@ -876,6 +876,23 @@ main = hspec $ do
         `shouldSatisfy` isLeft
 
   describe "PR drainer status decoding" $ do
+    it "replaces the LaunchAgent's managed repository with the current one" $ do
+      let repository = Repository "/tmp/current-project" "example" "project"
+          expected =
+            Right
+              ( DrainerController
+                  "/usr/bin/python3"
+                  ["/tmp/drain_prs_service.py", "--path", "/tmp/current-project"]
+              )
+      controllerFromProgramArguments
+        repository
+        ["/usr/bin/python3", "/tmp/drain_prs_service.py", "run"]
+        `shouldBe` expected
+      controllerFromProgramArguments
+        repository
+        ["/usr/bin/python3", "/tmp/drain_prs_service.py", "--path", "/tmp/previous-project", "run"]
+        `shouldBe` expected
+
     it "maps a running managed drainer to green/on" $ do
       let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":null}"
       result `shouldBe` Right (DrainerStatus DrainerOn "on")
@@ -889,6 +906,10 @@ main = hspec $ do
     it "makes a stopped drainer with an unresolved incident an error" $
       decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+
+    it "warns when the singleton drainer belongs to another repository" $
+      decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
+        `shouldBe` Right (DrainerStatus DrainerWarning "another repository is running")
 
     it "rejects unsupported controller output" $
       decodeDrainerStatus "{\"state\":\"paused\"}"

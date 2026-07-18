@@ -20,8 +20,9 @@ from typing import Any, NoReturn
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
-REQUIRED_CI_CHECK = "build-test"
-REQUIRED_REVIEW_CHECK = "review-approved"
+DEFAULT_REQUIRED_CI_CHECK = "build-test"
+DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
+CONFIG_FILENAME = ".drain-prs.json"
 STALE_APPROVAL_CHECK = "dismiss-stale-approval"
 DEFAULT_INTERVAL_SECONDS = 300
 MAX_AUTO_REPAIR_CONFLICT_FILES = 2
@@ -96,6 +97,12 @@ class RepoContext:
     repo_slug: str
     repo_name: str
     default_branch: str
+
+
+@dataclass(frozen=True)
+class GateConfig:
+    required_ci_check: str | None
+    required_review_check: str | None
 
 
 def active_log_path() -> Path | None:
@@ -258,6 +265,47 @@ def get_repo_context(path: Path) -> RepoContext:
         repo_slug=repo_slug,
         repo_name=repo_name,
         default_branch=default_branch,
+    )
+
+
+def load_gate_config(ctx: RepoContext) -> GateConfig:
+    path = ctx.path / CONFIG_FILENAME
+    if not path.exists():
+        return GateConfig(
+            required_ci_check=DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DrainError(f"Failed to read drainer config from {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise DrainError(f"Drainer config in {path} must be a JSON object.")
+
+    allowed = {"required_ci_check", "required_review_check"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise DrainError(
+            f"Unsupported drainer config key(s) in {path}: {', '.join(unknown)}"
+        )
+
+    def check_name(key: str, default: str) -> str | None:
+        configured = value.get(key, default)
+        if configured is None:
+            return None
+        if not isinstance(configured, str) or not configured.strip():
+            raise DrainError(
+                f"Drainer config {key!r} in {path} must be a non-empty string or null."
+            )
+        return configured.strip()
+
+    return GateConfig(
+        required_ci_check=check_name(
+            "required_ci_check", DEFAULT_REQUIRED_CI_CHECK
+        ),
+        required_review_check=check_name(
+            "required_review_check", DEFAULT_REQUIRED_REVIEW_CHECK
+        ),
     )
 
 
@@ -680,6 +728,22 @@ def classify_check(item: dict[str, Any] | None) -> str:
     if conclusion == "SUCCESS":
         return "success"
     return "failure"
+
+
+def configured_check_state(pr: dict[str, Any], name: str | None) -> str:
+    if name is None:
+        return "disabled"
+    return classify_check(latest_check(pr, name))
+
+
+def check_gate_satisfied(state: str) -> bool:
+    return state in {"success", "disabled"}
+
+
+def render_check_gate(kind: str, name: str | None, state: str) -> str:
+    if name is None:
+        return f"{kind}=disabled"
+    return f"{name}={state}"
 
 
 def wait_for_branch_update_policy(
@@ -1706,6 +1770,7 @@ def process_pr(
     dry_run: bool,
     repair_conflicts: bool,
     state: dict[str, Any],
+    gates: GateConfig,
 ) -> bool:
     pr = get_pr(ctx, number)
 
@@ -1746,23 +1811,24 @@ def process_pr(
                 remember_approved_head(state, number, refreshed["headRefOid"])
         return True
 
-    build_check = latest_check(pr, REQUIRED_CI_CHECK)
-    review_check = latest_check(pr, REQUIRED_REVIEW_CHECK)
-    build_state = classify_check(build_check)
-    review_state = classify_check(review_check)
+    build_state = configured_check_state(pr, gates.required_ci_check)
+    review_state = configured_check_state(pr, gates.required_review_check)
 
     if build_state == "failure":
-        raise DrainError(f"PR #{number}: required CI check {REQUIRED_CI_CHECK} failed.")
+        raise DrainError(
+            f"PR #{number}: required CI check {gates.required_ci_check} failed."
+        )
     if review_state == "failure":
         raise DrainError(
-            f"PR #{number}: required review gate {REQUIRED_REVIEW_CHECK} failed."
+            f"PR #{number}: required review gate "
+            f"{gates.required_review_check} failed."
         )
 
-    if build_state != "success" or review_state != "success":
+    if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
         log(
             f"PR #{number}: waiting "
-            f"({REQUIRED_CI_CHECK}={build_state}, "
-            f"{REQUIRED_REVIEW_CHECK}={review_state}, "
+            f"({render_check_gate('ci', gates.required_ci_check, build_state)}, "
+            f"{render_check_gate('review', gates.required_review_check, review_state)}, "
             f"mergeStateStatus={merge_state})"
         )
         return True
@@ -1778,10 +1844,14 @@ def process_pr(
     if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
         log(f"PR #{number}: approval changed before merge; deferring")
         return True
-    if classify_check(latest_check(pr, REQUIRED_CI_CHECK)) != "success":
+    if not check_gate_satisfied(
+        configured_check_state(pr, gates.required_ci_check)
+    ):
         log(f"PR #{number}: CI changed before merge; deferring")
         return True
-    if classify_check(latest_check(pr, REQUIRED_REVIEW_CHECK)) != "success":
+    if not check_gate_satisfied(
+        configured_check_state(pr, gates.required_review_check)
+    ):
         log(f"PR #{number}: review gate changed before merge; deferring")
         return True
 
@@ -1815,6 +1885,7 @@ def loop(
     once: bool,
     dry_run: bool,
     repair_conflicts: bool,
+    gates: GateConfig,
 ) -> None:
     lock_handle = acquire_lock(ctx)
     state = load_drain_state(ctx)
@@ -1903,6 +1974,7 @@ def loop(
                         dry_run=dry_run,
                         repair_conflicts=repair_conflicts,
                         state=state,
+                        gates=gates,
                     )
                 except ModelUnavailableError:
                     raise
@@ -1981,9 +2053,15 @@ def main() -> None:
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
     try:
         ctx = get_repo_context(Path(args.path).expanduser().resolve())
+        gates = load_gate_config(ctx)
         log(
             f"Watching {ctx.repo_slug} at {ctx.path} "
             f"(default branch: {ctx.default_branch})"
+        )
+        log(
+            "Required checks: "
+            f"{gates.required_ci_check or 'ci disabled'}, "
+            f"{gates.required_review_check or 'review disabled'}"
         )
         log(f"Logging to {active_log_path()}")
         if args.dry_run:
@@ -1994,6 +2072,7 @@ def main() -> None:
             once=args.once,
             dry_run=args.dry_run,
             repair_conflicts=not args.no_conflict_repair,
+            gates=gates,
         )
     except DrainError as exc:
         fail(f"drain_prs.py error: {exc}")

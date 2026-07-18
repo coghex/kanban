@@ -3,10 +3,53 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 import drain_prs
+
+
+class GateConfigTests(unittest.TestCase):
+    def _context(self, path):
+        return drain_prs.RepoContext(path, "example/project", "project", "master")
+
+    def test_missing_config_uses_legacy_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = drain_prs.load_gate_config(self._context(Path(tmp)))
+        self.assertEqual(
+            config.required_ci_check, drain_prs.DEFAULT_REQUIRED_CI_CHECK
+        )
+        self.assertEqual(
+            config.required_review_check, drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK
+        )
+
+    def test_repository_can_rename_and_disable_gates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / drain_prs.CONFIG_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "required_ci_check": "build",
+                        "required_review_check": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = drain_prs.load_gate_config(self._context(root))
+        self.assertEqual(config.required_ci_check, "build")
+        self.assertIsNone(config.required_review_check)
+
+    def test_unknown_config_key_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / drain_prs.CONFIG_FILENAME).write_text(
+                json.dumps({"required_build_check": "build"}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(drain_prs.DrainError):
+                drain_prs.load_gate_config(self._context(root))
 
 
 class ClassifyCheckTests(unittest.TestCase):

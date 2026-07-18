@@ -123,13 +123,13 @@ class HappyPathDrainCycleTest(unittest.TestCase):
             "baseRefName": "master",
             "statusCheckRollup": [
                 {
-                    "name": drain_prs.REQUIRED_CI_CHECK,
+                    "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-07-18T00:00:00Z",
                 },
                 {
-                    "name": drain_prs.REQUIRED_REVIEW_CHECK,
+                    "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-07-18T00:00:01Z",
@@ -167,6 +167,10 @@ class HappyPathDrainCycleTest(unittest.TestCase):
                 dry_run=False,
                 repair_conflicts=True,
                 state=state,
+                gates=drain_prs.GateConfig(
+                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                ),
             )
         return result, state
 

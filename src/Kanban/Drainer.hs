@@ -1,7 +1,8 @@
 module Kanban.Drainer
-  ( DrainerController,
+  ( DrainerController (..),
     DrainerState (..),
     DrainerStatus (..),
+    controllerFromProgramArguments,
     decodeDrainerStatus,
     discoverDrainerController,
     drainerIsRunning,
@@ -15,6 +16,7 @@ import Data.Aeson (FromJSON (..), eitherDecode, withObject, (.:), (.:?))
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Domain (Repository (..))
 import System.Directory (getHomeDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -61,8 +63,8 @@ instance FromJSON RawStatus where
   parseJSON = withObject "PR drainer status" $ \value ->
     RawStatus <$> value .: "state" <*> value .:? "open_incident"
 
-discoverDrainerController :: IO (Either Text DrainerController)
-discoverDrainerController = do
+discoverDrainerController :: Repository -> IO (Either Text DrainerController)
+discoverDrainerController repository = do
   home <- getHomeDirectory
   let plist = home </> "Library" </> "LaunchAgents" </> "com.coghex.drain-prs.plist"
   result <- runProcess 3 "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
@@ -71,9 +73,20 @@ discoverDrainerController = do
     arguments <- case eitherDecode (LazyByteString.pack output) of
       Left message -> Left ("could not decode launchd ProgramArguments: " <> Text.pack message)
       Right values -> Right values
-    case stripRunArgument arguments of
-      executable : controllerArguments -> Right (DrainerController executable controllerArguments)
-      _ -> Left "launchd ProgramArguments do not identify the PR drainer controller"
+    controllerFromProgramArguments repository arguments
+
+controllerFromProgramArguments :: Repository -> [String] -> Either Text DrainerController
+controllerFromProgramArguments repository arguments = case arguments of
+  executable : rawControllerArguments
+    | not (null controllerArguments) ->
+        Right
+          ( DrainerController
+              executable
+              (controllerArguments <> ["--path", repository.repositoryRoot])
+          )
+    where
+      controllerArguments = stripManagedArguments rawControllerArguments
+  _ -> Left "launchd ProgramArguments do not identify the PR drainer controller"
 
 queryDrainerStatus :: DrainerController -> IO (Either Text DrainerStatus)
 queryDrainerStatus controller = runController 4 controller "status"
@@ -119,12 +132,20 @@ stripRunArgument arguments = case reverse arguments of
   "run" : rest -> reverse rest
   _ -> arguments
 
+stripManagedArguments :: [String] -> [String]
+stripManagedArguments = removePathArgument . stripRunArgument
+  where
+    removePathArgument ("--path" : _ : rest) = removePathArgument rest
+    removePathArgument (argument : rest) = argument : removePathArgument rest
+    removePathArgument [] = []
+
 statusFromRaw :: RawStatus -> DrainerStatus
 statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
   ("running", Nothing) -> DrainerStatus DrainerOn "on"
   ("running", Just incident) -> DrainerStatus DrainerWarning ("on · unresolved incident" <> incidentDetail incident)
   ("starting", _) -> DrainerStatus DrainerStarting "starting…"
   ("external", _) -> DrainerStatus DrainerWarning "on outside launchd"
+  ("foreign", _) -> DrainerStatus DrainerWarning "another repository is running"
   ("stopped", Nothing) -> DrainerStatus DrainerOff "off"
   ("stopped", Just incident) -> DrainerStatus DrainerError ("stopped · unresolved incident" <> incidentDetail incident)
   (other, _) -> DrainerStatus DrainerError ("unknown state: " <> other)

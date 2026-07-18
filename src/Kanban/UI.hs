@@ -349,7 +349,7 @@ runDashboard options repository = do
     if options.optionNoCache
       then pure UsageCacheAbsent
       else loadUsageCache
-  drainerController <- discoverDrainerController
+  drainerController <- discoverDrainerController repository
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256

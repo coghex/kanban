@@ -111,7 +111,7 @@ References:
 
 ```text
 kanban
-kanban --path ~/work/synarchy
+kanban --path ~/work/project
 kanban --path .
 ```
 
@@ -793,6 +793,9 @@ a countdown.
 - The PR drainer controller discovers the installed LaunchAgent, reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
   and stop operations run asynchronously and expose transitional UI state.
+  Every controller call includes the dashboard's resolved repository root; a
+  singleton already serving another repository is reported as foreign and is
+  never stopped or replaced implicitly.
 - The canonical drainer implementation is versioned with Kanban at
   `tools/drain_prs.py`; the LaunchAgent wrapper invokes the stable
   `~/work/drain_prs.py` symlink so repository relocation does not change its
@@ -925,7 +928,7 @@ manual checks.
 - SSH attachment to the same tmux session.
 - Truecolor and 256-color modes.
 - Large and narrow terminal dimensions.
-- Real GitHub refresh against Synarchy.
+- Real GitHub refresh against a configured repository.
 - Real Codex and Claude usage refreshes without submitting a model prompt.
 
 ## 19. Implementation roadmap
@@ -987,7 +990,7 @@ Native GitHub sub-issue membership remains a follow-up slice.
 - Handle MULTI-TRACKED PRs and malformed trackers.
 - Add tracker progress and details context.
 
-Exit criteria: Synarchy's current tracker formats render children in their
+Exit criteria: the configured tracker formats render children in their
 intended `A1`, `A2`, `B1`, `C1` implementation order across all four columns.
 
 ### Milestone 4 — Codex usage
@@ -1029,6 +1032,9 @@ Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
 - Track the canonical implementation at `tools/drain_prs.py` while preserving
   the service-facing `~/work/drain_prs.py` symlink.
 - Discover the controller command from the LaunchAgent plist.
+- Bind controller status and start/stop operations to the current repository.
+- Reinstall the stopped singleton LaunchAgent with that repository path before
+  starting it, and reject cross-repository start/stop requests while it runs.
 - Decode the managed wrapper's structured status and incident data.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.

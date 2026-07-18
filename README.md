@@ -22,11 +22,21 @@ The bottom of the sidebar contains an ASCII `drain_prs.py` button backed by the
 installed `com.coghex.drain-prs` LaunchAgent. White means stopped, green means
 running, yellow means a transition or warning, and red means an error. Click it
 or press `d` to start or stop the managed drainer. Status checks are local and
-make no network request.
+make no network request. Kanban passes the current repository root to every
+controller operation. The singleton service refuses to start or stop through a
+dashboard for a different repository while another repository's drainer is
+active.
 
 The canonical drainer implementation is tracked at `tools/drain_prs.py`.
 The macOS service continues to invoke the stable `~/work/drain_prs.py` path,
 which may be a symlink to this checked-in copy.
+
+Each repository may override the drainer's required status-check names with a
+tracked `.drain-prs.json` file. `required_ci_check` and
+`required_review_check` accept a check name or `null` to disable that status
+gate. Repositories without the file retain the `build-test` and
+`review-approved` defaults. The `reviewed:approve` label remains mandatory
+regardless of these settings.
 
 Cards support a deliberately small mouse contract: click once to select, click
 the selected card to open its details, click outside the details panel to close
@@ -141,7 +151,7 @@ keys and press `e` to expand or collapse it, or click its title directly.
 
 ```console
 cabal run kanban
-cabal run kanban -- --path ~/work/synarchy
+cabal run kanban -- --path ~/work/project
 cabal run kanban -- --border open # optional borderless column gutters
 cabal run kanban -- --glyph-test  # compare line glyphs in this terminal/font
 ```
