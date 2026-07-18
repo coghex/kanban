@@ -367,7 +367,18 @@ leaseIsActive descriptor = do
       stateResult <- decodeFile statePath :: IO (Either Text WorkerState)
       case stateResult of
         Right state -> case state.workerStateStatus of
-          WorkerTerminal _ -> pure False
+          -- Every path that writes WorkerTerminal has already verified zero
+          -- surviving identities before doing so, so this is normally
+          -- redundant; it is still re-checked (rather than trusted
+          -- unconditionally) so a live identity match at this exact moment —
+          -- e.g. a PID somehow reused with the same recorded start time in
+          -- the narrow window right after that verified write — still blocks
+          -- a relaunch instead of racing it. A state with no recorded
+          -- identity at all (nothing to re-verify) keeps the prior
+          -- unconditional release, since Terminal already means done.
+          WorkerTerminal _ -> case state.workerStateWorkerIdentity of
+            Nothing -> pure False
+            Just _ -> recordedIdentitiesActive state pendingTerminationPath
           -- Every other status — including Orphaned — is judged by whether
           -- any durably recorded identity for this worker still matches a
           -- process, not by the status label alone: a blanket "Orphaned is
@@ -752,6 +763,13 @@ waitForWorkerStart descriptor processHandle attempts = do
               void (confirmStalledSupervisorStopped processHandle)
               pure (Left "persistent worker did not initialize within three seconds")
           | otherwise -> do
+              -- Retried on every poll, not just once at spawn: recovery
+              -- paths reached after this launcher itself is gone (see
+              -- 'supervisorLaunchIdentityPresenceWith') have no other way to
+              -- learn this supervisor's identity, so this gives a transient
+              -- snapshot failure the whole startup window to resolve rather
+              -- than one attempt.
+              recordLaunchedSupervisorIdentity descriptor processHandle
               threadDelay workerStartupIntervalMicros
               waitForWorkerStart descriptor processHandle (attempts - 1)
 
@@ -778,27 +796,29 @@ confirmStalledSupervisorStopped processHandle = do
 -- lease this launch already holds, so a later recovery pass with no other
 -- way to learn its PID — its own state file may never appear, e.g. a slow
 -- or crashed start — can still tell a live supervisor from a dead one
--- instead of guessing from elapsed time alone. Best-effort: a snapshot or
--- lookup failure just leaves the lease without an identity, and callers
--- fall back to the existing time-based grace heuristic.
+-- instead of guessing from elapsed time alone. Best-effort and idempotent:
+-- a snapshot or lookup failure just leaves the lease without an identity
+-- for this attempt (the caller retries across the whole startup window
+-- rather than giving up after one), and a lease that already carries an
+-- identity is left untouched rather than rewritten on every poll.
 recordLaunchedSupervisorIdentity :: WorkerDescriptor -> ProcessHandle -> IO ()
 recordLaunchedSupervisorIdentity descriptor processHandle = do
-  maybePid <- getPid processHandle
-  case maybePid of
-    Nothing -> pure ()
-    Just pid -> do
-      snapshotResult <- readProcessSnapshot
-      case snapshotResult of
-        Left _ -> pure ()
-        Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
-          Nothing -> pure ()
-          Just identity -> do
-            existing <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
-            case existing of
-              Right lease
-                | lease.workerLeaseId == descriptor.workerDescriptorSpec.workerId ->
-                    void (writePrivateJson descriptor.workerDescriptorLeaseOwnerPath lease {workerLeaseSupervisorIdentity = Just identity})
-              _ -> pure ()
+  existing <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
+  case existing of
+    Right lease
+      | lease.workerLeaseId == descriptor.workerDescriptorSpec.workerId,
+        Nothing <- lease.workerLeaseSupervisorIdentity -> do
+          maybePid <- getPid processHandle
+          case maybePid of
+            Nothing -> pure ()
+            Just pid -> do
+              snapshotResult <- defaultProcessSnapshot
+              case snapshotResult of
+                Left _ -> pure ()
+                Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
+                  Nothing -> pure ()
+                  Just identity -> void (writePrivateJson descriptor.workerDescriptorLeaseOwnerPath lease {workerLeaseSupervisorIdentity = Just identity})
+    _ -> pure ()
 
 -- | Whether the freshly launched supervisor identity durably recorded on
 -- this lease (see 'recordLaunchedSupervisorIdentity') still matches a

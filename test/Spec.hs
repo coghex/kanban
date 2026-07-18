@@ -997,6 +997,83 @@ main = hspec $ do
                 releaseWorkerLease freshDescriptor
               _ -> expectationFailure "worker fixtures were not discoverable"
 
+    it "re-verifies a terminal lease's recorded identity rather than trusting the status label alone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            firstSpec = workerFixtureSpec repository (WorkerId "solve-800-terminal-live") 800
+            secondSpec = workerFixtureSpec repository (WorkerId "solve-800-fresh") 800
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-800-terminal-live.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-800-terminal-live.spec.json") (encode firstSpec)
+        LazyByteString.writeFile (workerRoot </> "solve-800-fresh.spec.json") (encode secondSpec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+            (Just first, Just second) -> do
+              ownPid <- fromIntegral <$> getProcessID
+              snapshot <- readProcessSnapshot
+              realIdentity <- case snapshot of
+                Left message -> fail ("could not find this test process in a process snapshot: " <> Data.Text.unpack message)
+                Right identities -> case identityForPid ownPid identities of
+                  Nothing -> fail "could not find this test process in a process snapshot"
+                  Just identity -> pure identity
+              -- A Terminal write is only ever reached after every recorded
+              -- identity has been verified absent; this constructs the
+              -- anomalous case directly to prove the re-check — not the
+              -- WorkerTerminal label alone — is what decides.
+              acquireWorkerLease first `shouldReturn` Right ()
+              let liveTerminalState = (runningWorkerState firstSpec.workerId ownPid (Just realIdentity)) {workerStateStatus = WorkerTerminal SolveCompleted}
+              LazyByteString.writeFile statePath (encode liveTerminalState)
+              acquireWorkerLease second `shouldReturn` Left "issue #800 already has a live solve worker; open it from Processes or kill it before starting another"
+              releaseWorkerLease first
+              -- A terminal state with no recorded identity at all keeps the
+              -- prior unconditional release: nothing to re-verify, and
+              -- Terminal already means done.
+              acquireWorkerLease first `shouldReturn` Right ()
+              let noIdentityTerminalState = (runningWorkerState firstSpec.workerId 999999 Nothing) {workerStateStatus = WorkerTerminal SolveCompleted}
+              LazyByteString.writeFile statePath (encode noIdentityTerminalState)
+              acquireWorkerLease second `shouldReturn` Right ()
+              releaseWorkerLease second
+            _ -> expectationFailure "worker fixtures were not discoverable"
+
+    it "never lets a later identity-recording attempt overwrite a lease's already-recorded supervisor" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \firstProcess ->
+          withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \secondProcess -> do
+            let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+                firstSpec = workerFixtureSpec repository (WorkerId "solve-801-identity-idempotent") 801
+                secondSpec = workerFixtureSpec repository (WorkerId "solve-801-fresh") 801
+                workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            createDirectory repository.repositoryRoot
+            createDirectoryIfMissing True workerRoot
+            LazyByteString.writeFile (workerRoot </> "solve-801-identity-idempotent.spec.json") (encode firstSpec)
+            LazyByteString.writeFile (workerRoot </> "solve-801-fresh.spec.json") (encode secondSpec)
+            withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+              descriptors <- discoverWorkerHistory repository
+              case (find ((== firstSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors, find ((== secondSpec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors) of
+                (Just first, Just second) -> do
+                  acquireWorkerLease first `shouldReturn` Right ()
+                  recordLaunchedSupervisorIdentity first firstProcess
+                  -- A retried recording attempt (as happens when
+                  -- 'waitForWorkerStart' retries on every poll after the
+                  -- first attempt already succeeded) must not clobber the
+                  -- identity already recorded, even though `secondProcess`
+                  -- is itself a live, matchable identity.
+                  recordLaunchedSupervisorIdentity first secondProcess
+                  managedProcessFor firstProcess >>= killManagedProcess
+                  void (timeout 3000000 (waitForProcess firstProcess))
+                  -- If the second call had overwritten the recorded
+                  -- identity, `secondProcess` (still alive) would keep the
+                  -- lease blocked here even though `firstProcess` — the
+                  -- identity that should still be recorded — is dead.
+                  past <- addUTCTime (-30) <$> getCurrentTime
+                  setModificationTime first.workerDescriptorLeasePath past
+                  acquireWorkerLease second `shouldReturn` Right ()
+                  releaseWorkerLease second
+                _ -> expectationFailure "worker fixtures were not discoverable"
+
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
       let payload = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"delta\":\"hello\"}}"
