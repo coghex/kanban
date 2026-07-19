@@ -701,7 +701,22 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                 emit (WorkerProviderStarted (fromIntegral providerPid))
                 refreshProcessCensus descriptor stateLock
                 stopRequested <- readIORef stoppedRef
-                when stopRequested (killManagedProcess process)
+                -- A late registration can land after the watchdog already
+                -- ran its own verified provider/census kill against an
+                -- empty census (nothing was recorded yet at that moment —
+                -- see 'terminateProviderRefWith'); a group-signal kill on
+                -- just the direct process here would leave any descendant
+                -- this refresh just discovered in a different process
+                -- group (unreachable by that signal) alive indefinitely,
+                -- with nothing else ever attempting to kill it — only
+                -- 'waitForOrphanResolution' waiting on it, forever. Running
+                -- the same verified, identity-checked census kill the
+                -- watchdog itself uses gives every descendant this refresh
+                -- just recorded — not only the direct process — a real,
+                -- verified termination attempt.
+                when stopRequested $ do
+                  killManagedProcess process
+                  void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
               Nothing -> do
                 let message = "provider started without an observable process-group id; terminating it for safety"
                 emit (WorkerDiagnostic message)
@@ -763,7 +778,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- deadline watchdog can still take over that same ref after this
       -- point (see 'watchdogLoop'); this read only decides whether to
       -- enter the wait at all.
-      when (pending /= Nothing) (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef watchdogAdjudicatedVar)
+      when (pending /= Nothing) (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef deadline watchdogAdjudicatedVar)
       writeIORef stoppedRef True
       -- Whether it is safe to release the lease now without waiting for the
       -- watchdog is decided by a genuine race against it, claimed as late
@@ -1448,11 +1463,28 @@ terminateProviderGroupWith takeSnapshot state = case (state.workerStateProviderP
 -- outcome exactly like any other unverified case, so 'waitForOrphanResolution'
 -- naturally re-polls the census once registration (or the spawn's failure)
 -- has actually settled.
+--
+-- 'spawnPending' is read *before* 'providerRef', not after: these are two
+-- separate 'IORef's with no atomicity between them, so reading
+-- 'providerRef' first could observe 'Nothing' just before registration
+-- actually lands and then read a since-cleared 'spawnPending' as 'False'
+-- — a torn combination that matches neither the pre-spawn state nor the
+-- registered one, vacuously verifying a provider that in fact now exists.
+-- 'rememberProvider' always writes 'providerRef' before clearing
+-- 'spawnPending' (see its own documentation), so reading 'providerRef'
+-- *last* means whatever it reports is at least as fresh as the
+-- 'spawnPending' reading: if registration has since landed, this reads
+-- 'Just' and verifies the real provider instead (never even consulting
+-- 'spawnPending'); if 'providerRef' still reads 'Nothing' after
+-- 'spawnPending' already read 'True', that gap can only mean registration
+-- (or the spawn's failure) has not happened yet, correctly retaining a
+-- pending outcome.
 terminateProviderRefWith :: IO (Either Text [ProcessIdentity]) -> IO Bool -> IORef (Maybe ManagedProcess) -> IO Bool
 terminateProviderRefWith takeSnapshot spawnPending providerRef = do
+  pending <- spawnPending
   current <- readIORef providerRef
   case current of
-    Nothing -> not <$> spawnPending
+    Nothing -> pure (not pending)
     Just process -> do
       maybePid <- managedProcessPid process
       case maybePid of
@@ -1534,34 +1566,42 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 -- or just after, the deadline passes, while the value still sitting in
 -- 'pendingOutcomeRef' is the original pre-deadline one.
 --
--- Checking a wall-clock deadline and then separately consuming cannot
--- close this on its own: the two are not one atomic step, so a pause of
--- any length between them (a GC pause, a context switch to some other
--- runnable thread) can let a "not yet due" reading go stale before the
--- consume actually runs, no matter how few instructions sit in between
--- or how many times it is rechecked — a wall-clock recheck answers "has
--- the deadline passed," never "has the watchdog thread actually run
--- yet," and only the second question is the one that matters here. What
--- actually closes it is racing 'watchdogLoop' for 'watchdogAdjudicatedVar'
--- itself via 'tryPutMVar' — a single atomic compare-and-fill, exactly the
--- same shape as 'claimLeaseRelease' — unconditionally, every time this
--- would otherwise finalize: winning it means 'watchdogLoop' can never
--- fill it first (an 'MVar' fills at most once), so its takeover branch
--- will find this already full and skip its own write, and this may
--- safely consume 'pendingOutcomeRef' immediately. Losing it means
--- 'watchdogLoop' already won and is (or is about to be) writing its
--- takeover; 'readMVar' (not 'takeMVar', which would consume the fill and
--- strand a later iteration of this same loop) then blocks until that
--- write has actually landed, guaranteed to unblock because a losing
--- 'watchdogLoop' only ever reaches its own 'tryPutMVar' attempt after its
--- own delay has already elapsed. No wall-clock check gates whether this
--- attempts the race at all: 'tryPutMVar' costs the same whether it wins
--- or loses, so the overwhelmingly common case — resolving long before
--- any deadline is near, where this always wins trivially against a
--- watchdog thread that has not even reached its own delay's end yet —
+-- Racing 'watchdogLoop' for 'watchdogAdjudicatedVar' itself via
+-- 'tryPutMVar' — a single atomic compare-and-fill, exactly the same shape
+-- as 'claimLeaseRelease' — closes the torn-value gap: winning it means
+-- 'watchdogLoop' can never fill it first (an 'MVar' fills at most once),
+-- so its takeover branch will find this already full and skip its own
+-- write, and this may safely consume 'pendingOutcomeRef' immediately.
+-- Losing it means 'watchdogLoop' already won and is (or is about to be)
+-- writing its takeover; 'readMVar' (not 'takeMVar', which would consume
+-- the fill and strand a later iteration of this same loop) then blocks
+-- until that write has actually landed.
+--
+-- But racing at all is only correct once it is already clear the
+-- watchdog is entitled to be racing this in the first place: 'now' is
+-- checked *first*, and once it is at or past 'deadline', this never
+-- attempts 'tryPutMVar' itself at all — only 'readMVar', a pure wait with
+-- no attempt to win anything. That guarantees the watchdog is the only
+-- caller that ever wins the race for this specific finalization once
+-- past the deadline, rather than merely being favored to: the two
+-- outcomes of the 'now' check lead to genuinely different operations
+-- (blocking wait vs. racing attempt), not the same consume gated by a
+-- stale boolean, so there is no separate step afterward for the reading
+-- to go stale before. The 'now < deadline' branch's own 'tryPutMVar'
+-- attempt needs no such guarantee: it is always safe regardless of
+-- whether 'now' is by then stale, since a genuine atomic race decides the
+-- winner correctly either way — the watchdog can only ever win it after
+-- its own identically-computed delay has elapsed, so if this reads
+-- 'now < deadline' just as that delay is also expiring, whichever of the
+-- two calls 'tryPutMVar' first is exactly as entitled to the outcome as
+-- the other. No check gates whether the 'now < deadline' branch attempts
+-- the race at all beyond that: 'tryPutMVar' costs the same whether it
+-- wins or loses, so the overwhelmingly common case — resolving long
+-- before any deadline is near, where this always wins trivially against
+-- a watchdog thread that has not even reached its own delay's end yet —
 -- never pays anything extra for it either.
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> MVar () -> IO ()
-waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef watchdogAdjudicatedVar = loop Nothing
+waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> UTCTime -> MVar () -> IO ()
+waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef deadline watchdogAdjudicatedVar = loop Nothing
   where
     loop lastDiagnostic = do
       current <- readIORef pendingOutcomeRef
@@ -1588,8 +1628,10 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
               loop reported
             Right surviving
               | null surviving -> do
-                  wonRace <- tryPutMVar watchdogAdjudicatedVar ()
-                  unless wonRace (readMVar watchdogAdjudicatedVar)
+                  now <- getCurrentTime
+                  if now >= deadline
+                    then readMVar watchdogAdjudicatedVar
+                    else void (tryPutMVar watchdogAdjudicatedVar ())
                   final <- atomicModifyIORef' pendingOutcomeRef (\value -> (Nothing, value))
                   emit (WorkerFinished (maybe outcome snd final))
               | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing

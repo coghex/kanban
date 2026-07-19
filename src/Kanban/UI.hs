@@ -16,7 +16,7 @@ import Brick.Widgets.Border.Style (BorderStyle (..), ascii, unicode, unicodeBold
 import Brick.Widgets.Center (centerLayer)
 import qualified Brick.Types as BrickTypes
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Monad (forever, void, when)
+import Control.Monad (forever, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Char (isPrint)
 import Data.List (find, findIndex, intersperse, sortOn)
@@ -2789,13 +2789,25 @@ pullRequestWorkerFor state number =
       PullRequestWorkerTaskKind task -> task.pullRequestWorkerNumber == number
       SolveWorkerTaskKind _ -> False
 
+-- | A provider that only registers (via 'WorkerProviderStarted') after the
+-- watchdog has already committed a deadline outcome — orphaning or
+-- finishing the session — must not have that late arrival revert the
+-- session back to a running/thinking projection: the underlying worker is
+-- already stopped or being cleaned up regardless of what this late event
+-- claims, so resurrecting "running" here would be actively misleading
+-- about what is actually happening.
+isResolvedSolvePhase :: SolvePhase -> Bool
+isResolvedSolvePhase phase = phase `elem` [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+
 applyWorkerProtocolEvent :: WorkerDescriptor -> WorkerEvent -> EventM Name AppState ()
 applyWorkerProtocolEvent descriptor workerEvent = do
   ensureWorkerSession descriptor
   case descriptor.workerDescriptorSpec.workerTask of
     SolveWorkerTaskKind task -> case workerEvent of
-      WorkerProviderStarted processId ->
-        applySolveEvent (SolveProcessStarted task.solveWorkerIssueNumber task.solveWorkerBrand (managedProcessGroup (fromIntegral processId)))
+      WorkerProviderStarted processId -> do
+        sessions <- (.appSolveSessions) <$> get
+        let alreadyResolved = maybe False (isResolvedSolvePhase . (.solveSessionPhase)) (Map.lookup task.solveWorkerIssueNumber sessions)
+        unless alreadyResolved (applySolveEvent (SolveProcessStarted task.solveWorkerIssueNumber task.solveWorkerBrand (managedProcessGroup (fromIntegral processId))))
       WorkerProviderSpawning _ -> pure ()
       WorkerLogOpened path -> applySolveEvent (SolveLogOpened task.solveWorkerIssueNumber path)
       WorkerSessionIdentified sessionId -> applySolveEvent (SolveSessionIdentified task.solveWorkerIssueNumber sessionId)
@@ -2806,8 +2818,10 @@ applyWorkerProtocolEvent descriptor workerEvent = do
     PullRequestWorkerTaskKind task ->
       let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
        in case workerEvent of
-            WorkerProviderStarted processId ->
-              applyPullRequestFlowEvent (PullRequestProcessStarted task.pullRequestWorkerNumber task.pullRequestWorkerAction brand (managedProcessGroup (fromIntegral processId)))
+            WorkerProviderStarted processId -> do
+              sessions <- (.appPullRequestReviewSessions) <$> get
+              let alreadyResolved = maybe False (isResolvedSolvePhase . (.pullRequestSessionPhase)) (Map.lookup task.pullRequestWorkerNumber sessions)
+              unless alreadyResolved (applyPullRequestFlowEvent (PullRequestProcessStarted task.pullRequestWorkerNumber task.pullRequestWorkerAction brand (managedProcessGroup (fromIntegral processId))))
             WorkerProviderSpawning _ -> pure ()
             WorkerLogOpened path -> applyPullRequestFlowEvent (PullRequestLogOpened task.pullRequestWorkerNumber path)
             WorkerSessionIdentified sessionId -> applyPullRequestFlowEvent (PullRequestSessionIdentified task.pullRequestWorkerNumber sessionId)
