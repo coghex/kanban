@@ -1,11 +1,17 @@
 module Kanban.UI
-  ( failureActivity,
-    orphanMessage,
+  ( ChatTranscript (..),
     PendingReviewInteraction (..),
+    PullRequestReviewSession (..),
     ReviewDigitAction (..),
+    SolvePhase (..),
+    SolveSession (..),
+    failureActivity,
+    orphanMessage,
+    pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
     resolveReviewDigitAction,
     runDashboard,
+    solveSessionAlreadyResolved,
   )
 where
 
@@ -2799,34 +2805,68 @@ pullRequestWorkerFor state number =
 isResolvedSolvePhase :: SolvePhase -> Bool
 isResolvedSolvePhase phase = phase `elem` [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
 
+-- | Whether a nonterminal solve projection (a fresh "started" event, but
+-- also agent output/diagnostic text) arriving for this issue right now
+-- should be dropped because the session has already resolved.
+-- 'streamOutput'/'streamDiagnostics' run in their own thread reading a pipe
+-- to EOF, independent of the worker's own lifecycle: buffered stdout/stderr
+-- can still surface after the watchdog has already committed
+-- 'WorkerOrphansDetected' or 'WorkerFinished'. Applying a late output or
+-- diagnostic event unconditionally would overwrite the just-set
+-- deadline/orphan activity text with generic "thinking"/"diagnostic output"
+-- copy, hiding the very state this revision exists to surface. A missing
+-- session (never seen before) is never considered resolved, matching the
+-- prior unconditional behavior for a session's first event.
+solveSessionAlreadyResolved :: Int -> Map Int SolveSession -> Bool
+solveSessionAlreadyResolved issueNumber sessions = maybe False (isResolvedSolvePhase . (.solveSessionPhase)) (Map.lookup issueNumber sessions)
+
+-- | The pull-request analogue of 'solveSessionAlreadyResolved'; see its
+-- documentation.
+pullRequestSessionAlreadyResolved :: Int -> Map Int PullRequestReviewSession -> Bool
+pullRequestSessionAlreadyResolved number sessions = maybe False (isResolvedSolvePhase . (.pullRequestSessionPhase)) (Map.lookup number sessions)
+
+suppressIfResolvedSolve :: Int -> EventM Name AppState () -> EventM Name AppState ()
+suppressIfResolvedSolve issueNumber action = do
+  sessions <- (.appSolveSessions) <$> get
+  unless (solveSessionAlreadyResolved issueNumber sessions) action
+
+suppressIfResolvedPullRequest :: Int -> EventM Name AppState () -> EventM Name AppState ()
+suppressIfResolvedPullRequest number action = do
+  sessions <- (.appPullRequestReviewSessions) <$> get
+  unless (pullRequestSessionAlreadyResolved number sessions) action
+
 applyWorkerProtocolEvent :: WorkerDescriptor -> WorkerEvent -> EventM Name AppState ()
 applyWorkerProtocolEvent descriptor workerEvent = do
   ensureWorkerSession descriptor
   case descriptor.workerDescriptorSpec.workerTask of
     SolveWorkerTaskKind task -> case workerEvent of
-      WorkerProviderStarted processId -> do
-        sessions <- (.appSolveSessions) <$> get
-        let alreadyResolved = maybe False (isResolvedSolvePhase . (.solveSessionPhase)) (Map.lookup task.solveWorkerIssueNumber sessions)
-        unless alreadyResolved (applySolveEvent (SolveProcessStarted task.solveWorkerIssueNumber task.solveWorkerBrand (managedProcessGroup (fromIntegral processId))))
+      WorkerProviderStarted processId ->
+        suppressIfResolvedSolve
+          task.solveWorkerIssueNumber
+          (applySolveEvent (SolveProcessStarted task.solveWorkerIssueNumber task.solveWorkerBrand (managedProcessGroup (fromIntegral processId))))
       WorkerProviderSpawning _ -> pure ()
       WorkerLogOpened path -> applySolveEvent (SolveLogOpened task.solveWorkerIssueNumber path)
       WorkerSessionIdentified sessionId -> applySolveEvent (SolveSessionIdentified task.solveWorkerIssueNumber sessionId)
-      WorkerAgentOutput output -> applySolveEvent (SolveOutput task.solveWorkerIssueNumber output)
-      WorkerDiagnostic message -> applySolveEvent (SolveDiagnostic task.solveWorkerIssueNumber message)
+      WorkerAgentOutput output ->
+        suppressIfResolvedSolve task.solveWorkerIssueNumber (applySolveEvent (SolveOutput task.solveWorkerIssueNumber output))
+      WorkerDiagnostic message ->
+        suppressIfResolvedSolve task.solveWorkerIssueNumber (applySolveEvent (SolveDiagnostic task.solveWorkerIssueNumber message))
       WorkerOrphansDetected outcome processes -> applySolveOrphans task.solveWorkerIssueNumber outcome processes
       WorkerFinished outcome -> applySolveEvent (SolveProcessFinished task.solveWorkerIssueNumber outcome)
     PullRequestWorkerTaskKind task ->
       let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
        in case workerEvent of
-            WorkerProviderStarted processId -> do
-              sessions <- (.appPullRequestReviewSessions) <$> get
-              let alreadyResolved = maybe False (isResolvedSolvePhase . (.pullRequestSessionPhase)) (Map.lookup task.pullRequestWorkerNumber sessions)
-              unless alreadyResolved (applyPullRequestFlowEvent (PullRequestProcessStarted task.pullRequestWorkerNumber task.pullRequestWorkerAction brand (managedProcessGroup (fromIntegral processId))))
+            WorkerProviderStarted processId ->
+              suppressIfResolvedPullRequest
+                task.pullRequestWorkerNumber
+                (applyPullRequestFlowEvent (PullRequestProcessStarted task.pullRequestWorkerNumber task.pullRequestWorkerAction brand (managedProcessGroup (fromIntegral processId))))
             WorkerProviderSpawning _ -> pure ()
             WorkerLogOpened path -> applyPullRequestFlowEvent (PullRequestLogOpened task.pullRequestWorkerNumber path)
             WorkerSessionIdentified sessionId -> applyPullRequestFlowEvent (PullRequestSessionIdentified task.pullRequestWorkerNumber sessionId)
-            WorkerAgentOutput output -> applyPullRequestFlowEvent (PullRequestFlowOutput task.pullRequestWorkerNumber output)
-            WorkerDiagnostic message -> applyPullRequestFlowEvent (PullRequestFlowDiagnostic task.pullRequestWorkerNumber message)
+            WorkerAgentOutput output ->
+              suppressIfResolvedPullRequest task.pullRequestWorkerNumber (applyPullRequestFlowEvent (PullRequestFlowOutput task.pullRequestWorkerNumber output))
+            WorkerDiagnostic message ->
+              suppressIfResolvedPullRequest task.pullRequestWorkerNumber (applyPullRequestFlowEvent (PullRequestFlowDiagnostic task.pullRequestWorkerNumber message))
             WorkerOrphansDetected outcome processes -> applyPullRequestOrphans task.pullRequestWorkerNumber outcome processes
             WorkerFinished outcome -> applyPullRequestFlowEvent (PullRequestProcessFinished task.pullRequestWorkerNumber outcome)
   case workerEvent of

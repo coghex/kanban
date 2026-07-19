@@ -101,7 +101,20 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
-import Kanban.UI (PendingReviewInteraction (..), ReviewDigitAction (..), failureActivity, orphanMessage, pullRequestSessionReusable, resolveReviewDigitAction)
+import Kanban.UI
+  ( ChatTranscript (..),
+    PendingReviewInteraction (..),
+    PullRequestReviewSession (..),
+    ReviewDigitAction (..),
+    SolvePhase (..),
+    SolveSession (..),
+    failureActivity,
+    orphanMessage,
+    pullRequestSessionAlreadyResolved,
+    pullRequestSessionReusable,
+    resolveReviewDigitAction,
+    solveSessionAlreadyResolved,
+  )
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( ProviderSlot (..),
@@ -2036,6 +2049,66 @@ main = hspec $ do
         `shouldBe` "deadline exceeded; 1 subprocesses survived termination; press x to terminate the orphaned process tree"
       orphanMessage SolveCompleted "1" "the PR agent"
         `shouldBe` "1 subprocesses survived the PR agent; press x to terminate the orphaned process tree"
+
+    it "suppresses a late WorkerAgentOutput/WorkerDiagnostic projection once a solve or PR session has already resolved" $ do
+      -- 'applyWorkerProtocolEvent' cannot be exercised directly in a unit
+      -- test (it runs in brick's 'EventM', which exposes no way to run an
+      -- action against a plain state outside a live Vty event loop); this
+      -- instead directly covers 'solveSessionAlreadyResolved' and
+      -- 'pullRequestSessionAlreadyResolved', the pure predicates that
+      -- decide whether a trailing 'WorkerAgentOutput'/'WorkerDiagnostic'
+      -- event -- which 'streamOutput'/'streamDiagnostics' can still emit
+      -- after the watchdog has already committed 'WorkerOrphansDetected' or
+      -- 'WorkerFinished' -- gets applied at all.
+      let solveSessionWith phase =
+            SolveSession
+              { solveSessionIssue = baseIssue 787 [],
+                solveSessionWorkflow = SolveOnly,
+                solveSessionBrand = CodexSolver,
+                solveSessionId = Nothing,
+                solveSessionPhase = phase,
+                solveSessionActivity = "thinking",
+                solveSessionActivityStartedAt = epoch,
+                solveSessionLogPath = Nothing,
+                solveSessionTranscript = ChatTranscript "" "" "",
+                solveSessionInput = "",
+                solveSessionSpinnerFrame = 0,
+                solveSessionAutoProgress = Nothing,
+                solveSessionResumeProvenance = ResumeAnswer
+              }
+          solveSessionsWith phase = Map.fromList [(787, solveSessionWith phase)]
+      mapM_
+        (\phase -> solveSessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` True)
+        [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+      mapM_
+        (\phase -> solveSessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` False)
+        [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
+      solveSessionAlreadyResolved 999 (solveSessionsWith SolveFinished) `shouldBe` False
+      let pullRequestSessionWith phase =
+            PullRequestReviewSession
+              { pullRequestSessionPullRequest = basePullRequest 826 [] False [],
+                pullRequestSessionOrigin = PullRequestCodex,
+                pullRequestSessionAction = PullRequestReview,
+                pullRequestSessionLaunchedForUpdatedAt = epoch,
+                pullRequestSessionBrand = CodexSolver,
+                pullRequestSessionId = Nothing,
+                pullRequestSessionPhase = phase,
+                pullRequestSessionActivity = "thinking",
+                pullRequestSessionActivityStartedAt = epoch,
+                pullRequestSessionLogPath = Nothing,
+                pullRequestSessionTranscript = ChatTranscript "" "" "",
+                pullRequestSessionInput = "",
+                pullRequestSessionSpinnerFrame = 0,
+                pullRequestSessionResumeProvenance = ResumeAnswer
+              }
+          pullRequestSessionsWith phase = Map.fromList [(826, pullRequestSessionWith phase)]
+      mapM_
+        (\phase -> pullRequestSessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` True)
+        [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+      mapM_
+        (\phase -> pullRequestSessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` False)
+        [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
+      pullRequestSessionAlreadyResolved 999 (pullRequestSessionsWith SolveFinished) `shouldBe` False
 
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
