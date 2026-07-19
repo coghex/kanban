@@ -1,5 +1,6 @@
 module Kanban.UI
-  ( runDashboard,
+  ( pullRequestSessionReusable,
+    runDashboard,
   )
 where
 
@@ -217,6 +218,11 @@ data PullRequestReviewSession = PullRequestReviewSession
   { pullRequestSessionPullRequest :: PullRequest,
     pullRequestSessionOrigin :: PullRequestOrigin,
     pullRequestSessionAction :: PullRequestAction,
+    -- | The PR's @updatedAt@ when this action was launched, so a finished
+    -- session with the same recomputed action (e.g. a second
+    -- reviewed:changes verdict after pr-revise's own rereview) can be told
+    -- apart from one still addressing the state it was launched for.
+    pullRequestSessionLaunchedForUpdatedAt :: UTCTime,
     pullRequestSessionBrand :: SolverBrand,
     pullRequestSessionId :: Maybe Text,
     pullRequestSessionPhase :: SolvePhase,
@@ -2931,6 +2937,7 @@ recoveredPullRequestSession descriptor pullRequest task =
         { pullRequestSessionPullRequest = pullRequest,
           pullRequestSessionOrigin = task.pullRequestWorkerOrigin,
           pullRequestSessionAction = task.pullRequestWorkerAction,
+          pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
           pullRequestSessionBrand = brand,
           pullRequestSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
           pullRequestSessionPhase = SolveStarting,
@@ -3101,7 +3108,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
     let action = actionForLabels (map (.labelName) pullRequest.pullRequestLabels)
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
-        | not forceFresh && (pullRequestReviewActive session || session.pullRequestSessionAction == action) ->
+        | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
             when showOverlay (modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing}))
       _ -> do
         let brand = agentForAction origin action
@@ -3110,6 +3117,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
                 { pullRequestSessionPullRequest = pullRequest,
                   pullRequestSessionOrigin = origin,
                   pullRequestSessionAction = action,
+                  pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
                   pullRequestSessionBrand = brand,
                   pullRequestSessionId = Nothing,
                   pullRequestSessionPhase = SolveStarting,
@@ -3132,6 +3140,16 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
 
 pullRequestReviewActive :: PullRequestReviewSession -> Bool
 pullRequestReviewActive session = session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
+
+-- | Whether pressing r should reuse a tracked session's overlay rather than
+-- launch a fresh action. An active session is always reused. A finished
+-- session is only reused when the recomputed action still matches AND the
+-- PR has not changed since that action was launched -- otherwise a fresh
+-- canonical round is needed even if the recomputed action repeats, e.g. a
+-- second reviewed:changes verdict after pr-revise's own rereview.
+pullRequestSessionReusable :: Bool -> Bool -> PullRequestAction -> PullRequestAction -> UTCTime -> UTCTime -> Bool
+pullRequestSessionReusable forceFresh active sessionAction currentAction launchedForUpdatedAt currentUpdatedAt =
+  not forceFresh && (active || (sessionAction == currentAction && launchedForUpdatedAt == currentUpdatedAt))
 
 launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> Text -> EventM Name AppState ()
 launchPullRequestFlow number origin action _brand existingSession input = do

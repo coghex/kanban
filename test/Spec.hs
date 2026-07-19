@@ -94,6 +94,7 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
+import Kanban.UI (pullRequestSessionReusable)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -1439,6 +1440,23 @@ main = hspec $ do
       pullRequestVerdictForLabels ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
       pullRequestVerdictForLabels ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
       pullRequestVerdictForLabels ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+
+    it "starts a fresh r-key revision round instead of reopening a finished one when the PR changed since it launched" $ do
+      let launchedAt = UTCTime (fromGregorian 2026 7 18) 0
+          unchanged = launchedAt
+          afterFreshVerdict = UTCTime (fromGregorian 2026 7 19) 0
+      -- A finished PullRequestRevision session addressing the same unchanged
+      -- state (no new push, comment, or label change) is safely reused.
+      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` True
+      -- pr-revise's own canonical rereview lands a fresh reviewed:changes
+      -- verdict, so the recomputed action repeats (PullRequestRevision) but
+      -- the PR has changed since this session launched: it must not reuse
+      -- the finished session and instead start another canonical round.
+      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` False
+      -- A still-active session is always reused regardless of PR changes.
+      pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
+      -- forceFresh always starts a new session.
+      pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
