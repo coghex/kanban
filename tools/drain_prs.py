@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1313,79 +1314,109 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
 
 
-def _stash_entries(ctx: RepoContext) -> list[tuple[str, str, str]]:
+def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None:
+    # Physically moved aside (never staged, stashed, or otherwise recorded in
+    # any git ref) so a concurrent `git stash` in another terminal has
+    # nothing of ours to collide with.
     proc = run(
-        ["git", "stash", "list", "--format=%H%x09%gd%x09%gs"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=ctx.path,
         check=False,
     )
     if proc.returncode != 0:
-        return []
-    entries = []
-    for line in (proc.stdout or "").splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3:
-            entries.append((parts[0], parts[1], parts[2]))
-    return entries
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(f"Could not list untracked files ahead of a temporary stash:\n{detail}")
+    paths = [p for p in (proc.stdout or "").split("\0") if p]
+    if not paths:
+        return None
+    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(ctx.path / ".git")))
+    moved: list[str] = []
+    try:
+        for rel in paths:
+            dst = holding / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            (ctx.path / rel).rename(dst)
+            moved.append(rel)
+    except OSError as exc:
+        for rel in moved:
+            (holding / rel).rename(ctx.path / rel)
+        raise DrainError(f"Could not set aside untracked files ahead of a temporary stash: {exc}")
+    return holding, paths
 
 
-def _find_stash_by_message(ctx: RepoContext, marker: str) -> str | None:
-    # The marker is embedded in the stash commit's subject by `stash push -m`
-    # at creation time, so a match identifies this run's own entry no matter
-    # what else has been pushed onto (or popped off) the shared stash list
-    # since -- unlike the reflog position, it can never point at someone
-    # else's entry.
-    for sha, _ref, subject in _stash_entries(ctx):
-        if marker in subject:
-            return sha
-    return None
+def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) -> list[str]:
+    failures = []
+    for rel in paths:
+        try:
+            dst = ctx.path / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            (holding / rel).rename(dst)
+        except OSError as exc:
+            failures.append(f"{rel} ({exc})")
+    try:
+        shutil.rmtree(holding)
+    except OSError:
+        pass
+    return failures
 
 
-def _find_stash_ref(ctx: RepoContext, stash_sha: str) -> str | None:
-    for sha, ref, _subject in _stash_entries(ctx):
-        if sha == stash_sha:
-            return ref
-    return None
+def _snapshot_tracked_changes(ctx: RepoContext, message: str) -> str | None:
+    # `git stash create` snapshots the index/working-tree diff into a
+    # floating commit without touching the shared refs/stash reflog at all,
+    # so there is no shared position for a concurrent stash to disturb.
+    proc = run(["git", "stash", "create", message], cwd=ctx.path, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(detail)
+    return (proc.stdout or "").strip() or None
 
 
-def _restore_stash(ctx: RepoContext, stashed_sha: str) -> None:
-    # Apply by commit SHA, not reflog position: content-addressed, so a
-    # concurrent stash push landing anywhere in the list can't make this
-    # target the wrong entry.
-    apply_proc = run(
-        ["git", "stash", "apply", "--index", stashed_sha],
-        cwd=ctx.path,
-        check=False,
-    )
-    if apply_proc.returncode != 0:
-        detail = (apply_proc.stderr or apply_proc.stdout or "").strip()
-        ref = _find_stash_ref(ctx, stashed_sha)
-        location = f"{ref}, commit {stashed_sha}" if ref else f"commit {stashed_sha}"
-        raise DrainError(
-            f"Fast-forward succeeded, but restoring stashed local changes ({location}) "
-            "failed.\nYour changes remain in the stash; inspect `git stash list`."
-            + (f"\n{detail}" if detail else "")
+def _restore_snapshot(
+    ctx: RepoContext,
+    tracked_sha: str | None,
+    untracked: tuple[Path, list[str]] | None,
+) -> None:
+    problems = []
+    if tracked_sha is not None:
+        apply_proc = run(
+            ["git", "stash", "apply", "--index", tracked_sha],
+            cwd=ctx.path,
+            check=False,
         )
-
-    # Dropping the now-applied entry still requires git's positional
-    # stash@{N} syntax -- `git stash drop <sha>` is rejected outright, since
-    # drop (unlike apply) only resolves reflog selectors. Re-resolve the
-    # position as late as possible and verify afterward that this run's own
-    # commit is the one that actually disappeared, rather than trusting a
-    # stale position.
-    ref = _find_stash_ref(ctx, stashed_sha)
-    if ref is None:
+        if apply_proc.returncode != 0:
+            detail = (apply_proc.stderr or apply_proc.stdout or "").strip()
+            # The snapshot commit is otherwise unreferenced (and eligible for
+            # gc); store it under the shared stash list so it's discoverable
+            # through normal tooling now that we're handing off to a human.
+            run(
+                [
+                    "git",
+                    "stash",
+                    "store",
+                    "-m",
+                    f"drain-prs-autostash-recovery {tracked_sha}",
+                    tracked_sha,
+                ],
+                cwd=ctx.path,
+                check=False,
+            )
+            problems.append(
+                f"tracked changes (commit {tracked_sha}) could not be reapplied"
+                + (f": {detail}" if detail else "")
+                + "; recovered into `git stash list` for manual resolution"
+            )
+    if untracked is not None:
+        holding, paths = untracked
+        failures = _restore_untracked_files(ctx, holding, paths)
+        if failures:
+            problems.append(
+                f"untracked files could not be restored and remain at {holding}: "
+                + ", ".join(failures)
+            )
+    if problems:
         raise DrainError(
-            "Fast-forward succeeded and local changes were restored, but the "
-            f"stash entry (commit {stashed_sha}) could not be located to drop it; "
-            "it may need manual cleanup via `git stash list`."
-        )
-    run(["git", "stash", "drop", ref], cwd=ctx.path, check=False)
-    if _find_stash_ref(ctx, stashed_sha) is not None:
-        raise DrainError(
-            "Fast-forward succeeded and local changes were restored, but "
-            f"automatically dropping the stash entry ({ref}, commit {stashed_sha}) "
-            "failed; remove it manually via `git stash list` / `git stash drop`."
+            "Fast-forward succeeded, but restoring local changes failed:\n- "
+            + "\n- ".join(problems)
         )
 
 
@@ -1410,38 +1441,38 @@ def fast_forward_default_branch(
         try_ff()
         return
     except DrainError as ff_exc:
-        stash_name = f"drain-prs-autostash-{int(time.time())}-{os.getpid()}"
-        stash_proc = run(
-            [
-                "git",
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                stash_name,
-            ],
-            cwd=ctx.path,
-            check=False,
-        )
-        if stash_proc.returncode != 0:
-            detail = (
-                stash_proc.stderr or stash_proc.stdout or f"exit code {stash_proc.returncode}"
-            ).strip()
+        message = f"drain-prs-autostash-{int(time.time())}-{os.getpid()}"
+        untracked = None
+        tracked_sha = None
+        try:
+            untracked = _relocate_untracked_files(ctx)
+            tracked_sha = _snapshot_tracked_changes(ctx, message)
+            if tracked_sha is not None:
+                run(["git", "reset", "--hard", "HEAD"], cwd=ctx.path)
+        except DrainError as prep_exc:
+            if untracked is not None:
+                _restore_untracked_files(ctx, *untracked)
+            if tracked_sha is not None:
+                run(
+                    ["git", "stash", "store", "-m", message, tracked_sha],
+                    cwd=ctx.path,
+                    check=False,
+                )
             raise DrainError(
-                "Local changes blocked fast-forward, and stashing them failed; "
-                f"aborting.\n{detail}"
+                "Local changes blocked fast-forward, and preparing a temporary "
+                f"snapshot of them failed; aborting.\n{prep_exc}"
             ) from ff_exc
 
-        stashed_sha = _find_stash_by_message(ctx, stash_name)
-        if stashed_sha is None:
+        if tracked_sha is None and untracked is None:
             raise
+
         log("Local changes blocked fast-forward; stashed them temporarily")
         try:
             try_ff()
         except DrainError:
             raise
         finally:
-            _restore_stash(ctx, stashed_sha)
+            _restore_snapshot(ctx, tracked_sha, untracked)
 
 
 def cleanup_after_merge(

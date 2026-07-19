@@ -1,7 +1,8 @@
 """Integration tests for drain_prs.fast_forward_default_branch()'s stash
-safety: a failed stash must abort without popping, and restoration must
-target only the stash entry this run created -- never a pre-existing or
-concurrently created one -- against a real temporary Git repository.
+safety: a failed snapshot attempt must abort cleanly, and restoring local
+changes afterward must never read or write the shared `refs/stash` reflog
+that a concurrent `git stash` in another terminal also uses -- against a
+real temporary Git repository.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
@@ -97,6 +98,48 @@ class SuccessfulStashRestoreTest(_FastForwardStashFixture):
             (self.main / "shared.txt").read_text(encoding="utf-8"),
             "line1-updated\nline2\nline3-local\n",
         )
+        # This run never reads or writes the shared stash list on the
+        # success path, so the pre-existing user entry is untouched.
+        self.assertEqual(stash_shas(self.main), [user_stash_sha])
+
+
+class StagedAndUnstagedRestoreTest(_FastForwardStashFixture):
+    def test_staged_index_and_untracked_file_both_restored(self):
+        user_stash_sha = self._seed_unrelated_stash()
+
+        (self.main / "staged.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+        run_git(["commit", "-q", "-m", "add staged.txt"], cwd=self.main)
+        run_git(["push", "-q", "origin", "master"], cwd=self.main)
+
+        # A *staged* edit to a tracked file origin never touches...
+        (self.main / "staged.txt").write_text(
+            "alpha\nbeta-staged\ngamma\n", encoding="utf-8"
+        )
+        run_git(["add", "staged.txt"], cwd=self.main)
+        # ...plus a completely untracked new file.
+        (self.main / "new-tracked.txt").write_text("untracked-new-file\n", encoding="utf-8")
+
+        self._advance_origin_line1("line1-updated")
+
+        drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1-updated\nline2\nline3\n",
+        )
+        self.assertEqual(
+            (self.main / "staged.txt").read_text(encoding="utf-8"),
+            "alpha\nbeta-staged\ngamma\n",
+        )
+        staged_diff = run_git(
+            ["diff", "--cached", "--", "staged.txt"], cwd=self.main
+        ).stdout
+        self.assertIn("beta-staged", staged_diff)
+        self.assertEqual(
+            (self.main / "new-tracked.txt").read_text(encoding="utf-8"),
+            "untracked-new-file\n",
+        )
         self.assertEqual(stash_shas(self.main), [user_stash_sha])
 
 
@@ -121,9 +164,17 @@ class CleanTreeNoEntryTest(_FastForwardStashFixture):
         self.assertEqual(stash_shas(self.main), [])
 
 
-class StashCommandFailsTest(_FastForwardStashFixture):
-    def test_failed_stash_command_aborts_with_detail_and_no_pop(self):
+class SnapshotCommandFailsTest(_FastForwardStashFixture):
+    def test_failed_snapshot_aborts_with_detail_and_touches_no_stash(self):
         user_stash_sha = self._seed_unrelated_stash()
+
+        # A genuine dirty tracked edit, so `git stash create` actually has
+        # something to snapshot (and so hits the lock below) instead of
+        # short-circuiting on a clean tree.
+        lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
+        lines[2] = "line3-dirty"
+        (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
         self._advance_origin_line1("line1-updated")
         original_head = run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip()
 
@@ -134,7 +185,7 @@ class StashCommandFailsTest(_FastForwardStashFixture):
         with self.assertRaises(drain_prs.DrainError) as cm:
             drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
         message = str(cm.exception)
-        self.assertIn("stashing them failed", message)
+        self.assertIn("preparing a temporary snapshot", message)
         self.assertIn("index.lock", message)
 
         lock_path.unlink()
@@ -165,8 +216,8 @@ class SecondFastForwardStillFailsTest(_FastForwardStashFixture):
         self.assertEqual((self.main / "other.txt").read_text(encoding="utf-8"), "dirty\n")
 
 
-class ConflictingPopTest(_FastForwardStashFixture):
-    def test_conflicting_restore_names_entry_and_preserves_other_stashes(self):
+class ConflictingRestoreTest(_FastForwardStashFixture):
+    def test_conflicting_restore_recovers_snapshot_and_preserves_other_stashes(self):
         user_stash_sha = self._seed_unrelated_stash()
 
         (self.main / "shared.txt").write_text(
@@ -177,21 +228,22 @@ class ConflictingPopTest(_FastForwardStashFixture):
         with self.assertRaises(drain_prs.DrainError) as cm:
             drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
         message = str(cm.exception)
-        self.assertIn("restoring stashed local changes", message)
-        self.assertIn("stash@{", message)
+        self.assertIn("restoring local changes failed", message)
+        self.assertIn("recovered into `git stash list`", message)
 
         shas_after = stash_shas(self.main)
         self.assertEqual(len(shas_after), 2)
         self.assertIn(user_stash_sha, shas_after)
 
 
-class ConcurrentStashPushedBeforeRestorationTest(_FastForwardStashFixture):
-    """A user stash lands after this run's own stash was created but before
-    restoration begins -- e.g. between the second fast-forward attempt and
-    the `finally` block that restores it.
+class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):
+    """This run's own snapshot never touches refs/stash on the success path,
+    so a user stash pushed at any point during restoration -- before the
+    second fast-forward attempt, or interleaved with the restore itself --
+    can't collide with it in either direction.
     """
 
-    def test_restoration_targets_drainer_entry_despite_concurrent_user_stash(self):
+    def test_restoration_ignores_concurrent_user_stash_entirely(self):
         lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
         lines[2] = "line3-local"
         (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -228,75 +280,6 @@ class ConcurrentStashPushedBeforeRestorationTest(_FastForwardStashFixture):
             (self.main / "shared.txt").read_text(encoding="utf-8"),
             "line1-updated\nline2\nline3-local\n",
         )
-
-
-class ConcurrentStashPushedDuringDropTest(_FastForwardStashFixture):
-    """The narrowest window: a user stash lands after this run has already
-    resolved its own entry's reflog position but before the drop of that
-    position executes -- git's stash storage offers no atomic
-    resolve-and-remove-by-content primitive, so this can shift which entry
-    a positional drop actually removes. Content restoration (`apply` by
-    commit SHA) must still be correct regardless, and the drop must fail
-    loudly -- never silently report success -- when this happens.
-    """
-
-    def test_content_restored_and_drop_failure_reported_when_position_shifts(self):
-        lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
-        lines[2] = "line3-local"
-        (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self._advance_origin_line1("line1-updated")
-
-        real_run = drain_prs.run
-        state = {"concurrent_sha": None}
-
-        def fake_run(args, **kwargs):
-            if args[:3] == ["git", "stash", "drop"]:
-                cwd = kwargs["cwd"]
-                (Path(cwd) / "concurrent.txt").write_text(
-                    "concurrent\n", encoding="utf-8"
-                )
-                subprocess.run(
-                    ["git", "add", "concurrent.txt"], cwd=str(cwd), check=True
-                )
-                # Pathspec-limited so this concurrent push -- modeling another
-                # process entirely -- can't also scoop up this run's own
-                # already-applied-but-uncommitted restoration of shared.txt.
-                subprocess.run(
-                    [
-                        "git",
-                        "stash",
-                        "push",
-                        "-q",
-                        "-m",
-                        "user-concurrent",
-                        "--",
-                        "concurrent.txt",
-                    ],
-                    cwd=str(cwd),
-                    check=True,
-                )
-                state["concurrent_sha"] = stash_shas(cwd)[0]
-            return real_run(args, **kwargs)
-
-        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
-            with self.assertRaises(drain_prs.DrainError) as cm:
-                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
-        message = str(cm.exception)
-        self.assertIn("automatically dropping the stash entry", message)
-        self.assertIn("remove it manually", message)
-
-        # The restore itself (apply by commit SHA) is unaffected by the race:
-        # the working tree is correctly restored either way.
-        self.assertEqual(
-            (self.main / "shared.txt").read_text(encoding="utf-8"),
-            "line1-updated\nline2\nline3-local\n",
-        )
-        # The drop, resolved by stale position, removed the concurrently
-        # pushed entry instead of this run's own -- which is exactly the
-        # failure this test proves gets surfaced, not swallowed.
-        remaining = stash_shas(self.main)
-        self.assertEqual(len(remaining), 1)
-        self.assertNotIn(state["concurrent_sha"], remaining)
 
 
 if __name__ == "__main__":
