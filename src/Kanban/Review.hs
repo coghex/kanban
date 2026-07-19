@@ -20,6 +20,7 @@ module Kanban.Review
     answerReviewQuestion,
     approveReviewAction,
     beginIssueReview,
+    canonicalIssueReviewerPath,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -29,6 +30,7 @@ module Kanban.Review
     interruptReview,
     killReviewTools,
     renderCanonicalIssueReviewResult,
+    resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     runCanonicalIssueReview,
     sendReviewMessage,
@@ -72,6 +74,7 @@ import Kanban.Domain (Repository (..))
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hClose, hFlush, hIsEOF, hSetBuffering)
 import System.Process
@@ -362,16 +365,45 @@ reviewStageForLabels labels
     foldedLabels = map Text.toCaseFold labels
     hasLabel name = Text.toCaseFold name `elem` foldedLabels
 
+-- | The Kanban-managed install location for the vendored canonical
+-- issue-review backend (@tools\/approve_issues.py@), independent of which
+-- repository is under review — the same stable directory
+-- @tools\/install_issue_review.py@ populates in the same manner as the PR
+-- drainer installer. Overridable with @KANBAN_ISSUE_REVIEW_INSTALL_DIR@ for
+-- an alternate install or a test fixture.
+canonicalIssueReviewerPath :: IO FilePath
+canonicalIssueReviewerPath = do
+  override <- lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
+  case override of
+    Just installDir | not (null installDir) -> pure (installDir <> "/approve_issues.py")
+    _ -> do
+      home <- getHomeDirectory
+      pure (home <> "/Library/Application Support/kanban/issue-review/approve_issues.py")
+
+-- | Resolve the bundled canonical issue reviewer, failing with a
+-- remediation-oriented diagnostic when it has not been installed yet.
+resolveCanonicalIssueReviewer :: IO (Either Text FilePath)
+resolveCanonicalIssueReviewer = do
+  scriptPath <- canonicalIssueReviewerPath
+  scriptExists <- doesFileExist scriptPath
+  pure $
+    if scriptExists
+      then Right scriptPath
+      else
+        Left
+          ( "Canonical issue reviewer was not found at "
+              <> Text.pack scriptPath
+              <> ". Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
+          )
+
 runCanonicalIssueReview :: Repository -> Int -> ReviewStage -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)
 runCanonicalIssueReview repository issueNumber stage processStarted
   | stage == IssueRevision = pure (Left "Canonical issue review cannot perform specification revision")
   | otherwise = do
-      home <- getHomeDirectory
-      let scriptPath = home <> "/work/approve-issues.py"
-      scriptExists <- doesFileExist scriptPath
-      if not scriptExists
-        then pure (Left ("Canonical issue reviewer was not found at " <> Text.pack scriptPath))
-        else do
+      resolved <- resolveCanonicalIssueReviewer
+      case resolved of
+        Left message -> pure (Left message)
+        Right scriptPath -> do
           python <- findExecutable "python3"
           case python of
             Nothing -> pure (Left "python3 was not found on PATH")
@@ -1370,7 +1402,7 @@ reviewDeveloperInstructions :: Text
 reviewDeveloperInstructions =
   Text.unlines
     [ "You are the interactive issue-review and specification-revision coordinator embedded inside the Kanban terminal dashboard.",
-      "Never run ~/work/approve-issues.py, approve-issues.py from another path, or any background approval daemon.",
+      "Never run ~/work/approve-issues.py, the installed tools/approve_issues.py backend from any path, or any background approval daemon.",
       "Advance exactly ONE workflow stage per invocation. Do not edit repository files, edit the issue body, or implement the issue.",
       "All questions requiring user input MUST use the kanban_prompt_user tool. Never ask a question in ordinary assistant prose.",
       "Use kind=choice with 2-5 concrete options when possible. Set multiple=false and ask one decision per tool call. Use kind=text only for genuinely free-form context.",

@@ -7,7 +7,7 @@ import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (find, sortOn)
+import Data.List (find, isInfixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -75,6 +75,8 @@ import Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    canonicalIssueReviewerPath,
+    resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
@@ -1297,6 +1299,28 @@ main = hspec $ do
             "    • latest current review verdict is CHANGES_REQUESTED"
           ]
 
+    it "resolves the bundled canonical issue reviewer from its Kanban-managed install directory" $ do
+      temporaryRoot <- createTemporaryDirectory
+      let installDir = temporaryRoot </> "issue-review"
+          scriptPath = installDir </> "approve_issues.py"
+      withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installDir $ do
+        canonicalIssueReviewerPath `shouldReturn` scriptPath
+        missing <- resolveCanonicalIssueReviewer
+        case missing of
+          Left message -> do
+            message `shouldSatisfy` Data.Text.isInfixOf "was not found at"
+            message `shouldSatisfy` Data.Text.isInfixOf "tools/install_issue_review.py"
+          Right found -> expectationFailure ("expected a missing-backend diagnostic, got " <> found)
+        createDirectoryIfMissing True installDir
+        writeFile scriptPath "#!/usr/bin/env python3\n"
+        resolveCanonicalIssueReviewer `shouldReturn` Right scriptPath
+
+    it "resolves the bundled canonical issue reviewer without KANBAN_ISSUE_REVIEW_INSTALL_DIR requiring ~/work" $
+      withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" $ do
+        scriptPath <- canonicalIssueReviewerPath
+        scriptPath `shouldSatisfy` (not . isInfixOf "/work/approve-issues.py")
+        scriptPath `shouldSatisfy` isInfixOf "kanban/issue-review/approve_issues.py"
+
     it "validates standalone prompts for the authenticated Claude client tool" $ do
       decodeClaudeToolPrompt (object ["prompt" .= ("Review issue #844" :: Text)])
         `shouldBe` Right "Review issue #844"
@@ -1940,6 +1964,13 @@ withEnvironmentValue name value action =
   bracket
     (do previous <- lookupEnv name; setEnv name value; pure previous)
     (maybe (unsetEnv name) (setEnv name))
+    (const action)
+
+withoutEnvironmentValue :: String -> IO result -> IO result
+withoutEnvironmentValue name action =
+  bracket
+    (do previous <- lookupEnv name; unsetEnv name; pure previous)
+    (maybe (pure ()) (setEnv name))
     (const action)
 
 withManagedShell :: String -> (ProcessHandle -> IO result) -> IO result
