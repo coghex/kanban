@@ -61,9 +61,11 @@ import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    ReviewApproval (..),
     ReviewChoice (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
+    ReviewRequestId (..),
     ReviewResult (..),
     ReviewStage (..),
     ReviewWireMessage (..),
@@ -94,7 +96,7 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
-import Kanban.UI (pullRequestSessionReusable)
+import Kanban.UI (PendingReviewInteraction (..), ReviewDigitAction (..), pullRequestSessionReusable, resolveReviewDigitAction)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -1457,6 +1459,60 @@ main = hspec $ do
       pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
       -- forceFresh always starts a new session.
       pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
+
+  describe "review overlay digit dispatch" $ do
+    let requestId = ReviewRequestId (String "req-1")
+        choices = [ReviewChoice "keep" "Keep compatibility" "Preserve callers", ReviewChoice "break" "Break compatibility" ""]
+        textQuestion allowOther =
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "How many retries?",
+              reviewQuestionKind = QuestionText,
+              reviewQuestionChoices = [],
+              reviewQuestionAllowOther = allowOther,
+              reviewQuestionMultiple = False
+            }
+        choiceQuestion allowOther =
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "Which contract?",
+              reviewQuestionKind = QuestionChoice,
+              reviewQuestionChoices = choices,
+              reviewQuestionAllowOther = allowOther,
+              reviewQuestionMultiple = False
+            }
+        approval = ReviewApproval Nothing Nothing False
+
+    it "appends free-text digits instead of treating them as choice selections" $ do
+      -- A QuestionText pending interaction must take precedence over any
+      -- choices/allowOther it happens to carry (issue #3 spec addition).
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion False))) 2 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion True))) 8 `shouldBe` ReviewDigitAppend
+
+    it "selects an in-range choice by its 1-based digit" $ do
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 0
+        `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "keep" "Keep compatibility" "Preserve callers")
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 1
+        `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "break" "Break compatibility" "")
+
+    it "appends an out-of-range choice digit when free text is also accepted" $
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion True))) 5 `shouldBe` ReviewDigitAppend
+
+    it "reports an out-of-range choice digit unavailable when free text is not accepted" $
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 5
+        `shouldBe` ReviewDigitUnavailable "That review choice is not available"
+
+    it "keeps approval digit handling exactly as before" $ do
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 0 `shouldBe` ReviewDigitApprovalOnce requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 1 `shouldBe` ReviewDigitApprovalSession requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 2 `shouldBe` ReviewDigitApprovalDecline requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 5
+        `shouldBe` ReviewDigitUnavailable "That approval choice is not available"
+
+    it "appends digits when nothing is pending" $
+      resolveReviewDigitAction Nothing 4 `shouldBe` ReviewDigitAppend
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
