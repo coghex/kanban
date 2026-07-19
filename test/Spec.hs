@@ -1731,19 +1731,21 @@ main = hspec $ do
             -- deadline: the orphan-poll's own periodic census check can
             -- observe "empty" from that natural exit alone, independently
             -- of anything the watchdog does. This is the scenario
-            -- 'waitForOrphanResolution's deadline recheck guards against —
-            -- without it, a poll iteration landing at or just after the
-            -- deadline elapses could finalize on the stale pre-deadline
-            -- 'SolveCompleted' before the watchdog thread ever gets
-            -- scheduled to take over. In practice this test cannot force
-            -- that exact interleaving deterministically: 'refreshProcessCensus'
+            -- 'waitForOrphanResolution's 'watchdogAdjudicatedVar'
+            -- synchronization guards against — without it, a poll
+            -- iteration landing at or just after the deadline elapses
+            -- could finalize on the stale pre-deadline 'SolveCompleted'
+            -- before the watchdog thread ever gets scheduled to take
+            -- over. In practice this test cannot force that exact
+            -- interleaving deterministically: 'refreshProcessCensus'
             -- always shells out to a real 'ps' before either side reaches
-            -- its own decision point, and that real, blocking call reliably
-            -- gives the watchdog thread a scheduling opportunity to win
-            -- first, so this passes even without the fix. It is kept as a
-            -- characterization test — confirming an orphan-pending
-            -- completion still resolves correctly to the deadline outcome
-            -- once genuinely past it — rather than as a proof the fix is
+            -- its own decision point, and that real, blocking call
+            -- reliably gives the watchdog thread a scheduling opportunity
+            -- to win outright, so this passes even without the
+            -- synchronization fix. It is kept as a characterization test
+            -- — confirming an orphan-pending completion still resolves
+            -- correctly to the deadline outcome once genuinely past it —
+            -- rather than as a proof the fix is
             -- exercised.
             let completeThenOrphan _spec rememberProvider emit = do
                   rememberProvider managed
