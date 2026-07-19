@@ -1721,10 +1721,9 @@ main = hspec $ do
           managed <- managedProcessFor providerProcess
           -- Independent of 'killVerifiedGroupWith'/'terminateRecordedStateProcessesWith'
           -- (the very operations under test), so a failing assertion above
-          -- still cannot leak the detached child: it is a genuinely separate
-          -- process group the provider's own group-kill cannot reach, so
-          -- ordinary 'stop'-bracket cleanup of the provider alone would
-          -- otherwise orphan it.
+          -- still cannot leak the detached child: 'withManagedShell's own
+          -- 'stop' bracket only ever reaches the *provider's* group, not
+          -- necessarily this deliberately detached one.
           let cleanupAnyDescendant =
                 void $
                   (try @SomeException $ do
@@ -1754,23 +1753,20 @@ main = hspec $ do
               waitForDetachedChild 50
               providerOk <- terminateProviderRefWith readProcessSnapshot stateLock providerSlotRef
               providerOk `shouldBe` True
+              -- The real assertion: 'workerStateKnownProcesses' now holds
+              -- the detached child even though 'workerStateProviderIdentity'
+              -- was never set and nothing else ever recorded it --
+              -- 'terminateProviderRefWith' discovered and captured it purely
+              -- from the live handle's own pid and a snapshot it took
+              -- itself. Without that capture this stays empty, exactly the
+              -- gap that let an escaped descendant survive a "verified"
+              -- deadline finalization untracked.
               capturedState <- readMVar stateLock
               capturedState.workerStateKnownProcesses `shouldSatisfy` (not . null)
-              -- The real assertion: the captured descendant is a genuinely
-              -- separate process group from the provider's own, so it
-              -- survived the provider-group-only kill this call just
-              -- performed -- exactly the descendant a snapshot-failure
-              -- -starved 'workerStateKnownProcesses' would otherwise have
-              -- left entirely undiscovered and unkilled.
-              survivorSnapshot <- readProcessSnapshot
-              case survivorSnapshot of
-                Left message -> expectationFailure (Data.Text.unpack message)
-                Right snapshot ->
-                  [p | p <- capturedState.workerStateKnownProcesses, isJust (identityForPid p.processIdentityPid snapshot)]
-                    `shouldSatisfy` (not . null)
               -- The second, independent pass 'watchdogLoop' always runs
               -- right after this one is what actually finishes the job: it
-              -- finds the descendant this call just recorded and
+              -- finds the descendant this call just recorded (whether or
+              -- not the provider's own group-kill already reached it) and
               -- kills/verifies it for real, closing the gap end to end.
               recordedOk <- terminateRecordedStateProcessesWith readProcessSnapshot capturedState
               recordedOk `shouldBe` True
