@@ -12,7 +12,7 @@ module Kanban.Review
     ReviewOutputKind (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
-    ReviewRequestId,
+    ReviewRequestId (..),
     ReviewResult (..),
     ReviewStage (..),
     ReviewTurnOutcome (..),
