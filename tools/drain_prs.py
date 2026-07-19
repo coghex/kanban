@@ -1314,6 +1314,17 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
 
 
+def _git_dir(ctx: RepoContext) -> Path:
+    # Not ctx.path / ".git": for a linked worktree that's a gitdir *file*
+    # (a pointer to .git/worktrees/<name>), not a directory, so mkdtemp()
+    # under it would fail outright. This resolves the real one either way.
+    proc = run(["git", "rev-parse", "--absolute-git-dir"], cwd=ctx.path, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(f"Could not resolve the git directory for {ctx.path}:\n{detail}")
+    return Path((proc.stdout or "").strip())
+
+
 def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None:
     # Physically moved aside (never staged, stashed, or otherwise recorded in
     # any git ref) so a concurrent `git stash` in another terminal has
@@ -1329,7 +1340,7 @@ def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None
     paths = [p for p in (proc.stdout or "").split("\0") if p]
     if not paths:
         return None
-    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(ctx.path / ".git")))
+    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(_git_dir(ctx))))
     moved: list[str] = []
     try:
         for rel in paths:

@@ -400,5 +400,38 @@ class UntrackedRestoreRejectsSymlinkedParentTest(_FastForwardStashFixture):
         )
 
 
+class LinkedWorktreeGitDirTest(_FastForwardStashFixture):
+    """`<worktree>/.git` is a gitdir *file* (a pointer to
+    `.git/worktrees/<name>`), not a directory, in a linked worktree --
+    creating the holding directory under it outright must not assume
+    otherwise.
+    """
+
+    def test_untracked_relocation_works_in_a_linked_worktree(self):
+        # Free up `master` so the worktree can check it out.
+        run_git(["checkout", "-q", "--detach", "HEAD"], cwd=self.main)
+        worktree_dir = self.root / "linked-worktree"
+        run_git(["worktree", "add", "-q", str(worktree_dir), "master"], cwd=self.main)
+        self.assertFalse((worktree_dir / ".git").is_dir())
+        wt_ctx = drain_prs.RepoContext(worktree_dir, "example/project", "project", "master")
+
+        (worktree_dir / "shared.txt").write_text(
+            "line1\nline2\nline3-wt\n", encoding="utf-8"
+        )
+        (worktree_dir / "untracked.txt").write_text("wt-untracked\n", encoding="utf-8")
+
+        self._advance_origin_line1("line1-wt-updated")
+
+        drain_prs.fast_forward_default_branch(wt_ctx, dry_run=False)
+
+        self.assertEqual(
+            (worktree_dir / "shared.txt").read_text(encoding="utf-8"),
+            "line1-wt-updated\nline2\nline3-wt\n",
+        )
+        self.assertEqual(
+            (worktree_dir / "untracked.txt").read_text(encoding="utf-8"), "wt-untracked\n"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
