@@ -1,5 +1,8 @@
 module Kanban.UI
-  ( pullRequestSessionReusable,
+  ( PendingReviewInteraction (..),
+    ReviewDigitAction (..),
+    pullRequestSessionReusable,
+    resolveReviewDigitAction,
     runDashboard,
   )
 where
@@ -2094,19 +2097,46 @@ appendReviewInput character session =
 removeReviewInputCharacter :: ReviewSession -> ReviewSession
 removeReviewInputCharacter session = session {reviewSessionInput = Text.dropEnd 1 session.reviewSessionInput}
 
+-- | What a digit key '1'..'9' should do given the pending review
+-- interaction (if any) and the 0-based choice index it encodes. Pulled out
+-- of 'chooseReviewOption' so the dispatch rules are unit-testable without an
+-- 'EventM' harness.
+data ReviewDigitAction
+  = ReviewDigitAppend
+  | ReviewDigitSelectChoice ReviewRequestId ReviewChoice
+  | ReviewDigitApprovalOnce ReviewRequestId
+  | ReviewDigitApprovalSession ReviewRequestId
+  | ReviewDigitApprovalDecline ReviewRequestId
+  | ReviewDigitUnavailable Text
+  deriving stock (Eq, Show)
+
+resolveReviewDigitAction :: Maybe PendingReviewInteraction -> Int -> ReviewDigitAction
+resolveReviewDigitAction pending choiceIndex = case pending of
+  Just (PendingReviewQuestion requestId question)
+    | question.reviewQuestionKind == QuestionText -> ReviewDigitAppend
+    | otherwise -> case safeIndex choiceIndex question.reviewQuestionChoices of
+        Just choice -> ReviewDigitSelectChoice requestId choice
+        Nothing
+          | question.reviewQuestionAllowOther -> ReviewDigitAppend
+          | otherwise -> ReviewDigitUnavailable "That review choice is not available"
+  Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
+    0 -> ReviewDigitApprovalOnce requestId
+    1 -> ReviewDigitApprovalSession requestId
+    2 -> ReviewDigitApprovalDecline requestId
+    _ -> ReviewDigitUnavailable "That approval choice is not available"
+  Nothing -> ReviewDigitAppend
+
 chooseReviewOption :: Int -> Int -> EventM Name AppState ()
 chooseReviewOption issueNumber choiceIndex = do
   state <- get
-  case Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionPending) of
-    Just (PendingReviewQuestion requestId question) -> case safeIndex choiceIndex question.reviewQuestionChoices of
-      Nothing -> setNotice "That review choice is not available"
-      Just choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
-    Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
-      0 -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
-      1 -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
-      2 -> submitApprovalAnswer issueNumber requestId False False "Declined this action"
-      _ -> setNotice "That approval choice is not available"
-    Nothing -> modifyReviewSession issueNumber (appendReviewInput (toEnum (fromEnum '1' + choiceIndex)))
+  let pending = Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionPending)
+  case resolveReviewDigitAction pending choiceIndex of
+    ReviewDigitAppend -> modifyReviewSession issueNumber (appendReviewInput (toEnum (fromEnum '1' + choiceIndex)))
+    ReviewDigitSelectChoice requestId choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
+    ReviewDigitApprovalOnce requestId -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
+    ReviewDigitApprovalSession requestId -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
+    ReviewDigitApprovalDecline requestId -> submitApprovalAnswer issueNumber requestId False False "Declined this action"
+    ReviewDigitUnavailable message -> setNotice message
 
 submitReviewInput :: Int -> EventM Name AppState ()
 submitReviewInput issueNumber = do
