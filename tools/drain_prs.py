@@ -965,6 +965,11 @@ def select_matching_worktree(
                 head_sha = entry.get("HEAD")
                 if pr_head_oid and head_sha and head_sha == pr_head_oid:
                     detached_matches.append(path)
+                else:
+                    log(
+                        f"possible worktree for PR #{pr_number} at {path} — not "
+                        "verified, leaving in place"
+                    )
             continue
 
         base = path.name.lower()

@@ -414,16 +414,22 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
             {"worktree": "/work/detached", "detached": "", "HEAD": "ancestor0" * 5},
         ]
-        result = drain_prs.select_matching_worktree(
-            entries,
-            main_path=Path("/repo/main"),
-            repo_name="widgets",
-            branch_name="issue-9-fix",
-            issue_numbers=[],
-            pr_number=1,
-            pr_head_oid="deadbeef" * 5,
-        )
+        with mock.patch.object(drain_prs, "log") as mock_log:
+            result = drain_prs.select_matching_worktree(
+                entries,
+                main_path=Path("/repo/main"),
+                repo_name="widgets",
+                branch_name="issue-9-fix",
+                issue_numbers=[],
+                pr_number=1,
+                pr_head_oid="deadbeef" * 5,
+            )
         self.assertIsNone(result)
+        mock_log.assert_called_once()
+        message = mock_log.call_args[0][0]
+        self.assertIn("PR #1", message)
+        self.assertIn("/work/detached", message)
+        self.assertIn("not verified, leaving in place", message)
 
     def test_multiple_detached_exact_head_matches_raise(self):
         entries = [
@@ -447,32 +453,44 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
             {"worktree": "/work/detached-unknown", "detached": ""},
         ]
-        result = drain_prs.select_matching_worktree(
-            entries,
-            main_path=Path("/repo/main"),
-            repo_name="widgets",
-            branch_name="issue-9-fix",
-            issue_numbers=[9],
-            pr_number=1,
-            pr_head_oid="deadbeef" * 5,
-        )
+        with mock.patch.object(drain_prs, "log") as mock_log:
+            result = drain_prs.select_matching_worktree(
+                entries,
+                main_path=Path("/repo/main"),
+                repo_name="widgets",
+                branch_name="issue-9-fix",
+                issue_numbers=[9],
+                pr_number=1,
+                pr_head_oid="deadbeef" * 5,
+            )
         self.assertIsNone(result)
+        mock_log.assert_called_once()
+        message = mock_log.call_args[0][0]
+        self.assertIn("PR #1", message)
+        self.assertIn("/work/detached-unknown", message)
+        self.assertIn("not verified, leaving in place", message)
 
     def test_missing_pr_head_oid_treats_detached_candidate_as_unverified(self):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
             {"worktree": "/work/detached", "detached": "", "HEAD": "abc123"},
         ]
-        result = drain_prs.select_matching_worktree(
-            entries,
-            main_path=Path("/repo/main"),
-            repo_name="widgets",
-            branch_name="issue-9-fix",
-            issue_numbers=[],
-            pr_number=1,
-            pr_head_oid=None,
-        )
+        with mock.patch.object(drain_prs, "log") as mock_log:
+            result = drain_prs.select_matching_worktree(
+                entries,
+                main_path=Path("/repo/main"),
+                repo_name="widgets",
+                branch_name="issue-9-fix",
+                issue_numbers=[],
+                pr_number=1,
+                pr_head_oid=None,
+            )
         self.assertIsNone(result)
+        mock_log.assert_called_once()
+        message = mock_log.call_args[0][0]
+        self.assertIn("PR #1", message)
+        self.assertIn("/work/detached", message)
+        self.assertIn("not verified, leaving in place", message)
 
     def test_entry_missing_both_branch_and_detached_marker_is_not_matched(self):
         # A permissively parsed / malformed porcelain entry that lacks both
