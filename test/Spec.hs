@@ -1224,6 +1224,38 @@ main = hspec $ do
           terminalState <- waitForWorkerState statePath isTerminal 10
           terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
+    it "still fires the deadline outcome for an already-overdue workerCreatedAt when the task itself finishes immediately" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            longAgo = addUTCTime (-3600) now
+            spec = deadlineFixtureSpec repository (WorkerId "solve-810b-overdue-fast") 8102 longAgo 60
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-810b-overdue-fast.spec.json"
+            statePath = workerRoot </> "solve-810b-overdue-fast.state.json"
+            eventPath = workerRoot </> "solve-810b-overdue-fast.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          -- The task reports success essentially instantly, well before the
+          -- zero-delay watchdog thread is even guaranteed to have had its
+          -- first chance to run: thread-scheduling order has no relationship
+          -- to wall-clock deadline elapsed-ness, so a task finishing this
+          -- fast must not be able to claim a normal outcome ahead of an
+          -- already-overdue deadline just because it got scheduled first.
+          let finishInstantly _spec _rememberProvider emit = emit (WorkerFinished SolveCompleted)
+          result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot finishInstantly specPath)
+          result `shouldBe` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          eventBytes <- ByteString.readFile eventPath
+          eventBytes `shouldNotSatisfy` ByteString.isInfixOf "SolveCompleted"
+
     it "cancels a task stalled before any provider registers once the deadline fires, releasing the lease promptly" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
