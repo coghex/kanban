@@ -185,7 +185,12 @@ class ConflictingPopTest(_FastForwardStashFixture):
         self.assertIn(user_stash_sha, shas_after)
 
 
-class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):
+class ConcurrentStashPushedBeforeRestorationTest(_FastForwardStashFixture):
+    """A user stash lands after this run's own stash was created but before
+    restoration begins -- e.g. between the second fast-forward attempt and
+    the `finally` block that restores it.
+    """
+
     def test_restoration_targets_drainer_entry_despite_concurrent_user_stash(self):
         lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
         lines[2] = "line3-local"
@@ -223,6 +228,75 @@ class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):
             (self.main / "shared.txt").read_text(encoding="utf-8"),
             "line1-updated\nline2\nline3-local\n",
         )
+
+
+class ConcurrentStashPushedDuringDropTest(_FastForwardStashFixture):
+    """The narrowest window: a user stash lands after this run has already
+    resolved its own entry's reflog position but before the drop of that
+    position executes -- git's stash storage offers no atomic
+    resolve-and-remove-by-content primitive, so this can shift which entry
+    a positional drop actually removes. Content restoration (`apply` by
+    commit SHA) must still be correct regardless, and the drop must fail
+    loudly -- never silently report success -- when this happens.
+    """
+
+    def test_content_restored_and_drop_failure_reported_when_position_shifts(self):
+        lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
+        lines[2] = "line3-local"
+        (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self._advance_origin_line1("line1-updated")
+
+        real_run = drain_prs.run
+        state = {"concurrent_sha": None}
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "drop"]:
+                cwd = kwargs["cwd"]
+                (Path(cwd) / "concurrent.txt").write_text(
+                    "concurrent\n", encoding="utf-8"
+                )
+                subprocess.run(
+                    ["git", "add", "concurrent.txt"], cwd=str(cwd), check=True
+                )
+                # Pathspec-limited so this concurrent push -- modeling another
+                # process entirely -- can't also scoop up this run's own
+                # already-applied-but-uncommitted restoration of shared.txt.
+                subprocess.run(
+                    [
+                        "git",
+                        "stash",
+                        "push",
+                        "-q",
+                        "-m",
+                        "user-concurrent",
+                        "--",
+                        "concurrent.txt",
+                    ],
+                    cwd=str(cwd),
+                    check=True,
+                )
+                state["concurrent_sha"] = stash_shas(cwd)[0]
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            with self.assertRaises(drain_prs.DrainError) as cm:
+                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+        message = str(cm.exception)
+        self.assertIn("automatically dropping the stash entry", message)
+        self.assertIn("remove it manually", message)
+
+        # The restore itself (apply by commit SHA) is unaffected by the race:
+        # the working tree is correctly restored either way.
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1-updated\nline2\nline3-local\n",
+        )
+        # The drop, resolved by stale position, removed the concurrently
+        # pushed entry instead of this run's own -- which is exactly the
+        # failure this test proves gets surfaced, not swallowed.
+        remaining = stash_shas(self.main)
+        self.assertEqual(len(remaining), 1)
+        self.assertNotIn(state["concurrent_sha"], remaining)
 
 
 if __name__ == "__main__":

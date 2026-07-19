@@ -1313,30 +1313,80 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
 
 
-def _stash_top_sha(ctx: RepoContext) -> str | None:
+def _stash_entries(ctx: RepoContext) -> list[tuple[str, str, str]]:
     proc = run(
-        ["git", "rev-parse", "-q", "--verify", "refs/stash"],
+        ["git", "stash", "list", "--format=%H%x09%gd%x09%gs"],
         cwd=ctx.path,
         check=False,
     )
     if proc.returncode != 0:
-        return None
-    return proc.stdout.strip()
+        return []
+    entries = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            entries.append((parts[0], parts[1], parts[2]))
+    return entries
+
+
+def _find_stash_by_message(ctx: RepoContext, marker: str) -> str | None:
+    # The marker is embedded in the stash commit's subject by `stash push -m`
+    # at creation time, so a match identifies this run's own entry no matter
+    # what else has been pushed onto (or popped off) the shared stash list
+    # since -- unlike the reflog position, it can never point at someone
+    # else's entry.
+    for sha, _ref, subject in _stash_entries(ctx):
+        if marker in subject:
+            return sha
+    return None
 
 
 def _find_stash_ref(ctx: RepoContext, stash_sha: str) -> str | None:
-    proc = run(
-        ["git", "stash", "list", "--format=%H %gd"],
+    for sha, ref, _subject in _stash_entries(ctx):
+        if sha == stash_sha:
+            return ref
+    return None
+
+
+def _restore_stash(ctx: RepoContext, stashed_sha: str) -> None:
+    # Apply by commit SHA, not reflog position: content-addressed, so a
+    # concurrent stash push landing anywhere in the list can't make this
+    # target the wrong entry.
+    apply_proc = run(
+        ["git", "stash", "apply", "--index", stashed_sha],
         cwd=ctx.path,
         check=False,
     )
-    if proc.returncode != 0:
-        return None
-    for line in (proc.stdout or "").splitlines():
-        sha, _, ref = line.partition(" ")
-        if sha == stash_sha:
-            return ref.strip()
-    return None
+    if apply_proc.returncode != 0:
+        detail = (apply_proc.stderr or apply_proc.stdout or "").strip()
+        ref = _find_stash_ref(ctx, stashed_sha)
+        location = f"{ref}, commit {stashed_sha}" if ref else f"commit {stashed_sha}"
+        raise DrainError(
+            f"Fast-forward succeeded, but restoring stashed local changes ({location}) "
+            "failed.\nYour changes remain in the stash; inspect `git stash list`."
+            + (f"\n{detail}" if detail else "")
+        )
+
+    # Dropping the now-applied entry still requires git's positional
+    # stash@{N} syntax -- `git stash drop <sha>` is rejected outright, since
+    # drop (unlike apply) only resolves reflog selectors. Re-resolve the
+    # position as late as possible and verify afterward that this run's own
+    # commit is the one that actually disappeared, rather than trusting a
+    # stale position.
+    ref = _find_stash_ref(ctx, stashed_sha)
+    if ref is None:
+        raise DrainError(
+            "Fast-forward succeeded and local changes were restored, but the "
+            f"stash entry (commit {stashed_sha}) could not be located to drop it; "
+            "it may need manual cleanup via `git stash list`."
+        )
+    run(["git", "stash", "drop", ref], cwd=ctx.path, check=False)
+    if _find_stash_ref(ctx, stashed_sha) is not None:
+        raise DrainError(
+            "Fast-forward succeeded and local changes were restored, but "
+            f"automatically dropping the stash entry ({ref}, commit {stashed_sha}) "
+            "failed; remove it manually via `git stash list` / `git stash drop`."
+        )
 
 
 def fast_forward_default_branch(
@@ -1360,8 +1410,7 @@ def fast_forward_default_branch(
         try_ff()
         return
     except DrainError as ff_exc:
-        before_sha = _stash_top_sha(ctx)
-        stash_name = f"drain-prs-autostash-{int(time.time())}"
+        stash_name = f"drain-prs-autostash-{int(time.time())}-{os.getpid()}"
         stash_proc = run(
             [
                 "git",
@@ -1383,8 +1432,8 @@ def fast_forward_default_branch(
                 f"aborting.\n{detail}"
             ) from ff_exc
 
-        stashed_sha = _stash_top_sha(ctx)
-        if stashed_sha is None or stashed_sha == before_sha:
+        stashed_sha = _find_stash_by_message(ctx, stash_name)
+        if stashed_sha is None:
             raise
         log("Local changes blocked fast-forward; stashed them temporarily")
         try:
@@ -1392,21 +1441,7 @@ def fast_forward_default_branch(
         except DrainError:
             raise
         finally:
-            stash_ref = _find_stash_ref(ctx, stashed_sha)
-            if stash_ref is None:
-                raise DrainError(
-                    "Fast-forward succeeded, but the stashed local changes "
-                    f"(commit {stashed_sha}) could not be located for restoration.\n"
-                    "Inspect `git stash list`."
-                )
-            try:
-                run(["git", "stash", "pop", stash_ref], cwd=ctx.path)
-            except DrainError as exc:
-                raise DrainError(
-                    "Fast-forward succeeded, but restoring stashed local changes "
-                    f"({stash_ref}, commit {stashed_sha}) failed.\n"
-                    "Your changes remain in the stash; inspect `git stash list`."
-                ) from exc
+            _restore_stash(ctx, stashed_sha)
 
 
 def cleanup_after_merge(
