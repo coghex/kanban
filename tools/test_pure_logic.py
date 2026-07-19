@@ -392,7 +392,11 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
     ):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
-            {"worktree": "/work/totally-unrelated-name", "HEAD": "deadbeef" * 5},
+            {
+                "worktree": "/work/totally-unrelated-name",
+                "detached": "",
+                "HEAD": "deadbeef" * 5,
+            },
         ]
         result = drain_prs.select_matching_worktree(
             entries,
@@ -408,7 +412,7 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
     def test_detached_worktree_with_non_matching_head_does_not_match(self):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
-            {"worktree": "/work/detached", "HEAD": "ancestor0" * 5},
+            {"worktree": "/work/detached", "detached": "", "HEAD": "ancestor0" * 5},
         ]
         result = drain_prs.select_matching_worktree(
             entries,
@@ -424,8 +428,8 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
     def test_multiple_detached_exact_head_matches_raise(self):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
-            {"worktree": "/work/a", "HEAD": "deadbeef" * 5},
-            {"worktree": "/work/b", "HEAD": "deadbeef" * 5},
+            {"worktree": "/work/a", "detached": "", "HEAD": "deadbeef" * 5},
+            {"worktree": "/work/b", "detached": "", "HEAD": "deadbeef" * 5},
         ]
         with self.assertRaises(drain_prs.DrainError):
             drain_prs.select_matching_worktree(
@@ -441,7 +445,7 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
     def test_detached_entry_missing_head_field_is_unverified(self):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
-            {"worktree": "/work/detached-unknown"},
+            {"worktree": "/work/detached-unknown", "detached": ""},
         ]
         result = drain_prs.select_matching_worktree(
             entries,
@@ -457,7 +461,7 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
     def test_missing_pr_head_oid_treats_detached_candidate_as_unverified(self):
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
-            {"worktree": "/work/detached", "HEAD": "abc123"},
+            {"worktree": "/work/detached", "detached": "", "HEAD": "abc123"},
         ]
         result = drain_prs.select_matching_worktree(
             entries,
@@ -467,6 +471,26 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
             issue_numbers=[],
             pr_number=1,
             pr_head_oid=None,
+        )
+        self.assertIsNone(result)
+
+    def test_entry_missing_both_branch_and_detached_marker_is_not_matched(self):
+        # A permissively parsed / malformed porcelain entry that lacks both
+        # "branch" and the explicit "detached" marker must never be treated
+        # as a positively identified detached worktree, even if its "HEAD"
+        # happens to equal the PR head SHA.
+        entries = [
+            {"worktree": "/repo/main", "branch": "refs/heads/master"},
+            {"worktree": "/work/malformed", "HEAD": "deadbeef" * 5},
+        ]
+        result = drain_prs.select_matching_worktree(
+            entries,
+            main_path=Path("/repo/main"),
+            repo_name="widgets",
+            branch_name="issue-9-fix",
+            issue_numbers=[],
+            pr_number=1,
+            pr_head_oid="deadbeef" * 5,
         )
         self.assertIsNone(result)
 

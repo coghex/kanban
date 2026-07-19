@@ -957,9 +957,14 @@ def select_matching_worktree(
             return path
 
         if branch_ref is None:
-            head_sha = entry.get("HEAD")
-            if pr_head_oid and head_sha and head_sha == pr_head_oid:
-                detached_matches.append(path)
+            # Only the explicit porcelain "detached" marker positively
+            # establishes detached state; an entry missing both "branch"
+            # and "detached" is malformed/undetermined and must not be
+            # eligible for the exact-HEAD match either.
+            if "detached" in entry:
+                head_sha = entry.get("HEAD")
+                if pr_head_oid and head_sha and head_sha == pr_head_oid:
+                    detached_matches.append(path)
             continue
 
         base = path.name.lower()
