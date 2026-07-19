@@ -23,12 +23,14 @@ module Kanban.Worker
     monitorWorker,
     pendingTerminationDiagnosticPrefix,
     readWorkerState,
+    recordLaunchedSupervisorIdentity,
     recoverIfWorkerStoppedWith,
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
     terminateWorker,
     terminateWorkerWith,
+    waitForWorkerStart,
   )
 where
 
@@ -62,6 +64,7 @@ import Kanban.Process
     killManagedProcess,
     killVerifiedGroupWith,
     liveProcessesWith,
+    managedProcess,
     managedProcessPid,
     matchingIdentities,
     readProcessSnapshot,
@@ -88,7 +91,7 @@ import System.IO (BufferMode (LineBuffering), IOMode (AppendMode), hClose, hSetB
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (Handler (Catch), installHandler, sigINT, sigKILL, sigTERM, signalProcessGroup)
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream), createProcess, getProcessExitCode, proc, terminateProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream), createProcess, getPid, getProcessExitCode, proc)
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
@@ -189,10 +192,24 @@ instance FromJSON WorkerState where
 
 data WorkerLease = WorkerLease
   { workerLeaseId :: WorkerId,
-    workerLeaseCreatedAt :: UTCTime
+    workerLeaseCreatedAt :: UTCTime,
+    -- | The freshly spawned supervisor's identity, recorded as soon as it is
+    -- known (see 'recordLaunchedSupervisorIdentity'). Durable so a recovery
+    -- pass reached before any worker state file exists — the only other
+    -- place a supervisor's identity would otherwise be recorded — can still
+    -- tell a live pre-state supervisor from a dead one instead of guessing
+    -- from elapsed time alone.
+    workerLeaseSupervisorIdentity :: Maybe ProcessIdentity
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+instance FromJSON WorkerLease where
+  parseJSON = withObject "WorkerLease" $ \object ->
+    WorkerLease
+      <$> object .: "workerLeaseId"
+      <*> object .: "workerLeaseCreatedAt"
+      <*> object .:? "workerLeaseSupervisorIdentity" .!= Nothing
 
 data WorkerEnvelope = WorkerEnvelope
   { workerEnvelopeTimestamp :: UTCTime,
@@ -281,9 +298,26 @@ launchWorker spec = do
               releaseWorkerLease descriptor
               pure (Left ("could not start persistent worker: " <> Text.pack (show exception)))
             Right (_, _, _, processHandle) -> do
+              recordLaunchedSupervisorIdentity descriptor processHandle
               result <- waitForWorkerStart descriptor processHandle workerStartupAttempts
               case result of
-                Left _ -> acknowledgeWorker descriptor >> releaseWorkerLease descriptor
+                Left _ -> do
+                  acknowledgeWorker descriptor
+                  -- 'waitForWorkerStart' has already escalated and polled a
+                  -- stalled supervisor to a confirmed exit by the time it
+                  -- returns 'Left'; a single TERM is not enough to safely
+                  -- release here, because the supervisor's own TERM handler
+                  -- only stops the work it owns so far (see
+                  -- 'runWorkerWith'), not a long-running task already under
+                  -- way such as the worktree git operations 'runSolve'
+                  -- performs before any provider starts. If exit still
+                  -- could not be confirmed, the lease is left in place for
+                  -- ordinary stale-lease recovery rather than released over
+                  -- a possibly-live supervisor.
+                  exitCode <- getProcessExitCode processHandle
+                  case exitCode of
+                    Just _ -> releaseWorkerLease descriptor
+                    Nothing -> pure ()
                 Right _ -> pure ()
               pure result
 
@@ -300,7 +334,8 @@ acquireWorkerLease descriptor = attempt workerLeaseAttempts
               descriptor.workerDescriptorLeaseOwnerPath
               WorkerLease
                 { workerLeaseId = descriptor.workerDescriptorSpec.workerId,
-                  workerLeaseCreatedAt = descriptor.workerDescriptorSpec.workerCreatedAt
+                  workerLeaseCreatedAt = descriptor.workerDescriptorSpec.workerCreatedAt,
+                  workerLeaseSupervisorIdentity = Nothing
                 }
           case written of
             Right () -> pure (Right ())
@@ -324,6 +359,7 @@ leaseIsActive :: WorkerDescriptor -> IO Bool
 leaseIsActive descriptor = do
   leaseResult <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
   case leaseResult of
+    Left _ -> leaseIsRecent descriptor
     Right lease -> do
       let ownerBase = takeDirectory descriptor.workerDescriptorLeasePath </> Text.unpack lease.workerLeaseId.unWorkerId
           statePath = ownerBase <> ".state.json"
@@ -331,32 +367,74 @@ leaseIsActive descriptor = do
       stateResult <- decodeFile statePath :: IO (Either Text WorkerState)
       case stateResult of
         Right state -> case state.workerStateStatus of
-          WorkerTerminal _ -> pure False
-          -- Orphaned means a recorded descendant has not yet been confirmed
-          -- gone, regardless of whether the supervisor itself is still
-          -- alive: a dead supervisor here must never retire the lease and
-          -- let a replacement worker start alongside that unverified
-          -- descendant.
-          WorkerOrphaned _ -> pure True
-          _ -> case state.workerStateWorkerIdentity of
-            -- An unverified identity (a pre-identity state file) must never
-            -- authorize retiring a lease that might still be live: fail
-            -- closed as active rather than risk a concurrent worker.
-            Nothing -> pure True
-            Just workerIdentity -> do
-              presence <- checkIdentityPresenceWith defaultProcessSnapshot [workerIdentity]
-              case presence of
-                IdentityPresent -> pure True
-                IdentitySnapshotFailed _ -> pure True
-                IdentityAbsent -> do
-                  -- The supervisor is confirmed gone, but if it never got to
-                  -- signal a pending user termination (recorded only in this
-                  -- marker file, not the state it stopped updating), that
-                  -- termination's recorded descendants are still unverified:
-                  -- never retire the lease out from under them.
-                  doesFileExist pendingTerminationPath
-        Left _ -> leaseIsRecent descriptor
-    Left _ -> leaseIsRecent descriptor
+          -- Every path that writes WorkerTerminal has already verified zero
+          -- surviving identities before doing so, so this is normally
+          -- redundant; it is still re-checked (rather than trusted
+          -- unconditionally) so a live identity match at this exact moment —
+          -- e.g. a PID somehow reused with the same recorded start time in
+          -- the narrow window right after that verified write — still blocks
+          -- a relaunch instead of racing it. Every recorded identity is
+          -- consulted, not only the supervisor's, since a terminal write
+          -- clears the supervisor's own fields on some paths while a
+          -- provider or other descendant identity can still be present in
+          -- 'workerStateKnownProcesses'; only when nothing at all is
+          -- recorded is there nothing left to re-verify.
+          WorkerTerminal _ -> do
+            let identities = catMaybes [state.workerStateWorkerIdentity, state.workerStateProviderIdentity] <> state.workerStateKnownProcesses
+            if null identities
+              then pure False
+              else do
+                presence <- checkIdentityPresenceWith defaultProcessSnapshot identities
+                pure (presence /= IdentityAbsent)
+          -- Every other status — including Orphaned — is judged by whether
+          -- any durably recorded identity for this worker still matches a
+          -- process, not by the status label alone: a blanket "Orphaned is
+          -- always active" would block a same-issue relaunch forever once a
+          -- confirmed-gone orphan's supervisor also died without writing a
+          -- terminal state, and checking only the supervisor's identity for
+          -- every other status would let a relaunch start alongside a live
+          -- provider or other recorded descendant whose supervisor happened
+          -- to already be gone.
+          _ -> recordedIdentitiesActive state pendingTerminationPath
+        Left _ -> do
+          -- No state file has been written yet: fall back to the
+          -- supervisor's identity recorded directly on the lease at launch.
+          -- Unlike every other fallback in this function, there is no
+          -- elapsed-time escape hatch here: elapsed time cannot distinguish
+          -- a still-slow-but-alive supervisor from a dead one, and the
+          -- one-live-worker invariant must hold even in the rare case where
+          -- identity capture itself never succeeds — a lease that can never
+          -- be proven dead stays active rather than risk a concurrent
+          -- worker.
+          presence <- supervisorLaunchIdentityPresenceWith defaultProcessSnapshot descriptor
+          pure (presence /= Just IdentityAbsent)
+
+-- | A lease stays active while any durably recorded identity for its
+-- worker — the supervisor itself, its provider, or any other recorded
+-- descendant — still matches a fresh process snapshot: the one-live-worker
+-- invariant covers the whole recorded process tree, not merely the
+-- supervisor, so a descendant surviving a dead supervisor (mid-orphan-wait,
+-- or a supervisor that died without a terminal write) must still block a
+-- same-issue relaunch.
+recordedIdentitiesActive :: WorkerState -> FilePath -> IO Bool
+recordedIdentitiesActive state pendingTerminationPath = case state.workerStateWorkerIdentity of
+  -- An unverified identity (a pre-identity state file) must never authorize
+  -- retiring a lease that might still be live: fail closed as active rather
+  -- than risk a concurrent worker.
+  Nothing -> pure True
+  Just workerIdentity -> do
+    let identities = workerIdentity : maybe [] (: []) state.workerStateProviderIdentity <> state.workerStateKnownProcesses
+    presence <- checkIdentityPresenceWith defaultProcessSnapshot identities
+    case presence of
+      IdentityPresent -> pure True
+      IdentitySnapshotFailed _ -> pure True
+      IdentityAbsent -> do
+        -- Every recorded identity is confirmed gone, but if the supervisor
+        -- never got to signal a pending user termination (recorded only in
+        -- this marker file, not the state it stopped updating), that
+        -- termination's recorded descendants are still unverified: never
+        -- retire the lease out from under them.
+        doesFileExist pendingTerminationPath
 
 leaseIsRecent :: WorkerDescriptor -> IO Bool
 leaseIsRecent descriptor = do
@@ -570,20 +648,38 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
   stateResult <- readWorkerState descriptor
   case stateResult of
     Left _ -> do
-      now <- getCurrentTime
-      if diffUTCTime now spec.workerCreatedAt < workerMissingStateGraceSeconds
-        then pure False
-        else do
-          let message = "persistent worker never published its initial state"
-          releaseWorkerLease descriptor
-          eventSink spec.workerId spec (WorkerDiagnostic message)
-          eventSink spec.workerId spec (WorkerFinished (SolveFailed message))
-          pure True
+      -- No state file exists yet to consult for the supervisor's identity;
+      -- fall back to the identity recorded directly on the lease at launch
+      -- (see 'recordLaunchedSupervisorIdentity'), which is available to
+      -- this independent recovery pass exactly because the state file is
+      -- not. Unlike the prior elapsed-time heuristic this replaces, there is
+      -- no time-based escape hatch: elapsed time cannot distinguish a
+      -- still-slow-but-alive supervisor from a dead one, so a launch whose
+      -- identity was never recorded (a legacy lease, or best-effort capture
+      -- that never succeeded) is left pending rather than finalized on a
+      -- guess.
+      identityPresence <- supervisorLaunchIdentityPresenceWith takeSnapshot descriptor
+      case identityPresence of
+        Just IdentityAbsent -> finalizeMissingState
+        _ -> pure False
     Right state -> case state.workerStateStatus of
+      -- Mirrors leaseIsActive's own re-check for WorkerTerminal: every path
+      -- that writes it has already verified zero survivors, so this is
+      -- normally immediate, but releasing here unconditionally would be the
+      -- one place in this module that trusts the status label over a
+      -- recorded identity. A live match (e.g. this pass racing the narrow
+      -- window between the terminal write and the writer's own release)
+      -- leaves the lease untouched and lets the monitor loop retry rather
+      -- than free it out from under something still recorded as present.
       WorkerTerminal outcome -> do
-        releaseWorkerLease descriptor
-        eventSink spec.workerId spec (WorkerFinished outcome)
-        pure True
+        let identities = catMaybes [state.workerStateWorkerIdentity, state.workerStateProviderIdentity] <> state.workerStateKnownProcesses
+        presence <- if null identities then pure IdentityAbsent else checkIdentityPresenceWith takeSnapshot identities
+        case presence of
+          IdentityAbsent -> do
+            releaseWorkerLease descriptor
+            eventSink spec.workerId spec (WorkerFinished outcome)
+            pure True
+          _ -> pure False
       _ -> do
         now <- getCurrentTime
         if diffUTCTime now state.workerStateHeartbeatAt < workerStaleHeartbeatSeconds
@@ -631,6 +727,16 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
                       pure True
   where
     spec = descriptor.workerDescriptorSpec
+    -- Reached only once the supervisor is either confirmed absent by its
+    -- durably recorded launch identity or, lacking that, has outlived the
+    -- elapsed-time grace window: no state file ever appeared, so nothing
+    -- was ever started to terminate beyond the lease itself.
+    finalizeMissingState = do
+      let message = "persistent worker never published its initial state"
+      releaseWorkerLease descriptor
+      eventSink spec.workerId spec (WorkerDiagnostic message)
+      eventSink spec.workerId spec (WorkerFinished (SolveFailed message))
+      pure True
     -- A pending user termination ('terminateWorkerWith' left it unverified)
     -- is retried here even while the supervisor's heartbeat is still fresh,
     -- since an unverified termination never signaled the supervisor and it
@@ -669,11 +775,87 @@ waitForWorkerStart descriptor processHandle attempts = do
         Just code -> pure (Left ("persistent worker exited before initialization: " <> Text.pack (show code)))
         Nothing
           | attempts <= 0 -> do
-              terminateProcess processHandle
+              -- A single TERM is not sufficient to safely hand this worktree
+              -- to a replacement worker: the supervisor's own TERM handler
+              -- only stops the work it owns so far, not a task already in
+              -- flight (see 'runWorkerWith'), so this escalates to SIGKILL
+              -- and polls for a confirmed exit before giving up on it.
+              void (confirmStalledSupervisorStopped processHandle)
               pure (Left "persistent worker did not initialize within three seconds")
           | otherwise -> do
+              -- Retried on every poll, not just once at spawn: recovery
+              -- paths reached after this launcher itself is gone (see
+              -- 'supervisorLaunchIdentityPresenceWith') have no other way to
+              -- learn this supervisor's identity, so this gives a transient
+              -- snapshot failure the whole startup window to resolve rather
+              -- than one attempt.
+              recordLaunchedSupervisorIdentity descriptor processHandle
               threadDelay workerStartupIntervalMicros
               waitForWorkerStart descriptor processHandle (attempts - 1)
+
+-- | Escalates a startup-stalled supervisor to a confirmed exit rather than
+-- merely signalling it, so the caller can tell "definitely dead, safe to
+-- release its lease" from "could not confirm, leave the lease for ordinary
+-- stale-lease recovery" ('getProcessExitCode' after this call reflects
+-- which case applied).
+confirmStalledSupervisorStopped :: ProcessHandle -> IO Bool
+confirmStalledSupervisorStopped processHandle = do
+  (managed, _) <- managedProcess processHandle
+  killManagedProcess managed
+  pollExit workerTerminationAttempts
+  where
+    pollExit attempts = do
+      exitCode <- getProcessExitCode processHandle
+      case exitCode of
+        Just _ -> pure True
+        Nothing
+          | attempts <= 0 -> pure False
+          | otherwise -> threadDelay workerTerminationPollMicros >> pollExit (attempts - 1)
+
+-- | Durably records the freshly spawned supervisor's identity onto the
+-- lease this launch already holds, so a later recovery pass with no other
+-- way to learn its PID — its own state file may never appear, e.g. a slow
+-- or crashed start — can still tell a live supervisor from a dead one
+-- instead of guessing from elapsed time alone. Best-effort and idempotent:
+-- a snapshot or lookup failure just leaves the lease without an identity
+-- for this attempt (the caller retries across the whole startup window
+-- rather than giving up after one), and a lease that already carries an
+-- identity is left untouched rather than rewritten on every poll.
+recordLaunchedSupervisorIdentity :: WorkerDescriptor -> ProcessHandle -> IO ()
+recordLaunchedSupervisorIdentity descriptor processHandle = do
+  existing <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
+  case existing of
+    Right lease
+      | lease.workerLeaseId == descriptor.workerDescriptorSpec.workerId,
+        Nothing <- lease.workerLeaseSupervisorIdentity -> do
+          maybePid <- getPid processHandle
+          case maybePid of
+            Nothing -> pure ()
+            Just pid -> do
+              snapshotResult <- defaultProcessSnapshot
+              case snapshotResult of
+                Left _ -> pure ()
+                Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
+                  Nothing -> pure ()
+                  Just identity -> void (writePrivateJson descriptor.workerDescriptorLeaseOwnerPath lease {workerLeaseSupervisorIdentity = Just identity})
+    _ -> pure ()
+
+-- | Whether the freshly launched supervisor identity durably recorded on
+-- this lease (see 'recordLaunchedSupervisorIdentity') still matches a
+-- process, for recovery paths reached before any worker state file exists
+-- to consult instead. 'Nothing' means no identity was ever recorded (a
+-- legacy lease predating this field, or a launch whose best-effort
+-- recording failed), so the caller falls back to its own existing
+-- time-based heuristic rather than guessing from a signal that was never
+-- captured.
+supervisorLaunchIdentityPresenceWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> IO (Maybe IdentityPresence)
+supervisorLaunchIdentityPresenceWith takeSnapshot descriptor = do
+  leaseResult <- decodeFile descriptor.workerDescriptorLeaseOwnerPath :: IO (Either Text WorkerLease)
+  case leaseResult of
+    Left _ -> pure Nothing
+    Right lease -> case lease.workerLeaseSupervisorIdentity of
+      Nothing -> pure Nothing
+      Just identity -> Just <$> checkIdentityPresenceWith takeSnapshot [identity]
 
 discoverWorkers :: Repository -> IO [WorkerDescriptor]
 discoverWorkers repository = do
@@ -1131,9 +1313,6 @@ workerStartupIntervalMicros = 50 * 1000
 
 workerStaleHeartbeatSeconds :: NominalDiffTime
 workerStaleHeartbeatSeconds = 20
-
-workerMissingStateGraceSeconds :: NominalDiffTime
-workerMissingStateGraceSeconds = 10
 
 workerDiscoveryStartupGraceSeconds :: NominalDiffTime
 workerDiscoveryStartupGraceSeconds = 30
