@@ -496,21 +496,50 @@ class SelectMatchingWorktreeTests(unittest.TestCase):
         # A permissively parsed / malformed porcelain entry that lacks both
         # "branch" and the explicit "detached" marker must never be treated
         # as a positively identified detached worktree, even if its "HEAD"
-        # happens to equal the PR head SHA.
+        # happens to equal the PR head SHA -- and must still be logged as
+        # unverified, like any other undetermined candidate.
         entries = [
             {"worktree": "/repo/main", "branch": "refs/heads/master"},
             {"worktree": "/work/malformed", "HEAD": "deadbeef" * 5},
         ]
-        result = drain_prs.select_matching_worktree(
-            entries,
-            main_path=Path("/repo/main"),
-            repo_name="widgets",
-            branch_name="issue-9-fix",
-            issue_numbers=[],
-            pr_number=1,
-            pr_head_oid="deadbeef" * 5,
-        )
+        with mock.patch.object(drain_prs, "log") as mock_log:
+            result = drain_prs.select_matching_worktree(
+                entries,
+                main_path=Path("/repo/main"),
+                repo_name="widgets",
+                branch_name="issue-9-fix",
+                issue_numbers=[],
+                pr_number=1,
+                pr_head_oid="deadbeef" * 5,
+            )
         self.assertIsNone(result)
+        mock_log.assert_called_once()
+        message = mock_log.call_args[0][0]
+        self.assertIn("PR #1", message)
+        self.assertIn("/work/malformed", message)
+        self.assertIn("not verified, leaving in place", message)
+
+    def test_fuzzy_tie_raises_even_when_an_unrelated_detached_match_exists(self):
+        # The fuzzy name-score tie check must run before any
+        # positive-identification step, including the detached exact-HEAD
+        # match -- so a tied fuzzy pair still raises even when some other
+        # detached worktree in the same list is a genuine, unambiguous match.
+        entries = [
+            {"worktree": "/repo/main", "branch": "refs/heads/master"},
+            {"worktree": "/work/detached", "detached": "", "HEAD": "deadbeef" * 5},
+            {"worktree": "/work/issue-24-a", "branch": "refs/heads/branch-a"},
+            {"worktree": "/work/issue-24-b", "branch": "refs/heads/branch-b"},
+        ]
+        with self.assertRaises(drain_prs.DrainError):
+            drain_prs.select_matching_worktree(
+                entries,
+                main_path=Path("/repo/main"),
+                repo_name="widgets",
+                branch_name="issue-9-fix",
+                issue_numbers=[24],
+                pr_number=1,
+                pr_head_oid="deadbeef" * 5,
+            )
 
 
 class ExtractIssueNumbersTests(unittest.TestCase):

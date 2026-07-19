@@ -961,15 +961,15 @@ def select_matching_worktree(
             # establishes detached state; an entry missing both "branch"
             # and "detached" is malformed/undetermined and must not be
             # eligible for the exact-HEAD match either.
-            if "detached" in entry:
-                head_sha = entry.get("HEAD")
-                if pr_head_oid and head_sha and head_sha == pr_head_oid:
-                    detached_matches.append(path)
-                else:
-                    log(
-                        f"possible worktree for PR #{pr_number} at {path} — not "
-                        "verified, leaving in place"
-                    )
+            is_detached = "detached" in entry
+            head_sha = entry.get("HEAD") if is_detached else None
+            if is_detached and pr_head_oid and head_sha and head_sha == pr_head_oid:
+                detached_matches.append(path)
+            else:
+                log(
+                    f"possible worktree for PR #{pr_number} at {path} — not "
+                    "verified, leaving in place"
+                )
             continue
 
         base = path.name.lower()
@@ -984,23 +984,31 @@ def select_matching_worktree(
         if score:
             fuzzy_candidates.append((score, path))
 
+    # The fuzzy name-score tie check runs before any positive-identification
+    # / verification step -- including the detached exact-HEAD match below --
+    # so a tied fuzzy candidate set always raises, never gets shadowed by an
+    # unrelated detached match elsewhere in the same worktree list.
+    best_fuzzy_paths: list[Path] = []
+    if fuzzy_candidates:
+        fuzzy_candidates.sort(key=lambda item: (-item[0], str(item[1])))
+        best_score = fuzzy_candidates[0][0]
+        best_fuzzy_paths = [
+            path for score, path in fuzzy_candidates if score == best_score
+        ]
+        if len(best_fuzzy_paths) > 1:
+            joined = ", ".join(str(path) for path in best_fuzzy_paths)
+            raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
+
     if len(detached_matches) > 1:
         joined = ", ".join(str(path) for path in sorted(detached_matches, key=str))
         raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
     if detached_matches:
         return detached_matches[0]
 
-    if not fuzzy_candidates:
+    if not best_fuzzy_paths:
         return None
 
-    fuzzy_candidates.sort(key=lambda item: (-item[0], str(item[1])))
-    best_score = fuzzy_candidates[0][0]
-    best_paths = [path for score, path in fuzzy_candidates if score == best_score]
-    if len(best_paths) > 1:
-        joined = ", ".join(str(path) for path in best_paths)
-        raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
-
-    candidate = best_paths[0]
+    candidate = best_fuzzy_paths[0]
     log(
         f"possible worktree for PR #{pr_number} at {candidate} — not verified, "
         "leaving in place"
