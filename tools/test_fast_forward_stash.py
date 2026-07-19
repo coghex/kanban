@@ -7,6 +7,7 @@ real temporary Git repository.
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -325,6 +326,43 @@ class UntrackedCollisionOnRestoreTest(_FastForwardStashFixture):
             (holding_dirs[0] / "collide.txt").read_text(encoding="utf-8"), "local-untracked\n"
         )
         self.assertFalse((holding_dirs[0] / "safe.txt").exists())
+
+
+class UntrackedCollisionWithDanglingSymlinkTest(_FastForwardStashFixture):
+    """A dangling symlink upstream just checked out is a real collision too,
+    but `Path.exists()` follows the link and reports False for it -- only
+    `os.path.lexists()` sees the symlink itself. Restoring must not replace
+    it with the stale local file.
+    """
+
+    def test_restore_does_not_replace_dangling_symlink(self):
+        (self.main / "link.txt").write_text("local-untracked\n", encoding="utf-8")
+
+        clone_dir = Path(tempfile.mkdtemp(dir=str(self.root)))
+        run_git(["clone", "-q", str(self.bare), str(clone_dir)], cwd=self.root)
+        run_git(["config", "user.email", "test@example.com"], cwd=clone_dir)
+        run_git(["config", "user.name", "Test"], cwd=clone_dir)
+        (clone_dir / "link.txt").symlink_to("nonexistent-target")
+        run_git(["add", "link.txt"], cwd=clone_dir)
+        run_git(["commit", "-q", "-m", "add dangling symlink link.txt"], cwd=clone_dir)
+        run_git(["push", "-q", "origin", "master"], cwd=clone_dir)
+
+        with self.assertRaises(drain_prs.DrainError) as cm:
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+        message = str(cm.exception)
+        self.assertIn("restoring local changes failed", message)
+        self.assertIn("a path now exists there", message)
+
+        # The fast-forward's own dangling symlink must survive untouched.
+        restored_path = self.main / "link.txt"
+        self.assertTrue(restored_path.is_symlink())
+        self.assertEqual(os.readlink(restored_path), "nonexistent-target")
+
+        holding_dirs = list((self.main / ".git").glob("autostash-*"))
+        self.assertEqual(len(holding_dirs), 1)
+        self.assertEqual(
+            (holding_dirs[0] / "link.txt").read_text(encoding="utf-8"), "local-untracked\n"
+        )
 
 
 if __name__ == "__main__":

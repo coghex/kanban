@@ -1348,7 +1348,10 @@ def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) 
     failures = []
     for rel in paths:
         dst = ctx.path / rel
-        if dst.exists():
+        # lexists(), not exists(): a dangling symlink the fast-forward just
+        # checked out is a real collision too, but exists() follows it and
+        # reports False, which would let rename() replace the symlink itself.
+        if os.path.lexists(dst):
             # The fast-forward checked out something new at this path (e.g.
             # upstream added a tracked file/dir here); renaming over it would
             # silently destroy that content, so leave our copy in `holding`
