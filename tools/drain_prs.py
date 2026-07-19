@@ -936,16 +936,31 @@ def select_matching_worktree(
     branch_name: str,
     issue_numbers: list[int],
     pr_number: int,
+    pr_head_oid: str | None,
 ) -> Path | None:
-    candidates: list[tuple[int, Path]] = []
+    # Positive identification is the only thing allowed to select a worktree
+    # for deletion or sandbox-bypassed reuse: an exact branch match, or (for
+    # detached worktrees, independent of directory naming) an exact HEAD-SHA
+    # match against the PR head. Directory-basename scoring alone is used
+    # only to surface a candidate for branch-checked-out worktrees whose
+    # branch doesn't match -- it can never itself select a match, and a lone
+    # surviving candidate is logged and left in place rather than returned.
+    detached_matches: list[Path] = []
+    fuzzy_candidates: list[tuple[int, Path]] = []
 
     for entry in entries:
         path = Path(entry["worktree"]).resolve()
         if path == main_path:
             continue
-        branch_ref = entry.get("branch", "")
+        branch_ref = entry.get("branch")
         if branch_ref == f"refs/heads/{branch_name}":
             return path
+
+        if branch_ref is None:
+            head_sha = entry.get("HEAD")
+            if pr_head_oid and head_sha and head_sha == pr_head_oid:
+                detached_matches.append(path)
+            continue
 
         base = path.name.lower()
         score = 0
@@ -957,18 +972,30 @@ def select_matching_worktree(
             if base.endswith(f"-{number}"):
                 score = max(score, 40)
         if score:
-            candidates.append((score, path))
+            fuzzy_candidates.append((score, path))
 
-    if not candidates:
+    if len(detached_matches) > 1:
+        joined = ", ".join(str(path) for path in sorted(detached_matches, key=str))
+        raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
+    if detached_matches:
+        return detached_matches[0]
+
+    if not fuzzy_candidates:
         return None
 
-    candidates.sort(key=lambda item: (-item[0], str(item[1])))
-    best_score = candidates[0][0]
-    best_paths = [path for score, path in candidates if score == best_score]
+    fuzzy_candidates.sort(key=lambda item: (-item[0], str(item[1])))
+    best_score = fuzzy_candidates[0][0]
+    best_paths = [path for score, path in fuzzy_candidates if score == best_score]
     if len(best_paths) > 1:
         joined = ", ".join(str(path) for path in best_paths)
         raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
-    return best_paths[0]
+
+    candidate = best_paths[0]
+    log(
+        f"possible worktree for PR #{pr_number} at {candidate} — not verified, "
+        "leaving in place"
+    )
+    return None
 
 
 def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
@@ -979,6 +1006,7 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
         branch_name=pr["headRefName"],
         issue_numbers=extract_issue_numbers(pr),
         pr_number=pr["number"],
+        pr_head_oid=pr.get("headRefOid"),
     )
 
 
