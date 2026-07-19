@@ -80,23 +80,35 @@ manages or something I must set up myself."
     directly.
   - GitHub reads and label/comment mutations for the interactive session go
     through `gh`, never a raw HTTP client.
-  - Synchronous canonical publication, rereview, and the read-only gate
-    check solve sessions must pass before claiming an issue all run:
-    `python3 ~/work/approve-issues.py --path <repository root> [--review|--rereview] <issue> --legacy-policy dual --json`.
-- **Inputs:** issue number, review stage, repository root.
-- **Outputs:** an `issue-review:v2` comment with the verdict, updated
-  `reviewed:*` labels, and, for the gate check, a structured JSON approval
-  decision.
+  - Kanban's own synchronous invocation (`runCanonicalIssueReview` in
+    `src/Kanban/Review.hs`) is a **publishing** action, run when the user
+    presses `r`:
+    `python3 ~/work/approve-issues.py --path <repository root> --review|--rereview <issue> --legacy-policy dual --json`.
+    It writes the `issue-review:v2` comment and verdict labels; Kanban's own
+    code never runs `--check`.
+  - The solve readiness gate is a separate, **read-only** invocation that
+    Kanban's Haskell code does not run itself. The solve prompt
+    (`src/Kanban/Solve.hs:218`) explicitly forbids the spawned solving agent
+    from running `--review`/`--rereview` ("Kanban's `r` workflow owns that
+    gate") and instructs it to run only
+    `python3 ~/work/approve-issues.py --path <repository root> --check <issue> --legacy-policy dual --json`
+    itself, via its own shell access, before claiming an issue
+    (`approve-issues.py --help`: "`--check ISSUE` Check one issue gate.").
+- **Inputs:** issue number, review stage or gate check, repository root.
+- **Outputs:** for `--review`/`--rereview`, an `issue-review:v2` comment
+  with the verdict and updated `reviewed:*` labels; for `--check`, a
+  structured JSON approval decision with no GitHub mutation.
 - **Failure semantics:** `"Canonical issue reviewer was not found at
   <path>"` if `~/work/approve-issues.py` is absent; `"python3 was not found
   on PATH"`; a malformed response surfaces the backend's own error text.
-- **Required authority:** the same GitHub write scope as PR review; local
-  read access to the canonical backend script.
+- **Required authority:** the same GitHub write scope as PR review for
+  `--review`/`--rereview` (`--check` performs no GitHub write); local read
+  access to the canonical backend script.
 - **Durable state:** none Kanban owns beyond the GitHub comment/labels; the
   backend may keep additional state outside Kanban's tracking.
 - **Mandatory/optional:** optional at the Kanban-action level (the `r` key),
-  but a solve session refuses to claim an issue that has not passed the gate
-  check.
+  but a solve session refuses to claim an issue that has not passed the
+  read-only gate check.
 
 ### 2.4 Incident/controller capability — the PR drainer
 
@@ -145,23 +157,25 @@ manages or something I must set up myself."
 
 ## 3. Migration boundary
 
-Kanban owns:
+Kanban owns the canonical issue-review backend: its path convention, CLI
+flags (`--path`, `--review`/`--rereview`/`--check`, `--legacy-policy dual`,
+`--json`), its JSON/comment/label output contract, and its role as the sole
+source of truth for both the interactive review workflow and the solve
+readiness gate. Kanban also owns any runtime component required for its own
+supported synchronous review path, i.e. the code in `src/Kanban/Review.hs`
+that shells out to it.
 
-- The canonical issue-review backend's *invocation contract* — its path
-  convention, CLI flags (`--path`, `--review`/`--rereview`,
-  `--legacy-policy dual`, `--json`), and its role as the sole source a solve
-  session may read for the readiness gate.
-- Any runtime component required for its own supported synchronous review
-  path, i.e. the code in `src/Kanban/Review.hs` that shells out to it.
+What Kanban does not yet own — and this issue does not move or change — is
+*where that backend physically lives*:
 
-Kanban does not yet own, and this issue does not move or change:
-
-- **`~/work/approve-issues.py`** — the canonical backend's implementation.
-  Flagged as a **migration target**, not a supported installation
-  requirement. A future migration (tracked separately, depends on this
-  issue) must leave a compatibility symlink at `~/work/approve-issues.py` so
-  existing installs keep working, but that path must stop being Kanban's
-  source of truth.
+- **`~/work/approve-issues.py`** — the canonical backend Kanban owns
+  today happens to be installed at this untracked, personal path rather than
+  inside the repository. It is flagged as a **migration target**, not a
+  supported installation requirement: a fresh checkout has no way to obtain
+  it. A future migration (tracked separately, depends on this issue) must
+  move its implementation into the repository while leaving a compatibility
+  symlink at `~/work/approve-issues.py` so existing installs keep working;
+  after that migration, this path stops being Kanban's source of truth.
 - **`~/.codex/skills/approve-issues/...`** — the Codex-side skill packaging
   of the same review flow. Also flagged as a migration target. It is not
   present in this repository and nothing here installs it; it is named so a
@@ -178,21 +192,23 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 - `token`: the exact literal string the check searches for.
 - `files`: `;`-separated repository-relative paths where the token is
   expected to appear (empty when nothing in this repository references it).
-- `owner`: `kanban` (a Kanban-defined convention) or `external` (state
-  outside this repository's control).
+- `owner`: `kanban` (Kanban owns this dependency's contract, whether or not
+  its implementation is tracked in this repository yet) or `external` (a
+  dependency Kanban consumes but does not define, e.g. a Codex-side skill
+  package).
 - `status`: `supported` or `migration-target`.
 - `mandatory`: `yes` or `no`, matching §2.5 for executables.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review.hs | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
-approve-issues-backend | personal-path | /work/approve-issues.py | src/Kanban/Review.hs | external | migration-target | no
+approve-issues-backend | personal-path | /work/approve-issues.py | src/Kanban/Review.hs | kanban | migration-target | no
 codex-approve-issues-skill | personal-path | ~/.codex/skills/approve-issues | | external | migration-target | no
 drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
 ```

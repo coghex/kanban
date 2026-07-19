@@ -44,6 +44,12 @@ EXECUTABLE_CALL_RE = re.compile(
 )
 TIMED_PROCESS_CALL_RE = re.compile(r'runProcess\s+\d+\s+"([^"]+)"')
 
+# findExecutable <var> resolves an executable name bound elsewhere as a
+# string literal (Solve.hs and PullRequestFlow.hs both do this rather than
+# passing a literal directly), so the two known binding idioms are matched
+# separately and their literals are treated as discovered invocations too.
+INDIRECT_VAR_RE = re.compile(r'findExecutable\s+([A-Za-z_][A-Za-z0-9_\']*)\b')
+
 # A `home` value built with <> or </> segments, e.g.
 # `home <> "/work/approve-issues.py"` or
 # `home </> "Library" </> "LaunchAgents" </> "com.coghex.drain-prs.plist"`.
@@ -72,9 +78,38 @@ def parse_manifest():
     return rows
 
 
+def indirect_executable_names(content):
+    """Literals bound to a variable that findExecutable resolves indirectly.
+
+    Covers the two idioms Solve.hs and PullRequestFlow.hs use:
+      executableName = case brand of
+        CodexSolver -> "codex"
+        ClaudeSolver -> "claude"
+    and
+      executableName = if brand == CodexSolver then "codex" else "claude"
+    """
+    names = set()
+    for var_match in INDIRECT_VAR_RE.finditer(content):
+        var_name = re.escape(var_match.group(1))
+        case_re = re.compile(
+            var_name + r'\s*=\s*case\s+\w+\s+of'
+            r'((?:\n[ \t]+\S.*?->\s*"[^"]*")+)'
+        )
+        for case_match in case_re.finditer(content):
+            names |= {quoted.group(1) for quoted in QUOTED_RE.finditer(case_match.group(1))}
+        if_re = re.compile(
+            var_name + r'\s*=\s*if\b[^\n]*?then\s*"([^"]*)"\s*else\s*"([^"]*)"'
+        )
+        for if_match in if_re.finditer(content):
+            names.add(if_match.group(1))
+            names.add(if_match.group(2))
+    return names
+
+
 def discovered_executables(content):
     names = {match.group(1) for match in EXECUTABLE_CALL_RE.finditer(content)}
     names |= {match.group(1) for match in TIMED_PROCESS_CALL_RE.finditer(content)}
+    names |= indirect_executable_names(content)
     return names
 
 
@@ -136,6 +171,45 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{name!r}; add it to the manifest in "
                     "docs/agent-workflow-contract.md",
                 )
+
+    def test_indirect_solver_brand_mappings_are_discovered(self):
+        # Solve.hs and PullRequestFlow.hs resolve codex/claude through a
+        # variable (`findExecutable executableName`) rather than a literal,
+        # so this pins that discovered_executables still recovers both
+        # brand names from each file's actual binding instead of silently
+        # covering zero invocations in these two surface files.
+        solve_content = (REPO_ROOT / "src/Kanban/Solve.hs").read_text(encoding="utf-8")
+        pull_request_flow_content = (
+            REPO_ROOT / "src/Kanban/PullRequestFlow.hs"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            discovered_executables(solve_content) & {"codex", "claude"},
+            {"codex", "claude"},
+        )
+        self.assertEqual(
+            discovered_executables(pull_request_flow_content) & {"codex", "claude"},
+            {"codex", "claude"},
+        )
+
+    def test_indirect_executable_extraction_handles_case_and_if_bindings(self):
+        case_snippet = "\n".join(
+            [
+                "runThing brand = do",
+                "  executable <- findExecutable executableName",
+                "  where",
+                "    executableName = case brand of",
+                '      CodexSolver -> "codex"',
+                '      ClaudeSolver -> "claude"',
+            ]
+        )
+        self.assertEqual(indirect_executable_names(case_snippet), {"codex", "claude"})
+
+        if_snippet = (
+            "runThing brand = do\n"
+            "  executable <- findExecutable executableName\n"
+            '  let executableName = if brand == CodexSolver then "codex" else "claude"\n'
+        )
+        self.assertEqual(indirect_executable_names(if_snippet), {"codex", "claude"})
 
     def test_every_home_relative_path_segment_is_documented(self):
         personal_tokens = [
