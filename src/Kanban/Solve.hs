@@ -122,20 +122,24 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath u
   case executable of
     Nothing -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
-      started <- try (createProcess (processSpec executablePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-      case started of
-        Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
-        Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          -- A deadline (or any other async cancellation) landing between a
-          -- successfully spawned process and its registration would leave it
-          -- neither tracked by the caller's 'providerRef' nor killed: the
-          -- caller only ever learns about a provider through the
-          -- 'SolveProcessStarted' event this reaches. Masking this span
-          -- makes registration atomic with the spawn it reports.
-          uninterruptibleMask_ $ do
+      -- Masked from before the process is even spawned through its
+      -- registration, so a deadline's cancellation can never land in the
+      -- gap between a successful 'createProcess' and the event that
+      -- reaches 'rememberProvider' — the only way the caller ever learns
+      -- about (and can track or kill) this provider. Masking only after
+      -- 'createProcess' returned left exactly that gap open.
+      started <- uninterruptibleMask_ $ do
+        result <- try (createProcess (processSpec executablePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+        case result of
+          Right (Nothing, Just _, Just _, processHandle) -> do
             (managed, groupLeaderProblem) <- managedProcess processHandle
             mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
             eventSink (SolveProcessStarted issueNumber brand managed)
+          _ -> pure ()
+        pure result
+      case started of
+        Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
+        Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession
