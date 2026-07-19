@@ -533,6 +533,8 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       taskThreadIdRef <- newIORef Nothing
       taskResultVar <- newEmptyMVar
       watchdogDoneVar <- newEmptyMVar
+      leaseReleaseClaimRef <- newIORef False
+      let claimLeaseRelease = atomicModifyIORef' leaseReleaseClaimRef (\claimed -> (True, not claimed))
       let stopOwnedWork = do
             writeIORef stoppedRef True
             writeIORef signalShutdownRef True
@@ -652,25 +654,20 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
         result <- try @SomeException (restore runTask)
         uninterruptibleMask_ (putMVar taskResultVar result)
       writeIORef taskThreadIdRef (Just taskThreadId)
-      void . forkIO $ watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw watchdogDoneVar
+      void . forkIO $ watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar
       taskResult <- takeMVar taskResultVar
       forcedOutcome <- readIORef forcedOutcomeRef
       case forcedOutcome of
-        -- The watchdog claimed completion, but 'forcedOutcomeRef' is set the
-        -- moment it wins — well before it has actually killed or verified
-        -- anything. A provider that exits in direct response to the
-        -- watchdog's own termination signal can let the task's own
-        -- `runSolve`/`runPullRequestFlow` observe that exit and return
-        -- normally (its own completion attempt then simply loses the
-        -- already-claimed slot and does nothing) well before the watchdog's
-        -- kill-verify-and-commit sequence — bounded by real termination
-        -- grace waits — actually concludes. Waiting here for the watchdog's
-        -- own completion signal ensures 'completeBody' has already run (so
-        -- `pendingOutcomeRef` below reflects its real decision) before this
-        -- proceeds to release the lease; otherwise the lease could be freed,
-        -- or this whole call could return, before any outcome was ever
-        -- committed.
-        Just _ -> takeMVar watchdogDoneVar
+        -- 'forcedOutcomeRef' is only consulted here to skip the redundant
+        -- fallback completion below — it can still be stale (the deadline
+        -- can fire after this exact read), which is harmless for that one
+        -- decision: the fallback goes through the same atomic
+        -- 'claimCompletion' either way, so at worst this attempts it
+        -- pointlessly. Whether it is safe to actually release the lease
+        -- below is decided separately, immediately before doing so, via
+        -- 'claimLeaseRelease' — a real, race-free arbitration rather than a
+        -- one-time snapshot like this one.
+        Just _ -> pure ()
         Nothing -> case taskResult of
           Right () -> do
             stopped <- readIORef stoppedRef
@@ -697,6 +694,20 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- enter the wait at all.
       when (pending /= Nothing) (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef)
       writeIORef stoppedRef True
+      -- Whether it is safe to release the lease now without waiting for the
+      -- watchdog is decided by a genuine race against it, claimed as late
+      -- as possible (right here) rather than inferred from any earlier,
+      -- necessarily stale snapshot: everything above (fallback completion,
+      -- orphan resolution) can finish before the deadline ever fires, so an
+      -- early check has no way to know whether the watchdog will still act
+      -- later. Winning this claim means the watchdog's own 'threadDelay'
+      -- has not elapsed yet (or, if it does later, 'watchdogLoop' will find
+      -- this already claimed and do nothing) — safe to proceed directly.
+      -- Losing it means the watchdog already committed to firing and may
+      -- still be mid-sequence (its own bounded termination-grace waits);
+      -- 'watchdogDoneVar' blocks until that has genuinely finished.
+      wonLeaseRelease <- claimLeaseRelease
+      unless wonLeaseRelease (takeMVar watchdogDoneVar)
       releaseWorkerLease descriptor
       void (installHandler sigTERM previousTermHandler Nothing)
       void (installHandler sigINT previousInterruptHandler Nothing)
@@ -1393,6 +1404,15 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 -- holds 'Just'; a race where it is somehow 'Nothing' on first read never
 -- happens in practice but degrades to a harmless no-op rather than a
 -- crash.
+--
+-- The outcome is read a *second* time, immediately before finally emitting
+-- 'WorkerFinished', rather than reusing the value from the top of this same
+-- iteration: the census check in between takes a real snapshot, wide enough
+-- for the watchdog's takeover to land inside it. Re-reading right at the
+-- emit point — the narrowest gap achievable without a lock — makes it very
+-- unlikely (rather than merely eventually-consistent) that this ever
+-- publishes an outcome to the durable state that was already stale by the
+-- time this decided to finalize.
 waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> IO ()
 waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef = loop Nothing
   where
@@ -1420,7 +1440,9 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
               threadDelay workerOrphanCheckIntervalMicros
               loop reported
             Right surviving
-              | null surviving -> emit (WorkerFinished outcome)
+              | null surviving -> do
+                  final <- readIORef pendingOutcomeRef
+                  emit (WorkerFinished (maybe outcome snd final))
               | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
 
 -- | Bounds the worker's whole lifetime (task execution, not just its
@@ -1487,44 +1509,57 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
 -- lands, already reads the deadline reason.
 --
 -- 'watchdogDoneVar' is filled unconditionally once this returns, win or
--- lose, so the supervisor — which blocks on it whenever 'forcedOutcomeRef'
--- is set — never mistakes a merely-fired deadline for a fully settled one.
-watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe (Bool, SolveOutcome)) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> (WorkerEvent -> IO ()) -> MVar () -> IO ()
-watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw watchdogDoneVar = do
+-- lose (including winning nothing at all — see 'claimLeaseRelease' below),
+-- so the supervisor never mistakes a merely-fired deadline for a fully
+-- settled one.
+--
+-- Before doing anything else — before even 'stoppedRef' — this races the
+-- supervisor for 'claimLeaseRelease', immediately after the delay elapses.
+-- The supervisor claims the same thing immediately before releasing the
+-- lease, as late as it possibly can (see 'runWorkerWithTask'), rather than
+-- inferring from any earlier snapshot whether the deadline will still fire
+-- later. Losing this claim means the supervisor has already decided the
+-- worker is fully done and is releasing the lease right now (or already
+-- has): there is nothing left here to kill or commit, another worker may
+-- already be acquiring that lease, and this does nothing further at all.
+watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe (Bool, SolveOutcome)) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> (WorkerEvent -> IO ()) -> IO Bool -> MVar () -> IO ()
+watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar = do
   now <- getCurrentTime
   let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
   threadDelay delayMicros
-  writeIORef stoppedRef True
-  writeIORef forcedOutcomeRef (Just workerDeadlineOutcome)
-  wonCompletion <- claimCompletion
-  if wonCompletion
-    then do
-      providerOk <- terminateProviderRefWith takeSnapshot providerRef
-      recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
-      completeBody (providerOk && recordedOk) workerDeadlineOutcome
-      readIORef taskThreadIdRef >>= mapM_ killThread
-    else do
-      readIORef taskThreadIdRef >>= mapM_ killThread
-      pending <- readIORef pendingOutcomeRef
-      case pending of
-        Nothing -> pure ()
-        Just _ -> do
-          -- Written *before* the kill below, not after: 'waitForOrphanResolution'
-          -- polls this same census independently and concurrently (it has
-          -- been running since the normal completion first reported this
-          -- orphan, well before this deadline fired), so it can observe the
-          -- kill's effect — the recorded group actually dying — the moment
-          -- that happens, regardless of when this function gets around to
-          -- writing the takeover. Writing the outcome first guarantees that
-          -- whenever the poll next observes "gone" — even a race against
-          -- this exact kill — it already reads the deadline reason rather
-          -- than the stale original one.
-          writeIORef pendingOutcomeRef (Just (False, workerDeadlineOutcome))
-          known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
-          emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
-          void (terminateProviderRefWith takeSnapshot providerRef)
-          void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
+  wonLeaseRelease <- claimLeaseRelease
+  when wonLeaseRelease $ do
+    writeIORef stoppedRef True
+    writeIORef forcedOutcomeRef (Just workerDeadlineOutcome)
+    wonCompletion <- claimCompletion
+    if wonCompletion
+      then do
+        providerOk <- terminateProviderRefWith takeSnapshot providerRef
+        recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
+        completeBody (providerOk && recordedOk) workerDeadlineOutcome
+        readIORef taskThreadIdRef >>= mapM_ killThread
+      else do
+        readIORef taskThreadIdRef >>= mapM_ killThread
+        pending <- readIORef pendingOutcomeRef
+        case pending of
+          Nothing -> pure ()
+          Just _ -> do
+            -- Written *before* the kill below, not after: 'waitForOrphanResolution'
+            -- polls this same census independently and concurrently (it has
+            -- been running since the normal completion first reported this
+            -- orphan, well before this deadline fired), so it can observe the
+            -- kill's effect — the recorded group actually dying — the moment
+            -- that happens, regardless of when this function gets around to
+            -- writing the takeover. Writing the outcome first guarantees that
+            -- whenever the poll next observes "gone" — even a race against
+            -- this exact kill — it already reads the deadline reason rather
+            -- than the stale original one.
+            writeIORef pendingOutcomeRef (Just (False, workerDeadlineOutcome))
+            known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
+            emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
+            void (terminateProviderRefWith takeSnapshot providerRef)
+            void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
   putMVar watchdogDoneVar ()
 
 -- | The canonical externally visible reason a persistent worker's
