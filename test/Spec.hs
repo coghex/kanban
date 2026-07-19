@@ -50,10 +50,12 @@ import Kanban.Repository (parseRepositoryName)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestOrigin (..),
+    PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
     originFromBody,
     pullRequestArguments,
+    pullRequestVerdictForLabels,
   )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -92,7 +94,7 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
-import Kanban.UI (failureActivity, orphanMessage)
+import Kanban.UI (failureActivity, orphanMessage, pullRequestSessionReusable)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -1724,6 +1726,7 @@ main = hspec $ do
       actionForLabels [] `shouldBe` PullRequestReview
       actionForLabels ["reviewed:changes"] `shouldBe` PullRequestRevision
       actionForLabels ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
+      actionForLabels ["reviewed:revised"] `shouldBe` PullRequestRereview
 
     it "uses the opposite brand to review and the origin brand to revise" $ do
       agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
@@ -1733,8 +1736,42 @@ main = hspec $ do
 
     it "pins canonical reviewer and reviser models" $ do
       pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.4"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.6-terra"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+
+    it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing "")
+      codexOriginRevisionPrompt `shouldContain` "$pr-revise"
+      claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
+      codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
+      claudeOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
+      codexOriginRevisionPrompt `shouldNotContain` "create reviewed:revised"
+      codexOriginRevisionPrompt `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
+
+    it "derives a pure post-revision verdict from current labels instead of waiting on a reviewed:revised handoff" $ do
+      pullRequestVerdictForLabels [] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
+      pullRequestVerdictForLabels ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+
+    it "starts a fresh r-key revision round instead of reopening a finished one when the PR changed since it launched" $ do
+      let launchedAt = UTCTime (fromGregorian 2026 7 18) 0
+          unchanged = launchedAt
+          afterFreshVerdict = UTCTime (fromGregorian 2026 7 19) 0
+      -- A finished PullRequestRevision session addressing the same unchanged
+      -- state (no new push, comment, or label change) is safely reused.
+      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` True
+      -- pr-revise's own canonical rereview lands a fresh reviewed:changes
+      -- verdict, so the recomputed action repeats (PullRequestRevision) but
+      -- the PR has changed since this session launched: it must not reuse
+      -- the finished session and instead start another canonical round.
+      pullRequestSessionReusable False False PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` False
+      -- A still-active session is always reused regardless of PR changes.
+      pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
+      -- forceFresh always starts a new session.
+      pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
