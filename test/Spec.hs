@@ -1541,6 +1541,82 @@ main = hspec $ do
               Right identities ->
                 identities `shouldSatisfy` all (\identity -> not (Data.Text.isInfixOf (Data.Text.pack fakeCodex) identity.processIdentityCommand))
 
+    it "kills a recorded census group and takes over the pending outcome when the deadline fires on an already-orphaned normal completion" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            identifier = WorkerId "solve-820-orphan-then-deadline"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            spec = deadlineFixtureSpec repository identifier 820 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-820-orphan-then-deadline.spec.json"
+            statePath = workerRoot </> "solve-820-orphan-then-deadline.state.json"
+            eventPath = workerRoot </> "solve-820-orphan-then-deadline.events.jsonl"
+            leasePath = workerRoot </> "issue-820.lease"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        -- The provider itself exits normally almost immediately, backgrounding
+        -- a TERM-resistant child first: the normal completion claims
+        -- completedRef and, finding that child still alive, reports
+        -- WorkerOrphansDetected SolveCompleted rather than WorkerFinished. The
+        -- one-second deadline then fires while that orphan-pending state is
+        -- still unresolved.
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"orphan-then-deadline-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'",
+                -- Long enough that the periodic census loop (every 250ms)
+                -- captures the backgrounded child at least once while this
+                -- script is still its live parent -- once this script exits
+                -- and the child gets reparented, a fresh census can no
+                -- longer discover it by descent -- but short enough that
+                -- the normal completion below still lands well before the
+                -- one-second deadline fires.
+                "sleep 0.5"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            finished <- newEmptyMVar
+            void . forkIO $ runWorker specPath >>= putMVar finished
+            orphanState <- waitForWorkerState statePath isOrphaned 80
+            orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
+            -- The one-second deadline fires next, while the survivor is
+            -- still alive and the worker is still orphan-pending on it: it
+            -- must take over the pending outcome even though it lost
+            -- completedRef to the normal completion above.
+            deadlineTookOver <-
+              waitForWorkerState
+                statePath
+                ( \state -> case state.workerStateStatus of
+                    WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
+                    _ -> False
+                )
+                80
+            deadlineTookOver.workerStateStatus `shouldBe` WorkerOrphaned (SolveFailed workerDeadlineReason)
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            terminalState <- waitForWorkerState statePath isTerminal 30
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+            eventBytes <- ByteString.readFile eventPath
+            let orphanEvents = length (filter (ByteString.isInfixOf "WorkerOrphansDetected") (ByteString.lines eventBytes))
+            orphanEvents `shouldSatisfy` (>= 2)
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "\"SolveCompleted\""
+
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do
       failureActivity workerDeadlineReason `shouldBe` "deadline exceeded"
