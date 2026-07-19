@@ -83,6 +83,7 @@ data SolveOutcome
 
 data SolveEvent
   = SolveProcessStarted Int SolverBrand ManagedProcess
+  | SolveProcessSpawning Int Bool
   | SolveLogOpened Int FilePath
   | SolveSessionIdentified Int Text
   | SolveOutput Int AgentEvent
@@ -139,14 +140,25 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath p
       -- reaches 'rememberProvider' — the only way the caller ever learns
       -- about (and can track or kill) this provider. Masking only after
       -- 'createProcess' returned left exactly that gap open.
+      --
+      -- 'SolveProcessSpawning' brackets the spawn attempt itself (True
+      -- before 'createProcess', False on every path that concludes without
+      -- a live registration): a deadline watchdog racing this exact mask
+      -- cannot otherwise tell "no provider was ever spawned" (safe to
+      -- treat as vacuously verified) apart from "one was just spawned but
+      -- has not been recorded yet" (a live, unrecorded process that must
+      -- not be treated as vacuously verified) — both look identical from
+      -- outside as long as the caller's own provider reference is still
+      -- unset.
       started <- uninterruptibleMask_ $ do
+        eventSink (SolveProcessSpawning issueNumber True)
         result <- try (createProcess (processSpec executablePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
         case result of
           Right (Nothing, Just _, Just _, processHandle) -> do
             (managed, groupLeaderProblem) <- managedProcess processHandle
             mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
             eventSink (SolveProcessStarted issueNumber brand managed)
-          _ -> pure ()
+          _ -> eventSink (SolveProcessSpawning issueNumber False)
         pure result
       case started of
         Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))

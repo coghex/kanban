@@ -1580,6 +1580,55 @@ main = hspec $ do
               Right identities ->
                 identities `shouldSatisfy` all (\identity -> not (Data.Text.isInfixOf (Data.Text.pack fakeCodex) identity.processIdentityCommand))
 
+    it "retains orphan state instead of vacuously finalizing when the deadline fires mid-spawn, before registration lands" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-821-spawn-registration-race") 821 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-821-spawn-registration-race.spec.json"
+              statePath = workerRoot </> "solve-821-spawn-registration-race.state.json"
+              eventPath = workerRoot </> "solve-821-spawn-registration-race.events.jsonl"
+              leasePath = workerRoot </> "issue-821.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            -- Reproduces the exact narrow window 'runSolve'/'runPullRequestFlow's
+            -- own masked spawn-to-registration block leaves open, without
+            -- depending on how fast a real 'createProcess' happens to run:
+            -- 'WorkerProviderSpawning True' marks the spawn as started, then
+            -- this masked delay holds 'rememberProvider' back for 2 seconds
+            -- — well past the 1-second deadline — so the watchdog's check
+            -- deterministically lands while 'providerRef' is still 'Nothing'
+            -- and a real, live process is already running unrecorded.
+            let spawningThenRegister _spec rememberProvider emit = uninterruptibleMask_ $ do
+                  emit (WorkerProviderSpawning True)
+                  threadDelay 2000000
+                  rememberProvider managed
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask readProcessSnapshot spawningThenRegister specPath >>= putMVar finished
+            terminalState <- waitForWorkerState statePath isTerminal 80
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+            -- The real assertion: a provider spawned (but not yet
+            -- registered) when the deadline fires must not let the
+            -- watchdog treat the still-unset 'providerRef' as vacuously
+            -- verified and finalize directly. It must retain orphan state
+            -- until the census actually reflects — and confirms gone — the
+            -- process this spawn attempt started, so the lease is never
+            -- released on an unverified guess.
+            eventBytes <- ByteString.readFile eventPath
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
+
     it "kills a recorded census group and takes over the pending outcome when the deadline fires on an already-orphaned normal completion" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
@@ -1655,6 +1704,63 @@ main = hspec $ do
             let orphanEvents = length (filter (ByteString.isInfixOf "WorkerOrphansDetected") (ByteString.lines eventBytes))
             orphanEvents `shouldSatisfy` (>= 2)
             eventBytes `shouldSatisfy` ByteString.isInfixOf "\"SolveCompleted\""
+
+    it "does not finalize an orphan-pending normal completion on its own stale outcome once the deadline has passed" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "sleep 0.95" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-822-orphan-poll-race") 822 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-822-orphan-poll-race.spec.json"
+              statePath = workerRoot </> "solve-822-orphan-poll-race.state.json"
+              leasePath = workerRoot </> "issue-822.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            -- Unlike the TERM-resistant survivor above (only ever killed by
+            -- the watchdog's own verified kill, guaranteeing its takeover
+            -- write lands before the census can ever read empty), this one
+            -- exits entirely on its own, just before the one-second
+            -- deadline: the orphan-poll's own periodic census check can
+            -- observe "empty" from that natural exit alone, independently
+            -- of anything the watchdog does. This is the scenario
+            -- 'waitForOrphanResolution's deadline recheck guards against —
+            -- without it, a poll iteration landing at or just after the
+            -- deadline elapses could finalize on the stale pre-deadline
+            -- 'SolveCompleted' before the watchdog thread ever gets
+            -- scheduled to take over. In practice this test cannot force
+            -- that exact interleaving deterministically: 'refreshProcessCensus'
+            -- always shells out to a real 'ps' before either side reaches
+            -- its own decision point, and that real, blocking call reliably
+            -- gives the watchdog thread a scheduling opportunity to win
+            -- first, so this passes even without the fix. It is kept as a
+            -- characterization test — confirming an orphan-pending
+            -- completion still resolves correctly to the deadline outcome
+            -- once genuinely past it — rather than as a proof the fix is
+            -- exercised.
+            let completeThenOrphan _spec rememberProvider emit = do
+                  rememberProvider managed
+                  emit (WorkerFinished SolveCompleted)
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask readProcessSnapshot completeThenOrphan specPath >>= putMVar finished
+            orphanState <- waitForWorkerState statePath isOrphaned 80
+            orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
+            terminalState <- waitForWorkerState statePath isTerminal 80
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+            stateBytes <- LazyByteString.readFile statePath
+            case eitherDecode stateBytes :: Either String WorkerState of
+              Left message -> expectationFailure message
+              Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do

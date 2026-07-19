@@ -2611,6 +2611,7 @@ boundedAppend transcript addition = Text.takeEnd reviewTranscriptLimit (transcri
 
 applySolveEvent :: SolveEvent -> EventM Name AppState ()
 applySolveEvent solveEvent = case solveEvent of
+  SolveProcessSpawning _ _ -> pure ()
   SolveProcessStarted issueNumber _ process -> do
     modify
       ( \state ->
@@ -2795,6 +2796,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
     SolveWorkerTaskKind task -> case workerEvent of
       WorkerProviderStarted processId ->
         applySolveEvent (SolveProcessStarted task.solveWorkerIssueNumber task.solveWorkerBrand (managedProcessGroup (fromIntegral processId)))
+      WorkerProviderSpawning _ -> pure ()
       WorkerLogOpened path -> applySolveEvent (SolveLogOpened task.solveWorkerIssueNumber path)
       WorkerSessionIdentified sessionId -> applySolveEvent (SolveSessionIdentified task.solveWorkerIssueNumber sessionId)
       WorkerAgentOutput output -> applySolveEvent (SolveOutput task.solveWorkerIssueNumber output)
@@ -2806,6 +2808,7 @@ applyWorkerProtocolEvent descriptor workerEvent = do
        in case workerEvent of
             WorkerProviderStarted processId ->
               applyPullRequestFlowEvent (PullRequestProcessStarted task.pullRequestWorkerNumber task.pullRequestWorkerAction brand (managedProcessGroup (fromIntegral processId)))
+            WorkerProviderSpawning _ -> pure ()
             WorkerLogOpened path -> applyPullRequestFlowEvent (PullRequestLogOpened task.pullRequestWorkerNumber path)
             WorkerSessionIdentified sessionId -> applyPullRequestFlowEvent (PullRequestSessionIdentified task.pullRequestWorkerNumber sessionId)
             WorkerAgentOutput output -> applyPullRequestFlowEvent (PullRequestFlowOutput task.pullRequestWorkerNumber output)
@@ -3276,6 +3279,7 @@ modifyPullRequestSession number update = modify (\state -> state {appPullRequest
 
 applyPullRequestFlowEvent :: PullRequestFlowEvent -> EventM Name AppState ()
 applyPullRequestFlowEvent flowEvent = case flowEvent of
+  PullRequestProcessSpawning _ _ -> pure ()
   PullRequestProcessStarted number _ _ process -> do
     modify
       ( \state ->
