@@ -282,5 +282,50 @@ class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):
         )
 
 
+class UntrackedCollisionOnRestoreTest(_FastForwardStashFixture):
+    """An untracked file that shares a path with a file upstream newly adds
+    is exactly what makes --ff-only refuse in the first place ("untracked
+    working tree files would be overwritten by merge"). Restoring it after
+    a successful retry must never blindly rename over whatever the
+    fast-forward just checked out there.
+    """
+
+    def test_restore_does_not_overwrite_new_file_and_keeps_others_recoverable(self):
+        (self.main / "collide.txt").write_text("local-untracked\n", encoding="utf-8")
+        (self.main / "safe.txt").write_text("local-safe\n", encoding="utf-8")
+
+        clone_dir = Path(tempfile.mkdtemp(dir=str(self.root)))
+        run_git(["clone", "-q", str(self.bare), str(clone_dir)], cwd=self.root)
+        run_git(["config", "user.email", "test@example.com"], cwd=clone_dir)
+        run_git(["config", "user.name", "Test"], cwd=clone_dir)
+        (clone_dir / "collide.txt").write_text("upstream-tracked\n", encoding="utf-8")
+        run_git(["add", "collide.txt"], cwd=clone_dir)
+        run_git(["commit", "-q", "-m", "add collide.txt"], cwd=clone_dir)
+        run_git(["push", "-q", "origin", "master"], cwd=clone_dir)
+
+        with self.assertRaises(drain_prs.DrainError) as cm:
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+        message = str(cm.exception)
+        self.assertIn("restoring local changes failed", message)
+        self.assertIn("a path now exists there", message)
+
+        # The fast-forward's own file must win -- our stale untracked copy
+        # must never silently clobber it.
+        self.assertEqual(
+            (self.main / "collide.txt").read_text(encoding="utf-8"), "upstream-tracked\n"
+        )
+        # The file with no collision restores normally...
+        self.assertEqual((self.main / "safe.txt").read_text(encoding="utf-8"), "local-safe\n")
+
+        # ...and the one that couldn't be restored is still recoverable --
+        # the holding directory must survive, not be deleted alongside it.
+        holding_dirs = list((self.main / ".git").glob("autostash-*"))
+        self.assertEqual(len(holding_dirs), 1)
+        self.assertEqual(
+            (holding_dirs[0] / "collide.txt").read_text(encoding="utf-8"), "local-untracked\n"
+        )
+        self.assertFalse((holding_dirs[0] / "safe.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

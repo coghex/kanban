@@ -1347,17 +1347,49 @@ def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None
 def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) -> list[str]:
     failures = []
     for rel in paths:
+        dst = ctx.path / rel
+        if dst.exists():
+            # The fast-forward checked out something new at this path (e.g.
+            # upstream added a tracked file/dir here); renaming over it would
+            # silently destroy that content, so leave our copy in `holding`
+            # for manual reconciliation instead.
+            failures.append(f"{rel} (a path now exists there; left under {holding})")
+            continue
         try:
-            dst = ctx.path / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             (holding / rel).rename(dst)
         except OSError as exc:
-            failures.append(f"{rel} ({exc})")
-    try:
-        shutil.rmtree(holding)
-    except OSError:
-        pass
+            failures.append(f"{rel} ({exc}; left under {holding})")
+    if not failures:
+        try:
+            shutil.rmtree(holding)
+        except OSError:
+            pass
     return failures
+
+
+def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:
+    # `tracked_sha` is otherwise reachable from no ref and eligible for gc;
+    # try to make it durably discoverable before handing off to a human, and
+    # say plainly where it actually landed rather than assuming success.
+    store_proc = run(
+        ["git", "stash", "store", "-m", message, tracked_sha],
+        cwd=ctx.path,
+        check=False,
+    )
+    if store_proc.returncode == 0:
+        return "The snapshotted changes were recovered into `git stash list` for manual resolution."
+    ref_name = f"refs/drain-prs/autostash/{tracked_sha}"
+    ref_proc = run(["git", "update-ref", ref_name, tracked_sha], cwd=ctx.path, check=False)
+    if ref_proc.returncode == 0:
+        return (
+            "The snapshotted changes could not be added to `git stash list`, but were "
+            f"preserved at `{ref_name}`; restore with `git stash apply --index {tracked_sha}`."
+        )
+    return (
+        "The snapshotted changes could NOT be preserved under any ref and may be "
+        f"garbage-collected; restore them immediately with `git stash apply --index {tracked_sha}`."
+    )
 
 
 def _snapshot_tracked_changes(ctx: RepoContext, message: str) -> str | None:
@@ -1385,25 +1417,13 @@ def _restore_snapshot(
         )
         if apply_proc.returncode != 0:
             detail = (apply_proc.stderr or apply_proc.stdout or "").strip()
-            # The snapshot commit is otherwise unreferenced (and eligible for
-            # gc); store it under the shared stash list so it's discoverable
-            # through normal tooling now that we're handing off to a human.
-            run(
-                [
-                    "git",
-                    "stash",
-                    "store",
-                    "-m",
-                    f"drain-prs-autostash-recovery {tracked_sha}",
-                    tracked_sha,
-                ],
-                cwd=ctx.path,
-                check=False,
+            where = _preserve_unreachable_snapshot(
+                ctx, tracked_sha, f"drain-prs-autostash-recovery {tracked_sha}"
             )
             problems.append(
                 f"tracked changes (commit {tracked_sha}) could not be reapplied"
                 + (f": {detail}" if detail else "")
-                + "; recovered into `git stash list` for manual resolution"
+                + f"; {where}"
             )
     if untracked is not None:
         holding, paths = untracked
@@ -1452,15 +1472,12 @@ def fast_forward_default_branch(
         except DrainError as prep_exc:
             if untracked is not None:
                 _restore_untracked_files(ctx, *untracked)
+            recovery_note = ""
             if tracked_sha is not None:
-                run(
-                    ["git", "stash", "store", "-m", message, tracked_sha],
-                    cwd=ctx.path,
-                    check=False,
-                )
+                recovery_note = " " + _preserve_unreachable_snapshot(ctx, tracked_sha, message)
             raise DrainError(
                 "Local changes blocked fast-forward, and preparing a temporary "
-                f"snapshot of them failed; aborting.\n{prep_exc}"
+                f"snapshot of them failed; aborting.\n{prep_exc}{recovery_note}"
             ) from ff_exc
 
         if tracked_sha is None and untracked is None:
