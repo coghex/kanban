@@ -61,9 +61,11 @@ import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    ReviewApproval (..),
     ReviewChoice (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
+    ReviewRequestId (..),
     ReviewResult (..),
     ReviewStage (..),
     ReviewWireMessage (..),
@@ -79,6 +81,7 @@ import Kanban.Review
   )
 import Kanban.Solve
   ( AgentEvent (..),
+    ResumeProvenance (..),
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
@@ -88,13 +91,14 @@ import Kanban.Solve
     codexSolverModel,
     parseSolveOutputLine,
     renderAgentEvent,
+    resumeProvenanceHeader,
     solveArguments,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
-import Kanban.UI (failureActivity, orphanMessage, pullRequestSessionReusable)
+import Kanban.UI (PendingReviewInteraction (..), ReviewDigitAction (..), failureActivity, orphanMessage, pullRequestSessionReusable, resolveReviewDigitAction)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -198,6 +202,7 @@ main = hspec $ do
                 workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 858 PullRequestCodex PullRequestRereview),
                 workerExistingSession = Just "review-session",
                 workerExistingLogPath = Just "/tmp/review.jsonl",
+                workerResumeProvenance = ResumeInterruptGuidance,
                 workerUserMessage = "continue",
                 workerParent = Just parent,
                 workerCreatedAt = epoch,
@@ -461,6 +466,7 @@ main = hspec $ do
                   workerTask = SolveWorkerTaskKind (SolveWorkerTask 782 SolveOnly CodexSolver),
                   workerExistingSession = Nothing,
                   workerExistingLogPath = Nothing,
+                  workerResumeProvenance = ResumeAnswer,
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = now,
@@ -1533,6 +1539,7 @@ main = hspec $ do
                   workerTask = SolveWorkerTaskKind (SolveWorkerTask 818 SolveOnly CodexSolver),
                   workerExistingSession = Nothing,
                   workerExistingLogPath = Nothing,
+                  workerResumeProvenance = ResumeAnswer,
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = longAgo,
@@ -1796,8 +1803,8 @@ main = hspec $ do
       claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing ""
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer ""
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
@@ -1805,10 +1812,10 @@ main = hspec $ do
       claudeArguments `shouldContain` ["--effort", "high"]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing "")
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -1819,12 +1826,25 @@ main = hspec $ do
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing "")
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "existing worktree for issue #782"
       solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
       solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
       solvePrompt `shouldContain` "Do not discard, reset, or overwrite unfinished changes merely to start clean"
       solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
+
+    it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
+      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldNotContain` "The user answered"
+      interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+      automatedPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAutomatedChangesRequested)
+      automatedPrompt `shouldNotContain` "The user answered"
+      automatedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
     it "extracts Codex session ids and readable agent output" $ do
       parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
@@ -1890,20 +1910,35 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing "")
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
       claudeOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
       codexOriginRevisionPrompt `shouldNotContain` "create reviewed:revised"
       codexOriginRevisionPrompt `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
+
+    it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
+      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing ResumeAnswer "")
+      initialReviewPrompt `shouldNotContain` "reviewed:revised"
+      rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
+
+    it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
+      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldNotContain` "The user answered"
+      interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
     it "derives a pure post-revision verdict from current labels instead of waiting on a reviewed:revised handoff" $ do
       pullRequestVerdictForLabels [] `shouldBe` PullRequestVerdictPending
@@ -1927,6 +1962,60 @@ main = hspec $ do
       pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
       -- forceFresh always starts a new session.
       pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
+
+  describe "review overlay digit dispatch" $ do
+    let requestId = ReviewRequestId (String "req-1")
+        choices = [ReviewChoice "keep" "Keep compatibility" "Preserve callers", ReviewChoice "break" "Break compatibility" ""]
+        textQuestion allowOther =
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "How many retries?",
+              reviewQuestionKind = QuestionText,
+              reviewQuestionChoices = [],
+              reviewQuestionAllowOther = allowOther,
+              reviewQuestionMultiple = False
+            }
+        choiceQuestion allowOther =
+          ReviewQuestion
+            { reviewQuestionId = "scope",
+              reviewQuestionHeader = "SCOPE",
+              reviewQuestionText = "Which contract?",
+              reviewQuestionKind = QuestionChoice,
+              reviewQuestionChoices = choices,
+              reviewQuestionAllowOther = allowOther,
+              reviewQuestionMultiple = False
+            }
+        approval = ReviewApproval Nothing Nothing False
+
+    it "appends free-text digits instead of treating them as choice selections" $ do
+      -- A QuestionText pending interaction must take precedence over any
+      -- choices/allowOther it happens to carry (issue #3 spec addition).
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion False))) 2 `shouldBe` ReviewDigitAppend
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (textQuestion True))) 8 `shouldBe` ReviewDigitAppend
+
+    it "selects an in-range choice by its 1-based digit" $ do
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 0
+        `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "keep" "Keep compatibility" "Preserve callers")
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 1
+        `shouldBe` ReviewDigitSelectChoice requestId (ReviewChoice "break" "Break compatibility" "")
+
+    it "appends an out-of-range choice digit when free text is also accepted" $
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion True))) 5 `shouldBe` ReviewDigitAppend
+
+    it "reports an out-of-range choice digit unavailable when free text is not accepted" $
+      resolveReviewDigitAction (Just (PendingReviewQuestion requestId (choiceQuestion False))) 5
+        `shouldBe` ReviewDigitUnavailable "That review choice is not available"
+
+    it "keeps approval digit handling exactly as before" $ do
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 0 `shouldBe` ReviewDigitApprovalOnce requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 1 `shouldBe` ReviewDigitApprovalSession requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 2 `shouldBe` ReviewDigitApprovalDecline requestId
+      resolveReviewDigitAction (Just (PendingReviewApproval requestId approval)) 5
+        `shouldBe` ReviewDigitUnavailable "That approval choice is not available"
+
+    it "appends digits when nothing is pending" $
+      resolveReviewDigitAction Nothing 4 `shouldBe` ReviewDigitAppend
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
@@ -2408,6 +2497,7 @@ workerFixtureSpec repository identifier issueNumber =
       workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly CodexSolver),
       workerExistingSession = Nothing,
       workerExistingLogPath = Nothing,
+      workerResumeProvenance = ResumeAnswer,
       workerUserMessage = "",
       workerParent = Nothing,
       workerCreatedAt = epoch,

@@ -69,7 +69,12 @@ Every mouse action has a keyboard equivalent.
 
 ## Reviews and issue work
 
-These actions require a working Codex or Claude installation and login.
+These actions require a working Codex or Claude installation and login, plus
+the Kanban-owned workflow assets those actions call into (the canonical
+issue-review backend and the named `solve`/`pr-review`/`pr-rereview`/
+`pr-revise` commands). Provider installation alone does not make them ready;
+see [the agent-workflow contract](agent-workflow-contract.md) for what each
+action depends on.
 
 - Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview.
 - Press `S` to work on an issue and open a pull request.

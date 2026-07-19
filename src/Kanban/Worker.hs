@@ -72,7 +72,7 @@ import Kanban.Process
     readProcessSnapshot,
   )
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
-import Kanban.Solve (AgentEvent (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, runSolve)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, runSolve)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectory,
@@ -138,13 +138,31 @@ data WorkerSpec = WorkerSpec
     workerTask :: WorkerTask,
     workerExistingSession :: Maybe Text,
     workerExistingLogPath :: Maybe FilePath,
+    workerResumeProvenance :: ResumeProvenance,
     workerUserMessage :: Text,
     workerParent :: Maybe WorkerParent,
     workerCreatedAt :: UTCTime,
     workerMaxRuntimeSeconds :: Int
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Manual instance so a durable spec file written before
+-- 'workerResumeProvenance' existed still decodes: legacy specs default to
+-- 'ResumeAnswer', matching every resume's framing prior to its introduction.
+instance FromJSON WorkerSpec where
+  parseJSON = withObject "WorkerSpec" $ \object ->
+    WorkerSpec
+      <$> object .: "workerId"
+      <*> object .: "workerRepository"
+      <*> object .: "workerTask"
+      <*> object .: "workerExistingSession"
+      <*> object .: "workerExistingLogPath"
+      <*> object .:? "workerResumeProvenance" .!= ResumeAnswer
+      <*> object .: "workerUserMessage"
+      <*> object .: "workerParent"
+      <*> object .: "workerCreatedAt"
+      <*> object .: "workerMaxRuntimeSeconds"
 
 data WorkerEvent
   = WorkerProviderStarted Int
@@ -237,8 +255,8 @@ data WorkerDescriptor = WorkerDescriptor
   }
   deriving stock (Eq, Show)
 
-launchSolveWorker :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> Text -> Maybe WorkerParent -> IO (Either Text WorkerDescriptor)
-launchSolveWorker repository issueNumber workflow brand existingSession existingLogPath userMessage parent = do
+launchSolveWorker :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> IO (Either Text WorkerDescriptor)
+launchSolveWorker repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
@@ -248,14 +266,15 @@ launchSolveWorker repository issueNumber workflow brand existingSession existing
         workerTask = SolveWorkerTaskKind (SolveWorkerTask issueNumber workflow brand),
         workerExistingSession = existingSession,
         workerExistingLogPath = existingLogPath,
+        workerResumeProvenance = provenance,
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
         workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds
       }
 
-launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> Text -> Maybe WorkerParent -> IO (Either Text WorkerDescriptor)
-launchPullRequestWorker repository number origin action existingSession existingLogPath userMessage parent = do
+launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> IO (Either Text WorkerDescriptor)
+launchPullRequestWorker repository number origin action existingSession existingLogPath provenance userMessage parent = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
@@ -265,6 +284,7 @@ launchPullRequestWorker repository number origin action existingSession existing
         workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask number origin action),
         workerExistingSession = existingSession,
         workerExistingLogPath = existingLogPath,
+        workerResumeProvenance = provenance,
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
@@ -489,10 +509,10 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 defaultRunTask :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
 defaultRunTask spec rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
-    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
+    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translateSolveEvent rememberProvider emit)
   PullRequestWorkerTaskKind task ->
-    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerUserMessage
+    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translatePullRequestEvent rememberProvider emit)
 
 runWorkerWithTask :: IO (Either Text [ProcessIdentity]) -> (WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()) -> FilePath -> IO (Either Text ())

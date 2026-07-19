@@ -29,7 +29,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -102,8 +102,8 @@ agentForAction PullRequestClaude PullRequestRevision = ClaudeSolver
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlow repository pullRequestNumber origin action existingSession existingLogPath userMessage eventSink = do
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlow repository pullRequestNumber origin action existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
@@ -153,7 +153,7 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand existingSession userMessage))
+      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,
           std_out = CreatePipe,
@@ -161,17 +161,17 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
           create_group = True
         }
 
-pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> Text -> [String]
-pullRequestArguments number origin action CodexSolver existingSession userMessage = case existingSession of
+pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> [String]
+pullRequestArguments number origin action CodexSolver existingSession provenance userMessage = case existingSession of
   Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action CodexSolver)]
-  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt action userMessage)]
+  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
     codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-pullRequestArguments number origin action ClaudeSolver existingSession userMessage =
+pullRequestArguments number origin action ClaudeSolver existingSession provenance userMessage =
   ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action ClaudeSolver else resumePrompt action userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action ClaudeSolver else resumePrompt action provenance userMessage)]
 
 codexModel :: PullRequestAction -> String
 codexModel PullRequestRevision = "gpt-5.4"
@@ -195,7 +195,7 @@ initialPrompt number _origin action brand = Text.unlines (actionLines <> interac
     actionLines = case action of
       PullRequestReview ->
         [ "Run " <> commandName "pr-review" <> " for PR #" <> numberText <> ".",
-          "Review only. Use the canonical opposite-brand workflow, publish its verdict, and never edit or merge the PR. Remove reviewed:revised after successfully publishing the verdict."
+          "Review only. Use the canonical opposite-brand workflow, publish its verdict, and never edit or merge the PR."
         ]
       PullRequestRereview ->
         [ "Run " <> commandName "pr-rereview" <> " for PR #" <> numberText <> ".",
@@ -212,8 +212,8 @@ initialPrompt number _origin action brand = Text.unlines (actionLines <> interac
       ]
     numberText = Text.pack (show number)
 
-resumePrompt :: PullRequestAction -> Text -> Text
-resumePrompt action answer = Text.unlines ["The user answered:", Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
+resumePrompt :: PullRequestAction -> ResumeProvenance -> Text -> Text
+resumePrompt action provenance answer = Text.unlines [resumeProvenanceHeader provenance, Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
 
 actionName :: PullRequestAction -> Text
 actionName PullRequestReview = "review"

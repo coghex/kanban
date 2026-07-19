@@ -1,7 +1,10 @@
 module Kanban.UI
   ( failureActivity,
     orphanMessage,
+    PendingReviewInteraction (..),
+    ReviewDigitAction (..),
     pullRequestSessionReusable,
+    resolveReviewDigitAction,
     runDashboard,
   )
 where
@@ -90,6 +93,7 @@ import Kanban.Review
   )
 import Kanban.Solve
   ( AgentEvent (..),
+    ResumeProvenance (..),
     SolveEvent (..),
     SolveOutcome (..),
     SolveWorkflow (..),
@@ -213,7 +217,13 @@ data SolveSession = SolveSession
     solveSessionTranscript :: ChatTranscript,
     solveSessionInput :: Text,
     solveSessionSpinnerFrame :: Int,
-    solveSessionAutoProgress :: Maybe AutoSolveProgress
+    solveSessionAutoProgress :: Maybe AutoSolveProgress,
+    -- | Why the session last entered 'SolveAttention', so 'submitSolveInput'
+    -- can tell a real answer to a 'KANBAN_NEEDS_INPUT' question apart from
+    -- guidance typed after an interrupt -- both land in the same phase and
+    -- are submitted through the same key -- and frame the resumed prompt
+    -- accordingly. Meaningless while not in 'SolveAttention'.
+    solveSessionResumeProvenance :: ResumeProvenance
   }
   deriving stock (Eq, Show)
 
@@ -234,7 +244,10 @@ data PullRequestReviewSession = PullRequestReviewSession
     pullRequestSessionLogPath :: Maybe FilePath,
     pullRequestSessionTranscript :: ChatTranscript,
     pullRequestSessionInput :: Text,
-    pullRequestSessionSpinnerFrame :: Int
+    pullRequestSessionSpinnerFrame :: Int,
+    -- | See 'solveSessionResumeProvenance'; the PR flow's own resume path
+    -- has the same answer-vs-interrupt ambiguity.
+    pullRequestSessionResumeProvenance :: ResumeProvenance
   }
   deriving stock (Eq, Show)
 
@@ -2097,19 +2110,46 @@ appendReviewInput character session =
 removeReviewInputCharacter :: ReviewSession -> ReviewSession
 removeReviewInputCharacter session = session {reviewSessionInput = Text.dropEnd 1 session.reviewSessionInput}
 
+-- | What a digit key '1'..'9' should do given the pending review
+-- interaction (if any) and the 0-based choice index it encodes. Pulled out
+-- of 'chooseReviewOption' so the dispatch rules are unit-testable without an
+-- 'EventM' harness.
+data ReviewDigitAction
+  = ReviewDigitAppend
+  | ReviewDigitSelectChoice ReviewRequestId ReviewChoice
+  | ReviewDigitApprovalOnce ReviewRequestId
+  | ReviewDigitApprovalSession ReviewRequestId
+  | ReviewDigitApprovalDecline ReviewRequestId
+  | ReviewDigitUnavailable Text
+  deriving stock (Eq, Show)
+
+resolveReviewDigitAction :: Maybe PendingReviewInteraction -> Int -> ReviewDigitAction
+resolveReviewDigitAction pending choiceIndex = case pending of
+  Just (PendingReviewQuestion requestId question)
+    | question.reviewQuestionKind == QuestionText -> ReviewDigitAppend
+    | otherwise -> case safeIndex choiceIndex question.reviewQuestionChoices of
+        Just choice -> ReviewDigitSelectChoice requestId choice
+        Nothing
+          | question.reviewQuestionAllowOther -> ReviewDigitAppend
+          | otherwise -> ReviewDigitUnavailable "That review choice is not available"
+  Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
+    0 -> ReviewDigitApprovalOnce requestId
+    1 -> ReviewDigitApprovalSession requestId
+    2 -> ReviewDigitApprovalDecline requestId
+    _ -> ReviewDigitUnavailable "That approval choice is not available"
+  Nothing -> ReviewDigitAppend
+
 chooseReviewOption :: Int -> Int -> EventM Name AppState ()
 chooseReviewOption issueNumber choiceIndex = do
   state <- get
-  case Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionPending) of
-    Just (PendingReviewQuestion requestId question) -> case safeIndex choiceIndex question.reviewQuestionChoices of
-      Nothing -> setNotice "That review choice is not available"
-      Just choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
-    Just (PendingReviewApproval requestId _approval) -> case choiceIndex of
-      0 -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
-      1 -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
-      2 -> submitApprovalAnswer issueNumber requestId False False "Declined this action"
-      _ -> setNotice "That approval choice is not available"
-    Nothing -> modifyReviewSession issueNumber (appendReviewInput (toEnum (fromEnum '1' + choiceIndex)))
+  let pending = Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionPending)
+  case resolveReviewDigitAction pending choiceIndex of
+    ReviewDigitAppend -> modifyReviewSession issueNumber (appendReviewInput (toEnum (fromEnum '1' + choiceIndex)))
+    ReviewDigitSelectChoice requestId choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
+    ReviewDigitApprovalOnce requestId -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
+    ReviewDigitApprovalSession requestId -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
+    ReviewDigitApprovalDecline requestId -> submitApprovalAnswer issueNumber requestId False False "Declined this action"
+    ReviewDigitUnavailable message -> setNotice message
 
 submitReviewInput :: Int -> EventM Name AppState ()
 submitReviewInput issueNumber = do
@@ -2442,7 +2482,8 @@ startIssueSolve issue workflow brand = do
                 <> "\n\n",
             solveSessionInput = "",
             solveSessionSpinnerFrame = 0,
-            solveSessionAutoProgress = autoProgress
+            solveSessionAutoProgress = autoProgress,
+            solveSessionResumeProvenance = ResumeAnswer
           }
   modify
     ( \current ->
@@ -2452,10 +2493,10 @@ startIssueSolve issue workflow brand = do
             appNotice = Nothing
           }
     )
-  launchSolveInvocation issue.issueNumber workflow brand Nothing ""
+  launchSolveInvocation issue.issueNumber workflow brand Nothing ResumeAnswer ""
 
-launchSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Text -> EventM Name AppState ()
-launchSolveInvocation issueNumber workflow brand existingSession input = do
+launchSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.solveSessionLogPath)
       eventChannel = state.appEventChannel
@@ -2476,7 +2517,7 @@ launchSolveInvocation issueNumber workflow brand existingSession input = do
     . liftIO
     . forkIO
     $ do
-      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath input parent
+      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent
       case launched of
         Left message -> do
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
@@ -2516,7 +2557,7 @@ submitSolveInput issueNumber = do
                       solveSessionTranscript = appendSolveTranscript current.solveSessionTranscript ("\nYou: " <> answer <> "\n")
                     }
               )
-            launchSolveInvocation issueNumber session.solveSessionWorkflow session.solveSessionBrand (Just sessionId) answer
+            launchSolveInvocation issueNumber session.solveSessionWorkflow session.solveSessionBrand (Just sessionId) session.solveSessionResumeProvenance answer
 
 modifySolveSession :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
 modifySolveSession issueNumber update =
@@ -2636,7 +2677,8 @@ applySolveEvent solveEvent = case solveEvent of
       session
         { solveSessionPhase = SolveAttention,
           solveSessionActivity = "waiting for guidance",
-          solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n"
+          solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n",
+          solveSessionResumeProvenance = ResumeInterruptGuidance
         }
     finishSolveSession (Just SolveKilledPhase) _ session =
       session {solveSessionActivity = "killed", solveSessionAutoProgress = markAutoSolveStopped <$> session.solveSessionAutoProgress}
@@ -2659,7 +2701,8 @@ applySolveEvent solveEvent = case solveEvent of
         session
           { solveSessionPhase = SolveAttention,
             solveSessionActivity = "waiting for input",
-            solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n")
+            solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n"),
+            solveSessionResumeProvenance = ResumeAnswer
           }
       SolveFailed message ->
         session
@@ -2936,7 +2979,8 @@ recoveredSolveSession state descriptor issue task =
           ),
       solveSessionInput = "",
       solveSessionSpinnerFrame = 0,
-      solveSessionAutoProgress = recoveredAutoProgress state descriptor task
+      solveSessionAutoProgress = recoveredAutoProgress state descriptor task,
+      solveSessionResumeProvenance = ResumeAnswer
     }
 
 recoveredAutoProgress :: AppState -> WorkerDescriptor -> SolveWorkerTask -> Maybe AutoSolveProgress
@@ -2970,7 +3014,8 @@ recoveredPullRequestSession descriptor pullRequest task =
           pullRequestSessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath,
           pullRequestSessionTranscript = plainTranscript ("reattached persistent PR " <> pullRequestActionText task.pullRequestWorkerAction <> " worker\nagent: " <> pullRequestAgentLabel task.pullRequestWorkerAction brand <> "\n\n"),
           pullRequestSessionInput = "",
-          pullRequestSessionSpinnerFrame = 0
+          pullRequestSessionSpinnerFrame = 0,
+          pullRequestSessionResumeProvenance = ResumeAnswer
         }
 
 ensureRecoveredAutoSolve :: WorkerDescriptor -> PullRequestWorkerTask -> EventM Name AppState ()
@@ -3150,7 +3195,8 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
                   pullRequestSessionLogPath = Nothing,
                   pullRequestSessionTranscript = plainTranscript ("action: " <> pullRequestActionText action <> "\nagent: " <> pullRequestAgentLabel action brand <> "\n\n"),
                   pullRequestSessionInput = "",
-                  pullRequestSessionSpinnerFrame = 0
+                  pullRequestSessionSpinnerFrame = 0,
+                  pullRequestSessionResumeProvenance = ResumeAnswer
                 }
         modify
           ( \current ->
@@ -3160,7 +3206,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
                   appNotice = if showOverlay then Nothing else current.appNotice
                 }
           )
-        launchPullRequestFlow pullRequest.pullRequestNumber origin action brand Nothing ""
+        launchPullRequestFlow pullRequest.pullRequestNumber origin action brand Nothing ResumeAnswer ""
 
 pullRequestReviewActive :: PullRequestReviewSession -> Bool
 pullRequestReviewActive session = session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
@@ -3175,14 +3221,14 @@ pullRequestSessionReusable :: Bool -> Bool -> PullRequestAction -> PullRequestAc
 pullRequestSessionReusable forceFresh active sessionAction currentAction launchedForUpdatedAt currentUpdatedAt =
   not forceFresh && (active || (sessionAction == currentAction && launchedForUpdatedAt == currentUpdatedAt))
 
-launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> Text -> EventM Name AppState ()
-launchPullRequestFlow number origin action _brand existingSession input = do
+launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchPullRequestFlow number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.pullRequestSessionLogPath)
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath input parent
+    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent
     case launched of
       Left message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
@@ -3221,7 +3267,7 @@ submitPullRequestInput number = do
           modifyPullRequestSession number (\current -> current {pullRequestSessionPhase = SolveStarting, pullRequestSessionActivity = "resuming", pullRequestSessionInput = "", pullRequestSessionTranscript = appendSolveTranscript current.pullRequestSessionTranscript ("\nYou: " <> answer <> "\n")})
           modifyAutoSolveForPullRequest number
             (\current -> current {solveSessionPhase = SolveRunning, solveSessionActivity = "resuming PR review"})
-          launchPullRequestFlow number session.pullRequestSessionOrigin session.pullRequestSessionAction session.pullRequestSessionBrand (Just sessionId) answer
+          launchPullRequestFlow number session.pullRequestSessionOrigin session.pullRequestSessionAction session.pullRequestSessionBrand (Just sessionId) session.pullRequestSessionResumeProvenance answer
       | otherwise -> setNotice "This PR workflow is not waiting for a resumable answer"
     Nothing -> setNotice "PR workflow session is no longer available"
 
@@ -3291,10 +3337,10 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
       case state.appOverlay of
         Just (PullRequestReviewOverlay selected) | selected == number -> vScrollToEnd (viewportScroll PullRequestReviewViewport)
         _ -> pure ()
-    finish (Just SolveInterrupting) _ session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for guidance", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n"}
+    finish (Just SolveInterrupting) _ session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for guidance", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n", pullRequestSessionResumeProvenance = ResumeInterruptGuidance}
     finish (Just SolveKilledPhase) _ session = session {pullRequestSessionActivity = "killed"}
     finish _ SolveCompleted session = session {pullRequestSessionPhase = SolveFinished, pullRequestSessionActivity = "completed"}
-    finish _ (SolveNeedsInput question) session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for input", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n")}
+    finish _ (SolveNeedsInput question) session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for input", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n"), pullRequestSessionResumeProvenance = ResumeAnswer}
     finish _ (SolveFailed message) session = session {pullRequestSessionPhase = SolveFailedPhase, pullRequestSessionActivity = failureActivity message, pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\n" <> sanitizeText message <> "\n")}
 
 modifyAutoSolveForPullRequest :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
@@ -3881,7 +3927,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
                       solveSessionTranscript = appendSolveTranscript current.solveSessionTranscript ("\n[kanban] Review requested changes on PR #" <> showText pullRequest.pullRequestNumber <> "; resuming the original solver.\n")
                     }
               )
-            launchSolveInvocation issueNumber AutoSolve session.solveSessionBrand (Just sessionId) prompt
+            launchSolveInvocation issueNumber AutoSolve session.solveSessionBrand (Just sessionId) ResumeAutomatedChangesRequested prompt
             setNotice ("Autosolve #" <> showText issueNumber <> " resumed its original solver for PR #" <> showText pullRequest.pullRequestNumber)
 
 completeAutoSolve :: Int -> Int -> EventM Name AppState ()

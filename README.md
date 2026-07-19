@@ -10,7 +10,14 @@ It can also show Codex and Claude usage, run reviews, start work on issues, and 
 - [Git](https://git-scm.com/)
 - [GitHub CLI](https://cli.github.com/) signed in with `gh auth login`
 - GHC and Cabal to build from source
-- Codex or Claude only if you want the optional AI actions
+- Codex or Claude installed and signed in, only if you want the optional AI actions
+
+Having Codex or Claude installed and signed in is necessary but not
+sufficient for AI actions: they also depend on Kanban-owned workflow assets
+(the canonical issue-review backend, and named `solve`/`pr-review`/
+`pr-rereview`/`pr-revise` commands) that are not yet packaged for a fresh
+checkout. See [the agent-workflow contract](docs/agent-workflow-contract.md)
+for the full dependency list and what each action requires.
 
 ## Build
 
@@ -69,6 +76,7 @@ Installation does not start the drainer. Press `d` in Kanban when you are ready 
 
 - [User guide](docs/user-guide.md)
 - [PR drainer](docs/pr-drainer.md)
+- [Agent-workflow contract](docs/agent-workflow-contract.md)
 - [Development](docs/development.md)
 - [Documentation index](docs/README.md)
 - [Design and implementation notes](docs/design.md)
