@@ -1438,6 +1438,53 @@ main = hspec $ do
           eventBytes <- ByteString.readFile eventPath
           eventBytes `shouldNotSatisfy` ByteString.isInfixOf "SolveCompleted"
 
+    it "keeps the lease held until the watchdog's own verification finishes, even when the task's thread returns first" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        -- No TERM trap: this provider exits promptly once the watchdog
+        -- signals it, well inside the mandatory termination-grace wait the
+        -- watchdog's own verified kill always sleeps through afterward.
+        withManagedShell "while :; do sleep 1; done" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-819-watchdog-join") 819 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-819-watchdog-join.spec.json"
+              statePath = workerRoot </> "solve-819-watchdog-join.state.json"
+              leasePath = workerRoot </> "issue-819.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            -- Mirrors what a real runSolve/runPullRequestFlow does: register,
+            -- then wait on the actual provider process and report its exit.
+            -- Once the watchdog's own termination signal reaches it, this
+            -- naturally observes the exit and tries to complete normally —
+            -- losing the already-claimed slot — well before the watchdog's
+            -- own mandatory grace wait lets it finish verifying and
+            -- committing.
+            let registerThenWaitAndFinish _spec rememberProvider emit = do
+                  rememberProvider managed
+                  _ <- waitForProcess providerProcess
+                  emit (WorkerFinished SolveCompleted)
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask readProcessSnapshot registerThenWaitAndFinish specPath >>= putMVar finished
+            timeout 15000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            -- Checked immediately, with no polling wait: by the time
+            -- runWorkerWithTask has fully returned, the watchdog's own
+            -- commit must already be reflected on disk, not still catching
+            -- up in the background after the lease was released.
+            stateBytes <- LazyByteString.readFile statePath
+            case eitherDecode stateBytes :: Either String WorkerState of
+              Left message -> expectationFailure message
+              Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+
     it "never leaks a provider spawned right as an already-overdue deadline fires" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime

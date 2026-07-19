@@ -532,6 +532,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       forcedOutcomeRef <- newIORef Nothing
       taskThreadIdRef <- newIORef Nothing
       taskResultVar <- newEmptyMVar
+      watchdogDoneVar <- newEmptyMVar
       let stopOwnedWork = do
             writeIORef stoppedRef True
             writeIORef signalShutdownRef True
@@ -651,14 +652,25 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
         result <- try @SomeException (restore runTask)
         uninterruptibleMask_ (putMVar taskResultVar result)
       writeIORef taskThreadIdRef (Just taskThreadId)
-      void . forkIO $ watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody
+      void . forkIO $ watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody watchdogDoneVar
       taskResult <- takeMVar taskResultVar
       forcedOutcome <- readIORef forcedOutcomeRef
       case forcedOutcome of
-        -- The watchdog already claimed completion and ran `completeBody`
-        -- itself before ever cancelling the task (see 'watchdogLoop'), so
-        -- there is nothing left to commit here.
-        Just _ -> pure ()
+        -- The watchdog claimed completion, but 'forcedOutcomeRef' is set the
+        -- moment it wins — well before it has actually killed or verified
+        -- anything. A provider that exits in direct response to the
+        -- watchdog's own termination signal can let the task's own
+        -- `runSolve`/`runPullRequestFlow` observe that exit and return
+        -- normally (its own completion attempt then simply loses the
+        -- already-claimed slot and does nothing) well before the watchdog's
+        -- kill-verify-and-commit sequence — bounded by real termination
+        -- grace waits — actually concludes. Waiting here for the watchdog's
+        -- own completion signal ensures 'completeBody' has already run (so
+        -- `pendingOutcomeRef` below reflects its real decision) before this
+        -- proceeds to release the lease; otherwise the lease could be freed,
+        -- or this whole call could return, before any outcome was ever
+        -- committed.
+        Just _ -> takeMVar watchdogDoneVar
         Nothing -> case taskResult of
           Right () -> do
             stopped <- readIORef stoppedRef
@@ -1444,8 +1456,20 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
 -- still inside a claimed completion's 'uninterruptibleMask_' simply blocks
 -- here until that completion finishes rather than cutting it off, so this
 -- still cannot strand the supervisor.
-watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> IO ()
-watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody = do
+--
+-- 'watchdogDoneVar' is filled unconditionally once this returns, win or
+-- lose. 'forcedOutcomeRef' is set the moment this wins — well before the
+-- kill-verify-and-commit sequence below actually runs, which includes real
+-- bounded waits (termination grace periods). A provider that exits in
+-- direct response to this function's own termination signal can let the
+-- task's own runner observe that exit and return normally in the meantime;
+-- its losing completion attempt is a no-op, but the supervisor must not
+-- mistake 'forcedOutcomeRef' alone for "the outcome is committed" and
+-- release the lease early. The supervisor instead blocks on
+-- 'watchdogDoneVar' whenever 'forcedOutcomeRef' is set, so it only proceeds
+-- once this has actually finished.
+watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> MVar () -> IO ()
+watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody watchdogDoneVar = do
   now <- getCurrentTime
   let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
@@ -1458,6 +1482,7 @@ watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef 
     recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
     completeBody (providerOk && recordedOk) workerDeadlineOutcome
     readIORef taskThreadIdRef >>= mapM_ killThread
+  putMVar watchdogDoneVar ()
 
 -- | The canonical externally visible reason a persistent worker's
 -- 'workerMaxRuntimeSeconds' bound fired, used consistently in worker state,
