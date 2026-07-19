@@ -936,16 +936,41 @@ def select_matching_worktree(
     branch_name: str,
     issue_numbers: list[int],
     pr_number: int,
+    pr_head_oid: str | None,
 ) -> Path | None:
-    candidates: list[tuple[int, Path]] = []
+    # Positive identification is the only thing allowed to select a worktree
+    # for deletion or sandbox-bypassed reuse: an exact branch match, or (for
+    # detached worktrees, independent of directory naming) an exact HEAD-SHA
+    # match against the PR head. Directory-basename scoring alone is used
+    # only to surface a candidate for branch-checked-out worktrees whose
+    # branch doesn't match -- it can never itself select a match, and a lone
+    # surviving candidate is logged and left in place rather than returned.
+    detached_matches: list[Path] = []
+    fuzzy_candidates: list[tuple[int, Path]] = []
 
     for entry in entries:
         path = Path(entry["worktree"]).resolve()
         if path == main_path:
             continue
-        branch_ref = entry.get("branch", "")
+        branch_ref = entry.get("branch")
         if branch_ref == f"refs/heads/{branch_name}":
             return path
+
+        if branch_ref is None:
+            # Only the explicit porcelain "detached" marker positively
+            # establishes detached state; an entry missing both "branch"
+            # and "detached" is malformed/undetermined and must not be
+            # eligible for the exact-HEAD match either.
+            is_detached = "detached" in entry
+            head_sha = entry.get("HEAD") if is_detached else None
+            if is_detached and pr_head_oid and head_sha and head_sha == pr_head_oid:
+                detached_matches.append(path)
+            else:
+                log(
+                    f"possible worktree for PR #{pr_number} at {path} — not "
+                    "verified, leaving in place"
+                )
+            continue
 
         base = path.name.lower()
         score = 0
@@ -957,21 +982,55 @@ def select_matching_worktree(
             if base.endswith(f"-{number}"):
                 score = max(score, 40)
         if score:
-            candidates.append((score, path))
+            fuzzy_candidates.append((score, path))
 
-    if not candidates:
+    # The fuzzy name-score tie check runs before any positive-identification
+    # / verification step -- including the detached exact-HEAD match below --
+    # so a tied fuzzy candidate set always raises, never gets shadowed by an
+    # unrelated detached match elsewhere in the same worktree list.
+    best_fuzzy_paths: list[Path] = []
+    if fuzzy_candidates:
+        fuzzy_candidates.sort(key=lambda item: (-item[0], str(item[1])))
+        best_score = fuzzy_candidates[0][0]
+        best_fuzzy_paths = [
+            path for score, path in fuzzy_candidates if score == best_score
+        ]
+        if len(best_fuzzy_paths) > 1:
+            joined = ", ".join(str(path) for path in best_fuzzy_paths)
+            raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
+
+    if len(detached_matches) > 1:
+        joined = ", ".join(str(path) for path in sorted(detached_matches, key=str))
+        raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
+    if detached_matches:
+        return detached_matches[0]
+
+    if not best_fuzzy_paths:
         return None
 
-    candidates.sort(key=lambda item: (-item[0], str(item[1])))
-    best_score = candidates[0][0]
-    best_paths = [path for score, path in candidates if score == best_score]
-    if len(best_paths) > 1:
-        joined = ", ".join(str(path) for path in best_paths)
-        raise DrainError(f"Multiple worktrees match PR #{pr_number}: {joined}")
-    return best_paths[0]
+    candidate = best_fuzzy_paths[0]
+    log(
+        f"possible worktree for PR #{pr_number} at {candidate} — not verified, "
+        "leaving in place"
+    )
+    return None
+
+
+def commit_exists_locally(ctx: RepoContext, sha: str) -> bool:
+    proc = run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        cwd=ctx.path,
+        check=False,
+    )
+    return proc.returncode == 0
 
 
 def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
+    pr_head_oid = pr.get("headRefOid")
+    if pr_head_oid and not commit_exists_locally(ctx, pr_head_oid):
+        # The PR head commit object isn't available in the local repo, so an
+        # exact-HEAD string match can't be trusted as positive identification.
+        pr_head_oid = None
     return select_matching_worktree(
         parse_worktrees(ctx),
         main_path=ctx.path.resolve(),
@@ -979,6 +1038,7 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
         branch_name=pr["headRefName"],
         issue_numbers=extract_issue_numbers(pr),
         pr_number=pr["number"],
+        pr_head_oid=pr_head_oid,
     )
 
 
