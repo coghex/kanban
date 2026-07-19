@@ -577,6 +577,12 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- finalizing on that gap. A genuine task-reported outcome always
           -- passes True: the provider it reports for has already exited on
           -- its own.
+          -- The 'Bool' recorded alongside a pending outcome is
+          -- 'requireVerification': whether the commit that produced it was
+          -- itself unverified (came from 'completeBody's False case),
+          -- carried forward so the orphan-resolution poll below cannot
+          -- treat a merely-empty recorded census as equivalent to an
+          -- actually-confirmed one (see 'waitForOrphanResolution').
           completeBody verified outcome = uninterruptibleMask_ $ do
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
@@ -585,17 +591,17 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                 known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
                 signalTriggered <- readIORef signalShutdownRef
                 let operation = if signalTriggered then "signal shutdown" else "completion" :: Text
-                writeIORef pendingOutcomeRef (Just outcome)
+                writeIORef pendingOutcomeRef (Just (not verified, outcome))
                 emitRaw (WorkerDiagnostic (operation <> ": could not verify recorded descendants are gone (" <> message <> "); retaining orphan state and lease"))
                 emitRaw (WorkerOrphansDetected outcome known)
               Right survivors
                 | null survivors, verified -> emitRaw (WorkerFinished outcome)
                 | null survivors -> do
-                    writeIORef pendingOutcomeRef (Just outcome)
+                    writeIORef pendingOutcomeRef (Just (True, outcome))
                     emitRaw (WorkerDiagnostic "deadline: could not verify the current provider was terminated; retaining orphan state and lease")
                     emitRaw (WorkerOrphansDetected outcome survivors)
                 | otherwise -> do
-                    writeIORef pendingOutcomeRef (Just outcome)
+                    writeIORef pendingOutcomeRef (Just (not verified, outcome))
                     emitRaw (WorkerOrphansDetected outcome survivors)
           -- Claiming and running the completion body happen under the same
           -- mask: without it, an async exception (the watchdog's own
@@ -672,7 +678,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- `stoppedRef`: a signal-triggered shutdown already set that flag
       -- true (to stop the heartbeat/census loops), and gating this wait on
       -- it too would let the lease below release on an unverified kill.
-      mapM_ (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw) pending
+      mapM_ (\(requireVerification, outcome) -> waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw requireVerification outcome) pending
       writeIORef stoppedRef True
       releaseWorkerLease descriptor
       void (installHandler sigTERM previousTermHandler Nothing)
@@ -1357,12 +1363,29 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 -- failure diagnostic as signal-triggered, never to gate the loop itself. A
 -- snapshot failure retains the pending state and reports a diagnostic once
 -- per distinct failure message rather than once per poll.
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> SolveOutcome -> IO ()
-waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit outcome = loop Nothing
+--
+-- 'requireVerification' closes the same gap 'completeBody' guards against:
+-- an empty recorded census is not by itself proof that a deadline's kill
+-- actually succeeded, since nothing may ever have been captured for a
+-- provider still mid-registration when it fired. 'liveRecordedProcessesWith'
+-- vacuously succeeds on an empty list without ever taking a snapshot, so
+-- when the caller flags this outcome as needing verification, an empty
+-- census still forces one real snapshot attempt — treating its failure the
+-- same as a non-empty census's verification failure — before finalizing;
+-- only a snapshot that actually succeeds counts as confirmation. A
+-- genuinely verified commit (a normal task completion, or a deadline whose
+-- kills were confirmed) passes False and keeps the original, cheaper
+-- vacuous-empty-census behavior.
+waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> Bool -> SolveOutcome -> IO ()
+waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit requireVerification outcome = loop Nothing
   where
     loop lastDiagnostic = do
       refreshProcessCensus descriptor stateLock
-      result <- liveRecordedProcessesWith takeSnapshot stateLock
+      known <- withMVar stateLock (\state -> pure (state.workerStateKnownProcesses))
+      result <-
+        if requireVerification && null known
+          then fmap (const []) <$> takeSnapshot
+          else liveProcessesWith takeSnapshot known
       case result of
         Left message -> do
           reported <-
@@ -1383,49 +1406,57 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
 -- provider) from 'workerCreatedAt', not from whenever this thread happened
 -- to start: the delay is the remainder of that window, clamped to zero so
 -- an already-overdue spec fires immediately instead of waiting a full
--- 'workerMaxRuntimeSeconds' from scratch. On firing, this claims the same
--- stop guard 'rememberProvider' already checks (so a provider that starts
--- after the deadline is killed immediately as it registers) and claims the
--- completion slot 'complete' itself contends for; completion is claimed
--- immediately after the stop guard — before touching any process — so a
--- genuine, already-in-flight task completion reaching 'complete' around the
--- same instant cannot win that race and replace the deadline outcome; only
--- whichever caller claims the completion slot ever runs its verify-and-emit
--- body. 'stoppedRef' itself is claimed atomically so a task that already
--- finished (or was already stopped by a signal) around the same instant
--- wins the race instead of this firing redundantly.
+-- 'workerMaxRuntimeSeconds' from scratch. On firing, this claims the exact
+-- same 'claimCompletion' slot a genuine task completion ('complete')
+-- contends for — not a separate guard claimed just beforehand — so the two
+-- can never each "win" their own half of the decision: whichever caller's
+-- claim actually lands first is the sole, unambiguous owner of the
+-- outcome. (Claiming a separate 'stoppedRef' guard first and only then
+-- attempting the completion claim, as an earlier version did, leaves a
+-- real gap in which a same-instant genuine completion can still claim
+-- completion out from under an already-"won" deadline.) Losing this claim
+-- means some other caller's completion is already in flight — and since
+-- that only ever happens once its provider has already exited on its own,
+-- there is nothing left here for the deadline to kill, so this does
+-- nothing further.
+--
+-- On winning, 'stoppedRef' is set immediately — before any of the killing
+-- below — purely for its other roles: gating 'rememberProvider' so a
+-- registration racing this firing is killed rather than left running, and
+-- stopping the heartbeat/census loops. It plays no part in the win
+-- decision itself.
 --
 -- The current provider and every recorded census group are then killed via
 -- an identity-verified path — sourced from the live 'providerRef' handle
 -- rather than the durable 'WorkerState', which can still be missing that
 -- identity if 'rememberProvider' had not finished recording it when the
--- deadline fired — and only once that finishes does the winner's
--- 'completeBody' run, told whether both kills were actually confirmed. This
--- ordering matters: 'completeBody' reports what the census holds at the
--- moment it runs, so verifying (and killing) first means it reports on
--- processes this function actually attempted to terminate, rather than a
--- premature census that has not yet observed a provider still mid-
--- registration and vacuously finalizing on it. The task thread is cancelled
--- last, after the winning completion has already committed an outcome: were
--- it cancelled first, the supervisor's blocking 'takeMVar' on the task
--- result could unblock and release the lease while this function's own
--- completion is still in flight, racing ahead of it. A 'killThread' that
--- targets a task still inside a claimed completion's 'uninterruptibleMask_'
--- simply blocks here until that completion finishes rather than cutting it
--- off, so this still cannot strand the supervisor.
+-- deadline fired — and only once that finishes does 'completeBody' run,
+-- told whether both kills were actually confirmed. This ordering matters:
+-- 'completeBody' reports what the census holds at the moment it runs, so
+-- verifying (and killing) first means it reports on processes this
+-- function actually attempted to terminate, rather than a premature census
+-- that has not yet observed a provider still mid-registration and
+-- vacuously finalizing on it. The task thread is cancelled last, after
+-- 'completeBody' has already committed an outcome: were it cancelled
+-- first, the supervisor's blocking 'takeMVar' on the task result could
+-- unblock and release the lease while this function's own completion is
+-- still in flight, racing ahead of it. A 'killThread' that targets a task
+-- still inside a claimed completion's 'uninterruptibleMask_' simply blocks
+-- here until that completion finishes rather than cutting it off, so this
+-- still cannot strand the supervisor.
 watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> IO ()
 watchdogLoop takeSnapshot spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody = do
   now <- getCurrentTime
   let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
   threadDelay delayMicros
-  won <- atomicModifyIORef' stoppedRef (\stopped -> (True, not stopped))
+  won <- claimCompletion
   when won $ do
+    writeIORef stoppedRef True
     writeIORef forcedOutcomeRef (Just workerDeadlineOutcome)
-    wonCompletion <- claimCompletion
     providerOk <- terminateProviderRefWith takeSnapshot providerRef
     recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
-    when wonCompletion (completeBody (providerOk && recordedOk) workerDeadlineOutcome)
+    completeBody (providerOk && recordedOk) workerDeadlineOutcome
     readIORef taskThreadIdRef >>= mapM_ killThread
 
 -- | The canonical externally visible reason a persistent worker's

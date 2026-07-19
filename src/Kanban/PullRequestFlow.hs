@@ -14,7 +14,7 @@ module Kanban.PullRequestFlow
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
@@ -102,9 +102,16 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
       case started of
         Left exception -> closeWithOutcome sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          (managed, groupLeaderProblem) <- managedProcess processHandle
-          mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
-          eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
+          -- A deadline (or any other async cancellation) landing between a
+          -- successfully spawned process and its registration would leave it
+          -- neither tracked by the caller's 'providerRef' nor killed: the
+          -- caller only ever learns about a provider through the
+          -- 'PullRequestProcessStarted' event this reaches. Masking this
+          -- span makes registration atomic with the spawn it reports.
+          uninterruptibleMask_ $ do
+            (managed, groupLeaderProblem) <- managedProcess processHandle
+            mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
+            eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession

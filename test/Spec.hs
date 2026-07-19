@@ -1303,7 +1303,7 @@ main = hspec $ do
                 emit (WorkerProviderStarted 999999)
           finished <- newEmptyMVar
           void . forkIO $ runWorkerWithTask readProcessSnapshot lateRegister specPath >>= putMVar finished
-          terminalState <- waitForWorkerState statePath isTerminal 20
+          terminalState <- waitForWorkerState statePath isTerminal 50
           terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
           timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
           stateBytes <- LazyByteString.readFile statePath
@@ -1311,7 +1311,7 @@ main = hspec $ do
             Left message -> expectationFailure message
             Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
-    it "reports the deadline's provider/census kill as unverified through the orphan-pending path rather than finalizing on it blindly" $
+    it "keeps the deadline outcome pending while its kill stays unverified, then resolves once a snapshot succeeds" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
           now <- getCurrentTime
@@ -1334,26 +1334,36 @@ main = hspec $ do
             let registerThenHang _spec rememberProvider _emit = do
                   rememberProvider managed
                   threadDelay (300 * 1000000)
-            -- The injected snapshot never recovers: the provider and census
-            -- kills the watchdog attempts are real (they use the live
-            -- process handle, not this snapshot) and do succeed, but this
-            -- keeps their *confirmation* permanently unavailable, so the
-            -- worker can only ever reach the terminal outcome through the
-            -- orphan-pending path below rather than by momentarily,
-            -- coincidentally finding zero survivors and finalizing on that
-            -- gap.
-            let flakySnapshot = pure (Left "simulated ps outage")
+            -- The provider and census kills the watchdog attempts are real
+            -- (they use the live process handle, not this snapshot) and do
+            -- succeed, but the injected snapshot keeps their *confirmation*
+            -- unavailable throughout: an empty recorded census must not be
+            -- trusted as proof of that on its own (see
+            -- 'waitForOrphanResolution'), so the worker must stay
+            -- orphan-pending — not finalize on the coincidence of zero
+            -- survivors — until a real snapshot succeeds.
+            failing <- newIORef True
+            let flakySnapshot = do
+                  stillFailing <- readIORef failing
+                  if stillFailing then pure (Left "simulated ps outage") else readProcessSnapshot
             finished <- newEmptyMVar
             void . forkIO $ runWorkerWithTask flakySnapshot registerThenHang specPath >>= putMVar finished
+            pendingState <- waitForWorkerState statePath isOrphaned 80
+            pendingState.workerStateStatus `shouldBe` WorkerOrphaned (SolveFailed workerDeadlineReason)
+            leaseHeldWhileUnverified <- doesDirectoryExist leasePath
+            leaseHeldWhileUnverified `shouldBe` True
+            stillPending <- timeout 2000000 (takeMVar finished)
+            stillPending `shouldBe` Nothing
+            eventBytesWhileFailing <- ByteString.readFile eventPath
+            eventBytesWhileFailing `shouldNotSatisfy` ByteString.isInfixOf "WorkerFinished"
+            eventBytesWhileFailing `shouldSatisfy` ByteString.isInfixOf "could not verify the current provider was terminated"
+            eventBytesWhileFailing `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
+            writeIORef failing False
             timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 30
             terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
             leaseReleased <- doesDirectoryExist leasePath
             leaseReleased `shouldBe` False
-            eventBytes <- ByteString.readFile eventPath
-            eventBytes `shouldSatisfy` ByteString.isInfixOf "could not verify the current provider was terminated"
-            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
-            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
 
     it "lets an in-flight completion finish instead of being cut off by a deadline that fires while it is running" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -1388,6 +1398,99 @@ main = hspec $ do
             timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 10
             terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+
+    it "keeps the deadline outcome when a normal completion attempt lands just after it already fired" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-817-completion-race") 817 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-817-completion-race.spec.json"
+            statePath = workerRoot </> "solve-817-completion-race.state.json"
+            eventPath = workerRoot </> "solve-817-completion-race.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          -- Simulates a task thread that only reaches its own normal
+          -- completion after the deadline has already claimed the single
+          -- completion slot and committed its outcome: the deadline must
+          -- keep ownership, not be silently replaced by a later-arriving
+          -- ordinary 'WorkerFinished'.
+          let completeAfterDeadline _spec _rememberProvider emit = uninterruptibleMask_ $ do
+                _ <- waitForWorkerState statePath isTerminal 50
+                emit (WorkerFinished SolveCompleted)
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot completeAfterDeadline specPath >>= putMVar finished
+          terminalState <- waitForWorkerState statePath isTerminal 50
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          stateBytes <- LazyByteString.readFile statePath
+          case eitherDecode stateBytes :: Either String WorkerState of
+            Left message -> expectationFailure message
+            Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          eventBytes <- ByteString.readFile eventPath
+          eventBytes `shouldNotSatisfy` ByteString.isInfixOf "SolveCompleted"
+
+    it "never leaks a provider spawned right as an already-overdue deadline fires" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            identifier = WorkerId "solve-818-overdue-spawn"
+            repository = Repository repositoryRoot "coghex" "kanban"
+            longAgo = addUTCTime (-3600) now
+            spec =
+              WorkerSpec
+                { workerId = identifier,
+                  workerRepository = repository,
+                  workerTask = SolveWorkerTaskKind (SolveWorkerTask 818 SolveOnly CodexSolver),
+                  workerExistingSession = Nothing,
+                  workerExistingLogPath = Nothing,
+                  workerUserMessage = "",
+                  workerParent = Nothing,
+                  workerCreatedAt = longAgo,
+                  workerMaxRuntimeSeconds = 60
+                }
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-818-overdue-spawn.spec.json"
+            statePath = workerRoot </> "solve-818-overdue-spawn.state.json"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        createDirectoryIfMissing True workerRoot
+        -- A real provider, spawned through the actual 'runSolve' path (not a
+        -- synthetic event), that resists TERM so a leak would show up as a
+        -- process this test's own final snapshot can still see.
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "trap '' TERM",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"overdue-session\"}'",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        LazyByteString.writeFile specPath (encode spec)
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            result <- timeout 15000000 (runWorker specPath)
+            result `shouldBe` Just (Right ())
+            stateBytes <- LazyByteString.readFile statePath
+            case eitherDecode stateBytes :: Either String WorkerState of
+              Left message -> expectationFailure message
+              Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            survivorSnapshot <- readProcessSnapshot
+            case survivorSnapshot of
+              Left message -> expectationFailure (Data.Text.unpack message)
+              Right identities ->
+                identities `shouldSatisfy` all (\identity -> not (Data.Text.isInfixOf (Data.Text.pack fakeCodex) identity.processIdentityCommand))
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do

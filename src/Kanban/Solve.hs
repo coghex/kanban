@@ -20,7 +20,7 @@ module Kanban.Solve
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as Key
@@ -126,9 +126,16 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath u
       case started of
         Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          (managed, groupLeaderProblem) <- managedProcess processHandle
-          mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
-          eventSink (SolveProcessStarted issueNumber brand managed)
+          -- A deadline (or any other async cancellation) landing between a
+          -- successfully spawned process and its registration would leave it
+          -- neither tracked by the caller's 'providerRef' nor killed: the
+          -- caller only ever learns about a provider through the
+          -- 'SolveProcessStarted' event this reaches. Masking this span
+          -- makes registration atomic with the spawn it reports.
+          uninterruptibleMask_ $ do
+            (managed, groupLeaderProblem) <- managedProcess processHandle
+            mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
+            eventSink (SolveProcessStarted issueNumber brand managed)
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession
