@@ -14,11 +14,10 @@ jobs:
     steps:
       - name: Require a current reviewed:approve label
         env:
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
+          HAS_CURRENT_APPROVAL: ${{ contains(github.event.pull_request.labels.*.name, 'reviewed:approve') }}
         run: |
-          if [ "$ACTION" = "labeled" ] && [ "$LABEL" = "reviewed:approve" ]; then
-            echo "reviewed:approve added for the current pull-request head"
+          if [ "$HAS_CURRENT_APPROVAL" = "true" ]; then
+            echo "the pull request currently has reviewed:approve"
           else
             echo "a current reviewed:approve verdict is required"
             exit 1
