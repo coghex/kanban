@@ -255,15 +255,22 @@ PR routing mirrors issue routing while keeping implementation and review
 separate:
 
 1. With no workflow label, the opposite brand runs `pr-review`.
-2. `reviewed:changes` switches to the PR-origin solver brand. It locates the
-   existing issue worktree, addresses every canonical review blocker, runs
-   targeted checks, commits and pushes, then replaces the verdict labels with
-   `reviewed:revised` without reviewing its own work.
-3. `reviewed:revised` switches back to the opposite brand for `pr-rereview`,
-   publishes the new verdict, and removes the transient revised label.
+2. `reviewed:changes` switches to the PR-origin solver brand, which runs the
+   canonical `pr-revise` workflow: it acts only on a current canonical
+   CHANGES_REQUESTED verdict for the PR head (rerouting stale feedback through
+   canonical rereview instead of editing), works in a clean isolated
+   worktree, verifies the remote head before pushing, waits for required CI,
+   and invokes exactly one canonical `pr-rereview`. Kanban never manually
+   adds, removes, or synthesizes `reviewed:approve`, `reviewed:changes`, or
+   `reviewed:revised`; the canonical rereview publishes the fresh verdict
+   directly, so Kanban never waits on a Kanban-created `reviewed:revised`
+   handoff.
+3. A PR still carrying a legacy `reviewed:revised` label (from before this
+   unification) routes to the opposite brand for `pr-rereview` only, without
+   editing the PR again, and removes the stale label once it publishes.
 
 Codex-origin PRs use Opus 4.8 xhigh for review and GPT-5.4 high for revision;
-Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 high for
+Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
 revision. A missing or contradictory `pr-origin` marker fails visibly rather
 than guessing.
 
@@ -1063,8 +1070,10 @@ The first direct, one-off review slice is implemented.
   turn interruption without terminal emulation.
 - Route canonical reviewer families through the synchronous v2 publisher while
   never starting its background daemon.
-- Advance review, author-brand revision, and opposite-brand rereview as three
-  explicit stages using `reviewed:changes` and `reviewed:revised` handoffs.
+- Advance issue review, author-brand revision, and opposite-brand rereview as
+  three explicit stages using `reviewed:changes` and `reviewed:revised`
+  handoffs. This issue-level handoff is unrelated to PR revision, which does
+  not use a Kanban-created `reviewed:revised` handoff (see PR routing above).
 - Bound transcript and input memory and stop animation ticks when turns idle.
 
 Follow-up hardening should add broader fake app-server fixtures,
@@ -1138,10 +1147,13 @@ The first solve/autosolve-compatible slice is implemented.
 - Both modes preserve the existing solve contract: readiness gate, worktree
   rules, effective specification, targeted testing, and PR creation. Autosolve
   binds only to a newly linked PR with the selected solver's origin marker,
-  launches a fresh opposite-brand reviewer, resumes the original solver on
-  `reviewed:changes`, and launches a fresh rereviewer after
-  `reviewed:revised`. Approval or five review rounds terminates the loop; Kanban
-  never merges.
+  launches a fresh opposite-brand reviewer, and resumes the original solver to
+  run the canonical `pr-revise` workflow on `reviewed:changes`. Because
+  `pr-revise` invokes the canonical rereview itself, Kanban reads the
+  resulting verdict directly off the PR's labels rather than waiting on a
+  Kanban-created `reviewed:revised` handoff, and loops back into another
+  `pr-revise` round on a fresh `reviewed:changes` verdict. Approval or five
+  review rounds terminates the loop; Kanban never merges.
 - Kanban refreshes the board after startup and at explicit workflow handoffs
   rather than polling the solver or GitHub continuously.
 - Linked issue and PR cards remain visible simultaneously so the issue stays
