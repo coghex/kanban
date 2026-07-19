@@ -10,7 +10,8 @@ cabal build all
 CI uses GHC 9.12.2 and Cabal 3.16.1.0 on macOS. The required
 `build-test` check validates package metadata, builds the application, and runs
 both test suites. Pull requests also require the `review-approved` check, which
-passes only when `reviewed:approve` is added for the current revision.
+passes while the current pull request carries `reviewed:approve`. A head change
+removes that label through the review-gate workflow, requiring a fresh review.
 
 ## Test
 
