@@ -36,7 +36,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import Control.Exception (IOException, SomeException, try, uninterruptibleMask_)
+import Control.Exception (IOException, SomeException, mask, try, uninterruptibleMask_)
 import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
 import qualified Data.ByteString as ByteString
@@ -477,9 +477,19 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- replace it. The watchdog claims this atomically for itself
           -- before it even cancels the task (see 'watchdogLoop'), so a
           -- deadline reliably wins that race instead of merely attempting
-          -- to afterward.
+          -- to afterward. Whichever side wins runs the body under
+          -- 'uninterruptibleMask_': claiming the slot only to have a
+          -- concurrent 'killThread' interrupt it partway would leave no
+          -- terminal or pending outcome committed at all, stranding the
+          -- worker with a claimed-but-unfulfilled completion. A watchdog
+          -- that loses this claim (a task's own completion was already in
+          -- flight) still calls 'killThread' afterward, but since that
+          -- target is itself masked here, the call simply blocks until the
+          -- in-flight completion finishes rather than corrupting it —
+          -- letting an already-claimed completion run to conclusion instead
+          -- of being cancelled out from under itself.
           claimCompletion = atomicModifyIORef' completedRef (\done -> (True, not done))
-          completeBody outcome = do
+          completeBody outcome = uninterruptibleMask_ $ do
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of
@@ -516,16 +526,21 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                     emit (WorkerDiagnostic message)
                     killManagedProcess process
           runTask = buildRunTask spec rememberProvider emit
-      -- The result handoff itself is masked so a deadline's `killThread`
-      -- (delivered any time after `runTask` starts, including the instant
-      -- between `try` returning and `putMVar` running) can never leave this
-      -- thread having computed a result but never delivered it, which would
-      -- block the supervisor on `takeMVar taskResultVar` forever. The
-      -- `uninterruptibleMask_` is safe here specifically because
-      -- `taskResultVar` is always empty at this point (this is its one and
-      -- only producer), so `putMVar` cannot itself block.
-      taskThreadId <- forkIO $ do
-        result <- try @SomeException runTask
+      -- `runTask` runs under `restore` so a deadline's `killThread` can
+      -- still cancel it — that's the whole point. But once it has returned
+      -- or been caught by `try`, the handoff to `taskResultVar` runs fully
+      -- masked (the outer `mask` defers a pending exception at the
+      -- statement boundary right after `try` returns; the inner
+      -- `uninterruptibleMask_` then covers `putMVar` itself, since `putMVar`
+      -- remains an interruptible operation even under plain `mask`). Without
+      -- this, an exception landing in that gap could leave a fully computed
+      -- result never delivered, blocking the supervisor on
+      -- `takeMVar taskResultVar` forever. `uninterruptibleMask_` is safe
+      -- here specifically because `taskResultVar` is always empty at this
+      -- point (this is its one and only producer), so `putMVar` cannot
+      -- itself actually block.
+      taskThreadId <- forkIO $ mask $ \restore -> do
+        result <- try @SomeException (restore runTask)
         uninterruptibleMask_ (putMVar taskResultVar result)
       writeIORef taskThreadIdRef (Just taskThreadId)
       void . forkIO $ watchdogLoop spec providerRef stoppedRef stateLock taskThreadIdRef forcedOutcomeRef claimCompletion completeBody

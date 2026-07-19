@@ -940,6 +940,49 @@ main = hspec $ do
               finalState <- waitForWorkerState descriptor.workerDescriptorStatePath isTerminal 5
               finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
+    it "lets a completion the task already claimed finish instead of being corrupted by a same-instant deadline" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec now 1 repository (WorkerId "solve-800-inflight-completion-fixture") 800
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-800-inflight-completion-fixture.spec.json") (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> do
+              acquireWorkerLease descriptor `shouldReturn` Right ()
+              processRef <- newIORef Nothing
+              -- Registers a real, still-live provider and reports a normal
+              -- completion almost immediately, well before the 1-second
+              -- deadline: the task deterministically wins the completion
+              -- claim first. Its own verification is deliberately slow (an
+              -- injected snapshot with a fixed delay), so it is still
+              -- running when the deadline fires and the watchdog loses the
+              -- completion claim. This exercises whether the watchdog's
+              -- subsequent cancellation can corrupt that in-flight,
+              -- already-claimed completion instead of letting it finish.
+              let slowSnapshot = threadDelay 2000000 >> readProcessSnapshot
+                  raceInFlightCompletion _spec remember emit = do
+                    (_, _, _, handle) <- createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+                    writeIORef processRef (Just handle)
+                    managed <- managedProcessFor handle
+                    remember managed
+                    emit (WorkerFinished SolveCompleted)
+                  cleanupProcess =
+                    readIORef processRef >>= mapM_ (\handle -> managedProcessFor handle >>= killManagedProcess >> void (timeout 3000000 (waitForProcess handle)))
+              ( do
+                  finished <- newEmptyMVar
+                  void . forkIO $ runWorkerWithTask slowSnapshot raceInFlightCompletion descriptor.workerDescriptorSpecPath >>= putMVar finished
+                  timeout 20000000 (takeMVar finished) `shouldReturn` Just (Right ())
+                  finalState <- waitForWorkerState descriptor.workerDescriptorStatePath isTerminal 100
+                  finalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+                )
+                `finally` cleanupProcess
+
     it "retains the lease and pending deadline outcome while verification fails, then completes exactly once a snapshot succeeds" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
