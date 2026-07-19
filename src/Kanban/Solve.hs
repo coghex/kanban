@@ -249,7 +249,7 @@ initialSolvePrompt issueNumber workflow brand =
       "You are the canonical " <> solverLabel brand <> " solver selected explicitly by the user.",
       workflowContract,
       interruptedWorktreeRecovery,
-      "Do not run issue-review, issue-rereview, approve-issues.py --review, or approve-issues.py --rereview from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.",
+      "Do not run issue-review, issue-rereview, or --review/--rereview against approve-issues.py, its legacy ~/work/approve-issues.py symlink, or the installed tools/approve_issues.py backend, from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.",
       "Interaction contract: if a product choice, ambiguity, credentials problem, or other user decision blocks safe progress, do not guess and do not continue. End your response with exactly one line in the form KANBAN_NEEDS_INPUT: <one concrete question>. Kanban will resume this same session with the answer.",
       completionContract
     ]

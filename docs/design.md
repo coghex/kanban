@@ -275,14 +275,20 @@ revision. A missing or contradictory `pr-origin` marker fails visibly rather
 than guessing.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
-Initial review and rereview synchronously invoke `approve-issues.py` as the
-canonical `issue-review:v2` fingerprint publisher so the existing solve gate
-accepts Kanban-reviewed issues. Interactive revision remains inside Kanban.
+Initial review and rereview synchronously invoke the vendored
+`tools/approve_issues.py` backend (installed with
+`tools/install_issue_review.py`; see
+[the agent-workflow contract](agent-workflow-contract.md)) as the canonical
+`issue-review:v2` fingerprint publisher so the existing solve gate accepts
+Kanban-reviewed issues. Interactive revision remains inside Kanban.
 Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.
-   Claude-origin issues route to GPT-5.6-Terra xhigh, Codex-origin issues route
-   to Claude Opus 4.8 xhigh, and unmarked issues require both.
+   Claude-origin issues route to GPT-5.6-Sol xhigh, Codex-origin issues route
+   to Claude Fable 5 xhigh, and unmarked issues require both. GPT-5.6-Terra and
+   Claude Opus 4.8 remain sanctioned fallback models
+   (`tools/approve_issues.py`) so historical review markers keep validating
+   after either default changes.
 2. `reviewed:changes` switches back to the author brand for revision:
    GPT-5.4 high for Codex-origin issues and Claude Sonnet 5 high for
    Claude-origin issues. Unmarked issues default to GPT-5.4 high. The

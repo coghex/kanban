@@ -1,6 +1,6 @@
 # Kanban agent-workflow contract
 
-Contract version: 1
+Contract version: 2
 
 ## 1. Purpose and scope
 
@@ -14,10 +14,10 @@ Kanban invokes them, what they return or fail with, what authority they
 need, where their durable state lives, and whether they are mandatory for
 Kanban to run at all or optional AI/automation add-ons.
 
-It also declares the boundary between what Kanban owns today and what is
-still user-machine state pending a future migration (tracked separately;
-this issue does not move or change `~/work/approve-issues.py`), and the
-policy any future installer for that migration must follow.
+It also declares the boundary between what Kanban owns and tracks in this
+repository and what remains explicit, opt-in user-machine state (the PR
+drainer's LaunchAgent; the compatibility launcher described in §3), and the
+policy any installer for that state must follow.
 
 A fresh checkout can use this document to answer: "why did action X fail,"
 "what do I need to install before X works," and "is path Y something Kanban
@@ -82,25 +82,34 @@ manages or something I must set up myself."
     through `gh`, never a raw HTTP client.
   - Kanban's own synchronous invocation (`runCanonicalIssueReview` in
     `src/Kanban/Review.hs`) is a **publishing** action, run when the user
-    presses `r`:
-    `python3 ~/work/approve-issues.py --path <repository root> --review|--rereview <issue> --legacy-policy dual --json`.
-    It writes the `issue-review:v2` comment and verdict labels; Kanban's own
-    code never runs `--check`.
+    presses `r`. It resolves the backend with `resolveCanonicalIssueReviewer`
+    (`canonicalIssueReviewerPath`), which never hard-codes
+    `~/work/approve-issues.py`: it is the Kanban-managed install location
+    `~/Library/Application Support/kanban/issue-review/approve_issues.py`,
+    overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR` (see §3), then runs
+    `python3 <resolved path> --path <repository root> --review|--rereview
+    <issue> --legacy-policy dual --json`. It writes the `issue-review:v2`
+    comment and verdict labels; Kanban's own code never runs `--check`.
   - The solve readiness gate is a separate, **read-only** invocation that
     Kanban's Haskell code does not run itself. The solve prompt
-    (`src/Kanban/Solve.hs:218`) explicitly forbids the spawned solving agent
-    from running `--review`/`--rereview` ("Kanban's `r` workflow owns that
-    gate") and instructs it to run only
-    `python3 ~/work/approve-issues.py --path <repository root> --check <issue> --legacy-policy dual --json`
+    (`src/Kanban/Solve.hs:229`) explicitly forbids the spawned solving agent
+    from running `--review`/`--rereview` against `approve-issues.py`, its
+    `~/work/approve-issues.py` compatibility symlink, or the installed
+    `tools/approve_issues.py` backend ("Kanban's `r` workflow owns that
+    gate"), and instructs it to run only the same backend's `--check` with
+    `--path <repository root> --check <issue> --legacy-policy dual --json`
     itself, via its own shell access, before claiming an issue
-    (`approve-issues.py --help`: "`--check ISSUE` Check one issue gate.").
+    (`tools/approve_issues.py --help`: "`--check ISSUE` Check one issue
+    gate.").
 - **Inputs:** issue number, review stage or gate check, repository root.
 - **Outputs:** for `--review`/`--rereview`, an `issue-review:v2` comment
   with the verdict and updated `reviewed:*` labels; for `--check`, a
   structured JSON approval decision with no GitHub mutation.
 - **Failure semantics:** `"Canonical issue reviewer was not found at
-  <path>"` if `~/work/approve-issues.py` is absent; `"python3 was not found
-  on PATH"`; a malformed response surfaces the backend's own error text.
+  <path>. Run \`python3 tools/install_issue_review.py\` from the Kanban
+  checkout to install it."` if the resolved install location is absent;
+  `"python3 was not found on PATH"`; a malformed response surfaces the
+  backend's own error text.
 - **Required authority:** the same GitHub write scope as PR review for
   `--review`/`--rereview` (`--check` performs no GitHub write); local read
   access to the canonical backend script.
@@ -157,29 +166,45 @@ manages or something I must set up myself."
 
 ## 3. Migration boundary
 
-Kanban owns the canonical issue-review backend: its path convention, CLI
-flags (`--path`, `--review`/`--rereview`/`--check`, `--legacy-policy dual`,
-`--json`), its JSON/comment/label output contract, and its role as the sole
-source of truth for both the interactive review workflow and the solve
-readiness gate. Kanban also owns any runtime component required for its own
-supported synchronous review path, i.e. the code in `src/Kanban/Review.hs`
-that shells out to it.
+Kanban owns the canonical issue-review backend, fully: its path convention,
+CLI flags (`--path`, `--review`/`--rereview`/`--check`, `--legacy-policy
+dual`, `--json`), its JSON/comment/label output contract, its role as the
+sole source of truth for both the interactive review workflow and the solve
+readiness gate, and — since the vendoring migration this section now
+describes — its implementation and every runtime component its supported
+commands need.
 
-What Kanban does not yet own — and this issue does not move or change — is
-*where that backend physically lives*:
-
-- **`~/work/approve-issues.py`** — the canonical backend Kanban owns
-  today happens to be installed at this untracked, personal path rather than
-  inside the repository. It is flagged as a **migration target**, not a
-  supported installation requirement: a fresh checkout has no way to obtain
-  it. A future migration (tracked separately, depends on this issue) must
-  move its implementation into the repository while leaving a compatibility
-  symlink at `~/work/approve-issues.py` so existing installs keep working;
-  after that migration, this path stops being Kanban's source of truth.
-- **`~/.codex/skills/approve-issues/...`** — the Codex-side skill packaging
-  of the same review flow. Also flagged as a migration target. It is not
-  present in this repository and nothing here installs it; it is named so a
-  future migration knows to account for it.
+- **`tools/approve_issues.py`** is the tracked source of truth. A fresh
+  checkout can run its `--self-test`, `--check`, `--review`, and `--rereview`
+  paths directly, with no file beneath `~/work` or
+  `~/.codex/skills/approve-issues/`. Its portable runtime locations —
+  `~/Library/Application Support/kanban/issue-review/` (install links),
+  `~/Library/Logs/kanban/issue-review/` (daily logs), and the incident
+  circuit breaker beneath that install directory's `runtime/incidents/` — are
+  a namespaced Kanban footprint, not personal state, and its optional
+  crash/incident notification (`KANBAN_ISSUE_REVIEW_NTFY_URL`) is a
+  documented non-fatal no-op when unset, matching §5.
+- **`tools/install_issue_review.py`** installs a stable Kanban-managed link
+  to that tracked backend at
+  `~/Library/Application Support/kanban/issue-review/approve_issues.py`
+  (overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), in the same
+  dry-run-capable, idempotent, never-overwrite-an-ordinary-file manner as
+  `tools/install_drainer.py` (§5). `src/Kanban/Review.hs` resolves the
+  backend from that stable link (`resolveCanonicalIssueReviewer`) and fails
+  visibly, naming this installer, when it has not been installed yet.
+- **`~/work/approve-issues.py`** is now a purely optional **compatibility
+  launcher** for pre-migration automation that still invokes it directly. It
+  is not Kanban's source of truth and nothing in Kanban's own code resolves
+  it. `tools/install_issue_review.py --migrate-legacy-launcher` replaces it
+  with a symlink to the Kanban-managed link above, backing up and reporting
+  the location of any pre-existing ordinary file there; without that opt-in
+  flag, an ordinary file at this path is left untouched and refused, per §5.
+- **`~/.codex/skills/approve-issues/...`** is no longer a dependency of any
+  Kanban-supported command. The backend's incident handling
+  (`open_invalid_incident` in `tools/approve_issues.py`) is now
+  self-contained and never shells out to it. It may still be used by
+  separate, unpackaged Codex-side daemon tooling outside this repository's
+  contract; Kanban does not track or depend on that tooling.
 
 ## 4. Dependency manifest
 
@@ -208,8 +233,7 @@ git-cli | executable | git | src/Kanban/Repository.hs | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review.hs | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
-approve-issues-backend | personal-path | /work/approve-issues.py | src/Kanban/Review.hs | kanban | migration-target | no
-codex-approve-issues-skill | personal-path | ~/.codex/skills/approve-issues | | external | migration-target | no
+approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs | kanban | supported | no
 drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
 ```
 
@@ -221,24 +245,27 @@ drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kan
   `~/Library/Application Support/kanban/pr-drainer`, and its LaunchAgent
   label (`com.coghex.drain-prs`) and plist path are a Kanban-owned
   convention defined once in `tools/install_drainer.py` and read the same
-  way by `src/Kanban/Drainer.hs`.
+  way by `src/Kanban/Drainer.hs`. `tools/install_issue_review.py` follows
+  the identical convention for the canonical issue-review backend under
+  `~/Library/Application Support/kanban/issue-review`, read the same way by
+  `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer`.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
   build (`cabal build all`) or normal startup path installs the drainer's
-  LaunchAgent; it is only installed by running `tools/install_drainer.py`
-  directly.
+  LaunchAgent or the issue-review backend's stable link; the latter is only
+  installed by running `tools/install_issue_review.py` directly, and it
+  never starts a daemon.
 - **Installers must be dry-run capable, idempotent, and must never replace
   an ordinary user file.** `tools/install_drainer.py`'s `install_symlink`
-  already meets this bar (see `tools/test_install_drainer.py`); any future
-  installer this contract comes to cover — including a §3 migration
-  installer — must meet the same bar.
+  already meets this bar (see `tools/test_install_drainer.py`);
+  `tools/install_issue_review.py` meets the same bar for both its stable
+  link and the optional legacy-launcher migration described in §3 (see
+  `tools/test_install_issue_review.py`).
 - **No credential, personal model preference, private endpoint, or
   machine-specific path may be tracked as a required asset.**
-  `DRAIN_PRS_CLAUDE_REVIEW_MODEL` and `KANBAN_DRAINER_NTFY_URL` are optional
-  environment overrides with no tracked default value, not required
-  configuration. `~/work/approve-issues.py` and
-  `~/.codex/skills/approve-issues/...` are named in §3 as migration targets
-  specifically because they violate this policy today; they must not be
-  treated as something a fresh checkout is expected to already have.
+  `DRAIN_PRS_CLAUDE_REVIEW_MODEL`, `KANBAN_DRAINER_NTFY_URL`,
+  `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, and `KANBAN_ISSUE_REVIEW_NTFY_URL` are
+  optional environment overrides with no tracked default value, not required
+  configuration.
 
 ## 6. Completeness check
 
@@ -255,8 +282,9 @@ runs) parses the manifest in §4 and:
   matching `personal-path` manifest entry;
 - fails if a manifest entry's declared `files` no longer contain its token,
   so the manifest cannot silently drift from the code it describes;
-- fails if `~/work/approve-issues.py` or
-  `~/.codex/skills/approve-issues/...` are missing from the manifest or not
-  marked `migration-target`;
+- fails if the issue-review backend entry (`approve-issues-backend`) is
+  missing from the manifest or is not marked `kanban`-owned and `supported`,
+  or if a `codex-approve-issues-skill` entry still exists, so the manifest
+  cannot silently regress to the pre-migration boundary described in §3;
 - fails if the drainer LaunchAgent plist is marked anything other than a
   `kanban`-owned `supported` path.
