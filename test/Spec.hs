@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, bracket, finally, try)
+import Control.Exception (IOException, bracket, finally, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -92,6 +92,7 @@ import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, load
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
+import Kanban.UI (failureActivity, orphanMessage)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -112,8 +113,10 @@ import Kanban.Worker
     releaseWorkerLease,
     runWorker,
     runWorkerWith,
+    runWorkerWithTask,
     terminateWorkerWith,
     waitForWorkerStart,
+    workerDeadlineReason,
   )
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -443,6 +446,7 @@ main = hspec $ do
 
     it "persists a worker heartbeat, provider identity, journal, and terminal outcome" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
@@ -457,7 +461,7 @@ main = hspec $ do
                   workerExistingLogPath = Nothing,
                   workerUserMessage = "",
                   workerParent = Nothing,
-                  workerCreatedAt = epoch,
+                  workerCreatedAt = now,
                   workerMaxRuntimeSeconds = 60
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
@@ -498,11 +502,12 @@ main = hspec $ do
 
     it "marks a completed provider orphaned until its surviving child exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-783-orphan-fixture") 783
+            spec = (workerFixtureSpec repository (WorkerId "solve-783-orphan-fixture") 783) {workerCreatedAt = now}
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-783-orphan-fixture.spec.json"
             statePath = workerRoot </> "solve-783-orphan-fixture.state.json"
@@ -545,11 +550,12 @@ main = hspec $ do
 
     it "keeps a completed provider pending while descendant verification fails, then completes once a snapshot succeeds" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-787-verify-fixture") 787
+            spec = (workerFixtureSpec repository (WorkerId "solve-787-verify-fixture") 787) {workerCreatedAt = now}
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-787-verify-fixture.spec.json"
             statePath = workerRoot </> "solve-787-verify-fixture.state.json"
@@ -614,11 +620,12 @@ main = hspec $ do
 
     it "keeps the lease held when a signal-triggered shutdown cannot verify recorded descendants are gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-788-signal-fixture") 788
+            spec = (workerFixtureSpec repository (WorkerId "solve-788-signal-fixture") 788) {workerCreatedAt = now}
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-788-signal-fixture.spec.json"
             statePath = workerRoot </> "solve-788-signal-fixture.state.json"
@@ -919,11 +926,12 @@ main = hspec $ do
 
     it "abandoning orphan-wait on TERM never releases the lease while a live recorded survivor remains, and permits relaunch once it exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = workerFixtureSpec repository (WorkerId "solve-799-term-orphan-fixture") 799
+            spec = (workerFixtureSpec repository (WorkerId "solve-799-term-orphan-fixture") 799) {workerCreatedAt = now}
             freshSpec = workerFixtureSpec repository (WorkerId "solve-799-fresh") 799
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-799-term-orphan-fixture.spec.json"
@@ -1190,6 +1198,211 @@ main = hspec $ do
                 leaseReleased `shouldBe` False
                 finalEvents <- readIORef collected
                 finalEvents `shouldBe` [WorkerFinished SolveCompleted]
+
+    it "fires the deadline immediately for an already-overdue workerCreatedAt rather than waiting out a fresh runtime window" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            longAgo = addUTCTime (-3600) now
+            spec = deadlineFixtureSpec repository (WorkerId "solve-810-overdue") 810 longAgo 60
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-810-overdue.spec.json"
+            statePath = workerRoot </> "solve-810-overdue.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          let stallForever _spec _rememberProvider _emit = threadDelay (120 * 1000000)
+          result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot stallForever specPath)
+          result `shouldBe` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+
+    it "cancels a task stalled before any provider registers once the deadline fires, releasing the lease promptly" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-811-pre-provider") 811 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-811-pre-provider.spec.json"
+            statePath = workerRoot </> "solve-811-pre-provider.state.json"
+            leasePath = workerRoot </> "issue-811.lease"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          let hangForever _spec _rememberProvider _emit = threadDelay (300 * 1000000)
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot hangForever specPath >>= putMVar finished
+          timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          leaseReleased <- doesDirectoryExist leasePath
+          leaseReleased `shouldBe` False
+
+    it "kills the current provider and records the deadline outcome when it is still running at the deadline" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-812-provider") 812 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-812-provider.spec.json"
+              statePath = workerRoot </> "solve-812-provider.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            let registerThenHang _spec rememberProvider _emit = do
+                  rememberProvider managed
+                  threadDelay (300 * 1000000)
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask readProcessSnapshot registerThenHang specPath >>= putMVar finished
+            timeout 15000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            terminalState <- waitForWorkerState statePath isTerminal 10
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            exitCode <- timeout 3000000 (waitForProcess providerProcess)
+            exitCode `shouldSatisfy` isJust
+
+    it "keeps the deadline outcome when a provider registration event lands just after it already fired" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-813-late-registration") 813 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-813-late-registration.spec.json"
+            statePath = workerRoot </> "solve-813-late-registration.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          -- Simulates the task thread resuming just as (or after) the
+          -- watchdog has already committed the deadline outcome, emitting
+          -- the same 'WorkerProviderStarted' event a genuine late
+          -- registration would: this must never revert the already-terminal
+          -- status back to 'WorkerRunning'.
+          let lateRegister _spec _rememberProvider emit = uninterruptibleMask_ $ do
+                _ <- waitForWorkerState statePath isTerminal 50
+                emit (WorkerProviderStarted 999999)
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot lateRegister specPath >>= putMVar finished
+          terminalState <- waitForWorkerState statePath isTerminal 20
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          stateBytes <- LazyByteString.readFile statePath
+          case eitherDecode stateBytes :: Either String WorkerState of
+            Left message -> expectationFailure message
+            Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+
+    it "reports the deadline's provider/census kill as unverified through the orphan-pending path rather than finalizing on it blindly" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-814-deadline-verify") 814 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-814-deadline-verify.spec.json"
+              statePath = workerRoot </> "solve-814-deadline-verify.state.json"
+              eventPath = workerRoot </> "solve-814-deadline-verify.events.jsonl"
+              leasePath = workerRoot </> "issue-814.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            let registerThenHang _spec rememberProvider _emit = do
+                  rememberProvider managed
+                  threadDelay (300 * 1000000)
+            -- The injected snapshot never recovers: the provider and census
+            -- kills the watchdog attempts are real (they use the live
+            -- process handle, not this snapshot) and do succeed, but this
+            -- keeps their *confirmation* permanently unavailable, so the
+            -- worker can only ever reach the terminal outcome through the
+            -- orphan-pending path below rather than by momentarily,
+            -- coincidentally finding zero survivors and finalizing on that
+            -- gap.
+            let flakySnapshot = pure (Left "simulated ps outage")
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask flakySnapshot registerThenHang specPath >>= putMVar finished
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            terminalState <- waitForWorkerState statePath isTerminal 30
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+            eventBytes <- ByteString.readFile eventPath
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "could not verify the current provider was terminated"
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
+            eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+    it "lets an in-flight completion finish instead of being cut off by a deadline that fires while it is running" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "sleep 0.5" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-815-completion-boundary") 815 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-815-completion-boundary.spec.json"
+              statePath = workerRoot </> "solve-815-completion-boundary.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            -- A provider registered here so the deadline-firing completion's
+            -- own verification below has something to actually wait on: an
+            -- empty census would resolve immediately and never overlap the
+            -- deadline. It exits on its own well before the slow snapshot
+            -- resolves, so this always lands on the real completion's
+            -- 'WorkerFinished' rather than an orphan-pending detour.
+            let completeThenSlow _spec rememberProvider emit = do
+                  rememberProvider managed
+                  emit (WorkerFinished SolveCompleted)
+                slowSnapshot = threadDelay 2000000 >> readProcessSnapshot
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask slowSnapshot completeThenSlow specPath >>= putMVar finished
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            terminalState <- waitForWorkerState statePath isTerminal 10
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+
+  describe "persistent worker deadline UI projections" $ do
+    it "renders the deadline reason distinctly from a generic provider failure" $ do
+      failureActivity workerDeadlineReason `shouldBe` "deadline exceeded"
+      failureActivity "some other unexpected failure" `shouldBe` "failed"
+
+    it "renders the deadline reason distinctly for orphan-pending subprocesses, for both solve and PR workers" $ do
+      orphanMessage (SolveFailed workerDeadlineReason) "2" "the solver"
+        `shouldBe` "deadline exceeded; 2 subprocesses survived termination; press x to terminate the orphaned process tree"
+      orphanMessage SolveCompleted "2" "the solver"
+        `shouldBe` "2 subprocesses survived the solver; press x to terminate the orphaned process tree"
+      orphanMessage (SolveFailed workerDeadlineReason) "1" "the PR agent"
+        `shouldBe` "deadline exceeded; 1 subprocesses survived termination; press x to terminate the orphaned process tree"
+      orphanMessage SolveCompleted "1" "the PR agent"
+        `shouldBe` "1 subprocesses survived the PR agent; press x to terminate the orphaned process tree"
 
   describe "Codex app-server protocol" $ do
     it "decodes streamed notifications without scraping their payload" $ do
@@ -1904,6 +2117,16 @@ workerFixtureSpec repository identifier issueNumber =
       workerParent = Nothing,
       workerCreatedAt = epoch,
       workerMaxRuntimeSeconds = 60
+    }
+
+-- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and
+-- 'workerMaxRuntimeSeconds' so a deadline test can construct a precise,
+-- deterministic firing time.
+deadlineFixtureSpec :: Repository -> WorkerId -> Int -> UTCTime -> Int -> WorkerSpec
+deadlineFixtureSpec repository identifier issueNumber createdAt maxRuntimeSeconds =
+  (workerFixtureSpec repository identifier issueNumber)
+    { workerCreatedAt = createdAt,
+      workerMaxRuntimeSeconds = maxRuntimeSeconds
     }
 
 waitForWorkerState :: FilePath -> (WorkerState -> Bool) -> Int -> IO WorkerState
