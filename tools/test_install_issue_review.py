@@ -1,9 +1,14 @@
 """Safety tests for the canonical issue-review backend installer."""
 
+import contextlib
+import io
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import install_issue_review
 
@@ -295,6 +300,69 @@ class InstallerPolicyTests(unittest.TestCase):
                 dry_run=False,
             )
         self.assertFalse(self.install_dir.exists())
+
+
+class CLIOutputTests(unittest.TestCase):
+    """The plain (non-JSON) CLI output is the default a user actually sees,
+    so it must report the exact plan too, not only --json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        tools = self.repo / "tools"
+        tools.mkdir(parents=True)
+        (tools / "approve_issues.py").write_text("backend\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "-q", str(self.repo)], check=True, capture_output=True
+        )
+        self.install_dir = self.root / "installed"
+        self.legacy_path = self.root / "legacy" / "approve-issues.py"
+
+    def run_cli(self, *extra_args):
+        argv = [
+            "install_issue_review.py",
+            "--repo",
+            str(self.repo),
+            "--install-dir",
+            str(self.install_dir),
+            "--legacy-path",
+            str(self.legacy_path),
+            *extra_args,
+        ]
+        buffer = io.StringIO()
+        with mock.patch.object(sys, "argv", argv):
+            with contextlib.redirect_stdout(buffer):
+                exit_code = install_issue_review.main()
+        return exit_code, buffer.getvalue()
+
+    def test_plain_dry_run_output_reports_the_exact_plan(self):
+        exit_code, output = self.run_cli("--dry-run")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dry run for", output)
+        self.assertIn("Kanban-managed launcher", output)
+        self.assertIn(": created", output)
+        self.assertIn("Legacy launcher", output)
+        self.assertFalse(self.install_dir.exists())
+
+    def test_plain_dry_run_output_reports_an_update_after_a_repository_move(self):
+        self.run_cli()
+        moved_repo = self.root / "repo-moved"
+        self.repo.rename(moved_repo)
+        _, output = self.run_cli("--repo", str(moved_repo), "--dry-run")
+        self.assertIn("Kanban-managed launcher", output)
+        self.assertIn(": updated", output)
+        self.assertIn("Legacy launcher", output)
+        self.assertIn(": unchanged", output)
+
+    def test_plain_install_output_reports_the_result(self):
+        exit_code, output = self.run_cli()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Installed the canonical issue-review backend", output)
+        self.assertIn("Kanban-managed launcher", output)
+        self.assertIn(": created", output)
+        self.assertIn("Legacy launcher", output)
 
 
 if __name__ == "__main__":

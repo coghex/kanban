@@ -254,6 +254,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def print_plan(result: dict[str, Any], *, repo: Path) -> None:
+    dry_run = result.get("dry_run", False)
+    kanban_link = result["kanban_link"]
+    legacy = result["legacy_launcher"]
+    if dry_run:
+        print(f"Dry run for {repo}; no files will be changed.")
+    else:
+        print(f"Installed the canonical issue-review backend for {repo}")
+    print(f"Kanban-managed launcher {kanban_link['destination']}: {kanban_link['result']}")
+    if legacy["status"] == "refused":
+        print(
+            f"Legacy launcher at {legacy['path']}: refused (an ordinary file is "
+            "there; rerun with --migrate-legacy-launcher to replace it)"
+        )
+    else:
+        print(f"Legacy launcher at {legacy['path']}: {legacy['status']}")
+        if legacy.get("backup_path"):
+            note = "would back up" if dry_run else "backed up"
+            print(f"  ({note} the previous file to {legacy['backup_path']})")
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -269,21 +290,8 @@ def main() -> int:
         )
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
-        elif result.get("dry_run"):
-            print(f"Dry run passed for {repo}; no files were changed.")
         else:
-            print(f"Installed the canonical issue-review backend for {repo}")
-            print(f"Launcher: {install_dir / 'approve_issues.py'}")
-            legacy = result["legacy_launcher"]
-            if legacy["status"] == "refused":
-                print(
-                    f"Left the existing file at {legacy['path']} untouched; "
-                    "rerun with --migrate-legacy-launcher to replace it."
-                )
-            else:
-                print(f"Legacy launcher at {legacy['path']}: {legacy['status']}")
-                if legacy.get("backup_path"):
-                    print(f"Backed up the previous file to {legacy['backup_path']}")
+            print_plan(result, repo=repo)
         return 0
     except (InstallError, OSError) as exc:
         if args.json:
