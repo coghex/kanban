@@ -196,6 +196,38 @@ class SnapshotCommandFailsTest(_FastForwardStashFixture):
         self.assertEqual(stash_shas(self.main), [user_stash_sha])
 
 
+class SnapshotAnchoredBeforeResetTest(_FastForwardStashFixture):
+    """The snapshot must be anchored under a private ref *before* the
+    destructive `git reset --hard` -- otherwise a crash in that exact
+    window would leave the user's changes reachable from no ref at all --
+    and released once restoration actually succeeds.
+    """
+
+    def test_anchor_ref_exists_before_reset_and_is_released_after_restore(self):
+        lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
+        lines[2] = "line3-local"
+        (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self._advance_origin_line1("line1-updated")
+
+        real_run = drain_prs.run
+        state = {"anchor_seen_before_reset": False}
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "reset", "--hard"]:
+                refs = run_git(
+                    ["for-each-ref", "refs/drain-prs/autostash"], cwd=self.main
+                ).stdout
+                state["anchor_seen_before_reset"] = bool(refs.strip())
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        self.assertTrue(state["anchor_seen_before_reset"])
+        refs_after = run_git(["for-each-ref", "refs/drain-prs/autostash"], cwd=self.main).stdout
+        self.assertEqual(refs_after.strip(), "")
+
+
 class SecondFastForwardStillFailsTest(_FastForwardStashFixture):
     def test_stash_restored_when_second_ff_also_fails(self):
         # Origin and local both gain their own new commit -- diverged history
@@ -235,6 +267,12 @@ class ConflictingRestoreTest(_FastForwardStashFixture):
         shas_after = stash_shas(self.main)
         self.assertEqual(len(shas_after), 2)
         self.assertIn(user_stash_sha, shas_after)
+
+        # The private anchor ref created before the reset must survive a
+        # failed restore too -- it's the recovery path if `git stash list`
+        # itself is ever unavailable.
+        anchor_refs = run_git(["for-each-ref", "refs/drain-prs/autostash"], cwd=self.main).stdout
+        self.assertTrue(anchor_refs.strip())
 
 
 class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):

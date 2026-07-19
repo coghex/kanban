@@ -1403,10 +1403,31 @@ def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) 
     return failures
 
 
+def _snapshot_anchor_ref(tracked_sha: str) -> str:
+    return f"refs/drain-prs/autostash/{tracked_sha}"
+
+
+def _anchor_snapshot(ctx: RepoContext, tracked_sha: str) -> str:
+    # `git stash create` returns a commit reachable from no ref at all. If
+    # the process died right after this -- before `reset --hard` even runs,
+    # let alone before restoration -- that commit would be the *only* copy
+    # of the user's changes, and eligible for gc. Anchor it under a private
+    # ref immediately, before doing anything destructive to the worktree.
+    ref_name = _snapshot_anchor_ref(tracked_sha)
+    run(["git", "update-ref", ref_name, tracked_sha], cwd=ctx.path)
+    return ref_name
+
+
+def _release_snapshot_anchor(ctx: RepoContext, ref_name: str) -> None:
+    run(["git", "update-ref", "-d", ref_name], cwd=ctx.path, check=False)
+
+
 def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:
-    # `tracked_sha` is otherwise reachable from no ref and eligible for gc;
-    # try to make it durably discoverable before handing off to a human, and
-    # say plainly where it actually landed rather than assuming success.
+    # May already be anchored under refs/drain-prs/autostash/<sha> from
+    # earlier in the flow, or may not be (e.g. anchoring itself is what
+    # failed) -- (re)creating it here is idempotent either way. Also try to
+    # surface it through the more familiar `git stash list`, and say plainly
+    # where it actually landed rather than assuming success.
     store_proc = run(
         ["git", "stash", "store", "-m", message, tracked_sha],
         cwd=ctx.path,
@@ -1414,11 +1435,11 @@ def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: 
     )
     if store_proc.returncode == 0:
         return "The snapshotted changes were recovered into `git stash list` for manual resolution."
-    ref_name = f"refs/drain-prs/autostash/{tracked_sha}"
+    ref_name = _snapshot_anchor_ref(tracked_sha)
     ref_proc = run(["git", "update-ref", ref_name, tracked_sha], cwd=ctx.path, check=False)
     if ref_proc.returncode == 0:
         return (
-            "The snapshotted changes could not be added to `git stash list`, but were "
+            "The snapshotted changes could not be added to `git stash list`, but are "
             f"preserved at `{ref_name}`; restore with `git stash apply --index {tracked_sha}`."
         )
     return (
@@ -1442,6 +1463,7 @@ def _restore_snapshot(
     ctx: RepoContext,
     tracked_sha: str | None,
     untracked: tuple[Path, list[str]] | None,
+    anchor_ref: str | None,
 ) -> None:
     problems = []
     if tracked_sha is not None:
@@ -1460,6 +1482,10 @@ def _restore_snapshot(
                 + (f": {detail}" if detail else "")
                 + f"; {where}"
             )
+        elif anchor_ref is not None:
+            # Changes are safely back in the working tree; the anchor was
+            # only ever needed to survive a crash before this point.
+            _release_snapshot_anchor(ctx, anchor_ref)
     if untracked is not None:
         holding, paths = untracked
         failures = _restore_untracked_files(ctx, holding, paths)
@@ -1499,10 +1525,15 @@ def fast_forward_default_branch(
         message = f"drain-prs-autostash-{int(time.time())}-{os.getpid()}"
         untracked = None
         tracked_sha = None
+        anchor_ref = None
         try:
             untracked = _relocate_untracked_files(ctx)
             tracked_sha = _snapshot_tracked_changes(ctx, message)
             if tracked_sha is not None:
+                # Anchor before doing anything destructive: once
+                # `reset --hard` runs, this floating commit is the only
+                # copy of the user's changes until restoration completes.
+                anchor_ref = _anchor_snapshot(ctx, tracked_sha)
                 run(["git", "reset", "--hard", "HEAD"], cwd=ctx.path)
         except DrainError as prep_exc:
             if untracked is not None:
@@ -1524,7 +1555,7 @@ def fast_forward_default_branch(
         except DrainError:
             raise
         finally:
-            _restore_snapshot(ctx, tracked_sha, untracked)
+            _restore_snapshot(ctx, tracked_sha, untracked, anchor_ref)
 
 
 def cleanup_after_merge(
