@@ -37,7 +37,7 @@ module Kanban.Worker
 where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryPutMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
 import Control.Exception (IOException, SomeException, mask, try, uninterruptibleMask_)
 import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
@@ -768,7 +768,6 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
               emitRaw (WorkerDiagnostic message)
               complete (SolveFailed message)
       pending <- readIORef pendingOutcomeRef
-      let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       -- Verification always runs to a real conclusion here regardless of
       -- `stoppedRef`: a signal-triggered shutdown already set that flag
       -- true (to stop the heartbeat/census loops), and gating this wait on
@@ -777,8 +776,16 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- every poll rather than trusting this one-time snapshot, since the
       -- deadline watchdog can still take over that same ref after this
       -- point (see 'watchdogLoop'); this read only decides whether to
-      -- enter the wait at all.
-      when (pending /= Nothing) (waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef deadline watchdogAdjudicatedVar)
+      -- enter the wait at all. When it does, its own return value settles
+      -- whether this has already won 'claimLeaseRelease' for itself (see
+      -- its own documentation for why re-attempting the claim below in
+      -- that case would be actively harmful, not merely redundant) —
+      -- 'Nothing' here means the wait was never entered at all, in which
+      -- case the claim below still needs to be attempted fresh.
+      alreadyWonLeaseRelease <-
+        if pending /= Nothing
+          then Just <$> waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
+          else pure Nothing
       writeIORef stoppedRef True
       -- Whether it is safe to release the lease now without waiting for the
       -- watchdog is decided by a genuine race against it, claimed as late
@@ -804,9 +811,16 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- time: if it has already passed, this treats itself as having lost
       -- regardless of what the atomic race would otherwise say, leaving
       -- 'claimLeaseRelease' unclaimed for the watchdog (whenever it
-      -- eventually runs) to win outright.
-      releaseCheckNow <- getCurrentTime
-      wonLeaseRelease <- if releaseCheckNow >= deadline then pure False else claimLeaseRelease
+      -- eventually runs) to win outright. Only reached when
+      -- 'alreadyWonLeaseRelease' is 'Nothing' — 'waitForOrphanResolution'
+      -- already settled this exact question, via the same claim, whenever
+      -- it ran at all.
+      wonLeaseRelease <- case alreadyWonLeaseRelease of
+        Just settled -> pure settled
+        Nothing -> do
+          releaseCheckNow <- getCurrentTime
+          let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
+          if releaseCheckNow >= deadline then pure False else claimLeaseRelease
       unless wonLeaseRelease (takeMVar watchdogDoneVar)
       releaseWorkerLease descriptor
       void (installHandler sigTERM previousTermHandler Nothing)
@@ -1566,47 +1580,49 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 -- or just after, the deadline passes, while the value still sitting in
 -- 'pendingOutcomeRef' is the original pre-deadline one.
 --
--- Racing 'watchdogLoop' for 'watchdogAdjudicatedVar' itself via
--- 'tryPutMVar' — a single atomic compare-and-fill, exactly the same shape
--- as 'claimLeaseRelease' — closes the torn-value gap: winning it means
--- 'watchdogLoop' can never fill it first (an 'MVar' fills at most once),
--- so its takeover branch will find this already full and skip its own
--- write, and this may safely consume 'pendingOutcomeRef' immediately.
--- Losing it means 'watchdogLoop' already won and is (or is about to be)
--- writing its takeover; 'readMVar' (not 'takeMVar', which would consume
--- the fill and strand a later iteration of this same loop) then blocks
--- until that write has actually landed.
+-- No wall-clock check can decide whether this or 'watchdogLoop' gets to
+-- finalize: reading 'now' and separately consuming 'pendingOutcomeRef'
+-- are two steps, not one atomic one, so a pause of any length between
+-- them (a GC pause, a context switch to some other runnable thread) can
+-- let a "not yet due" reading go stale before the consume actually runs,
+-- no matter how few instructions sit in between or how many times it is
+-- rechecked — a wall-clock recheck answers "has the deadline passed,"
+-- never "has the watchdog thread actually run yet," and only the second
+-- question is the one that matters here.
 --
--- But racing at all is only correct once it is already clear the
--- watchdog is entitled to be racing this in the first place: 'now' is
--- checked *first*, and once it is at or past 'deadline', this never
--- attempts 'tryPutMVar' itself at all — only 'readMVar', a pure wait with
--- no attempt to win anything. That guarantees the watchdog is the only
--- caller that ever wins the race for this specific finalization once
--- past the deadline, rather than merely being favored to: the two
--- outcomes of the 'now' check lead to genuinely different operations
--- (blocking wait vs. racing attempt), not the same consume gated by a
--- stale boolean, so there is no separate step afterward for the reading
--- to go stale before. The 'now < deadline' branch's own 'tryPutMVar'
--- attempt needs no such guarantee: it is always safe regardless of
--- whether 'now' is by then stale, since a genuine atomic race decides the
--- winner correctly either way — the watchdog can only ever win it after
--- its own identically-computed delay has elapsed, so if this reads
--- 'now < deadline' just as that delay is also expiring, whichever of the
--- two calls 'tryPutMVar' first is exactly as entitled to the outcome as
--- the other. No check gates whether the 'now < deadline' branch attempts
--- the race at all beyond that: 'tryPutMVar' costs the same whether it
--- wins or loses, so the overwhelmingly common case — resolving long
--- before any deadline is near, where this always wins trivially against
--- a watchdog thread that has not even reached its own delay's end yet —
--- never pays anything extra for it either.
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> UTCTime -> MVar () -> IO ()
-waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef deadline watchdogAdjudicatedVar = loop Nothing
+-- What actually closes it is racing 'watchdogLoop' for 'claimLeaseRelease'
+-- itself — the exact same single atomic compare-and-swap the supervisor
+-- uses for its own later lease-release decision (see 'runWorkerWithTask'),
+-- not a separate check gated by a stale boolean. Winning it here means
+-- 'watchdogLoop' can never win it afterward (it is one-shot), so its own
+-- 'claimLeaseRelease' attempt is guaranteed to lose and do nothing further
+-- at all — safe to consume 'pendingOutcomeRef' immediately, exactly as
+-- the normal completion left it. Losing it means 'watchdogLoop' already
+-- won and is (or is about to be) writing its takeover into
+-- 'pendingOutcomeRef'; 'watchdogAdjudicatedVar' — filled only once that
+-- write has actually landed, not merely once win/lose is decided, see
+-- 'watchdogLoop' — is then read (blocking, never spinning) to wait for
+-- it, guaranteed to unblock because a losing attempt here can only happen
+-- after 'watchdogLoop' has already won the same claim, which it only
+-- ever attempts once its own identically-computed delay has elapsed.
+--
+-- The caller (see 'runWorkerWithTask') never independently attempts
+-- 'claimLeaseRelease' after this returns 'True': doing so would be not
+-- just redundant but actively harmful, forcing every worker that ever
+-- passes through this poll — including the overwhelmingly common case of
+-- resolving long before any deadline is near — to needlessly wait out
+-- watchdogLoop's entire remaining delay before releasing its lease, even
+-- though nothing is left for that watchdog to do. Returning whether this
+-- itself won lets the caller skip that attempt entirely and proceed
+-- directly, while still correctly deferring to 'watchdogDoneVar' on the
+-- (rare, deadline-adjacent) branch where this lost instead.
+waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> IO Bool -> MVar () -> IO Bool
+waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar = loop Nothing
   where
     loop lastDiagnostic = do
       current <- readIORef pendingOutcomeRef
       case current of
-        Nothing -> pure ()
+        Nothing -> pure False
         Just (requireVerification, outcome) -> do
           refreshProcessCensus descriptor stateLock
           known <- withMVar stateLock (\state -> pure (state.workerStateKnownProcesses))
@@ -1628,12 +1644,11 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
               loop reported
             Right surviving
               | null surviving -> do
-                  now <- getCurrentTime
-                  if now >= deadline
-                    then readMVar watchdogAdjudicatedVar
-                    else void (tryPutMVar watchdogAdjudicatedVar ())
+                  wonLease <- claimLeaseRelease
+                  unless wonLease (readMVar watchdogAdjudicatedVar)
                   final <- atomicModifyIORef' pendingOutcomeRef (\value -> (Nothing, value))
                   emit (WorkerFinished (maybe outcome snd final))
+                  pure wonLease
               | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
 
 -- | Bounds the worker's whole lifetime (task execution, not just its
@@ -1731,62 +1746,48 @@ watchdogLoop takeSnapshot spec providerRef spawnPending stoppedRef stateLock tas
           recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
           completeBody (providerOk && recordedOk) workerDeadlineOutcome
           -- 'watchdogAdjudicatedVar' fills only once 'pendingOutcomeRef'
-          -- (via 'completeBody' here, or the takeover compare-and-swap
-          -- below) has actually reached its final value for this claim —
-          -- not merely once win/lose is decided — so 'waitForOrphanResolution',
-          -- once past the deadline, can block on it and be guaranteed to
-          -- see a settled value rather than one still in flight. Only the
-          -- losing branch below can ever actually race that poll (it
-          -- starts only once 'completedRef' is already claimed by the
-          -- normal completion it is polling for, so this call can never
-          -- itself still win 'claimCompletion' while racing it), but
-          -- filling this on both branches keeps the guarantee
+          -- has actually reached its final value for this claim (via
+          -- 'completeBody' here, or the takeover compare-and-swap below)
+          -- — not merely once win/lose is decided — so
+          -- 'waitForOrphanResolution', on the branch where it loses
+          -- 'claimLeaseRelease' to this thread, can block on it and be
+          -- guaranteed to see a settled value rather than one still in
+          -- flight. This branch can never actually be the one that poll
+          -- is waiting on (it starts only once 'completedRef' is already
+          -- claimed by the normal completion it is polling for, so this
+          -- call can never itself still win 'claimCompletion' while
+          -- racing it), but filling this here too keeps the guarantee
           -- unconditional rather than dependent on that invariant.
-          void (tryPutMVar watchdogAdjudicatedVar ())
+          putMVar watchdogAdjudicatedVar ()
           readIORef taskThreadIdRef >>= mapM_ killThread
         else do
           readIORef taskThreadIdRef >>= mapM_ killThread
-          -- Races 'waitForOrphanResolution' for 'watchdogAdjudicatedVar'
-          -- itself via 'tryPutMVar' — see its own documentation for why a
-          -- wall-clock check cannot substitute for this. Winning means
-          -- that poll has not yet (and, since an 'MVar' fills at most
-          -- once, now never will) reached its own finalization, so the
-          -- takeover compare-and-swap below is guaranteed to still find
-          -- 'pendingOutcomeRef' exactly as the normal completion left it.
-          -- Losing means that poll already won the race and is either
-          -- about to consume 'pendingOutcomeRef' or already has —
-          -- attempting the compare-and-swap in that case would either
-          -- clobber a value the poll has not yet read, or (having already
-          -- consumed it) simply no-op against a stale 'Nothing'; skipping
-          -- it entirely avoids both, leaving 'pendingOutcomeRef' solely to
-          -- whichever the poll itself observes.
-          wonTakeoverRace <- tryPutMVar watchdogAdjudicatedVar ()
-          when wonTakeoverRace $ do
-            -- A single compare-and-swap: claims the takeover only while
-            -- 'pendingOutcomeRef' is still 'Just' something, and no-ops
-            -- (rather than clobbering 'Nothing' back to a stale 'Just')
-            -- on the (now unreachable, since winning the race above
-            -- already guarantees this) chance it somehow were not.
-            -- Written *before* the kill below, not after: the poll runs
-            -- independently and concurrently (it has been running since
-            -- the normal completion first reported this orphan, well
-            -- before this deadline fired), so it can observe the kill's
-            -- effect — the recorded group actually dying — the moment
-            -- that happens, regardless of when this function gets around
-            -- to writing the takeover. Writing the outcome first
-            -- guarantees that whenever the poll's own atomic consume next
-            -- runs — even racing this exact kill — it already reads the
-            -- deadline reason rather than the stale original one.
-            tookOver <-
-              atomicModifyIORef' pendingOutcomeRef $ \pending -> case pending of
-                Nothing -> (Nothing, False)
-                Just _ -> (Just (False, workerDeadlineOutcome), True)
-            when tookOver $ do
-              known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
-              emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
+          -- This branch is reached only when this thread has itself just
+          -- won 'claimLeaseRelease' — a one-shot claim — which means
+          -- 'waitForOrphanResolution' (see its own documentation) cannot
+          -- have won it instead, and so cannot yet have consumed
+          -- 'pendingOutcomeRef': it is guaranteed to still be blocked on
+          -- 'watchdogAdjudicatedVar', not racing this compare-and-swap.
+          -- The 'Nothing' case below is kept only as a defensive no-op,
+          -- not because it can actually happen.
+          tookOver <-
+            atomicModifyIORef' pendingOutcomeRef $ \pending -> case pending of
+              Nothing -> (Nothing, False)
+              Just _ -> (Just (False, workerDeadlineOutcome), True)
+          -- Filled here, right after the takeover claim is decided (win or
+          -- no-op alike): this is the earliest point 'pendingOutcomeRef'
+          -- is guaranteed settled for this branch, and — since 'killThread'
+          -- above already blocked until any in-flight normal completion
+          -- this deadline is racing had itself finished settling that same
+          -- ref — the poll blocked on this var can never observe anything
+          -- still in flight.
+          putMVar watchdogAdjudicatedVar ()
+          when tookOver $ do
+            known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
+            emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
           void (terminateProviderRefWith takeSnapshot spawnPending providerRef)
           void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
-    else void (tryPutMVar watchdogAdjudicatedVar ())
+    else pure ()
   putMVar watchdogDoneVar ()
 
 -- | The canonical externally visible reason a persistent worker's
