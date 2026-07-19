@@ -275,9 +275,12 @@ revision. A missing or contradictory `pr-origin` marker fails visibly rather
 than guessing.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
-Initial review and rereview synchronously invoke `approve-issues.py` as the
-canonical `issue-review:v2` fingerprint publisher so the existing solve gate
-accepts Kanban-reviewed issues. Interactive revision remains inside Kanban.
+Initial review and rereview synchronously invoke the vendored
+`tools/approve_issues.py` backend (installed with
+`tools/install_issue_review.py`; see
+[the agent-workflow contract](agent-workflow-contract.md)) as the canonical
+`issue-review:v2` fingerprint publisher so the existing solve gate accepts
+Kanban-reviewed issues. Interactive revision remains inside Kanban.
 Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.

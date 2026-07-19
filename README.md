@@ -13,11 +13,12 @@ It can also show Codex and Claude usage, run reviews, start work on issues, and 
 - Codex or Claude installed and signed in, only if you want the optional AI actions
 
 Having Codex or Claude installed and signed in is necessary but not
-sufficient for AI actions: they also depend on Kanban-owned workflow assets
-(the canonical issue-review backend, and named `solve`/`pr-review`/
-`pr-rereview`/`pr-revise` commands) that are not yet packaged for a fresh
-checkout. See [the agent-workflow contract](docs/agent-workflow-contract.md)
-for the full dependency list and what each action requires.
+sufficient for AI actions: canonical issue review (the `r` key) also needs
+`tools/install_issue_review.py` run once to install its backend, and the
+named `solve`/`pr-review`/`pr-rereview`/`pr-revise` commands are Kanban-owned
+workflow assets not yet packaged for a fresh checkout. See
+[the agent-workflow contract](docs/agent-workflow-contract.md) for the full
+dependency list and what each action requires.
 
 ## Build
 
