@@ -3,6 +3,7 @@
 
 module Kanban.Solve
   ( AgentEvent (..),
+    ResumeProvenance (..),
     SolveEvent (..),
     SolveOutcome (..),
     SolveWorkflow (..),
@@ -13,6 +14,7 @@ module Kanban.Solve
     claudeReviewerModel,
     parseSolveOutputLine,
     renderAgentEvent,
+    resumeProvenanceHeader,
     runSolve,
     solveArguments,
     solverLabel,
@@ -63,6 +65,15 @@ data SolveWorkflow = SolveOnly | AutoSolve
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | Why a resumed agent session is being fed this message, so the resume
+-- prompt can state the true provenance instead of always framing it as a
+-- user answer. 'ResumeAutomatedChangesRequested' covers Kanban's own
+-- reviewed:changes handoff (e.g. 'resumeAutoSolveRevision'), not a message
+-- typed by a person.
+data ResumeProvenance = ResumeAnswer | ResumeInterruptGuidance | ResumeAutomatedChangesRequested
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data SolveOutcome
   = SolveCompleted
   | SolveNeedsInput Text
@@ -109,8 +120,8 @@ solverLabel :: SolverBrand -> Text
 solverLabel CodexSolver = "codex · " <> codexSolverModel
 solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
-runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> Text -> (SolveEvent -> IO ()) -> IO ()
-runSolve repository issueNumber workflow brand existingSession existingLogPath userMessage eventSink = do
+runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
+runSolve repository issueNumber workflow brand existingSession existingLogPath provenance userMessage eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -154,7 +165,7 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath u
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
-      (proc executablePath (solveArguments issueNumber workflow brand existingSession userMessage))
+      (proc executablePath (solveArguments issueNumber workflow brand existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_out = CreatePipe,
           std_err = CreatePipe,
@@ -162,8 +173,8 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath u
           create_group = True
         }
 
-solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Text -> [String]
-solveArguments issueNumber workflow CodexSolver existingSession userMessage =
+solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> [String]
+solveArguments issueNumber workflow CodexSolver existingSession provenance userMessage =
   case existingSession of
     Nothing ->
       [ "exec",
@@ -191,9 +202,9 @@ solveArguments issueNumber workflow CodexSolver existingSession userMessage =
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
         Text.unpack sessionId,
-        Text.unpack (resumeSolvePrompt workflow CodexSolver userMessage)
+        Text.unpack (resumeSolvePrompt workflow CodexSolver provenance userMessage)
       ]
-solveArguments issueNumber workflow ClaudeSolver existingSession userMessage =
+solveArguments issueNumber workflow ClaudeSolver existingSession provenance userMessage =
   [ "--print",
     "--model",
     "claude-sonnet-5",
@@ -206,7 +217,7 @@ solveArguments issueNumber workflow ClaudeSolver existingSession userMessage =
     "--verbose"
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver else resumeSolvePrompt workflow ClaudeSolver userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver else resumeSolvePrompt workflow ClaudeSolver provenance userMessage)]
 
 initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Text
 initialSolvePrompt issueNumber workflow brand =
@@ -239,13 +250,22 @@ workflowLogName :: SolveWorkflow -> Text
 workflowLogName SolveOnly = "solve"
 workflowLogName AutoSolve = "autosolve"
 
-resumeSolvePrompt :: SolveWorkflow -> SolverBrand -> Text -> Text
-resumeSolvePrompt workflow brand answer =
+resumeSolvePrompt :: SolveWorkflow -> SolverBrand -> ResumeProvenance -> Text -> Text
+resumeSolvePrompt workflow brand provenance answer =
   Text.unlines
-    [ "The user answered the Kanban workflow question:",
+    [ resumeProvenanceHeader provenance,
       Text.strip answer,
       "Continue the same " <> workflowName workflow brand <> " workflow from its current state. Apply the same interaction contract: stop with KANBAN_NEEDS_INPUT: <question> rather than guessing if another user decision is required."
     ]
+
+-- | The opening line for a resumed prompt, distinguishing a real user answer
+-- to 'KANBAN_NEEDS_INPUT' from user interrupt guidance and from an automated
+-- workflow handoff, so the resumed agent does not misattribute an automated
+-- message as an authoritative user decision.
+resumeProvenanceHeader :: ResumeProvenance -> Text
+resumeProvenanceHeader ResumeAnswer = "The user answered the Kanban workflow question:"
+resumeProvenanceHeader ResumeInterruptGuidance = "The user interrupted with corrective guidance:"
+resumeProvenanceHeader ResumeAutomatedChangesRequested = "Kanban is resuming this session because the PR received reviewed:changes, not because of a user message. The following automated handoff directs you to the canonical review blockers; it is not the blocker text itself:"
 
 parseSolveOutputLine :: ByteString.ByteString -> Either Text (Maybe Text, [AgentEvent])
 parseSolveOutputLine bytes = do
