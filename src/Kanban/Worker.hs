@@ -616,7 +616,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       previousInterruptHandler <- installHandler sigINT (Catch stopOwnedWork) Nothing
       persistState descriptor stateLock
       void . forkIO $ heartbeatLoop descriptor stateLock stoppedRef
-      void . forkIO $ processCensusLoop descriptor stateLock stoppedRef
+      void . forkIO $ processCensusLoop takeSnapshot descriptor stateLock stoppedRef
       let emitRaw event = do
             appendWorkerEvent descriptor eventLock event
             updateWorkerState descriptor stateLock event
@@ -659,7 +659,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- treat a merely-empty recorded census as equivalent to an
           -- actually-confirmed one (see 'waitForOrphanResolution').
           completeBody verified outcome = uninterruptibleMask_ $ do
-            refreshProcessCensus descriptor stateLock
+            refreshProcessCensus takeSnapshot descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of
               Left message -> do
@@ -761,25 +761,34 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             processId <- managedProcessPid process
             case processId of
               Just providerPid -> do
-                recordProviderIdentity descriptor stateLock (fromIntegral providerPid)
+                recordProviderIdentity takeSnapshot descriptor stateLock (fromIntegral providerPid)
                 emit (WorkerProviderStarted (fromIntegral providerPid))
-                refreshProcessCensus descriptor stateLock
+                refreshProcessCensus takeSnapshot descriptor stateLock
                 stopRequested <- readIORef stoppedRef
                 -- A late registration can land after the watchdog already
-                -- ran its own verified provider/census kill against an
-                -- empty census (nothing was recorded yet at that moment —
-                -- see 'terminateProviderRefWith'); a group-signal kill on
-                -- just the direct process here would leave any descendant
-                -- this refresh just discovered in a different process
-                -- group (unreachable by that signal) alive indefinitely,
-                -- with nothing else ever attempting to kill it — only
-                -- 'waitForOrphanResolution' waiting on it, forever. Running
-                -- the same verified, identity-checked census kill the
-                -- watchdog itself uses gives every descendant this refresh
-                -- just recorded — not only the direct process — a real,
-                -- verified termination attempt.
+                -- gave up on an empty 'ProviderSlotSpawning' census (nothing
+                -- was recorded yet at that moment) and moved on. This must
+                -- not settle for the same best-effort, non-verifying signal
+                -- 'killManagedProcess' alone provides: if 'recordProviderIdentity'
+                -- and/or the 'refreshProcessCensus' call just above also hit
+                -- a snapshot failure, 'workerStateProviderIdentity' stays
+                -- unset -- and, since neither is ever retried, permanently
+                -- starves 'refreshProcessCensus's own descendant walk of a
+                -- root -- leaving any descendant in another process group
+                -- entirely undiscovered, with 'waitForOrphanResolution'
+                -- later accepting that permanently-empty census as fully
+                -- resolved and releasing the lease out from under it.
+                -- 'terminateProviderRefWith' independently re-derives the
+                -- provider's identity and descendants from a snapshot it
+                -- takes itself, using the live handle already recorded in
+                -- 'providerSlotRef' -- the exact same call the watchdog
+                -- makes for this purpose -- so this retries that capture
+                -- here rather than trusting whatever the census already
+                -- holds. The subsequent 'terminateRecordedStateProcessesWith'
+                -- then kills and verifies everything that capture just
+                -- merged in, not only the direct provider.
                 when stopRequested $ do
-                  killManagedProcess process
+                  void (terminateProviderRefWith takeSnapshot stateLock providerSlotRef)
                   void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
               Nothing -> do
                 let message = "provider started without an observable process-group id; terminating it for safety"
@@ -825,7 +834,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
               then pure ()
               else complete (SolveFailed "persistent worker task ended without a terminal provider event")
           Left exception -> do
-            refreshProcessCensus descriptor stateLock
+            refreshProcessCensus takeSnapshot descriptor stateLock
             readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
             let message = "persistent worker failed: " <> Text.pack (show exception)
             void . try @SomeException $ do
@@ -1452,20 +1461,20 @@ heartbeatLoop descriptor stateLock stoppedRef = do
       pure updated
     heartbeatLoop descriptor stateLock stoppedRef
 
-processCensusLoop :: WorkerDescriptor -> MVar WorkerState -> IORef Bool -> IO ()
-processCensusLoop descriptor stateLock stoppedRef = do
+processCensusLoop :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> IORef Bool -> IO ()
+processCensusLoop takeSnapshot descriptor stateLock stoppedRef = do
   threadDelay workerCensusIntervalMicros
   stopped <- readIORef stoppedRef
   unless stopped $ do
-    refreshProcessCensus descriptor stateLock
-    processCensusLoop descriptor stateLock stoppedRef
+    refreshProcessCensus takeSnapshot descriptor stateLock
+    processCensusLoop takeSnapshot descriptor stateLock stoppedRef
 
 -- | Records the provider's PID, start identity, and group id the moment it
 -- is observed, so census roots and later terminate paths always have an
 -- anchor to verify against rather than trusting a raw, possibly-reused PID.
-recordProviderIdentity :: WorkerDescriptor -> MVar WorkerState -> Int -> IO ()
-recordProviderIdentity descriptor stateLock providerPid = do
-  snapshotResult <- readProcessSnapshot
+recordProviderIdentity :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> Int -> IO ()
+recordProviderIdentity takeSnapshot descriptor stateLock providerPid = do
+  snapshotResult <- takeSnapshot
   case snapshotResult of
     Left _ -> pure ()
     Right snapshot -> modifyMVar_ stateLock $ \state -> do
@@ -1483,9 +1492,9 @@ processKey process = (process.processIdentityPid, process.processIdentityStarted
 -- (PID reuse) or absence drops it instead of walking into an unrelated
 -- process's descendants. Previously-known entries that no longer match are
 -- pruned rather than retained as raw, unverifiable PIDs.
-refreshProcessCensus :: WorkerDescriptor -> MVar WorkerState -> IO ()
-refreshProcessCensus descriptor stateLock = do
-  snapshotResult <- readProcessSnapshot
+refreshProcessCensus :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> IO ()
+refreshProcessCensus takeSnapshot descriptor stateLock = do
+  snapshotResult <- takeSnapshot
   case snapshotResult of
     Left _ -> pure ()
     Right snapshot ->
@@ -1769,7 +1778,7 @@ waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef
       case current of
         Nothing -> pure False
         Just (requireVerification, outcome) -> do
-          refreshProcessCensus descriptor stateLock
+          refreshProcessCensus takeSnapshot descriptor stateLock
           known <- withMVar stateLock (\state -> pure (state.workerStateKnownProcesses))
           result <-
             if requireVerification && null known
