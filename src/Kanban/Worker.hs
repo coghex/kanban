@@ -7,6 +7,7 @@ module Kanban.Worker
     WorkerId (..),
     WorkerParent (..),
     ProcessIdentity (..),
+    ProviderSlot (..),
     WorkerTask (..),
     SolveWorkerTask (..),
     PullRequestWorkerTask (..),
@@ -29,6 +30,8 @@ module Kanban.Worker
     runWorker,
     runWorkerWith,
     runWorkerWithTask,
+    terminateProviderRefWith,
+    terminateRecordedStateProcessesWith,
     terminateWorker,
     terminateWorkerWith,
     waitForOrphanResolution,
@@ -1470,6 +1473,11 @@ recordProviderIdentity descriptor stateLock providerPid = do
       writeState descriptor updated
       pure updated
 
+-- | Distinguishes a process from any later, unrelated one that happens to
+-- reuse the same pid, so merging two process lists never conflates them.
+processKey :: ProcessIdentity -> (Int, Text)
+processKey process = (process.processIdentityPid, process.processIdentityStartedAt)
+
 -- | A recorded process contributes as a census root only while a fresh
 -- snapshot still shows its PID with the same start identity; a mismatch
 -- (PID reuse) or absence drops it instead of walking into an unrelated
@@ -1494,8 +1502,6 @@ refreshProcessCensus descriptor stateLock = do
             let updated = state {workerStateKnownProcesses = updatedProcesses}
             writeState descriptor updated
             pure updated
-  where
-    processKey process = (process.processIdentityPid, process.processIdentityStartedAt)
 
 liveRecordedProcessesWith :: IO (Either Text [ProcessIdentity]) -> MVar WorkerState -> IO (Either Text [ProcessIdentity])
 liveRecordedProcessesWith takeSnapshot stateLock = withMVar stateLock (liveProcessesWith takeSnapshot . (.workerStateKnownProcesses))
@@ -1526,6 +1532,34 @@ terminateProviderGroupWith takeSnapshot state = case (state.workerStateProviderP
 -- missing observable process id, or a spawn still genuinely in flight left
 -- it unverified, so the caller retains a pending outcome rather than
 -- finalize on a guess.
+--
+-- Also captures the provider's own current descendants into
+-- 'workerStateKnownProcesses' before killing it, independent of whether
+-- 'recordProviderIdentity' ever succeeded. 'recordProviderIdentity' and
+-- 'refreshProcessCensus' both silently drop a snapshot failure ('Left _ ->
+-- pure ()'), and neither is ever retried afterward — a single transient
+-- failure at registration time permanently leaves
+-- 'workerStateProviderIdentity' unset, which starves 'refreshProcessCensus'
+-- of a root to descend from for this worker's entire remaining lifetime
+-- (its own 'providerRoots' computation reads exactly that field). A
+-- descendant the provider later spawns into its own process group would
+-- then never appear in 'workerStateKnownProcesses' at all: this function's
+-- own kill would still verify and terminate the provider's *own* group
+-- (its identity here comes from the live handle's pid via a snapshot this
+-- function takes itself, not from that possibly-never-set field), but the
+-- caller's separate 'terminateRecordedStateProcessesWith' pass over
+-- 'workerStateKnownProcesses' would see nothing to kill and report success
+-- vacuously, letting the escaped descendant survive a "verified" deadline
+-- finalization. Since this function already has to take a fresh snapshot
+-- and re-derive the provider's identity to kill it at all, it walks that
+-- same snapshot for the provider's descendants too and merges them into
+-- the census right here — no dependency on 'recordProviderIdentity' having
+-- ever run successfully. The merge is in-memory only (no direct
+-- 'writeState'): the caller's very next step, either 'completeBody' or the
+-- takeover path in 'watchdogLoop', emits an event through 'emitRaw', whose
+-- own 'updateWorkerState' persists whatever 'workerStateKnownProcesses'
+-- currently holds — so the merge reaches disk through the normal event
+-- pipeline instead of a redundant explicit write.
 --
 -- 'ProviderSlotIdle' is only safely "nothing to verify, and nothing ever
 -- will be" because claiming it is a genuine compare-and-swap into
@@ -1558,8 +1592,8 @@ terminateProviderGroupWith takeSnapshot state = case (state.workerStateProviderP
 -- racing anything new: only this task's own thread ever writes those
 -- values, so whatever this observes is a real, whole state that actually
 -- held at the read instant, never a torn one.
-terminateProviderRefWith :: IO (Either Text [ProcessIdentity]) -> IORef ProviderSlot -> IO Bool
-terminateProviderRefWith takeSnapshot providerSlotRef = do
+terminateProviderRefWith :: IO (Either Text [ProcessIdentity]) -> MVar WorkerState -> IORef ProviderSlot -> IO Bool
+terminateProviderRefWith takeSnapshot stateLock providerSlotRef = do
   claimedEmpty <- atomicModifyIORef' providerSlotRef $ \slot -> case slot of
     ProviderSlotIdle -> (ProviderSlotClaimedEmpty, True)
     ProviderSlotClaimedEmpty -> (ProviderSlotClaimedEmpty, True)
@@ -1582,7 +1616,12 @@ terminateProviderRefWith takeSnapshot providerSlotRef = do
                 Left _ -> killManagedProcess process >> pure False
                 Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
                   Nothing -> pure True
-                  Just identity -> isRight <$> killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity]
+                  Just identity -> do
+                    let descendants = descendantProcesses [identity.processIdentityPid] snapshot
+                    unless (null descendants) $
+                      modifyMVar_ stateLock $ \state ->
+                        pure state {workerStateKnownProcesses = Map.elems (Map.fromList [(processKey known, known) | known <- state.workerStateKnownProcesses <> descendants])}
+                    isRight <$> killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity]
 
 -- | Re-verifies each recorded process's identity before signaling its group,
 -- and again before the KILL that follows the grace window, so a group that
@@ -1850,7 +1889,7 @@ watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadId
       wonCompletion <- claimCompletion
       if wonCompletion
         then do
-          providerOk <- terminateProviderRefWith takeSnapshot providerSlotRef
+          providerOk <- terminateProviderRefWith takeSnapshot stateLock providerSlotRef
           recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
           completeBody (providerOk && recordedOk) workerDeadlineOutcome
           -- 'watchdogAdjudicatedVar' fills only once 'pendingOutcomeRef'
@@ -1893,7 +1932,7 @@ watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadId
           when tookOver $ do
             known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
             emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
-          void (terminateProviderRefWith takeSnapshot providerSlotRef)
+          void (terminateProviderRefWith takeSnapshot stateLock providerSlotRef)
           void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
     else pure ()
   putMVar watchdogDoneVar ()
