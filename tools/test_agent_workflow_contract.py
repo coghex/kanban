@@ -228,14 +228,23 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"segment {segment!r}; declare it in the manifest",
                 )
 
-    def test_migration_targets_are_flagged(self):
+    def test_issue_review_backend_is_kanban_owned_and_supported(self):
         by_id = {row["id"]: row for row in self.manifest}
-        for expected_id in ("approve-issues-backend", "codex-approve-issues-skill"):
-            self.assertIn(
-                expected_id, by_id, f"manifest is missing required entry {expected_id!r}"
-            )
-            self.assertEqual(by_id[expected_id]["status"], "migration-target")
-            self.assertEqual(by_id[expected_id]["mandatory"], "no")
+        self.assertIn(
+            "approve-issues-backend",
+            by_id,
+            "manifest is missing required entry 'approve-issues-backend'",
+        )
+        entry = by_id["approve-issues-backend"]
+        self.assertEqual(entry["owner"], "kanban")
+        self.assertEqual(entry["status"], "supported")
+        self.assertEqual(entry["mandatory"], "no")
+        self.assertNotIn(
+            "codex-approve-issues-skill",
+            by_id,
+            "codex-approve-issues-skill is no longer a dependency of any "
+            "Kanban-supported command; remove it instead of re-adding it",
+        )
 
     def test_drainer_launchagent_path_is_not_flagged_as_personal(self):
         by_id = {row["id"]: row for row in self.manifest}
