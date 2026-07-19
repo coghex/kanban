@@ -1,5 +1,6 @@
 """Safety tests for the canonical issue-review backend installer."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +65,23 @@ class LegacyLauncherMigrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertIsNone(result["backup_path"])
         self.assertEqual(self.legacy_path.resolve(), self.kanban_link.resolve())
+
+    def test_points_at_the_stable_link_itself_not_through_it(self):
+        # kanban_link is itself a symlink here, exactly as it is in real
+        # installs (install_symlink makes it point at the repo checkout).
+        # The legacy launcher must stop at kanban_link, one hop, so a
+        # repository move only ever requires reinstalling kanban_link.
+        repo_backend = self.root / "repo-backend.py"
+        repo_backend.write_text("backend\n", encoding="utf-8")
+        self.kanban_link.unlink()
+        self.kanban_link.symlink_to(repo_backend)
+
+        install_issue_review.migrate_legacy_launcher(
+            self.legacy_path, self.kanban_link, allow_migration=False
+        )
+
+        self.assertEqual(Path(os.readlink(self.legacy_path)), self.kanban_link)
+        self.assertNotEqual(Path(os.readlink(self.legacy_path)), repo_backend)
 
     def test_repoints_an_existing_symlink_without_opt_in(self):
         other_target = self.root / "other.py"
@@ -153,9 +171,72 @@ class InstallerPolicyTests(unittest.TestCase):
             migrate_legacy_launcher_flag=False,
             dry_run=True,
         )
-        self.assertTrue(result["legacy_launcher"]["would_refuse"])
-        self.assertFalse(result["legacy_launcher"]["would_migrate"])
+        self.assertEqual(result["legacy_launcher"]["status"], "refused")
         self.assertEqual(self.legacy_path.read_text(encoding="utf-8"), "pre-kanban\n")
+
+    def test_dry_run_reports_a_pending_migration_when_opted_in(self):
+        self.legacy_path.parent.mkdir(parents=True)
+        self.legacy_path.write_text("pre-kanban\n", encoding="utf-8")
+        result = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=True,
+            dry_run=True,
+        )
+        self.assertEqual(result["legacy_launcher"]["status"], "migrated")
+        self.assertIsNotNone(result["legacy_launcher"]["backup_path"])
+        self.assertEqual(self.legacy_path.read_text(encoding="utf-8"), "pre-kanban\n")
+
+    def test_dry_run_reports_exact_kanban_link_and_legacy_link_changes(self):
+        result = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        self.assertEqual(result["kanban_link"]["result"], "created")
+        self.assertEqual(result["legacy_launcher"]["status"], "created")
+        # A rerun after a real install reports both links as already correct.
+        install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=False,
+        )
+        rerun = install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        self.assertEqual(rerun["kanban_link"]["result"], "unchanged")
+        self.assertEqual(rerun["legacy_launcher"]["status"], "unchanged")
+
+    def test_dry_run_reports_an_update_after_the_repository_checkout_moves(self):
+        install_issue_review.install(
+            self.repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=False,
+        )
+        moved_repo = self.root / "repo-moved"
+        self.repo.rename(moved_repo)
+        result = install_issue_review.install(
+            moved_repo,
+            self.install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            dry_run=True,
+        )
+        self.assertEqual(result["kanban_link"]["result"], "updated")
+        # The legacy symlink points at the stable kanban_link, not at the
+        # repository, so it never needs to move when the checkout does.
+        self.assertEqual(result["legacy_launcher"]["status"], "unchanged")
 
     def test_install_creates_stable_link_and_legacy_symlink(self):
         result = install_issue_review.install(
