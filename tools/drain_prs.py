@@ -1313,6 +1313,32 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
 
 
+def _stash_top_sha(ctx: RepoContext) -> str | None:
+    proc = run(
+        ["git", "rev-parse", "-q", "--verify", "refs/stash"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _find_stash_ref(ctx: RepoContext, stash_sha: str) -> str | None:
+    proc = run(
+        ["git", "stash", "list", "--format=%H %gd"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        sha, _, ref = line.partition(" ")
+        if sha == stash_sha:
+            return ref.strip()
+    return None
+
+
 def fast_forward_default_branch(
     ctx: RepoContext,
     *,
@@ -1333,7 +1359,8 @@ def fast_forward_default_branch(
     try:
         try_ff()
         return
-    except DrainError:
+    except DrainError as ff_exc:
+        before_sha = _stash_top_sha(ctx)
         stash_name = f"drain-prs-autostash-{int(time.time())}"
         stash_proc = run(
             [
@@ -1347,8 +1374,17 @@ def fast_forward_default_branch(
             cwd=ctx.path,
             check=False,
         )
-        stashed = "No local changes to save" not in (stash_proc.stdout or "")
-        if not stashed:
+        if stash_proc.returncode != 0:
+            detail = (
+                stash_proc.stderr or stash_proc.stdout or f"exit code {stash_proc.returncode}"
+            ).strip()
+            raise DrainError(
+                "Local changes blocked fast-forward, and stashing them failed; "
+                f"aborting.\n{detail}"
+            ) from ff_exc
+
+        stashed_sha = _stash_top_sha(ctx)
+        if stashed_sha is None or stashed_sha == before_sha:
             raise
         log("Local changes blocked fast-forward; stashed them temporarily")
         try:
@@ -1356,11 +1392,19 @@ def fast_forward_default_branch(
         except DrainError:
             raise
         finally:
+            stash_ref = _find_stash_ref(ctx, stashed_sha)
+            if stash_ref is None:
+                raise DrainError(
+                    "Fast-forward succeeded, but the stashed local changes "
+                    f"(commit {stashed_sha}) could not be located for restoration.\n"
+                    "Inspect `git stash list`."
+                )
             try:
-                run(["git", "stash", "pop"], cwd=ctx.path)
+                run(["git", "stash", "pop", stash_ref], cwd=ctx.path)
             except DrainError as exc:
                 raise DrainError(
-                    "Fast-forward succeeded, but restoring stashed local changes failed.\n"
+                    "Fast-forward succeeded, but restoring stashed local changes "
+                    f"({stash_ref}, commit {stashed_sha}) failed.\n"
                     "Your changes remain in the stash; inspect `git stash list`."
                 ) from exc
 
