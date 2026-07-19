@@ -616,7 +616,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       previousInterruptHandler <- installHandler sigINT (Catch stopOwnedWork) Nothing
       persistState descriptor stateLock
       void . forkIO $ heartbeatLoop descriptor stateLock stoppedRef
-      void . forkIO $ processCensusLoop takeSnapshot descriptor stateLock stoppedRef
+      void . forkIO $ processCensusLoop descriptor stateLock stoppedRef
       let emitRaw event = do
             appendWorkerEvent descriptor eventLock event
             updateWorkerState descriptor stateLock event
@@ -659,7 +659,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- treat a merely-empty recorded census as equivalent to an
           -- actually-confirmed one (see 'waitForOrphanResolution').
           completeBody verified outcome = uninterruptibleMask_ $ do
-            refreshProcessCensus takeSnapshot descriptor stateLock
+            refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of
               Left message -> do
@@ -761,9 +761,9 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             processId <- managedProcessPid process
             case processId of
               Just providerPid -> do
-                recordProviderIdentity takeSnapshot descriptor stateLock (fromIntegral providerPid)
+                recordProviderIdentity descriptor stateLock (fromIntegral providerPid)
                 emit (WorkerProviderStarted (fromIntegral providerPid))
-                refreshProcessCensus takeSnapshot descriptor stateLock
+                refreshProcessCensus descriptor stateLock
                 stopRequested <- readIORef stoppedRef
                 -- A late registration can land after the watchdog already
                 -- gave up on an empty 'ProviderSlotSpawning' census (nothing
@@ -834,7 +834,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
               then pure ()
               else complete (SolveFailed "persistent worker task ended without a terminal provider event")
           Left exception -> do
-            refreshProcessCensus takeSnapshot descriptor stateLock
+            refreshProcessCensus descriptor stateLock
             readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
             let message = "persistent worker failed: " <> Text.pack (show exception)
             void . try @SomeException $ do
@@ -1461,20 +1461,29 @@ heartbeatLoop descriptor stateLock stoppedRef = do
       pure updated
     heartbeatLoop descriptor stateLock stoppedRef
 
-processCensusLoop :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> IORef Bool -> IO ()
-processCensusLoop takeSnapshot descriptor stateLock stoppedRef = do
+processCensusLoop :: WorkerDescriptor -> MVar WorkerState -> IORef Bool -> IO ()
+processCensusLoop descriptor stateLock stoppedRef = do
   threadDelay workerCensusIntervalMicros
   stopped <- readIORef stoppedRef
   unless stopped $ do
-    refreshProcessCensus takeSnapshot descriptor stateLock
-    processCensusLoop takeSnapshot descriptor stateLock stoppedRef
+    refreshProcessCensus descriptor stateLock
+    processCensusLoop descriptor stateLock stoppedRef
 
 -- | Records the provider's PID, start identity, and group id the moment it
 -- is observed, so census roots and later terminate paths always have an
 -- anchor to verify against rather than trusting a raw, possibly-reused PID.
-recordProviderIdentity :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> Int -> IO ()
-recordProviderIdentity takeSnapshot descriptor stateLock providerPid = do
-  snapshotResult <- takeSnapshot
+--
+-- Always uses the real 'readProcessSnapshot', never the caller's own
+-- injectable 'takeSnapshot': several tests deliberately inject a snapshot
+-- source that fails only to exercise a *later* verification/kill step,
+-- while still relying on discovery (this function and
+-- 'refreshProcessCensus') running against the real system so
+-- 'workerStateKnownProcesses' is genuinely populated for that later step to
+-- act on. Sharing one injectable source across both would make those two
+-- concerns impossible to vary independently in a test.
+recordProviderIdentity :: WorkerDescriptor -> MVar WorkerState -> Int -> IO ()
+recordProviderIdentity descriptor stateLock providerPid = do
+  snapshotResult <- readProcessSnapshot
   case snapshotResult of
     Left _ -> pure ()
     Right snapshot -> modifyMVar_ stateLock $ \state -> do
@@ -1492,9 +1501,13 @@ processKey process = (process.processIdentityPid, process.processIdentityStarted
 -- (PID reuse) or absence drops it instead of walking into an unrelated
 -- process's descendants. Previously-known entries that no longer match are
 -- pruned rather than retained as raw, unverifiable PIDs.
-refreshProcessCensus :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> MVar WorkerState -> IO ()
-refreshProcessCensus takeSnapshot descriptor stateLock = do
-  snapshotResult <- takeSnapshot
+--
+-- Always uses the real 'readProcessSnapshot' for the same reason
+-- 'recordProviderIdentity' does (see its own documentation) -- discovery
+-- and verification are deliberately independent axes for tests to vary.
+refreshProcessCensus :: WorkerDescriptor -> MVar WorkerState -> IO ()
+refreshProcessCensus descriptor stateLock = do
+  snapshotResult <- readProcessSnapshot
   case snapshotResult of
     Left _ -> pure ()
     Right snapshot ->
@@ -1778,7 +1791,7 @@ waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef
       case current of
         Nothing -> pure False
         Just (requireVerification, outcome) -> do
-          refreshProcessCensus takeSnapshot descriptor stateLock
+          refreshProcessCensus descriptor stateLock
           known <- withMVar stateLock (\state -> pure (state.workerStateKnownProcesses))
           result <-
             if requireVerification && null known

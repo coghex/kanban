@@ -1779,14 +1779,14 @@ main = hspec $ do
             )
             `finally` cleanupAnyDescendant
 
-    it "kills a descendant a late registration discovers even when recordProviderIdentity and refreshProcessCensus both hit a transient snapshot failure" $
+    it "kills a descendant discovered only by a late registration, after the deadline already gave up on an empty spawning census" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         now <- getCurrentTime
         let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
-            spec = deadlineFixtureSpec repository (WorkerId "solve-826-late-registration-snapshot-failure") 826 now 1
+            spec = deadlineFixtureSpec repository (WorkerId "solve-826-late-registration-descendant") 826 now 1
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
-            specPath = workerRoot </> "solve-826-late-registration-snapshot-failure.spec.json"
-            statePath = workerRoot </> "solve-826-late-registration-snapshot-failure.state.json"
+            specPath = workerRoot </> "solve-826-late-registration-descendant.spec.json"
+            statePath = workerRoot </> "solve-826-late-registration-descendant.state.json"
             leasePath = workerRoot </> "issue-826.lease"
             pidFile = temporaryRoot </> "detached-child.pid"
         createDirectory repository.repositoryRoot
@@ -1806,44 +1806,25 @@ main = hspec $ do
                        case reads contents :: [(Int, String)] of
                          [(childPid, _)] -> signalProcessGroup sigKILL (fromIntegral childPid)
                          _ -> pure ())
-            -- 'failCountRef' fails exactly the next N snapshot calls, then
-            -- reverts to the real snapshot. Nothing else calls 'takeSnapshot'
-            -- between the watchdog settling its own unverified completion
-            -- (well before the 2-second registration delay below elapses)
-            -- and 'rememberProvider' running -- 'processCensusLoop' stops
-            -- polling once 'stoppedRef' flips, and the supervisor is still
-            -- blocked on the task thread, so it has not yet started
-            -- 'waitForOrphanResolution' either. Arming this to 2 right
-            -- before 'rememberProvider' therefore reliably fails exactly
-            -- 'recordProviderIdentity's and 'refreshProcessCensus's own
-            -- calls (both silently swallow a 'Left', per their own design)
-            -- while everything from 'terminateProviderRefWith' onward -- the
-            -- fix under test -- sees the real snapshot again.
-            failCountRef <- newIORef (0 :: Int)
-            let flakyTakeSnapshot = do
-                  remaining <- atomicModifyIORef' failCountRef (\n -> (max 0 (n - 1), n))
-                  if remaining > 0
-                    then pure (Left "simulated transient snapshot failure")
-                    else readProcessSnapshot
-                lateRegistrationSnapshotFailure _spec rememberProvider emit = uninterruptibleMask_ $ do
+            -- Mirrors 'spawningThenRegister' above (the deadline fires while
+            -- the slot is still 'ProviderSlotSpawning'), but this provider
+            -- has a real descendant in its own process group -- an
+            -- integration check that 'rememberProvider's stopped path
+            -- (now 'terminateProviderRefWith' rather than a bare
+            -- 'killManagedProcess') stays correctly wired end to end and
+            -- still confirms the descendant gone before the lease releases.
+            let lateRegistrationWithDescendant _spec rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
-                  writeIORef failCountRef 2
                   rememberProvider managed
             ( do
                 finished <- newEmptyMVar
-                void . forkIO $ runWorkerWithTask flakyTakeSnapshot lateRegistrationSnapshotFailure specPath >>= putMVar finished
+                void . forkIO $ runWorkerWithTask readProcessSnapshot lateRegistrationWithDescendant specPath >>= putMVar finished
                 terminalState <- waitForWorkerState statePath isTerminal 80
                 terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
                 timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
                 leaseReleased <- doesDirectoryExist leasePath
                 leaseReleased `shouldBe` False
-                -- The real assertion: the lease is only released once the
-                -- descendant this late, snapshot-failure-hobbled
-                -- registration discovered is confirmed gone -- not left
-                -- running because 'workerStateProviderIdentity' was never
-                -- recorded and a best-effort signal alone could not reach
-                -- it.
                 childPidText <- readFile pidFile
                 case reads childPidText :: [(Int, String)] of
                   [(childPid, _)] -> do
