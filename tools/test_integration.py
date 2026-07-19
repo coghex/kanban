@@ -324,6 +324,28 @@ class WorktreeMatchingSafetyTests(unittest.TestCase):
 
         self.assertTrue(detached_wt.exists())
 
+    def test_commit_exists_locally_true_for_known_commit(self):
+        self.assertTrue(drain_prs.commit_exists_locally(self.ctx, self.head_sha))
+
+    def test_commit_exists_locally_false_for_unknown_sha(self):
+        self.assertFalse(drain_prs.commit_exists_locally(self.ctx, "f" * 40))
+
+    def test_pr_head_oid_unresolvable_locally_is_not_trusted_for_detached_match(self):
+        # A worktree's real HEAD equals the PR's headRefOid exactly, but the
+        # PR head commit is (simulated as) unavailable in the local object
+        # database -- per the approved amendment this must not be trusted as
+        # positive identification, even though the SHA strings match.
+        detached_wt = self.root / "detached-head"
+        run_git(
+            ["worktree", "add", "-q", "--detach", str(detached_wt), self.head_sha],
+            cwd=self.main,
+        )
+
+        with mock.patch.object(drain_prs, "commit_exists_locally", return_value=False):
+            result = drain_prs.find_matching_worktree(self.ctx, self.pr)
+
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()

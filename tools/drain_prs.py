@@ -1008,7 +1008,21 @@ def select_matching_worktree(
     return None
 
 
+def commit_exists_locally(ctx: RepoContext, sha: str) -> bool:
+    proc = run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        cwd=ctx.path,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
 def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
+    pr_head_oid = pr.get("headRefOid")
+    if pr_head_oid and not commit_exists_locally(ctx, pr_head_oid):
+        # The PR head commit object isn't available in the local repo, so an
+        # exact-HEAD string match can't be trusted as positive identification.
+        pr_head_oid = None
     return select_matching_worktree(
         parse_worktrees(ctx),
         main_path=ctx.path.resolve(),
@@ -1016,7 +1030,7 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
         branch_name=pr["headRefName"],
         issue_numbers=extract_issue_numbers(pr),
         pr_number=pr["number"],
-        pr_head_oid=pr.get("headRefOid"),
+        pr_head_oid=pr_head_oid,
     )
 
 
