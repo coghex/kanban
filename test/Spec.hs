@@ -1,12 +1,12 @@
 module Main (main) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, bracket, finally, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
 import Data.List (find, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -121,6 +121,7 @@ import Kanban.Worker
     runWorkerWith,
     runWorkerWithTask,
     terminateWorkerWith,
+    waitForOrphanResolution,
     waitForWorkerStart,
     workerDeadlineReason,
   )
@@ -1606,8 +1607,9 @@ main = hspec $ do
             -- 'WorkerProviderSpawning True' marks the spawn as started, then
             -- this masked delay holds 'rememberProvider' back for 2 seconds
             -- — well past the 1-second deadline — so the watchdog's check
-            -- deterministically lands while 'providerRef' is still 'Nothing'
-            -- and a real, live process is already running unrecorded.
+            -- deterministically lands while the provider slot is still
+            -- 'ProviderSlotSpawning' (not yet registered) and a real, live
+            -- process is already running unrecorded.
             let spawningThenRegister _spec rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
@@ -1621,13 +1623,66 @@ main = hspec $ do
             leaseReleased `shouldBe` False
             -- The real assertion: a provider spawned (but not yet
             -- registered) when the deadline fires must not let the
-            -- watchdog treat the still-unset 'providerRef' as vacuously
-            -- verified and finalize directly. It must retain orphan state
-            -- until the census actually reflects — and confirms gone — the
-            -- process this spawn attempt started, so the lease is never
-            -- released on an unverified guess.
+            -- watchdog treat the still-'ProviderSlotSpawning' slot as
+            -- vacuously verified and finalize directly. It must retain
+            -- orphan state until the census actually reflects — and
+            -- confirms gone — the process this spawn attempt started, so
+            -- the lease is never released on an unverified guess.
             eventBytes <- ByteString.readFile eventPath
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerOrphansDetected"
+
+    it "rejects a late spawn claim -- never adopting a real process -- once the watchdog has already claimed the provider slot empty" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = deadlineFixtureSpec repository (WorkerId "solve-823-late-spawn-claim") 823 now 1
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-823-late-spawn-claim.spec.json"
+              statePath = workerRoot </> "solve-823-late-spawn-claim.state.json"
+              leasePath = workerRoot </> "issue-823.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            managed <- managedProcessFor providerProcess
+            registeredRef <- newIORef False
+            -- The mirror image of the race above: this task deliberately
+            -- waits for the deadline to have already fired and committed
+            -- its terminal, verified-empty outcome (nothing was ever
+            -- spawned yet, so the watchdog's compare-and-swap into
+            -- 'ProviderSlotClaimedEmpty' wins outright) before it ever
+            -- attempts to begin its own spawn. Held under
+            -- 'uninterruptibleMask_' so the watchdog's 'killThread' cannot
+            -- race ahead and interrupt this before its spawn-claim attempt
+            -- actually runs, guaranteeing this exercises the real
+            -- compare-and-swap rejection deterministically rather than an
+            -- incidental early kill. If the claim were ever granted here,
+            -- 'rememberProvider' would hand a real, live process to a
+            -- worker that has already released its lease; 'registeredRef'
+            -- proves that never happens.
+            let lateSpawnClaim _spec rememberProvider emit = uninterruptibleMask_ $ do
+                  _ <- waitForWorkerState statePath isTerminal 80
+                  emit (WorkerProviderSpawning True)
+                  rememberProvider managed
+                  writeIORef registeredRef True
+            finished <- newEmptyMVar
+            void . forkIO $ runWorkerWithTask readProcessSnapshot lateSpawnClaim specPath >>= putMVar finished
+            terminalState <- waitForWorkerState statePath isTerminal 80
+            terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+            timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+            leaseReleased <- doesDirectoryExist leasePath
+            leaseReleased `shouldBe` False
+            registered <- readIORef registeredRef
+            registered `shouldBe` False
+            stateBytes <- LazyByteString.readFile statePath
+            case eitherDecode stateBytes :: Either String WorkerState of
+              Left message -> expectationFailure message
+              Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
 
     it "kills a recorded census group and takes over the pending outcome when the deadline fires on an already-orphaned normal completion" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -1730,23 +1785,21 @@ main = hspec $ do
             -- exits entirely on its own, just before the one-second
             -- deadline: the orphan-poll's own periodic census check can
             -- observe "empty" from that natural exit alone, independently
-            -- of anything the watchdog does. This is the scenario
-            -- 'waitForOrphanResolution's 'watchdogAdjudicatedVar'
-            -- synchronization guards against — without it, a poll
-            -- iteration landing at or just after the deadline elapses
-            -- could finalize on the stale pre-deadline 'SolveCompleted'
-            -- before the watchdog thread ever gets scheduled to take
-            -- over. In practice this test cannot force that exact
-            -- interleaving deterministically: 'refreshProcessCensus'
-            -- always shells out to a real 'ps' before either side reaches
-            -- its own decision point, and that real, blocking call
-            -- reliably gives the watchdog thread a scheduling opportunity
-            -- to win outright, so this passes even without the
-            -- synchronization fix. It is kept as a characterization test
-            -- — confirming an orphan-pending completion still resolves
-            -- correctly to the deadline outcome once genuinely past it —
-            -- rather than as a proof the fix is
-            -- exercised.
+            -- of anything the watchdog does, and can win 'claimLeaseRelease'
+            -- for itself well before the watchdog thread ever gets
+            -- scheduled. This end-to-end run cannot force that exact
+            -- scheduling interleaving deterministically (a direct, isolated
+            -- test of 'waitForOrphanResolution' below covers that
+            -- precisely), but it still exercises 'waitForOrphanResolution's
+            -- own post-win wall-clock recheck for real: this shell's 0.95s
+            -- runtime leaves only a razor-thin margin before the one-second
+            -- deadline, so by the time the orphan-poll's periodic check
+            -- (plus a real 'ps' shell-out) actually observes the census as
+            -- empty, wall-clock time has consistently already crossed the
+            -- deadline in practice. It is kept as an end-to-end
+            -- confirmation that an orphan-pending completion resolves to
+            -- the deadline outcome once genuinely past it, alongside the
+            -- more targeted unit coverage below.
             let completeThenOrphan _spec rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
@@ -1763,6 +1816,59 @@ main = hspec $ do
             case eitherDecode stateBytes :: Either String WorkerState of
               Left message -> expectationFailure message
               Right finalState -> finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+
+    it "waitForOrphanResolution reports the deadline outcome, not a stale pre-deadline one, when it wins the lease race after the deadline has passed" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            -- Created ten seconds in the past against a one-second runtime
+            -- bound, so the deadline sits nine seconds behind "now" --
+            -- unambiguously already passed, with no reliance on any real
+            -- timing margin or thread-scheduling luck.
+            spec = deadlineFixtureSpec repository (WorkerId "solve-824-orphan-poll-deadline-recheck") 824 (addUTCTime (-10) now) 1
+            descriptor =
+              WorkerDescriptor
+                { workerDescriptorSpec = spec,
+                  workerDescriptorSpecPath = temporaryRoot </> "unused.spec.json",
+                  workerDescriptorEventPath = temporaryRoot </> "unused.events.jsonl",
+                  workerDescriptorStatePath = temporaryRoot </> "unused.state.json",
+                  workerDescriptorAckPath = temporaryRoot </> "unused.ack",
+                  workerDescriptorLeasePath = temporaryRoot </> "unused.lease",
+                  workerDescriptorLeaseOwnerPath = temporaryRoot </> "unused.lease" </> "owner.json",
+                  workerDescriptorPendingTerminationPath = temporaryRoot </> "unused.pending-termination"
+                }
+            fixtureState =
+              WorkerState
+                { workerStateId = spec.workerId,
+                  workerStateStatus = WorkerStarting,
+                  workerStateWorkerPid = 0,
+                  workerStateWorkerIdentity = Nothing,
+                  workerStateProviderPid = Nothing,
+                  workerStateProviderIdentity = Nothing,
+                  workerStateSessionId = Nothing,
+                  workerStateLogPath = Nothing,
+                  workerStateHeartbeatAt = now,
+                  workerStateLastActivity = "",
+                  workerStateKnownProcesses = []
+                }
+        stateLock <- newMVar fixtureState
+        pendingOutcomeRef <- newIORef (Just (True, SolveCompleted))
+        signalShutdownRef <- newIORef False
+        watchdogAdjudicatedVar <- newEmptyMVar
+        emittedRef <- newIORef []
+        -- 'claimLeaseRelease' always "wins" on its very first attempt: this
+        -- directly constructs the exact interleaving the reviewer flagged
+        -- (the orphan-poll winning the lease-release race before the
+        -- watchdog thread has ever been scheduled to contend for it) rather
+        -- than approximating it with real thread timing, so this reliably
+        -- exercises 'waitForOrphanResolution's own post-win wall-clock
+        -- recheck on every run.
+        let claimLeaseRelease = pure True
+            emit event = atomicModifyIORef' emittedRef (\events -> (events <> [event], ()))
+        wonLease <- waitForOrphanResolution descriptor spec stateLock readProcessSnapshot signalShutdownRef emit pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
+        wonLease `shouldBe` True
+        emitted <- readIORef emittedRef
+        emitted `shouldBe` [WorkerFinished (SolveFailed workerDeadlineReason)]
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do

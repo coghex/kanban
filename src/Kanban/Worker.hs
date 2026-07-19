@@ -31,6 +31,7 @@ module Kanban.Worker
     runWorkerWithTask,
     terminateWorker,
     terminateWorkerWith,
+    waitForOrphanResolution,
     workerDeadlineReason,
     waitForWorkerStart,
   )
@@ -38,7 +39,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
-import Control.Exception (IOException, SomeException, mask, try, uninterruptibleMask_)
+import Control.Exception (Exception, IOException, SomeException, mask, throwIO, try, uninterruptibleMask_)
 import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
 import qualified Data.ByteString as ByteString
@@ -516,6 +517,49 @@ defaultRunTask spec rememberProvider emit = case spec.workerTask of
     runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translatePullRequestEvent rememberProvider emit)
 
+-- | The single source of truth the deadline watchdog and a task's own
+-- spawn-to-registration bracket both contend on, replacing what used to be
+-- two separate 'IORef's ('providerRef' and a spawn-pending flag) read
+-- independently of each other. Two separate refs can only ever be read one
+-- after the other, never as a single atomic combined snapshot: whichever
+-- order the reads happen in, a transition landing between them produces a
+-- combination that never actually existed at any single instant. Folding
+-- both into one 'IORef', mutated only via 'atomicModifyIORef'', gives every
+-- read a genuine, whole, un-torn instant to report — closing that gap
+-- structurally rather than by carefully choosing a read order (see the
+-- history in 'terminateProviderRefWith' and 'rememberProvider' for what that
+-- approach still missed).
+--
+-- 'ProviderSlotClaimedEmpty' is the watchdog's exclusive write: it marks
+-- that the watchdog has already committed to "nothing is here, and nothing
+-- more will start" as a genuine compare-and-swap against
+-- 'ProviderSlotIdle', not a plain overwrite — so it can only ever win when
+-- the slot was still idle at that exact instant, and a task's own
+-- contending attempt to leave 'ProviderSlotIdle' (see the 'emit' case for
+-- 'WorkerProviderSpawning' in 'runWorkerWithTask') is guaranteed to observe
+-- the loss and refuse to spawn, rather than silently racing ahead to create
+-- a real process the watchdog has already promised does not exist.
+data ProviderSlot
+  = ProviderSlotIdle
+  | ProviderSlotSpawning
+  | ProviderSlotRegistered ManagedProcess
+  | ProviderSlotClaimedEmpty
+
+-- | Thrown by the 'emit' callback (see 'runWorkerWithTask') when a task's
+-- attempt to begin spawning a provider loses its compare-and-swap against
+-- 'ProviderSlotClaimedEmpty' — the deadline watchdog has already committed
+-- to a verified-empty outcome, so this task must not proceed to actually
+-- create a process at all. Raised from deep inside 'runSolve'/
+-- 'runPullRequestFlow's own masked spawn bracket, before 'createProcess' is
+-- ever reached, so it aborts the spawn attempt outright rather than merely
+-- reporting a problem after the fact. Caught, like any other task failure,
+-- by 'runWorkerWithTask's own @'try' \@'SomeException'@ around the task
+-- thread; its content is never inspected because 'forcedOutcomeRef' being
+-- already set is what makes this outcome irrelevant.
+data WorkerDeadlineSpawnRejected = WorkerDeadlineSpawnRejected
+  deriving stock (Show)
+  deriving anyclass (Exception)
+
 runWorkerWithTask :: IO (Either Text [ProcessIdentity]) -> (WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()) -> FilePath -> IO (Either Text ())
 runWorkerWithTask takeSnapshot buildRunTask specPath = do
   decoded <- decodeFile specPath
@@ -545,8 +589,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             workerStateKnownProcesses = []
           }
       eventLock <- newMVar ()
-      providerRef <- newIORef Nothing
-      providerSpawnPendingRef <- newIORef False
+      providerSlotRef <- newIORef ProviderSlotIdle
       stoppedRef <- newIORef False
       signalShutdownRef <- newIORef False
       pendingOutcomeRef <- newIORef Nothing
@@ -558,10 +601,13 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       watchdogAdjudicatedVar <- newEmptyMVar
       leaseReleaseClaimRef <- newIORef False
       let claimLeaseRelease = atomicModifyIORef' leaseReleaseClaimRef (\claimed -> (True, not claimed))
+          registeredProvider slot = case slot of
+            ProviderSlotRegistered process -> Just process
+            _ -> Nothing
       let stopOwnedWork = do
             writeIORef stoppedRef True
             writeIORef signalShutdownRef True
-            readIORef providerRef >>= mapM_ killManagedProcess
+            readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
             terminateRecordedProcesses stateLock
       previousTermHandler <- installHandler sigTERM (Catch stopOwnedWork) Nothing
       previousInterruptHandler <- installHandler sigINT (Catch stopOwnedWork) Nothing
@@ -661,12 +707,33 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             unless (completeNow >= completeDeadline) (claimCompletion >>= \won -> when won (completeBody True outcome))
           -- 'WorkerProviderSpawning' is intercepted here rather than
           -- flowing through 'emitRaw': it exists purely to bracket the
-          -- spawn-to-registration window in 'providerSpawnPendingRef' for
+          -- spawn-to-registration window in 'providerSlotRef' for
           -- 'terminateProviderRefWith' to consult (see 'watchdogLoop'), not
           -- to become a durable event-log entry or 'WorkerState' field.
+          --
+          -- 'True' (about to spawn) is a genuine compare-and-swap against
+          -- 'ProviderSlotIdle', the same claim 'terminateProviderRefWith'
+          -- makes for the opposite outcome ("verified empty" —
+          -- 'ProviderSlotClaimedEmpty'). Only one of the two attempts can
+          -- ever win the transition away from 'ProviderSlotIdle': if the
+          -- watchdog got there first, this loses and throws
+          -- 'WorkerDeadlineSpawnRejected' right here, before 'runSolve'/
+          -- 'runPullRequestFlow' ever reaches their own 'createProcess' —
+          -- unlike the old two-ref design, there is no window left in which
+          -- a real process could still be created after the watchdog has
+          -- already committed to nothing being here. 'False' (the spawn
+          -- attempt concluded without a live registration) reverts the slot
+          -- unconditionally: only this task thread ever writes
+          -- 'ProviderSlotSpawning' or moves off it short of a genuine
+          -- registration, so no compare-and-swap is needed for that half.
           emit event = case event of
             WorkerFinished outcome -> complete outcome
-            WorkerProviderSpawning pending -> writeIORef providerSpawnPendingRef pending
+            WorkerProviderSpawning True -> do
+              claimed <- atomicModifyIORef' providerSlotRef $ \slot -> case slot of
+                ProviderSlotIdle -> (ProviderSlotSpawning, True)
+                _ -> (slot, False)
+              unless claimed (throwIO WorkerDeadlineSpawnRejected)
+            WorkerProviderSpawning False -> writeIORef providerSlotRef ProviderSlotIdle
             _ -> emitRaw event
           -- Identity and census recording run unconditionally, before ever
           -- checking whether a stop was already requested: a deadline that
@@ -680,20 +747,14 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- trail instead of a bare best-effort signal with nothing behind
           -- it to confirm against.
           --
-          -- 'providerRef' is written *before* 'providerSpawnPendingRef' is
-          -- cleared, not after: the watchdog's 'terminateProviderRefWith'
-          -- treats 'providerRef == Nothing' as vacuously verified only when
-          -- 'spawnPending' also reads False, so clearing the pending flag
-          -- first would open exactly the gap this exists to close — a
-          -- moment where the watchdog could observe both "no provider
-          -- recorded" and "no spawn in flight" simultaneously, for a
-          -- provider that in fact was just recorded one write later. Once
-          -- 'providerRef' holds 'Just', 'terminateProviderRefWith' never
-          -- consults 'spawnPending' again for this call at all, so the
-          -- order in which the flag itself later clears no longer matters.
+          -- Reached only once this task's own spawn claim (the 'emit' case
+          -- above) has already won its compare-and-swap into
+          -- 'ProviderSlotSpawning', so a plain 'writeIORef' here is safe:
+          -- the watchdog's competing claim can only ever act on
+          -- 'ProviderSlotIdle', which this call site is guaranteed to have
+          -- already left behind.
           rememberProvider process = do
-            writeIORef providerRef (Just process)
-            writeIORef providerSpawnPendingRef False
+            writeIORef providerSlotRef (ProviderSlotRegistered process)
             processId <- managedProcessPid process
             case processId of
               Just providerPid -> do
@@ -739,7 +800,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
         result <- try @SomeException (restore runTask)
         uninterruptibleMask_ (putMVar taskResultVar result)
       writeIORef taskThreadIdRef (Just taskThreadId)
-      void . forkIO $ watchdogLoop takeSnapshot spec providerRef (readIORef providerSpawnPendingRef) stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar
+      void . forkIO $ watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar
       taskResult <- takeMVar taskResultVar
       forcedOutcome <- readIORef forcedOutcomeRef
       case forcedOutcome of
@@ -762,7 +823,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
               else complete (SolveFailed "persistent worker task ended without a terminal provider event")
           Left exception -> do
             refreshProcessCensus descriptor stateLock
-            readIORef providerRef >>= mapM_ killManagedProcess
+            readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
             let message = "persistent worker failed: " <> Text.pack (show exception)
             void . try @SomeException $ do
               emitRaw (WorkerDiagnostic message)
@@ -784,7 +845,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- case the claim below still needs to be attempted fresh.
       alreadyWonLeaseRelease <-
         if pending /= Nothing
-          then Just <$> waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
+          then Just <$> waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
           else pure Nothing
       writeIORef stoppedRef True
       -- Whether it is safe to release the lease now without waiting for the
@@ -1453,63 +1514,75 @@ terminateProviderGroupWith takeSnapshot state = case (state.workerStateProviderP
   (Just _, Nothing) -> pure False
   (Just _, Just providerIdentity) -> isRight <$> killVerifiedGroupWith takeSnapshot providerIdentity.processIdentityGroupPid [providerIdentity]
 
--- | Kills the provider currently referenced by a live 'providerRef' handle,
--- verifying its identity against a fresh snapshot first so a PID that has
--- already been reused points nowhere. Used by the deadline watchdog instead
--- of 'terminateProviderGroupWith', which sources its identity from the
--- durable 'WorkerState': that field can still be unset when the deadline
--- fires before 'rememberProvider' has finished recording it, while the live
--- handle itself is available the moment the provider starts. Returns True
--- when there was nothing to kill or the kill was confirmed complete; False
--- when a snapshot failure (or a missing observable process id) left it
--- unverified, so the caller retains a pending outcome rather than finalize
--- on a guess.
+-- | Kills the provider currently referenced by a live 'providerSlotRef'
+-- handle, verifying its identity against a fresh snapshot first so a PID
+-- that has already been reused points nowhere. Used by the deadline
+-- watchdog instead of 'terminateProviderGroupWith', which sources its
+-- identity from the durable 'WorkerState': that field can still be unset
+-- when the deadline fires before 'rememberProvider' has finished recording
+-- it, while the live handle itself is available the moment the provider
+-- starts. Returns True when there was nothing to kill (or never will be)
+-- or the kill was confirmed complete; False when a snapshot failure, a
+-- missing observable process id, or a spawn still genuinely in flight left
+-- it unverified, so the caller retains a pending outcome rather than
+-- finalize on a guess.
 --
--- 'providerRef' still 'Nothing' is only safely "nothing to verify" when no
--- spawn is currently in flight either: 'runSolve'/'runPullRequestFlow's own
--- 'uninterruptibleMask_' can have already spawned a real process and simply
--- not yet reached the event that reaches 'rememberProvider' — from outside,
--- that looks identical to "this task will never spawn a provider at all"
--- unless 'spawnPending' says otherwise. Treating a live, unrecorded spawn as
--- vacuously verified would let this watchdog finalize with an empty census
--- while that process (and anything it has already forked) escapes both
--- tracking and killing. Returning False here instead retains a pending
--- outcome exactly like any other unverified case, so 'waitForOrphanResolution'
--- naturally re-polls the census once registration (or the spawn's failure)
--- has actually settled.
+-- 'ProviderSlotIdle' is only safely "nothing to verify, and nothing ever
+-- will be" because claiming it is a genuine compare-and-swap into
+-- 'ProviderSlotClaimedEmpty', racing directly against the same task-side
+-- attempt to leave 'ProviderSlotIdle' for 'ProviderSlotSpawning' (see the
+-- 'emit' case for 'WorkerProviderSpawning' in 'runWorkerWithTask').
+-- Whichever side's compare-and-swap actually lands first is authoritative:
+-- if this wins, the task's own attempt is guaranteed to lose and throw
+-- before it ever reaches 'createProcess' — there is no window left in
+-- which a real, live process could still appear after this has already
+-- committed to "nothing is here." A plain read (as the old two-'IORef'
+-- design used) cannot offer that guarantee no matter what order it reads
+-- in: two separate refs read one after the other can only ever report a
+-- combination assembled from two different instants, and a task's own
+-- transition landing in the gap between those two reads produces a
+-- combination that never actually existed at any single point in time. A
+-- single ref, mutated only via 'atomicModifyIORef'', has no such gap: this
+-- CAS either wins (a real, instantaneous "nothing here, and nothing more
+-- will start") or loses cleanly, with no assembled-from-two-moments case in
+-- between.
 --
--- 'spawnPending' is read *before* 'providerRef', not after: these are two
--- separate 'IORef's with no atomicity between them, so reading
--- 'providerRef' first could observe 'Nothing' just before registration
--- actually lands and then read a since-cleared 'spawnPending' as 'False'
--- — a torn combination that matches neither the pre-spawn state nor the
--- registered one, vacuously verifying a provider that in fact now exists.
--- 'rememberProvider' always writes 'providerRef' before clearing
--- 'spawnPending' (see its own documentation), so reading 'providerRef'
--- *last* means whatever it reports is at least as fresh as the
--- 'spawnPending' reading: if registration has since landed, this reads
--- 'Just' and verifies the real provider instead (never even consulting
--- 'spawnPending'); if 'providerRef' still reads 'Nothing' after
--- 'spawnPending' already read 'True', that gap can only mean registration
--- (or the spawn's failure) has not happened yet, correctly retaining a
--- pending outcome.
-terminateProviderRefWith :: IO (Either Text [ProcessIdentity]) -> IO Bool -> IORef (Maybe ManagedProcess) -> IO Bool
-terminateProviderRefWith takeSnapshot spawnPending providerRef = do
-  pending <- spawnPending
-  current <- readIORef providerRef
-  case current of
-    Nothing -> pure (not pending)
-    Just process -> do
-      maybePid <- managedProcessPid process
-      case maybePid of
-        Nothing -> killManagedProcess process >> pure False
-        Just pid -> do
-          snapshotResult <- takeSnapshot
-          case snapshotResult of
-            Left _ -> killManagedProcess process >> pure False
-            Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
-              Nothing -> pure True
-              Just identity -> isRight <$> killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity]
+-- If the CAS loses, the slot was not idle at that exact instant, so a
+-- second, ordinary read decides what to do about whatever is actually
+-- there now: still 'ProviderSlotSpawning' (a spawn is genuinely in flight —
+-- unverified, retain the pending outcome so 'waitForOrphanResolution'
+-- re-polls once it settles), 'ProviderSlotRegistered' (a real process to
+-- kill and verify), or, only if the spawn attempt has since concluded
+-- without ever registering one, back to 'ProviderSlotIdle' (genuinely
+-- nothing, safe to treat as verified) — this second read is not itself
+-- racing anything new: only this task's own thread ever writes those
+-- values, so whatever this observes is a real, whole state that actually
+-- held at the read instant, never a torn one.
+terminateProviderRefWith :: IO (Either Text [ProcessIdentity]) -> IORef ProviderSlot -> IO Bool
+terminateProviderRefWith takeSnapshot providerSlotRef = do
+  claimedEmpty <- atomicModifyIORef' providerSlotRef $ \slot -> case slot of
+    ProviderSlotIdle -> (ProviderSlotClaimedEmpty, True)
+    ProviderSlotClaimedEmpty -> (ProviderSlotClaimedEmpty, True)
+    other -> (other, False)
+  if claimedEmpty
+    then pure True
+    else do
+      current <- readIORef providerSlotRef
+      case current of
+        ProviderSlotIdle -> pure True
+        ProviderSlotClaimedEmpty -> pure True
+        ProviderSlotSpawning -> pure False
+        ProviderSlotRegistered process -> do
+          maybePid <- managedProcessPid process
+          case maybePid of
+            Nothing -> killManagedProcess process >> pure False
+            Just pid -> do
+              snapshotResult <- takeSnapshot
+              case snapshotResult of
+                Left _ -> killManagedProcess process >> pure False
+                Right snapshot -> case identityForPid (fromIntegral pid) snapshot of
+                  Nothing -> pure True
+                  Just identity -> isRight <$> killVerifiedGroupWith takeSnapshot identity.processIdentityGroupPid [identity]
 
 -- | Re-verifies each recorded process's identity before signaling its group,
 -- and again before the KILL that follows the grace window, so a group that
@@ -1616,9 +1689,42 @@ terminateRecordedStateProcessesWith takeSnapshot state = do
 -- itself won lets the caller skip that attempt entirely and proceed
 -- directly, while still correctly deferring to 'watchdogDoneVar' on the
 -- (rare, deadline-adjacent) branch where this lost instead.
-waitForOrphanResolution :: WorkerDescriptor -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> IO Bool -> MVar () -> IO Bool
-waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar = loop Nothing
+--
+-- Winning 'claimLeaseRelease' settles *who* gets to release the lease, but
+-- not, on its own, *which* outcome is correct to report: this poll can win
+-- that claim because the recorded census happened to go empty on its own
+-- (not from any kill this worker performed) at almost any real wall-clock
+-- moment, including one already past the deadline if 'watchdogLoop' simply
+-- has not been scheduled yet — GHC's scheduler gives no upper bound on how
+-- late a runnable thread's next instruction actually executes, so no
+-- design can guarantee the watchdog thread reacts to an elapsed
+-- 'threadDelay' promptly. Reporting the stale pre-deadline 'outcome'
+-- whenever that happens would let a completion that in fact only finished
+-- verifying itself after the deadline read as on-time, purely as an
+-- artifact of which thread the scheduler happened to run first.
+--
+-- The fix is not another check-then-act wall-clock guard like the ones
+-- this module has already rejected elsewhere (see 'complete' and this
+-- very function's own atomic-consume documentation above) — those are
+-- unsound specifically because two *concurrent* actors are still racing
+-- each other across the gap between the check and the act. Here, by the
+-- time this reads 'now', that race is already over: winning
+-- 'claimLeaseRelease' is a one-shot claim, so 'watchdogLoop' is
+-- structurally guaranteed to lose its own attempt and do nothing further
+-- at all (see its own documentation) the instant this wins. Nothing else
+-- can still overwrite 'pendingOutcomeRef', kill anything, or otherwise
+-- invalidate this decision after that point — there is no concurrent actor
+-- left to race, only a plain fact (has the deadline passed) to read once
+-- and act on immediately. Checking it only in the branch where this itself
+-- won avoids the same recheck when the *watchdog* won instead: that branch
+-- already reports the correct outcome unconditionally, because
+-- 'watchdogLoop' only ever writes 'workerDeadlineOutcome' into
+-- 'pendingOutcomeRef' when it wins, whether via 'completeBody' or its own
+-- takeover compare-and-swap.
+waitForOrphanResolution :: WorkerDescriptor -> WorkerSpec -> MVar WorkerState -> IO (Either Text [ProcessIdentity]) -> IORef Bool -> (WorkerEvent -> IO ()) -> IORef (Maybe (Bool, SolveOutcome)) -> IO Bool -> MVar () -> IO Bool
+waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef emit pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar = loop Nothing
   where
+    deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
     loop lastDiagnostic = do
       current <- readIORef pendingOutcomeRef
       case current of
@@ -1647,7 +1753,9 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
                   wonLease <- claimLeaseRelease
                   unless wonLease (readMVar watchdogAdjudicatedVar)
                   final <- atomicModifyIORef' pendingOutcomeRef (\value -> (Nothing, value))
-                  emit (WorkerFinished (maybe outcome snd final))
+                  let priorOutcome = maybe outcome snd final
+                  pastDeadline <- if wonLease then (>= deadline) <$> getCurrentTime else pure False
+                  emit (WorkerFinished (if pastDeadline then workerDeadlineOutcome else priorOutcome))
                   pure wonLease
               | otherwise -> threadDelay workerOrphanCheckIntervalMicros >> loop Nothing
 
@@ -1728,8 +1836,8 @@ waitForOrphanResolution descriptor stateLock takeSnapshot signalShutdownRef emit
 -- worker is fully done and is releasing the lease right now (or already
 -- has): there is nothing left here to kill or commit, another worker may
 -- already be acquiring that lease, and this does nothing further at all.
-watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef (Maybe ManagedProcess) -> IO Bool -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe (Bool, SolveOutcome)) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> (WorkerEvent -> IO ()) -> IO Bool -> MVar () -> MVar () -> IO ()
-watchdogLoop takeSnapshot spec providerRef spawnPending stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar = do
+watchdogLoop :: IO (Either Text [ProcessIdentity]) -> WorkerSpec -> IORef ProviderSlot -> IORef Bool -> MVar WorkerState -> IORef (Maybe ThreadId) -> IORef (Maybe (Bool, SolveOutcome)) -> IORef (Maybe SolveOutcome) -> IO Bool -> (Bool -> SolveOutcome -> IO ()) -> (WorkerEvent -> IO ()) -> IO Bool -> MVar () -> MVar () -> IO ()
+watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar = do
   now <- getCurrentTime
   let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
       delayMicros = max 0 (round (diffUTCTime deadline now * 1000000))
@@ -1742,7 +1850,7 @@ watchdogLoop takeSnapshot spec providerRef spawnPending stoppedRef stateLock tas
       wonCompletion <- claimCompletion
       if wonCompletion
         then do
-          providerOk <- terminateProviderRefWith takeSnapshot spawnPending providerRef
+          providerOk <- terminateProviderRefWith takeSnapshot providerSlotRef
           recordedOk <- withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot)
           completeBody (providerOk && recordedOk) workerDeadlineOutcome
           -- 'watchdogAdjudicatedVar' fills only once 'pendingOutcomeRef'
@@ -1785,7 +1893,7 @@ watchdogLoop takeSnapshot spec providerRef spawnPending stoppedRef stateLock tas
           when tookOver $ do
             known <- withMVar stateLock (pure . (.workerStateKnownProcesses))
             emitRaw (WorkerOrphansDetected workerDeadlineOutcome known)
-          void (terminateProviderRefWith takeSnapshot spawnPending providerRef)
+          void (terminateProviderRefWith takeSnapshot providerSlotRef)
           void (withMVar stateLock (terminateRecordedStateProcessesWith takeSnapshot))
     else pure ()
   putMVar watchdogDoneVar ()
