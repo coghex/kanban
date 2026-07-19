@@ -1344,6 +1344,21 @@ def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None
     return holding, paths
 
 
+def _has_unsafe_parent(root: Path, dst: Path) -> bool:
+    # A symlinked (or otherwise non-directory) parent component that the
+    # fast-forward just checked out would redirect mkdir()/rename() outside
+    # the worktree entirely -- not just the final path needs checking, any
+    # component between root and dst's parent could be the culprit.
+    current = root
+    for part in dst.relative_to(root).parts[:-1]:
+        current = current / part
+        if os.path.islink(current):
+            return True
+        if current.exists() and not current.is_dir():
+            return True
+    return False
+
+
 def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) -> list[str]:
     failures = []
     for rel in paths:
@@ -1357,6 +1372,12 @@ def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) 
             # silently destroy that content, so leave our copy in `holding`
             # for manual reconciliation instead.
             failures.append(f"{rel} (a path now exists there; left under {holding})")
+            continue
+        if _has_unsafe_parent(ctx.path, dst):
+            failures.append(
+                f"{rel} (a parent directory is now a symlink or non-directory; "
+                f"left under {holding})"
+            )
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)

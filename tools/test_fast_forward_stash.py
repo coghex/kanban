@@ -365,5 +365,40 @@ class UntrackedCollisionWithDanglingSymlinkTest(_FastForwardStashFixture):
         )
 
 
+class UntrackedRestoreRejectsSymlinkedParentTest(_FastForwardStashFixture):
+    """A parent directory component that has become a symlink -- not just
+    the final path -- must never be walked through when restoring a
+    relocated untracked file: mkdir(parents=True) plus rename() would
+    otherwise happily follow it and write the file outside the worktree.
+
+    This drives _restore_untracked_files() directly with a hand-built
+    holding directory rather than through a real fast-forward, since the
+    hazard is a pure filesystem property independent of how the symlinked
+    parent came to exist.
+    """
+
+    def test_restore_refuses_to_write_through_a_symlinked_parent(self):
+        escape_target = Path(tempfile.mkdtemp(dir=str(self.root)))
+
+        holding = Path(
+            tempfile.mkdtemp(prefix="autostash-", dir=str(self.main / ".git"))
+        )
+        (holding / "dir").mkdir()
+        (holding / "dir" / "file.txt").write_text("local-untracked\n", encoding="utf-8")
+
+        # What a fast-forward replacing a plain `dir` with a symlink would
+        # leave behind.
+        (self.main / "dir").symlink_to(escape_target, target_is_directory=True)
+
+        failures = drain_prs._restore_untracked_files(self.ctx, holding, ["dir/file.txt"])
+
+        self.assertTrue(failures)
+        self.assertFalse((escape_target / "file.txt").exists())
+        self.assertTrue((self.main / "dir").is_symlink())
+        self.assertEqual(
+            (holding / "dir" / "file.txt").read_text(encoding="utf-8"), "local-untracked\n"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
