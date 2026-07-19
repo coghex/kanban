@@ -5,10 +5,12 @@ module Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
+    PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
     originFromBody,
     pullRequestArguments,
+    pullRequestVerdictForLabels,
     runPullRequestFlow,
   )
 where
@@ -73,6 +75,23 @@ actionForLabels labels
   | has "reviewed:revised" = PullRequestRereview
   | has "reviewed:changes" = PullRequestRevision
   | otherwise = PullRequestReview
+  where
+    folded = map Text.toCaseFold labels
+    has value = Text.toCaseFold value `elem` folded
+
+-- | The canonical verdict a revised PR currently carries, derived directly
+-- from its labels rather than from a Kanban-created @reviewed:revised@
+-- handoff: @pr-revise@ invokes the canonical rereview itself, so the fresh
+-- verdict lands as @reviewed:approve@ or @reviewed:changes@ once it publishes.
+data PullRequestVerdict = PullRequestVerdictApproved | PullRequestVerdictChangesRequested | PullRequestVerdictPending
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+pullRequestVerdictForLabels :: [Text] -> PullRequestVerdict
+pullRequestVerdictForLabels labels
+  | has "reviewed:approve" = PullRequestVerdictApproved
+  | has "reviewed:changes" = PullRequestVerdictChangesRequested
+  | otherwise = PullRequestVerdictPending
   where
     folded = map Text.toCaseFold labels
     has value = Text.toCaseFold value `elem` folded
@@ -156,7 +175,6 @@ claudeModel PullRequestRevision = "claude-sonnet-5"
 claudeModel _ = "claude-opus-4-8"
 
 claudeEffort :: PullRequestAction -> String
-claudeEffort PullRequestRevision = "high"
 claudeEffort _ = "xhigh"
 
 initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Text
@@ -173,9 +191,9 @@ initialPrompt number _origin action brand = Text.unlines (actionLines <> interac
           "Rereview the current head, publish the canonical verdict, and never edit or merge the PR. Remove reviewed:revised after successfully publishing the verdict."
         ]
       PullRequestRevision ->
-        [ "Revise PR #" <> numberText <> " to address every blocker in the newest canonical pr-review:v1 CHANGES_REQUESTED comment.",
-          "Locate and work only in the PR head branch's existing issue worktree. Reconstruct the effective specification from the linked issue body and comments, make the smallest complete fix, run targeted checks, commit, and push. Do not review or merge.",
-          "After a successful push, create reviewed:revised if needed, add it, and remove reviewed:changes and reviewed:approve. Preserve the PR origin marker."
+        [ "Run " <> commandName "pr-revise" <> " for PR #" <> numberText <> ".",
+          "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
+          "Never merge, and leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator."
         ]
     interactionLines =
       [ "If ambiguity, credentials, or a product decision blocks safe progress, stop with exactly KANBAN_NEEDS_INPUT: <one concrete question>. Do not guess.",

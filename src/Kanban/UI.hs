@@ -1,5 +1,6 @@
 module Kanban.UI
-  ( runDashboard,
+  ( pullRequestSessionReusable,
+    runDashboard,
   )
 where
 
@@ -52,9 +53,11 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
+    PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
     originFromBody,
+    pullRequestVerdictForLabels,
   )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -215,6 +218,11 @@ data PullRequestReviewSession = PullRequestReviewSession
   { pullRequestSessionPullRequest :: PullRequest,
     pullRequestSessionOrigin :: PullRequestOrigin,
     pullRequestSessionAction :: PullRequestAction,
+    -- | The PR's @updatedAt@ when this action was launched, so a finished
+    -- session with the same recomputed action (e.g. a second
+    -- reviewed:changes verdict after pr-revise's own rereview) can be told
+    -- apart from one still addressing the state it was launched for.
+    pullRequestSessionLaunchedForUpdatedAt :: UTCTime,
     pullRequestSessionBrand :: SolverBrand,
     pullRequestSessionId :: Maybe Text,
     pullRequestSessionPhase :: SolvePhase,
@@ -2929,6 +2937,7 @@ recoveredPullRequestSession descriptor pullRequest task =
         { pullRequestSessionPullRequest = pullRequest,
           pullRequestSessionOrigin = task.pullRequestWorkerOrigin,
           pullRequestSessionAction = task.pullRequestWorkerAction,
+          pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
           pullRequestSessionBrand = brand,
           pullRequestSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
           pullRequestSessionPhase = SolveStarting,
@@ -3091,9 +3100,6 @@ startPullRequestReview = startPullRequestReviewWithOptions True False
 startPullRequestReviewWithVisibility :: Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions showOverlay False
 
-startFreshPullRequestReview :: PullRequest -> EventM Name AppState ()
-startFreshPullRequestReview = startPullRequestReviewWithOptions False True
-
 startPullRequestReviewWithOptions :: Bool -> Bool -> PullRequest -> EventM Name AppState ()
 startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
@@ -3102,7 +3108,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
     let action = actionForLabels (map (.labelName) pullRequest.pullRequestLabels)
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
-        | not forceFresh && (pullRequestReviewActive session || session.pullRequestSessionAction == action) ->
+        | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
             when showOverlay (modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing}))
       _ -> do
         let brand = agentForAction origin action
@@ -3111,6 +3117,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
                 { pullRequestSessionPullRequest = pullRequest,
                   pullRequestSessionOrigin = origin,
                   pullRequestSessionAction = action,
+                  pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
                   pullRequestSessionBrand = brand,
                   pullRequestSessionId = Nothing,
                   pullRequestSessionPhase = SolveStarting,
@@ -3133,6 +3140,16 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
 
 pullRequestReviewActive :: PullRequestReviewSession -> Bool
 pullRequestReviewActive session = session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
+
+-- | Whether pressing r should reuse a tracked session's overlay rather than
+-- launch a fresh action. An active session is always reused. A finished
+-- session is only reused when the recomputed action still matches AND the
+-- PR has not changed since that action was launched -- otherwise a fresh
+-- canonical round is needed even if the recomputed action repeats, e.g. a
+-- second reviewed:changes verdict after pr-revise's own rereview.
+pullRequestSessionReusable :: Bool -> Bool -> PullRequestAction -> PullRequestAction -> UTCTime -> UTCTime -> Bool
+pullRequestSessionReusable forceFresh active sessionAction currentAction launchedForUpdatedAt currentUpdatedAt =
+  not forceFresh && (active || (sessionAction == currentAction && launchedForUpdatedAt == currentUpdatedAt))
 
 launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> Text -> EventM Name AppState ()
 launchPullRequestFlow number origin action _brand existingSession input = do
@@ -3742,7 +3759,7 @@ advanceAutoSolve snapshot issueNumber session = case session.solveSessionAutoPro
   Just progress -> case progress.autoSolveStage of
     AutoDiscoveringPullRequest -> discoverAutoSolvePullRequest snapshot issueNumber session progress
     AutoReviewing -> advanceAutoSolveReview snapshot issueNumber session progress
-    AutoAwaitingRereview -> startAutoSolveRereview snapshot issueNumber session progress
+    AutoAwaitingRereview -> advanceAutoSolveAwaitingRereview snapshot issueNumber session progress
     _ -> pure ()
 
 discoverAutoSolvePullRequest :: RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
@@ -3805,26 +3822,19 @@ advanceAutoSolveReview snapshot issueNumber session progress = case progress.aut
           modifySolveSession issueNumber
             (\current -> current {solveSessionActivity = "reviewing PR #" <> showText pullRequest.pullRequestNumber})
 
-startAutoSolveRereview :: RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
-startAutoSolveRereview snapshot issueNumber _session progress = case progress.autoSolvePullRequest >>= findSnapshotPullRequest snapshot of
+-- | pr-revise invokes the canonical rereview itself, so once the resumed
+-- solver's revision finishes, the fresh verdict already lands on the PR as
+-- reviewed:approve or reviewed:changes; this never waits on a Kanban-created
+-- reviewed:revised label.
+advanceAutoSolveAwaitingRereview :: RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
+advanceAutoSolveAwaitingRereview snapshot issueNumber session progress = case progress.autoSolvePullRequest >>= findSnapshotPullRequest snapshot of
   Nothing -> stopAutoSolve issueNumber "the autosolve PR disappeared after revision"
-  Just pullRequest
-    | pullRequestHasLabel "reviewed:approve" pullRequest -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
-    | pullRequestHasLabel "reviewed:revised" pullRequest -> do
-        let nextRound = progress.autoSolveReviewRound + 1
-        modifySolveSession issueNumber
-          ( \current ->
-              current
-                { solveSessionPhase = SolveRunning,
-                  solveSessionActivity = "rereviewing PR #" <> showText pullRequest.pullRequestNumber,
-                  solveSessionAutoProgress = Just progress {autoSolveStage = AutoReviewing, autoSolveReviewRound = nextRound},
-                  solveSessionTranscript = appendSolveTranscript current.solveSessionTranscript ("\n[kanban] Starting PR rereview round " <> showText nextRound <> ".\n")
-                }
-          )
-        startFreshPullRequestReview pullRequest
-    | otherwise ->
-        modifySolveSession issueNumber
-          (\current -> current {solveSessionActivity = "waiting for reviewed:revised; press u to retry"})
+  Just pullRequest -> case pullRequestVerdictForLabels (map (.labelName) pullRequest.pullRequestLabels) of
+    PullRequestVerdictApproved -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
+    PullRequestVerdictChangesRequested -> resumeAutoSolveRevision issueNumber pullRequest session (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1})
+    PullRequestVerdictPending ->
+      modifySolveSession issueNumber
+        (\current -> current {solveSessionActivity = "waiting for the canonical rereview verdict; press u to retry"})
 
 resumeAutoSolveRevision :: Int -> PullRequest -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
 resumeAutoSolveRevision issueNumber pullRequest session progress
@@ -3837,7 +3847,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
         if Map.member issueNumber state.appSolveProcesses
           then pure ()
           else do
-            let prompt = autoSolveRevisionPrompt pullRequest.pullRequestNumber progress.autoSolveReviewRound
+            let prompt = autoSolveRevisionPrompt session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
             modifySolveSession issueNumber
               ( \current ->
                   current
@@ -3889,15 +3899,16 @@ failAutoSolve issueNumber reason = do
     )
   setNotice ("Autosolve #" <> showText issueNumber <> " failed: " <> sanitizeText reason)
 
-autoSolveRevisionPrompt :: Int -> Int -> Text
-autoSolveRevisionPrompt pullRequestNumber reviewRound =
+autoSolveRevisionPrompt :: SolverBrand -> Int -> Int -> Text
+autoSolveRevisionPrompt brand pullRequestNumber reviewRound =
   Text.unlines
     [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
-      "Resume the existing solve context and address every blocker in the newest canonical pr-review:v1 CHANGES_REQUESTED comment.",
-      "Rebuild the effective specification from the linked issue and its comments, make the smallest complete fix in the existing issue worktree, run targeted checks, commit, and push.",
-      "After the successful push, add reviewed:revised and remove reviewed:changes and reviewed:approve. Preserve the final pr-origin marker.",
-      "Do not start a reviewer and never merge. Stop after publishing the revised head so Kanban can launch a fresh rereviewer."
+      "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
+      "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
+      "Never merge, and leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator."
     ]
+  where
+    commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
 
 autoSolveReviewLimit :: Int
 autoSolveReviewLimit = 5
