@@ -46,6 +46,19 @@ class InstallSymlinkTests(unittest.TestCase):
             install_issue_review.install_symlink(self.source_a, self.destination)
         self.assertEqual(self.destination.read_text(encoding="utf-8"), "keep me\n")
 
+    def test_updating_a_link_does_not_delete_an_unrelated_file_at_the_naive_temp_name(self):
+        self.destination.parent.mkdir()
+        self.destination.symlink_to(self.source_a)
+        naive_temp = self.destination.with_name(f".{self.destination.name}.tmp")
+        naive_temp.write_text("unrelated user file\n", encoding="utf-8")
+
+        self.assertEqual(
+            install_issue_review.install_symlink(self.source_b, self.destination), "updated"
+        )
+
+        self.assertEqual(self.destination.resolve(), self.source_b.resolve())
+        self.assertEqual(naive_temp.read_text(encoding="utf-8"), "unrelated user file\n")
+
 
 class LegacyLauncherMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -187,6 +200,24 @@ class InstallerPolicyTests(unittest.TestCase):
         self.assertEqual(result["legacy_launcher"]["status"], "migrated")
         self.assertIsNotNone(result["legacy_launcher"]["backup_path"])
         self.assertEqual(self.legacy_path.read_text(encoding="utf-8"), "pre-kanban\n")
+
+    def test_dry_run_fails_instead_of_promising_a_migration_a_stale_backup_blocks(self):
+        self.legacy_path.parent.mkdir(parents=True)
+        self.legacy_path.write_text("pre-kanban\n", encoding="utf-8")
+        backup_path = self.legacy_path.with_name(self.legacy_path.name + ".pre-kanban-backup")
+        backup_path.write_text("stale backup\n", encoding="utf-8")
+
+        with self.assertRaises(install_issue_review.InstallError):
+            install_issue_review.install(
+                self.repo,
+                self.install_dir,
+                self.legacy_path,
+                migrate_legacy_launcher_flag=True,
+                dry_run=True,
+            )
+
+        self.assertEqual(self.legacy_path.read_text(encoding="utf-8"), "pre-kanban\n")
+        self.assertEqual(backup_path.read_text(encoding="utf-8"), "stale backup\n")
 
     def test_dry_run_reports_exact_kanban_link_and_legacy_link_changes(self):
         result = install_issue_review.install(

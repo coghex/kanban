@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -65,11 +66,17 @@ def plan_symlink(source: Path, destination: Path) -> str:
     return "created"
 
 
+def unique_sibling(path: Path) -> Path:
+    for _ in range(20):
+        candidate = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        if not os.path.lexists(candidate):
+            return candidate
+    raise InstallError(f"Could not allocate a temporary link beside {path}")
+
+
 def replace_symlink_atomically(source: Path, destination: Path) -> None:
-    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary = unique_sibling(destination)
     try:
-        if os.path.lexists(temporary):
-            temporary.unlink()
         temporary.symlink_to(source)
         os.replace(temporary, destination)
     finally:
@@ -108,6 +115,11 @@ def plan_legacy_launcher(
             return {"path": str(legacy_path), "status": status, "backup_path": None}
         if allow_migration:
             backup_path = legacy_path.with_name(legacy_path.name + ".pre-kanban-backup")
+            if os.path.lexists(backup_path):
+                raise InstallError(
+                    f"Refusing to migrate: a backup already exists at {backup_path}. "
+                    "Resolve or remove it before retrying."
+                )
             return {
                 "path": str(legacy_path),
                 "status": "migrated",
@@ -143,11 +155,6 @@ def migrate_legacy_launcher(
         return plan
     if status == "migrated":
         backup_path = Path(plan["backup_path"])
-        if os.path.lexists(backup_path):
-            raise InstallError(
-                f"Refusing to migrate: a backup already exists at {backup_path}. "
-                "Resolve or remove it before retrying."
-            )
         legacy_path.rename(backup_path)
         legacy_path.symlink_to(kanban_link)
         return plan
