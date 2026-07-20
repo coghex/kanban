@@ -46,6 +46,8 @@ Wait for the PR's required checks for the pushed head to complete successfully. 
 
 Then invoke the coordinator exactly once. Kanban resumes this session with the *revised* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
+Do not pass `--self-review` here: unlike `$pr-review`/`$pr-rereview`, this session cannot review as the opposite brand itself, so the coordinator must spawn that nested reviewer.
+
 ```bash
 COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/pr-review/scripts/review_pr.py' 2>/dev/null | head -n1)"
 python3 "$COORDINATOR" \

@@ -58,20 +58,38 @@ without those subcommands cannot install this plugin.
 | `skills/pr-rereview/` | `$pr-rereview` | Same as `$pr-review` for a changed PR; also removes a lingering `reviewed:revised` label after publishing, the one label mutation Kanban's own invocation prompts require of a review-only workflow. |
 | `skills/pr-revise/` | `$pr-revise` | Repairs a `reviewed:changes` PR in an isolated worktree, pushes safely, then hands off to exactly one canonical rereview. Never self-approves or merges. |
 
-`pr-review`, `pr-rereview`, and `pr-revise` all delegate their actual
-review-verdict publication to the bundled coordinator at
-`skills/pr-review/scripts/review_pr.py`, referenced by the other two skills
-through a portable sibling-relative path so the same review logic — and the
-same `pr-review:v2` marker/label state machine — runs regardless of which
-command an agent session starts from. The coordinator resolves the
-canonical issue-review backend the same way
+`pr-review`, `pr-rereview`, and `pr-revise` all delegate publication to the
+bundled coordinator at `skills/pr-review/scripts/review_pr.py`. Kanban
+spawns each of these workflows with the *reviewed* repository as the
+working directory, not this plugin's own install location, so the other
+two skills locate the installed coordinator by searching under
+`$CODEX_HOME` rather than a path relative to the current directory — the
+same review logic and `pr-review:v2` marker/label state machine runs
+regardless of which command an agent session starts from. The coordinator
+resolves the canonical issue-review backend the same way
 `Kanban.Review.canonicalIssueReviewerPath` does (`KANBAN_ISSUE_REVIEW_INSTALL_DIR`,
 falling back to the Kanban-managed install directory under
 `~/Library/Application Support/kanban/issue-review/`); it never hard-codes a
 personal path. None of the four skills set their own model, reasoning
 effort, sandbox, approval policy, or working directory — Kanban's own CLI
 invocation pins those per action, and `tools/test_codex_plugin.py` asserts
-none of the packaged manifests override them.
+none of the packaged manifests (or the coordinator's own nested-reviewer
+invocations) override them.
+
+For known-origin `$pr-review`/`$pr-rereview` — the case Kanban's own
+invocation always produces — the calling session already *is* the
+correctly-pinned canonical reviewer, so it reviews directly and uses the
+coordinator (`--self-review`) only for safe publication; no nested,
+unpinned reviewer is spawned. Only `pr-revise`'s cross-brand handoff (it
+runs on the PR's own origin brand but must hand off to the opposite brand)
+and the rare dual-review fallback for unknown/external origin — which
+Kanban's own invocation never triggers — spawn a nested `codex`/`claude`
+reviewer, and that nested call selects brand only, deferring to whatever
+model that installation defaults to; see
+[docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md#22-pr-review-rereview-and-revise)
+for why. Dual review runs its two reviewers strictly one at a time, each
+in its own unpredictably-named, read-only temp directory torn down before
+the next begins — never two reviewers' source trees on disk at once.
 
 ## Structural and contract coverage
 

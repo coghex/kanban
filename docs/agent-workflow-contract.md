@@ -69,22 +69,33 @@ manages or something I must set up myself."
 - **Durable state:** session log; the isolated worktree `pr-revise` works
   in.
 - **Mandatory/optional:** optional — only exercised by the `r` key.
-- **Cross-brand handoff model policy:** `pr-revise` runs on the PR's own
-  origin brand, so its internal "invoke exactly one canonical `pr-rereview`"
-  step spawns the *opposite* brand from inside that session — a nested
-  invocation no top-level Kanban CLI spawn is present to configure. For that
-  nested invocation only, "keep model selection with Kanban's invoking code
-  and canonical workflow policy" means brand selection (which of `codex`/
-  `claude` runs), not a specific pinned or verified model/effort: which
-  model backs a `codex`/`claude` install for canonical review purposes is a
-  host-configuration concern, the same category as `gh`/`git`/`python3`
-  being installed and authenticated, not something a packaged workflow
-  enforces or asserts. A packaged workflow implementing this handoff
-  publishes the reviewer brand as verified identity and does not claim a
-  specific model it cannot pin or verify. This is distinct from, and does
-  not weaken, the same "no override" requirement for the top-level
-  `$pr-review`/`$pr-rereview`/`$pr-revise` invocation itself, which
-  Kanban's own CLI spawn continues to pin per action as documented above.
+- **Cross-brand handoff model policy:** for known-origin `$pr-review`/
+  `$pr-rereview` — the case Kanban's own invocation always produces, since
+  every Kanban-created PR carries a `pr-origin` marker — the session Kanban
+  spawns already *is* the correctly-pinned canonical reviewer (Kanban chose
+  its brand via `agentForAction` and its model/effort via `codexModel`/
+  `codexEffort`/`claudeModel`/`claudeEffort` before invoking it). A packaged
+  workflow implementing this action must have that already-correct session
+  perform the review itself and use its bundled coordinator only to publish
+  the result safely (gate/head/race checks, comment, label) — not spawn a
+  further, unpinned nested reviewer that would both waste and be unable to
+  verify Kanban's guarantee.
+  `pr-revise` is the one genuine exception: it runs on the PR's own origin
+  brand, so its internal "invoke exactly one canonical `pr-rereview`" step
+  must spawn the *opposite* brand from inside that session — a nested
+  invocation no top-level Kanban CLI spawn is present to configure, and the
+  only case (along with the dual-review fallback for unknown/external
+  origin, which Kanban's own invocation never triggers) where "keep model
+  selection with Kanban's invoking code and canonical workflow policy" means
+  brand selection only (which of `codex`/`claude` runs), not a specific
+  pinned or verified model/effort: which model backs a `codex`/`claude`
+  install for canonical review purposes is then a host-configuration
+  concern, the same category as `gh`/`git`/`python3` being installed and
+  authenticated, not something the packaged workflow enforces or asserts
+  for that one nested call. None of this weakens the same "no override"
+  requirement for the top-level `$pr-review`/`$pr-rereview`/`$pr-revise`
+  invocation itself, which Kanban's own CLI spawn continues to pin per
+  action as documented above.
 
 ### 2.3 Canonical issue review, rereview, and the solve readiness gate
 

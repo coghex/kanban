@@ -571,6 +571,143 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         self.assertFalse(claude_cwd.exists())
 
 
+class SelfReviewProtocolTests(unittest.TestCase):
+    """Round-8 finding: for known-origin $pr-review/$pr-rereview, Kanban's
+    own top-level invocation already spawned the correct canonical
+    reviewer identity before this script ever ran, so review_pr.py must
+    not spawn a further, unpinned nested reviewer for that case — only
+    pr-revise's genuine cross-brand handoff needs that. workflow(...,
+    self_review=True) must instead return review context for the calling
+    (already-correct-identity) agent to use directly, then hand its
+    verdict to publish_verdict() rather than a spawned subprocess."""
+
+    def _base_pr(self, body="<!-- pr-origin:claude -->"):
+        return {
+            "number": 89,
+            "url": "https://github.com/coghex/kanban/pull/89",
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "body": body,
+            "isCrossRepository": False,
+            "labels": [],
+            "closingIssuesReferences": [],
+        }
+
+    def _gate(self, key="k1"):
+        return {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": key}
+
+    def test_self_review_known_origin_returns_context_without_spawning(self):
+        module = load_review_pr_module()
+        pr = self._base_pr()  # claude origin -> single reviewer, codex
+        gate = self._gate()
+
+        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            module, "pr_view", return_value=pr
+        ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
+            module, "collect_context", return_value={"diff": "..."}
+        ), mock.patch.object(module, "run_reviews") as run_reviews_mock, mock.patch.object(
+            module, "invoke_reviewer"
+        ) as invoke_reviewer_mock, mock.patch.object(
+            module, "extract_source"
+        ) as extract_source_mock:
+            code, result = module.workflow(
+                Path("/fake-repo"), 89, rereview=False, dry_run=False, allow_no_issue=False, self_review=True
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "awaiting_self_review")
+        self.assertEqual(result["reviewer_key"], "codex")  # claude origin -> opposite is codex
+        self.assertEqual(result["expected_head"], pr["headRefOid"])
+        self.assertEqual(result["gate_key"], gate["key"])
+        self.assertIn("REVIEW_PAYLOAD", result["instructions"])
+        self.assertIn("Codex", result["instructions"])
+        run_reviews_mock.assert_not_called()
+        invoke_reviewer_mock.assert_not_called()
+        extract_source_mock.assert_not_called()
+
+    def test_self_review_dual_origin_still_spawns_nested_reviewers(self):
+        # Unknown/external origin cannot be self-reviewed by one calling
+        # session as both brands; Kanban's own invocation never routes here
+        # (it always tags a known origin), so falling back to the existing
+        # nested-spawn-both behavior is an acceptable, low-value edge case.
+        module = load_review_pr_module()
+        pr = self._base_pr(body="no origin marker")
+        gate = self._gate()
+        fake_source = Path("/fake/source")
+
+        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            module, "pr_view", return_value=pr
+        ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
+            module, "collect_context", return_value={}
+        ), mock.patch.object(
+            module, "run_reviews", return_value=[{"reviewer": "codex"}, {"reviewer": "claude"}]
+        ) as run_reviews_mock, mock.patch.object(
+            module, "publish_results", return_value=(0, {"status": "reviewed"})
+        ) as publish_results_mock:
+            code, result = module.workflow(
+                Path("/fake-repo"), 89, rereview=False, dry_run=False, allow_no_issue=False, self_review=True
+            )
+
+        run_reviews_mock.assert_called_once()
+        publish_results_mock.assert_called_once()
+        self.assertEqual(result["status"], "reviewed")
+
+    def test_publish_verdict_publishes_a_precomputed_result(self):
+        module = load_review_pr_module()
+        pr = self._base_pr()
+        gate = self._gate()
+
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / "result.json"
+            result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "looks good", "blocking_concerns": []}))
+
+            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+                module, "pr_view", return_value=pr
+            ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
+                module, "publish_results", return_value=(0, {"status": "reviewed", "verdict": "APPROVE"})
+            ) as publish_results_mock, mock.patch.object(
+                module, "invoke_reviewer"
+            ) as invoke_reviewer_mock:
+                code, result = module.publish_verdict(
+                    Path("/fake-repo"), 89, pr["headRefOid"], gate["key"], result_path, allow_no_issue=False
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "reviewed")
+        invoke_reviewer_mock.assert_not_called()
+        publish_results_mock.assert_called_once()
+        published_results_arg = publish_results_mock.call_args.args[6]
+        self.assertEqual(published_results_arg[0]["verdict"], "APPROVE")
+        self.assertEqual(published_results_arg[0]["reviewer"], "codex")
+
+    def test_publish_verdict_rejects_a_stale_head(self):
+        module = load_review_pr_module()
+        pr = self._base_pr()
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / "result.json"
+            result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}))
+            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+                module, "pr_view", return_value=pr
+            ):
+                with self.assertRaises(module.WorkflowError) as excinfo:
+                    module.publish_verdict(Path("/fake-repo"), 89, "b" * 40, "k1", result_path, allow_no_issue=False)
+        self.assertIn("rerun $pr-review/$pr-rereview", str(excinfo.exception))
+
+    def test_publish_verdict_rejects_a_stale_gate_key(self):
+        module = load_review_pr_module()
+        pr = self._base_pr()
+        gate = self._gate(key="different-key")
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / "result.json"
+            result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}))
+            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+                module, "pr_view", return_value=pr
+            ), mock.patch.object(module, "gate_status", return_value=gate):
+                with self.assertRaises(module.WorkflowError) as excinfo:
+                    module.publish_verdict(Path("/fake-repo"), 89, pr["headRefOid"], "k1", result_path, allow_no_issue=False)
+        self.assertIn("rerun $pr-review/$pr-rereview", str(excinfo.exception))
+
+
 COORDINATOR_LOOKUP = (
     'find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
     "-path '*/kanban/*/skills/pr-review/scripts/review_pr.py'"

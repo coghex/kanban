@@ -70,10 +70,14 @@ class Reviewer:
 
 
 # Brand identity only, per docs/agent-workflow-contract.md §2.2's
-# "Cross-brand handoff model policy": this coordinator does not pin, and
-# cannot verify, which specific model actually runs the nested reviewer it
-# spawns (see invoke_codex/invoke_claude). Which executable runs — codex or
-# claude — is the one thing it does control and publish as fact.
+# "Cross-brand handoff model policy". These identify a REVIEWER ROLE, not a
+# pinned model: for the normal self-reviewed path (see workflow()'s
+# self_review parameter), the reviewer IS the already-correctly-pinned
+# calling session, so no model claim is made at all beyond the brand. Only
+# the nested spawn used by pr-revise's cross-brand handoff and the rare
+# dual-review fallback (invoke_codex/invoke_claude) cannot verify which
+# specific model actually ran; which executable runs — codex or claude — is
+# the one thing that path does control and publish as fact.
 CODEX_REVIEWER = Reviewer("codex", "Codex")
 CLAUDE_REVIEWER = Reviewer("claude", "Claude")
 
@@ -473,6 +477,30 @@ REVIEW_PAYLOAD:
 """
 
 
+def self_review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bool, number: int) -> str:
+    # Used only when the calling agent IS the canonical reviewer Kanban
+    # already spawned as (known-origin $pr-review/$pr-rereview): no nested
+    # model call is spawned for this case, so unlike review_prompt above,
+    # this session's own working directory is not a read-only extraction of
+    # the PR head and it must fetch that itself if it needs more than the
+    # diff already in REVIEW_PAYLOAD.
+    mode = "rereview" if rereview else "review"
+    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}. You are that canonical reviewer already — Kanban selected and spawned you for this exact role, so this is your own review, not something to delegate to a nested subprocess call.
+
+The JSON payload is authoritative for any linked approved issue specifications, the full patch (`diff`), commits, prior reviews/comments, and CI. Review from the diff directly; if you need broader repository context than the patch shows, fetch the PR head read-only (e.g. `git fetch --no-tags origin pull/{number}/head` then inspect files with `git show FETCH_HEAD:<path>`) without checking it out over your own working directory or branch. When linked_issues is empty, evaluate the PR directly from its title, body, patch, repository context, and tests. For a rereview, explicitly verify prior blocking concerns as well as finding regressions or new blockers.
+
+Review only. Do not edit files, publish a comment or label yourself, commit, push, or merge — write your verdict to a file and hand it to the coordinator's `--publish-verdict` mode, which performs the actual publication safely. Evaluate correctness, regressions, missing required tests, scope, and satisfaction of the effective review contract. Use CHANGES_REQUESTED only for concrete human-action blockers; do not block on optional style preferences. Use APPROVE only when there are no blocking concerns.
+
+Write a JSON file matching exactly this schema:
+{json.dumps(REVIEW_SCHEMA, indent=2)}
+
+Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and explanation. Keep the summary concise.
+
+REVIEW_PAYLOAD:
+{json.dumps(context, indent=2, sort_keys=True)}
+"""
+
+
 def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkflowError(f"{reviewer.display_name} returned a non-object result")
@@ -760,65 +788,26 @@ def require_prior_review(root: Path, repo: str, number: int) -> None:
         raise WorkflowError(f"PR #{number} has no prior canonical review to rereview")
 
 
-def workflow(
+def publish_results(
     root: Path,
+    repo: str,
     number: int,
+    pr: dict[str, Any],
+    gate: dict[str, Any],
+    reviewers: list[Reviewer],
+    results: list[dict[str, Any]],
+    base: dict[str, Any],
     *,
-    rereview: bool,
-    dry_run: bool,
     allow_no_issue: bool,
 ) -> tuple[int, dict[str, Any]]:
-    repo = repository_name(root)
-    pr = pr_view(root, number)
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
-    origin = pr_origin(pr)
-    reviewers = route_reviewers(origin)
-    base = {
-        "pr": number,
-        "url": pr["url"],
-        "head": pr["headRefOid"],
-        "origin": origin or "unknown",
-        "route": "+".join(item.key for item in reviewers),
-        "review_mode": "standalone" if allow_no_issue else "issue-gated",
-        "issue_gate": gate,
-    }
-    if not gate["approved"]:
-        if dry_run:
-            return 2, {**base, "status": "blocked", "comment_status": "dry-run"}
-        status, url = publish_gate_comment(
-            root,
-            repo,
-            pr,
-            gate,
-            allow_no_issue=allow_no_issue,
-        )
-        return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
-    if rereview:
-        require_prior_review(root, repo, number)
-    if dry_run:
-        return 0, {**base, "status": "ready", "comment_status": "dry-run"}
-
-    context = collect_context(root, repo, pr, gate["issues"])
-
-    def extract_for_next_reviewer() -> Path:
-        # An independently-rooted temp directory with no reviewer-identifying
-        # prefix (tempfile.mkdtemp, not a subdirectory of one shared parent
-        # and not named after the reviewer brand). run_reviews extracts,
-        # reviews, and tears this down before starting the next reviewer, so
-        # at most one such directory ever exists on disk at a time.
-        source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
-        extract_source(root, number, pr["headRefOid"], source)
-        return source
-
-    results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
-
+    """Safely publish an already-computed set of review results: re-verify
+    nothing went stale since `gate`/`pr` were captured, post the
+    consolidated comment, then label — clearing both verdict labels if
+    anything changes between commenting and labeling. Shared by workflow()'s
+    own nested-reviewer path and publish_verdict()'s self-reviewed path, so
+    both go through identical race handling."""
     refreshed_pr = pr_view(root, number)
-    refreshed_gate = gate_status(
-        root,
-        refreshed_pr,
-        repo,
-        allow_no_issue=allow_no_issue,
-    )
+    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue)
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
         raise WorkflowError("PR head changed during review; no verdict was published")
     if refreshed_gate["key"] != gate["key"]:
@@ -887,6 +876,136 @@ def workflow(
     }
 
 
+def workflow(
+    root: Path,
+    number: int,
+    *,
+    rereview: bool,
+    dry_run: bool,
+    allow_no_issue: bool,
+    self_review: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    repo = repository_name(root)
+    pr = pr_view(root, number)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    origin = pr_origin(pr)
+    reviewers = route_reviewers(origin)
+    base = {
+        "pr": number,
+        "url": pr["url"],
+        "head": pr["headRefOid"],
+        "origin": origin or "unknown",
+        "route": "+".join(item.key for item in reviewers),
+        "review_mode": "standalone" if allow_no_issue else "issue-gated",
+        "issue_gate": gate,
+    }
+    if not gate["approved"]:
+        if dry_run:
+            return 2, {**base, "status": "blocked", "comment_status": "dry-run"}
+        status, url = publish_gate_comment(
+            root,
+            repo,
+            pr,
+            gate,
+            allow_no_issue=allow_no_issue,
+        )
+        return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
+    if rereview:
+        require_prior_review(root, repo, number)
+    if dry_run:
+        return 0, {**base, "status": "ready", "comment_status": "dry-run"}
+
+    context = collect_context(root, repo, pr, gate["issues"])
+
+    if self_review and len(reviewers) == 1:
+        # Known-origin $pr-review/$pr-rereview: the calling agent IS the
+        # canonical reviewer Kanban already spawned as (it pinned that
+        # session's model at the CLI before this script ever ran), so
+        # spawning a further nested, unpinned reviewer here would both
+        # waste that guarantee and be unable to verify it published under
+        # the right identity. Return the review context for the caller to
+        # review with directly; it re-invokes this coordinator's
+        # --publish-verdict mode with the result. (Dual/unknown-origin
+        # review still needs a nested opposite-brand spawn
+        # below — a single calling session cannot self-review as both
+        # brands — and Kanban's own invocation never routes there anyway.)
+        reviewer = reviewers[0]
+        return 0, {
+            **base,
+            "status": "awaiting_self_review",
+            "reviewer_key": reviewer.key,
+            "expected_head": pr["headRefOid"],
+            "gate_key": gate["key"],
+            "instructions": self_review_prompt(context, reviewer, rereview, number),
+        }
+
+    def extract_for_next_reviewer() -> Path:
+        # An independently-rooted temp directory with no reviewer-identifying
+        # prefix (tempfile.mkdtemp, not a subdirectory of one shared parent
+        # and not named after the reviewer brand). run_reviews extracts,
+        # reviews, and tears this down before starting the next reviewer, so
+        # at most one such directory ever exists on disk at a time.
+        source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
+        extract_source(root, number, pr["headRefOid"], source)
+        return source
+
+    results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
+    return publish_results(root, repo, number, pr, gate, reviewers, results, base, allow_no_issue=allow_no_issue)
+
+
+def publish_verdict(
+    root: Path,
+    number: int,
+    expected_head: str,
+    expected_gate_key: str,
+    result_path: Path,
+    *,
+    allow_no_issue: bool,
+) -> tuple[int, dict[str, Any]]:
+    """Publish a verdict the calling agent already computed itself (the
+    self-review path from workflow()'s awaiting_self_review response).
+    Re-verifies the PR is still exactly the state that context was
+    generated from before accepting it — this is not a rubber stamp of
+    whatever the caller provides, it is the same safe-publish machinery
+    the nested-reviewer path uses, just fed an externally-supplied result
+    instead of one from a spawned subprocess."""
+    repo = repository_name(root)
+    pr = pr_view(root, number)
+    if pr["headRefOid"] != expected_head:
+        raise WorkflowError(
+            "PR head changed since the self-review context was generated; "
+            "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
+        )
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    if gate["key"] != expected_gate_key:
+        raise WorkflowError(
+            "linked issues changed since the self-review context was generated; "
+            "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
+        )
+    origin = pr_origin(pr)
+    reviewers = route_reviewers(origin)
+    if len(reviewers) != 1:
+        raise WorkflowError(
+            "PR origin is no longer a single known brand; rerun $pr-review/$pr-rereview "
+            "instead of publishing a self-review verdict"
+        )
+    base = {
+        "pr": number,
+        "url": pr["url"],
+        "head": pr["headRefOid"],
+        "origin": origin or "unknown",
+        "route": "+".join(item.key for item in reviewers),
+        "review_mode": "standalone" if allow_no_issue else "issue-gated",
+        "issue_gate": gate,
+    }
+    if not gate["approved"]:
+        status, url = publish_gate_comment(root, repo, pr, gate, allow_no_issue=allow_no_issue)
+        return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
+    result_data = load_json(Path(result_path).read_text(encoding="utf-8"), "self-review result file")
+    result = validate_review(result_data, reviewers[0])
+    return publish_results(root, repo, number, pr, gate, reviewers, [result], base, allow_no_issue=allow_no_issue)
+
+
 def self_test() -> None:
     assert CODEX_REVIEWER.key == "codex"
     assert CODEX_REVIEWER.display_name == "Codex"
@@ -935,7 +1054,31 @@ def parse_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review", type=int, metavar="PR", help="Review one pull request")
     mode.add_argument("--rereview", type=int, metavar="PR", help="Rereview one changed pull request")
+    mode.add_argument(
+        "--publish-verdict",
+        type=int,
+        metavar="PR",
+        help="Publish a verdict the calling agent already computed itself (see --self-review)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Check gate and route without writes or model calls")
+    parser.add_argument(
+        "--self-review",
+        action="store_true",
+        help=(
+            "For a single known-brand reviewer, return review context for the calling agent to "
+            "review with directly instead of spawning a nested, unpinned reviewer. Use only when "
+            "this session is itself the canonical reviewer Kanban already spawned as."
+        ),
+    )
+    parser.add_argument(
+        "--expected-head", metavar="SHA", help="With --publish-verdict: the head SHA the review was performed against"
+    )
+    parser.add_argument(
+        "--gate-key", metavar="KEY", help="With --publish-verdict: the gate_key from the awaiting_self_review response"
+    )
+    parser.add_argument(
+        "--result", type=Path, metavar="FILE", help="With --publish-verdict: path to the verdict JSON file"
+    )
     parser.add_argument(
         "--allow-no-issue",
         action="store_true",
@@ -944,9 +1087,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print structured output")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks")
     args = parser.parse_args()
-    if not args.self_test and args.review is None and args.rereview is None:
-        parser.error("one of --review, --rereview, or --self-test is required")
-    number = args.review if args.review is not None else args.rereview
+    if not args.self_test and args.review is None and args.rereview is None and args.publish_verdict is None:
+        parser.error("one of --review, --rereview, --publish-verdict, or --self-test is required")
+    if args.publish_verdict is not None and (args.expected_head is None or args.gate_key is None or args.result is None):
+        parser.error("--publish-verdict requires --expected-head, --gate-key, and --result")
+    number = args.review if args.review is not None else (args.rereview if args.rereview is not None else args.publish_verdict)
     if number is not None and number < 1:
         parser.error("PR number must be positive")
     return args
@@ -957,18 +1102,29 @@ def main() -> None:
     if args.self_test:
         self_test()
         return
-    number = args.review if args.review is not None else args.rereview
+    number = args.review if args.review is not None else (args.rereview if args.rereview is not None else args.publish_verdict)
     try:
         root = Path(
             run(["git", "rev-parse", "--show-toplevel"], cwd=args.path.resolve()).stdout.strip()
         ).resolve()
-        code, result = workflow(
-            root,
-            number,
-            rereview=args.rereview is not None,
-            dry_run=args.dry_run,
-            allow_no_issue=args.allow_no_issue,
-        )
+        if args.publish_verdict is not None:
+            code, result = publish_verdict(
+                root,
+                number,
+                args.expected_head,
+                args.gate_key,
+                args.result,
+                allow_no_issue=args.allow_no_issue,
+            )
+        else:
+            code, result = workflow(
+                root,
+                number,
+                rereview=args.rereview is not None,
+                dry_run=args.dry_run,
+                allow_no_issue=args.allow_no_issue,
+                self_review=args.self_review,
+            )
     except WorkflowError as exc:
         result = {"pr": number, "status": "error", "error": str(exc)}
         code = 1
