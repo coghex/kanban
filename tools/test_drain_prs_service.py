@@ -179,6 +179,39 @@ class ControllerConfigurationTests(unittest.TestCase):
                 drain_prs_service.start_service(repo)
         install_job.assert_not_called()
 
+    def test_start_refuses_a_non_default_branch_before_installing_or_launching(self):
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(drain_prs_service, "working_tree_status", return_value=""),
+            mock.patch.object(
+                drain_prs_service,
+                "require_default_branch",
+                side_effect=drain_prs_service.ServiceError("repository is on branch 'feature'"),
+            ),
+            mock.patch.object(drain_prs_service, "install_job") as install_job,
+        ):
+            with self.assertRaisesRegex(
+                drain_prs_service.ServiceError, "repository is on branch 'feature'"
+            ):
+                drain_prs_service.start_service(repo)
+        install_job.assert_not_called()
+
+    def test_runner_exits_without_an_incident_when_not_on_the_default_branch(self):
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "require_default_branch",
+                side_effect=drain_prs_service.ServiceError("repository is on branch 'feature'"),
+            ),
+            mock.patch.object(drain_prs_service, "service_log") as service_log,
+            mock.patch.object(drain_prs_service, "write_incident") as write_incident,
+        ):
+            result = drain_prs_service.run_service(repo)
+        self.assertEqual(result, 0)
+        service_log.assert_called_once()
+        write_incident.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

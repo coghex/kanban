@@ -163,6 +163,41 @@ def working_tree_status(repo_path: Path) -> str:
     return (proc.stdout or "").strip()
 
 
+def require_default_branch(repo_path: Path) -> None:
+    current = run_command(
+        ["git", "-C", str(repo_path), "branch", "--show-current"],
+        check=False,
+    )
+    if current.returncode != 0:
+        detail = (current.stderr or current.stdout or f"exit code {current.returncode}").strip()
+        raise ServiceError(f"Could not inspect repository branch: {detail}")
+    current_branch = (current.stdout or "").strip()
+
+    default = run_command(
+        ["git", "-C", str(repo_path), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        check=False,
+    )
+    if default.returncode != 0:
+        detail = (default.stderr or default.stdout or f"exit code {default.returncode}").strip()
+        raise ServiceError(
+            "Could not determine the repository default branch from origin/HEAD: "
+            + detail
+        )
+    default_ref = (default.stdout or "").strip()
+    if not default_ref.startswith("origin/") or len(default_ref) == len("origin/"):
+        raise ServiceError(
+            "Could not determine the repository default branch from origin/HEAD: "
+            + default_ref
+        )
+    default_branch = default_ref.removeprefix("origin/")
+
+    if current_branch != default_branch:
+        raise ServiceError(
+            f"Refusing to start PR drainer: repository is on branch {current_branch!r}, "
+            f"not default branch {default_branch!r}."
+        )
+
+
 def incident_files(
     *, repo_path: Path | None = None, open_only: bool = False
 ) -> list[Path]:
@@ -329,6 +364,7 @@ def start_service(repo_path: Path) -> dict[str, Any]:
             "Commit, stash, or discard them first.\n"
             + dirty_status
         )
+    require_default_branch(repo_path)
     ensure_dirs()
     snapshot = status_snapshot(repo_path)
     if snapshot["state"] in {"running", "starting"}:
@@ -547,6 +583,11 @@ def resolve_open_incidents(repo_path: Path, note: str) -> list[Path]:
 
 
 def run_service(repo_path: Path) -> int:
+    try:
+        require_default_branch(repo_path)
+    except ServiceError as exc:
+        service_log(f"PR drainer did not start: {exc}")
+        return 0
     ensure_dirs()
     command = [
         str(DRAINER_PATH),
