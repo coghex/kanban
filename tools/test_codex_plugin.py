@@ -13,6 +13,7 @@ src/Kanban/PullRequestFlow.hs actually spawn.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import py_compile
 import re
@@ -22,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin"
@@ -72,6 +74,18 @@ FRONTMATTER_FIELD_RE = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_review_pr_module():
+    """Import review_pr.py by file path (it lives under codex-plugin/, not
+    tools/, so it is never on sys.path via `-s tools` discovery)."""
+    spec = importlib.util.spec_from_file_location("kanban_codex_plugin_review_pr", REVIEW_COORDINATOR)
+    module = importlib.util.module_from_spec(spec)
+    # dataclass field resolution looks the module up in sys.modules by name
+    # while exec_module is still running, so it must be registered first.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def iter_tracked_plugin_files():
@@ -300,6 +314,83 @@ class ReviewCoordinatorSelfTestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfile = Path(tmp) / "review_pr.pyc"
             py_compile.compile(str(REVIEW_COORDINATOR), cfile=str(cfile), doraise=True)
+
+
+class PostCommentPublicationRaceTests(unittest.TestCase):
+    """Behavioral regression coverage for the round-1 fix: if the PR head
+    or issue gate goes stale in the window between posting the review
+    comment and labeling it, workflow() must clear any pre-existing
+    reviewed:* label rather than leaving it in place next to a
+    now-unlabeled comment. Drives the real workflow() function with its
+    GitHub/model-invoking dependencies mocked, rather than only asserting
+    the source text shape."""
+
+    def _base_pr(self):
+        return {
+            "number": 89,
+            "url": "https://github.com/coghex/kanban/pull/89",
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "body": "<!-- pr-origin:claude -->",
+            "isCrossRepository": False,
+            "labels": [],
+            "closingIssuesReferences": [],
+        }
+
+    def test_post_comment_gate_or_head_race_clears_stale_verdict_labels(self):
+        module = load_review_pr_module()
+        pr = self._base_pr()
+        gate = {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": "k1"}
+        review_result = {
+            "reviewer": "codex",
+            "display_name": "GPT-5.6-Terra",
+            "model": "gpt-5.6-terra",
+            "effort": "xhigh",
+            "verdict": "APPROVE",
+            "summary": "looks good",
+            "blocking_concerns": [],
+        }
+
+        require_state_calls = {"count": 0}
+
+        def require_state_side_effect(*args, **kwargs):
+            require_state_calls["count"] += 1
+            if require_state_calls["count"] == 2:
+                # Simulate the exact race this test exists to cover: the
+                # head or gate went stale in the window right after
+                # post_comment() landed, before labeling.
+                raise module.WorkflowError("PR head changed; no current-head verdict may be labeled")
+            return gate
+
+        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            module, "pr_view", return_value=pr
+        ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
+            module, "pr_origin", return_value="claude"
+        ), mock.patch.object(module, "collect_context", return_value={}), mock.patch.object(
+            module, "extract_source", return_value=None
+        ), mock.patch.object(
+            module, "run_reviews", return_value=[review_result]
+        ), mock.patch.object(
+            module, "render_review", return_value=("APPROVE", "APPROVE\n\nlooks good\n")
+        ), mock.patch.object(
+            module, "require_current_review_state", side_effect=require_state_side_effect
+        ), mock.patch.object(
+            module, "post_comment", return_value="https://github.com/coghex/kanban/pull/89#issuecomment-1"
+        ) as post_comment_mock, mock.patch.object(
+            module, "set_verdict_label"
+        ) as set_verdict_label_mock, mock.patch.object(
+            module, "verify_publication"
+        ) as verify_publication_mock, mock.patch.object(
+            module, "clear_verdict_labels"
+        ) as clear_verdict_labels_mock:
+            with self.assertRaises(module.WorkflowError) as excinfo:
+                module.workflow(Path("/fake-repo"), 89, rereview=False, dry_run=False, allow_no_issue=False)
+
+        post_comment_mock.assert_called_once()
+        clear_verdict_labels_mock.assert_called_once_with(Path("/fake-repo"), 89)
+        set_verdict_label_mock.assert_not_called()
+        verify_publication_mock.assert_not_called()
+        self.assertIn("both verdict labels were cleared", str(excinfo.exception))
 
 
 COORDINATOR_LOOKUP = (
