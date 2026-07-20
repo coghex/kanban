@@ -2549,6 +2549,9 @@ main = hspec $ do
     it "keeps reusing an interrupted session while its kill is still in flight" $
       reviewSessionReusable ReviewInterrupted InitialReview InitialReview True `shouldBe` True
 
+    it "reuses an interrupted app-server revision when its stage is unchanged" $
+      reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False `shouldBe` True
+
   describe "overlay mouse dispatch" $ do
     let backgroundCard = CardTarget Issues 0
         zeroLoc = Location (0, 0)

@@ -3251,9 +3251,11 @@ reviewSessionActive session = reviewPhaseActive session.reviewSessionPhase
 -- rather than reopen the stale interrupted overlay -- but while that kill
 -- is still in flight, reusing the existing session avoids racing a second
 -- process launch against the first invocation's still-pending completion.
+-- An interrupted app-server revision remains resumable, so it follows the
+-- ordinary same-stage reuse rule instead.
 reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool
 reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
-  | phase == ReviewInterrupted = hasLiveCanonicalProcess
+  | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
   | reviewPhaseActive phase = True
   | sessionStage == requestedStage = True
   | otherwise = False
