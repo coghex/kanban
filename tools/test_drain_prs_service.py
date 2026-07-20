@@ -151,6 +151,34 @@ class ControllerConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
 
+    def test_status_marks_a_stopped_dirty_checkout_as_an_error_state(self):
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(drain_prs_service, "read_json", return_value={}),
+            mock.patch.object(drain_prs_service, "pid_alive", return_value=False),
+            mock.patch.object(drain_prs_service, "lock_pid", return_value=None),
+            mock.patch.object(drain_prs_service, "incident_files", return_value=[]),
+            mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
+            mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
+            mock.patch.object(
+                drain_prs_service, "working_tree_status", return_value=" M src/Kanban/UI.hs"
+            ),
+        ):
+            result = drain_prs_service.status_snapshot(repo)
+        self.assertEqual(result["state"], "dirty")
+
+    def test_start_refuses_a_dirty_checkout_before_installing_or_launching(self):
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(drain_prs_service, "working_tree_status", return_value=" M src/Kanban/UI.hs"),
+            mock.patch.object(drain_prs_service, "install_job") as install_job,
+        ):
+            with self.assertRaisesRegex(
+                drain_prs_service.ServiceError, "repository has uncommitted changes"
+            ):
+                drain_prs_service.start_service(repo)
+        install_job.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

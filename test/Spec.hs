@@ -2927,6 +2927,10 @@ main = hspec $ do
       decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
 
+    it "makes a dirty checkout an error that prevents starting the drainer" $
+      decodeDrainerStatus "{\"state\":\"dirty\",\"open_incident\":null}"
+        `shouldBe` Right (DrainerStatus DrainerError "uncommitted changes; drainer will not start")
+
     it "warns when the singleton drainer belongs to another repository" $
       decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerWarning "another repository is running")

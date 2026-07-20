@@ -4,12 +4,27 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import drain_prs
+
+
+class CleanWorktreeTests(unittest.TestCase):
+    def test_refuses_to_start_when_any_worktree_change_is_present(self):
+        root = Path("/tmp/example")
+        with mock.patch.object(
+            drain_prs,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, " M src/Kanban/UI.hs\n", ""),
+        ):
+            with self.assertRaisesRegex(
+                drain_prs.DrainError, "repository has uncommitted changes"
+            ):
+                drain_prs.require_clean_worktree(root)
 
 
 class GateConfigTests(unittest.TestCase):

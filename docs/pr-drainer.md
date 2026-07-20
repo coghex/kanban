@@ -38,6 +38,14 @@ Only one managed drainer can run for the user at a time. A Kanban window for ano
 
 Installation never starts the drainer. Starting it can merge eligible pull requests immediately.
 
+The controller refuses to start from a checkout with staged, unstaged, or
+untracked changes. Kanban renders that condition in red and reports that the
+changes must be committed, stashed, or discarded first. This keeps the
+drainer's post-merge fast-forward from interfering with an in-progress hotfix.
+
+After each successful merge, the drainer fast-forwards its managed default
+branch to the current remote tip.
+
 ## Approval and checks
 
 A pull request must have the `reviewed:approve` label and must not have `reviewed:changes`.

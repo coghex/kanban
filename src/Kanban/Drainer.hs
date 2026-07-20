@@ -146,6 +146,7 @@ statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
   ("starting", _) -> DrainerStatus DrainerStarting "starting…"
   ("external", _) -> DrainerStatus DrainerWarning "on outside launchd"
   ("foreign", _) -> DrainerStatus DrainerWarning "another repository is running"
+  ("dirty", _) -> DrainerStatus DrainerError "uncommitted changes; drainer will not start"
   ("stopped", Nothing) -> DrainerStatus DrainerOff "off"
   ("stopped", Just incident) -> DrainerStatus DrainerError ("stopped · unresolved incident" <> incidentDetail incident)
   (other, _) -> DrainerStatus DrainerError ("unknown state: " <> other)

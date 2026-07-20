@@ -152,6 +152,17 @@ def lock_pid(repo_path: Path) -> int | None:
         return None
 
 
+def working_tree_status(repo_path: Path) -> str:
+    proc = run_command(
+        ["git", "-C", str(repo_path), "status", "--porcelain=v1", "--untracked-files=all"],
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise ServiceError(f"Could not inspect repository status: {detail}")
+    return (proc.stdout or "").strip()
+
+
 def incident_files(
     *, repo_path: Path | None = None, open_only: bool = False
 ) -> list[Path]:
@@ -226,7 +237,7 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
     elif locked_alive:
         state = "external"
     else:
-        state = "stopped"
+        state = "dirty" if working_tree_status(repo_path) else "stopped"
 
     open_incidents = incident_files(repo_path=repo_path, open_only=True)
     latest_incident = read_json(open_incidents[0]) if open_incidents else None
@@ -311,6 +322,13 @@ def install_job(repo_path: Path) -> dict[str, Any]:
 
 
 def start_service(repo_path: Path) -> dict[str, Any]:
+    dirty_status = working_tree_status(repo_path)
+    if dirty_status:
+        raise ServiceError(
+            "Refusing to start PR drainer: repository has uncommitted changes. "
+            "Commit, stash, or discard them first.\n"
+            + dirty_status
+        )
     ensure_dirs()
     snapshot = status_snapshot(repo_path)
     if snapshot["state"] in {"running", "starting"}:

@@ -228,6 +228,20 @@ def repo_root(path: Path) -> Path:
     return Path(root)
 
 
+def require_clean_worktree(root: Path) -> None:
+    proc = run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=root,
+    )
+    status = (proc.stdout or "").strip()
+    if status:
+        raise DrainError(
+            "Refusing to start PR drainer: repository has uncommitted changes. "
+            "Commit, stash, or discard them first.\n"
+            + status
+        )
+
+
 def parse_repo_slug(remote_url: str) -> str:
     remote_url = remote_url.strip()
     ssh_match = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", remote_url)
@@ -244,6 +258,7 @@ def parse_repo_slug(remote_url: str) -> str:
 
 def get_repo_context(path: Path) -> RepoContext:
     root = repo_root(path)
+    require_clean_worktree(root)
     remote_url = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
     repo_slug = parse_repo_slug(remote_url)
     repo_name = repo_slug.split("/", 1)[1]
