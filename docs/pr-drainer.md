@@ -43,6 +43,9 @@ untracked changes. Kanban renders that condition in red and reports that the
 changes must be committed, stashed, or discarded first. This keeps the
 drainer's post-merge fast-forward from interfering with an in-progress hotfix.
 
+It also requires the checkout to be on the repository's default branch. This
+keeps its post-merge fast-forward from moving a feature branch.
+
 After each successful merge, the drainer fast-forwards its managed default
 branch to the current remote tip.
 
