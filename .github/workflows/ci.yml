@@ -15,24 +15,40 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: macos-latest
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The official Haskell image bakes GHC + cabal, so there is no
+    # toolchain to provision at run time — the 5+ minute per-run ghcup
+    # download the macOS runner paid is gone. GHC is pinned to 9.12.2 to
+    # match the toolchain developers run locally via `make ci`.
+    container: haskell:9.12.2
+    env:
+      # The stock image doesn't pin CABAL_DIR, and cabal 3.10+ derives an
+      # XDG store path from HOME (which GitHub sets to /github/home for
+      # container jobs). Pin it to one absolute path so the store location
+      # is deterministic and cacheable regardless of HOME.
+      CABAL_DIR: /root/.cabal
     steps:
       - uses: actions/checkout@v6
 
-      - uses: haskell-actions/setup@v2
-        with:
-          ghc-version: "9.12.2"
-          cabal-version: "3.16.1.0"
+      - name: Toolchain versions
+        run: |
+          ghc --version
+          cabal --version
 
+      # Only the project's dependencies and build products are cached; the
+      # compiler lives in the image, so it is never cached or rebuilt. The
+      # key is scoped to the GHC version and the package/project files, so
+      # a dependency change rotates the key while restore-keys still seeds
+      # the build from the newest prior entry.
       - uses: actions/cache@v5
         with:
           path: |
-            ~/.cabal/store
+            /root/.cabal/store
             dist-newstyle
-          key: cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-${{ hashFiles('kanban.cabal', 'cabal.project') }}
+          key: cabal-${{ runner.os }}-ghc-9.12.2-${{ hashFiles('kanban.cabal', 'cabal.project') }}
           restore-keys: |
-            cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-
+            cabal-${{ runner.os }}-ghc-9.12.2-
 
       - name: Check package metadata
         run: cabal check
@@ -45,6 +61,16 @@ jobs:
 
       - name: Haskell tests
         run: cabal test all --test-show-details=direct
+
+  drainer-tests:
+    # Runs on the plain runner (python3 preinstalled) rather than inside
+    # the Haskell container, and in parallel with build-test. The suite
+    # uses temporary repositories and fake command-line tools and mocks
+    # the platform, so it is portable to Linux.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
 
       - name: PR drainer tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
