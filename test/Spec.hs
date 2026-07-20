@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Brick (BrickEvent (..), Location (..))
 import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, SomeException, bracket, finally, try, uninterruptibleMask_)
 import Control.Monad (void)
@@ -14,6 +15,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
+import qualified Graphics.Vty as Vty
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
@@ -103,6 +105,8 @@ import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLo
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
 import Kanban.UI
   ( ChatTranscript (..),
+    Name (..),
+    OverlayMouseAction (..),
     PendingReviewInteraction (..),
     PullRequestReviewSession (..),
     ReviewCancelAction (..),
@@ -113,6 +117,7 @@ import Kanban.UI
     canonicalReviewCompletionSuperseded,
     failureActivity,
     orphanMessage,
+    overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
     resolveReviewCancelAction,
@@ -2543,6 +2548,44 @@ main = hspec $ do
 
     it "keeps reusing an interrupted session while its kill is still in flight" $
       reviewSessionReusable ReviewInterrupted InitialReview InitialReview True `shouldBe` True
+
+  describe "overlay mouse dispatch" $ do
+    let backgroundCard = CardTarget Issues 0
+        zeroLoc = Location (0, 0)
+        rawWheel button = VtyEvent (Vty.EvMouseDown 0 0 button [])
+        overlays =
+          [ ("review overlay", ReviewPanel, ReviewViewport),
+            ("solve overlay", SolvePanel, SolveViewport),
+            ("pull request review overlay", PullRequestReviewPanel, PullRequestReviewViewport),
+            ("details overlay", DetailsPanel, DetailsViewport)
+          ]
+
+    mapM_
+      ( \(label, panel, viewport) -> describe label $ do
+          it "scrolls, without closing, when the wheel lands on a background clickable" $ do
+            overlayMouseAction panel (MouseDown backgroundCard Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
+            overlayMouseAction panel (MouseDown backgroundCard Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
+
+          it "scrolls on a raw Vty wheel event that carries no Brick name at all" $ do
+            overlayMouseAction panel (rawWheel Vty.BScrollUp) `shouldBe` Just (OverlayMouseScroll (-3))
+            overlayMouseAction panel (rawWheel Vty.BScrollDown) `shouldBe` Just (OverlayMouseScroll 3)
+
+          it "scrolls when the wheel lands on the overlay's own viewport or panel" $ do
+            overlayMouseAction panel (MouseDown viewport Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
+            overlayMouseAction panel (MouseDown viewport Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
+            overlayMouseAction panel (MouseDown panel Vty.BScrollUp [] zeroLoc) `shouldBe` Just (OverlayMouseScroll (-3))
+            overlayMouseAction panel (MouseDown panel Vty.BScrollDown [] zeroLoc) `shouldBe` Just (OverlayMouseScroll 3)
+
+          it "closes on an outside click, left or right, named or raw" $ do
+            overlayMouseAction panel (MouseDown backgroundCard Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction panel (MouseDown backgroundCard Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction panel (rawWheel Vty.BLeft) `shouldBe` Just OverlayMouseClose
+
+          it "closes the panel on a right click but leaves a left click on the panel inert" $ do
+            overlayMouseAction panel (MouseDown panel Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
+            overlayMouseAction panel (MouseDown panel Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseNoOp
+       )
+       overlays
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $
