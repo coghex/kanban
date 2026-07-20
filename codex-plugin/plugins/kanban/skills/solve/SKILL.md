@@ -24,7 +24,7 @@ Take one issue through a tested pull request. Stop after opening the PR; review 
 
    If `$BACKEND` does not exist, stop and report: "Canonical issue reviewer was not found at $BACKEND. Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
 
-   Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and report the reasons. Direct a canonical `CHANGES_REQUESTED` issue through `$issue-rereview <issue>`; direct an issue with no canonical review through `$issue-review <issue>`. Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
+   Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and stop with exactly one line: `KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.` Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
 3. Claim it before doing any work:
 
    ```bash

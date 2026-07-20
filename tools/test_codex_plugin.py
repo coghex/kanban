@@ -214,6 +214,21 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
 
 
+class SolveGateEscalationTests(unittest.TestCase):
+    """solve must escalate with the exact terminal line Kanban's own
+    invocation prompt uses (src/Kanban/Solve.hs), not a paraphrase, so
+    Kanban's KANBAN_NEEDS_INPUT handling recognizes it."""
+
+    ESCALATION_TEXT = "KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."
+
+    def test_escalation_text_matches_solve_hs_verbatim(self):
+        solve_hs_source = SOLVE_HS.read_text(encoding="utf-8")
+        self.assertIn(self.ESCALATION_TEXT, solve_hs_source)
+
+        solve_skill_source = (SKILLS_ROOT / "solve" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(self.ESCALATION_TEXT, solve_skill_source)
+
+
 class ReviewCoordinatorSelfTestTests(unittest.TestCase):
     def test_review_pr_self_test_passes_standalone(self):
         proc = subprocess.run(

@@ -208,12 +208,17 @@ commands need.
 
 ## 4. Dependency manifest
 
-Machine-readable; parsed verbatim by `tools/test_agent_workflow_contract.py`.
+Machine-readable; parsed verbatim by `tools/test_agent_workflow_contract.py`,
+which also reconciles this manifest against the tracked Codex plugin's own
+bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) in addition
+to the Haskell invocation surface — a command a packaged workflow shells out
+to is as undocumented-if-missing as one Kanban's own Haskell code spawns.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
-- `kind`: `executable` (a literal command Kanban's Haskell source spawns or
-  resolves) or `personal-path` (a home-relative path Kanban's Haskell source
-  builds or depends on).
+- `kind`: `executable` (a literal command Kanban's Haskell source or the
+  tracked Codex plugin's packaged workflows spawn or resolve) or
+  `personal-path` (a home-relative path Kanban's Haskell source builds or
+  depends on).
 - `token`: the exact literal string the check searches for.
 - `files`: `;`-separated repository-relative paths where the token is
   expected to appear (empty when nothing in this repository references it).
@@ -235,7 +240,14 @@ ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs | kanban | supported | no
 drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
 ```
+
+`find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
+the installed Codex plugin's shared review coordinator from `$pr-review`,
+`$pr-rereview`, and `$pr-revise`, themselves optional AI actions, and every
+supported macOS/Linux shell already provides both.
 
 ## 5. Portable-install policy
 
@@ -278,6 +290,10 @@ runs) parses the manifest in §4 and:
   `Codex.hs`, `Claude.hs`, `GitHub.hs`, `Repository.hs`, `Drainer.hs`,
   `Process.hs`) invoke a literal external command that has no matching
   `executable` manifest entry;
+- fails if any of the tracked Codex plugin's packaged `SKILL.md` files
+  (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) invoke a command, inside
+  a fenced ```` ```bash ```` block, that has no matching `executable`
+  manifest entry;
 - fails if those same files build a home-relative path segment that has no
   matching `personal-path` manifest entry;
 - fails if a manifest entry's declared `files` no longer contain its token,
