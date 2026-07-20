@@ -13,6 +13,7 @@ module Kanban.Process
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
+    interruptThenKillManagedProcess,
     killManagedProcess,
     killVerifiedGroup,
     killVerifiedGroupWith,
@@ -284,6 +285,18 @@ isZombieStat = Text.isInfixOf "Z"
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle) = signalOwnedGroup sigINT processHandle
 interruptManagedProcess (PersistentManagedProcess processId) = ignoreIOException (signalProcessGroup sigINT processId)
+
+-- | Ctrl-C's escalation for a still-owned process: SIGINT first, then fall
+-- back to 'killManagedProcess's bounded TERM/KILL escalation only if the
+-- process is still alive after the grace window. 'killManagedProcess'
+-- already no-ops once a local process has exited and safely ignores an
+-- absent persistent group (ESRCH), so no separate liveness check is needed
+-- here before falling back to it.
+interruptThenKillManagedProcess :: ManagedProcess -> IO ()
+interruptThenKillManagedProcess process = do
+  interruptManagedProcess process
+  threadDelay terminationGraceMicros
+  killManagedProcess process
 
 killManagedProcess :: ManagedProcess -> IO ()
 killManagedProcess (LocalManagedProcess processHandle) = do

@@ -113,17 +113,22 @@ import Kanban.UI
     ProcessClickOutcome (..),
     ProcessSelection (..),
     PullRequestReviewSession (..),
+    ReviewCancelAction (..),
     ReviewDigitAction (..),
+    ReviewPhase (..),
     SolvePhase (..),
     SolveSession (..),
+    canonicalReviewCompletionSuperseded,
     failureActivity,
     orphanMessage,
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
+    reviewSessionReusable,
     solveSessionAlreadyResolved,
   )
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
@@ -2489,6 +2494,70 @@ main = hspec $ do
     it "appends digits when nothing is pending" $
       resolveReviewDigitAction Nothing 4 `shouldBe` ReviewDigitAppend
 
+  describe "review overlay Ctrl-C cancel dispatch" $ do
+    -- issue #31: canonical review stages (InitialReview/IssueRereview) have
+    -- no app-server thread/turn, so the pre-existing app-server-only
+    -- dispatch reported "no active turn to cancel" even while their
+    -- ManagedProcess was still running. 'resolveReviewCancelAction' is the
+    -- pure routing extracted from 'cancelReviewSession' so each branch is
+    -- unconditionally covered without an 'EventM' harness.
+    it "routes a ready app-server turn to the interrupt-turn action, unchanged" $ do
+      resolveReviewCancelAction True (Just "thread-1") (Just "turn-1") IssueRevision ReviewRunning False
+        `shouldBe` ReviewCancelInterruptTurn "thread-1" "turn-1"
+      resolveReviewCancelAction False Nothing Nothing IssueRevision ReviewStarting False
+        `shouldBe` ReviewCancelNoActiveTurn
+
+    it "routes a live canonical process to the interrupt-process action" $ do
+      resolveReviewCancelAction False Nothing Nothing InitialReview ReviewRunning True
+        `shouldBe` ReviewCancelInterruptProcess
+      resolveReviewCancelAction False Nothing Nothing IssueRereview ReviewRunning True
+        `shouldBe` ReviewCancelInterruptProcess
+
+    it "gives a truthful notice for a canonical stage with no live process" $ do
+      resolveReviewCancelAction False Nothing Nothing InitialReview ReviewFinished False
+        `shouldBe` ReviewCancelNotRunning
+      resolveReviewCancelAction False Nothing Nothing InitialReview ReviewInterrupted False
+        `shouldBe` ReviewCancelNotRunning
+      resolveReviewCancelAction False Nothing Nothing InitialReview ReviewStarting False
+        `shouldBe` ReviewCancelStillStarting
+
+  describe "canonical review completion vs. cancellation" $ do
+    -- issue #31 spec addition: a canonical process's completion event can
+    -- arrive after the user already Ctrl-C'd the session; that late
+    -- completion must not overwrite the ReviewInterrupted terminal phase.
+    it "supersedes a late completion only once the session has been interrupted" $ do
+      canonicalReviewCompletionSuperseded ReviewInterrupted `shouldBe` True
+      mapM_
+        (\phase -> canonicalReviewCompletionSuperseded phase `shouldBe` False)
+        [ReviewStarting, ReviewRunning, ReviewWaiting, ReviewFinished, ReviewNeedsChanges, ReviewFailed]
+
+  describe "review session same-stage retry eligibility" $ do
+    -- issue #31 spec addition: after a canonical stage is interrupted, 'r'
+    -- must launch a fresh label-derived stage rather than reopen the
+    -- cancelled session -- but only once the prior invocation's process has
+    -- actually finished, so a fresh launch never races its still-pending
+    -- completion event.
+    it "reuses a live session regardless of stage" $ do
+      mapM_
+        (\phase -> reviewSessionReusable phase InitialReview InitialReview False `shouldBe` True)
+        [ReviewStarting, ReviewRunning, ReviewWaiting]
+      reviewSessionReusable ReviewRunning InitialReview IssueRereview False `shouldBe` True
+
+    it "reuses a finished session whose recorded stage still matches what labels request" $
+      reviewSessionReusable ReviewFinished InitialReview InitialReview False `shouldBe` True
+
+    it "does not reuse a finished session once labels request a different stage" $
+      reviewSessionReusable ReviewNeedsChanges InitialReview IssueRereview False `shouldBe` False
+
+    it "forces a fresh launch for an interrupted canonical stage once its process is gone" $
+      reviewSessionReusable ReviewInterrupted InitialReview InitialReview False `shouldBe` False
+
+    it "keeps reusing an interrupted session while its kill is still in flight" $
+      reviewSessionReusable ReviewInterrupted InitialReview InitialReview True `shouldBe` True
+
+    it "reuses an interrupted app-server revision when its stage is unchanged" $
+      reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False `shouldBe` True
+
   describe "processes overlay selection resolution" $ do
     let sessionEntry ref =
           AgentSessionEntry
@@ -2575,8 +2644,8 @@ main = hspec $ do
           it "closes the panel on a right click but leaves a left click on the panel inert" $ do
             overlayMouseAction panel (MouseDown panel Vty.BRight [] zeroLoc) `shouldBe` Just OverlayMouseClose
             overlayMouseAction panel (MouseDown panel Vty.BLeft [] zeroLoc) `shouldBe` Just OverlayMouseNoOp
-      )
-      overlays
+       )
+       overlays
 
   describe "repository identity parsing" $ do
     it "parses an HTTPS GitHub remote" $

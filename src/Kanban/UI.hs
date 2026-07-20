@@ -8,17 +8,22 @@ module Kanban.UI
     ProcessClickOutcome (..),
     ProcessSelection (..),
     PullRequestReviewSession (..),
+    ReviewCancelAction (..),
     ReviewDigitAction (..),
+    ReviewPhase (..),
     SolvePhase (..),
     SolveSession (..),
+    canonicalReviewCompletionSuperseded,
     failureActivity,
     orphanMessage,
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
+    reviewSessionReusable,
     runDashboard,
     solveSessionAlreadyResolved,
   )
@@ -67,7 +72,7 @@ import Kanban.Drainer
   )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
-import Kanban.Process (ManagedProcess, interruptManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
+import Kanban.Process (ManagedProcess, interruptManagedProcess, interruptThenKillManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -2319,19 +2324,73 @@ scheduleReviewForIssue issueNumber = do
     Just threadId -> scheduleReviewTick threadId
     Nothing -> pure ()
 
+-- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
+-- session's connection/process state rather than inline in
+-- 'cancelReviewSession' so the routing between the app-server interrupt
+-- path (the only resumable turn) and a canonical stage's process
+-- interrupt/kill escalation is unit-testable without an 'EventM' harness.
+data ReviewCancelAction
+  = ReviewCancelInterruptTurn Text Text
+  | ReviewCancelInterruptProcess
+  | ReviewCancelStillStarting
+  | ReviewCancelNotRunning
+  | ReviewCancelNoActiveTurn
+  deriving stock (Eq, Show)
+
+resolveReviewCancelAction :: Bool -> Maybe Text -> Maybe Text -> ReviewStage -> ReviewPhase -> Bool -> ReviewCancelAction
+resolveReviewCancelAction backendReady threadId turnId stage phase hasCanonicalProcess
+  | backendReady, Just thread <- threadId, Just turn <- turnId = ReviewCancelInterruptTurn thread turn
+  | hasCanonicalProcess = ReviewCancelInterruptProcess
+  | stage /= IssueRevision, phase == ReviewStarting = ReviewCancelStillStarting
+  | stage /= IssueRevision = ReviewCancelNotRunning
+  | otherwise = ReviewCancelNoActiveTurn
+
 cancelReviewSession :: Int -> EventM Name AppState ()
 cancelReviewSession issueNumber = do
   state <- get
   case Map.lookup issueNumber state.appReviewSessions of
-    Just session -> case (state.appReviewBackend, session.reviewSessionThreadId, session.reviewSessionTurnId) of
-      (ReviewBackendReady client, Just threadId, Just turnId) -> do
-        void . liftIO . forkIO $ killReviewTools client threadId
-        result <- liftIO (interruptReview client threadId turnId)
-        case result of
-          Left message -> setNotice message
-          Right () -> setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
-      _ -> setNotice "This review has no active turn to cancel"
     Nothing -> setNotice "Review session is no longer available"
+    Just session -> do
+      let backendReady = case state.appReviewBackend of
+            ReviewBackendReady _ -> True
+            _ -> False
+          hasCanonicalProcess = Map.member issueNumber state.appCanonicalReviewProcesses
+      case resolveReviewCancelAction backendReady session.reviewSessionThreadId session.reviewSessionTurnId session.reviewSessionStage session.reviewSessionPhase hasCanonicalProcess of
+        ReviewCancelInterruptTurn threadId turnId -> case state.appReviewBackend of
+          ReviewBackendReady client -> do
+            void . liftIO . forkIO $ killReviewTools client threadId
+            result <- liftIO (interruptReview client threadId turnId)
+            case result of
+              Left message -> setNotice message
+              Right () -> setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
+          _ -> setNotice "This review has no active turn to cancel"
+        ReviewCancelInterruptProcess -> cancelCanonicalReviewProcess issueNumber (Map.lookup issueNumber state.appCanonicalReviewProcesses)
+        ReviewCancelStillStarting -> setNotice ("Issue review #" <> showText issueNumber <> " is still starting; try Ctrl-C again once it is running")
+        ReviewCancelNotRunning -> setNotice ("Issue review #" <> showText issueNumber <> " is not running")
+        ReviewCancelNoActiveTurn -> setNotice "This review has no active turn to cancel"
+
+-- | Interrupts a canonical review stage's live subprocess. Canonical stages
+-- are not resumable turns, so unlike the app-server path this lands the
+-- session in the 'ReviewInterrupted' terminal phase immediately (preserving
+-- the transcript) rather than waiting on a protocol event, and the notice
+-- says a fresh stage restarts rather than promising "type guidance".
+-- 'appCanonicalReviewProcesses' keeps its entry until
+-- 'applyCanonicalIssueReview' observes the process's actual completion, so
+-- quit protection and same-stage retry both stay accurate while the kill is
+-- still in flight.
+cancelCanonicalReviewProcess :: Int -> Maybe ManagedProcess -> EventM Name AppState ()
+cancelCanonicalReviewProcess issueNumber Nothing = setNotice ("Issue review #" <> showText issueNumber <> " is not running")
+cancelCanonicalReviewProcess issueNumber (Just process) = do
+  modifyReviewSession issueNumber
+    ( \session ->
+        session
+          { reviewSessionPhase = ReviewInterrupted,
+            reviewSessionActivity = "interrupted",
+            reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[interrupted by user]\n"
+          }
+    )
+  void . liftIO . forkIO $ interruptThenKillManagedProcess process
+  setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
 
 cycleReviewSession :: Int -> EventM Name AppState ()
 cycleReviewSession currentIssue = modify $ \state ->
@@ -3211,7 +3270,7 @@ startIssueReview issue = do
   let requestedStage = issueReviewStage issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
-      | reviewSessionActive session || session.reviewSessionStage == requestedStage ->
+      | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) ->
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
     _ -> do
       let session = newReviewSession issue requestedStage
@@ -3233,8 +3292,30 @@ startIssueReview issue = do
             ReviewBackendFailed _ -> startReviewBackend
         else launchCanonicalIssueReview issue.issueNumber requestedStage
 
+reviewPhaseActive :: ReviewPhase -> Bool
+reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
+
 reviewSessionActive :: ReviewSession -> Bool
-reviewSessionActive session = session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
+reviewSessionActive session = reviewPhaseActive session.reviewSessionPhase
+
+-- | Whether pressing 'r' should just reopen an existing review session
+-- rather than launch a fresh label-derived stage. A live turn is always
+-- reused, as is a finished/failed session whose recorded stage still
+-- matches what the labels currently request. A cancelled canonical stage
+-- ('ReviewInterrupted') is the exception: once its process has actually
+-- finished (no live entry in 'appCanonicalReviewProcesses' remains), 'r'
+-- must launch a genuinely fresh stage even though the stage is unchanged,
+-- rather than reopen the stale interrupted overlay -- but while that kill
+-- is still in flight, reusing the existing session avoids racing a second
+-- process launch against the first invocation's still-pending completion.
+-- An interrupted app-server revision remains resumable, so it follows the
+-- ordinary same-stage reuse rule instead.
+reviewSessionReusable :: ReviewPhase -> ReviewStage -> ReviewStage -> Bool -> Bool
+reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
+  | phase == ReviewInterrupted, sessionStage /= IssueRevision = hasLiveCanonicalProcess
+  | reviewPhaseActive phase = True
+  | sessionStage == requestedStage = True
+  | otherwise = False
 
 issueReviewStage :: Issue -> ReviewStage
 issueReviewStage issue = reviewStageForLabels (map (.labelName) issue.issueLabels)
@@ -3262,19 +3343,30 @@ launchCanonicalIssueReview issueNumber stage = do
     result <- runCanonicalIssueReview state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
+-- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded
+-- rather than applied: the session was already moved to 'ReviewInterrupted'
+-- by a user Ctrl-C, so a late completion from that now-dead invocation must
+-- not clobber the terminal state and its restart-oriented notice with the
+-- generic failure/result transition below.
+canonicalReviewCompletionSuperseded :: ReviewPhase -> Bool
+canonicalReviewCompletionSuperseded phase = phase == ReviewInterrupted
+
 applyCanonicalIssueReview :: Int -> ReviewStage -> Either Text CanonicalIssueReviewResult -> EventM Name AppState ()
 applyCanonicalIssueReview issueNumber stage result = do
   modify (\current -> current {appCanonicalReviewProcesses = Map.delete issueNumber current.appCanonicalReviewProcesses})
-  modifyReviewSession issueNumber $ \session -> case result of
-    Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = "failed", reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
-    Right canonicalResult ->
-      session
-        { reviewSessionPhase = if canonicalResult.canonicalReviewApproved then ReviewFinished else ReviewNeedsChanges,
-          reviewSessionActivity = if canonicalResult.canonicalReviewApproved then "approved" else "changes requested",
-          reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> renderCanonicalIssueReviewResult stage canonicalResult)
-        }
-  startBoardRefresh
-  setNotice (case result of Left message -> "Canonical issue review failed: " <> sanitizeText message; Right _ -> stageActivity stage <> " completed with issue-review:v2 state")
+  state <- get
+  let superseded = maybe False (canonicalReviewCompletionSuperseded . (.reviewSessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
+  unless superseded $ do
+    modifyReviewSession issueNumber $ \session -> case result of
+      Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = "failed", reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
+      Right canonicalResult ->
+        session
+          { reviewSessionPhase = if canonicalResult.canonicalReviewApproved then ReviewFinished else ReviewNeedsChanges,
+            reviewSessionActivity = if canonicalResult.canonicalReviewApproved then "approved" else "changes requested",
+            reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> renderCanonicalIssueReviewResult stage canonicalResult)
+          }
+    startBoardRefresh
+    setNotice (case result of Left message -> "Canonical issue review failed: " <> sanitizeText message; Right _ -> stageActivity stage <> " completed with issue-review:v2 state")
   where
     stageActivity InitialReview = "Issue review"
     stageActivity IssueRereview = "Issue rereview"

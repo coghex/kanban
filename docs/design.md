@@ -214,7 +214,7 @@ Initial bindings:
 | `s` | Open settings, including chat-output verbosity |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
-| `Ctrl-C` | Interrupt the current turn in an open live-agent overlay, then accept user guidance for a resumable session |
+| `Ctrl-C` | Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r` |
 | `q` | Quit and restore the terminal |
 
 Refresh keys are ignored for a provider that already has a request in flight.
