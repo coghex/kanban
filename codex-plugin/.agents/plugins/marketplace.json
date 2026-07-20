@@ -1,0 +1,12 @@
+{
+  "name": "kanban",
+  "plugins": [
+    {
+      "name": "kanban",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kanban"
+      }
+    }
+  ]
+}

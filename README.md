@@ -14,9 +14,17 @@ It can also show Codex and Claude usage, run reviews, start work on issues, and 
 
 Having Codex or Claude installed and signed in is necessary but not
 sufficient for AI actions: canonical issue review (the `r` key) also needs
-`tools/install_issue_review.py` run once to install its backend, and the
-named `solve`/`pr-review`/`pr-rereview`/`pr-revise` commands are Kanban-owned
-workflow assets not yet packaged for a fresh checkout. See
+`tools/install_issue_review.py` run once to install its backend. The named
+`solve`/`pr-review`/`pr-rereview`/`pr-revise` commands are Kanban-owned
+workflow assets; for Codex, install them once per checkout from
+[codex-plugin/](codex-plugin/README.md):
+
+```console
+codex plugin marketplace add ./codex-plugin
+codex plugin add kanban@kanban
+```
+
+The equivalent Claude packaging is not implemented yet. See
 [the agent-workflow contract](docs/agent-workflow-contract.md) for the full
 dependency list and what each action requires.
 
