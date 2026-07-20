@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1313,6 +1314,193 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
 
 
+def _git_dir(ctx: RepoContext) -> Path:
+    # Not ctx.path / ".git": for a linked worktree that's a gitdir *file*
+    # (a pointer to .git/worktrees/<name>), not a directory, so mkdtemp()
+    # under it would fail outright. This resolves the real one either way.
+    proc = run(["git", "rev-parse", "--absolute-git-dir"], cwd=ctx.path, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(f"Could not resolve the git directory for {ctx.path}:\n{detail}")
+    return Path((proc.stdout or "").strip())
+
+
+def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None:
+    # Physically moved aside (never staged, stashed, or otherwise recorded in
+    # any git ref) so a concurrent `git stash` in another terminal has
+    # nothing of ours to collide with.
+    proc = run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(f"Could not list untracked files ahead of a temporary stash:\n{detail}")
+    paths = [p for p in (proc.stdout or "").split("\0") if p]
+    if not paths:
+        return None
+    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(_git_dir(ctx))))
+    moved: list[str] = []
+    try:
+        for rel in paths:
+            dst = holding / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            (ctx.path / rel).rename(dst)
+            moved.append(rel)
+    except OSError as exc:
+        for rel in moved:
+            (holding / rel).rename(ctx.path / rel)
+        raise DrainError(f"Could not set aside untracked files ahead of a temporary stash: {exc}")
+    return holding, paths
+
+
+def _has_unsafe_parent(root: Path, dst: Path) -> bool:
+    # A symlinked (or otherwise non-directory) parent component that the
+    # fast-forward just checked out would redirect mkdir()/rename() outside
+    # the worktree entirely -- not just the final path needs checking, any
+    # component between root and dst's parent could be the culprit.
+    current = root
+    for part in dst.relative_to(root).parts[:-1]:
+        current = current / part
+        if os.path.islink(current):
+            return True
+        if current.exists() and not current.is_dir():
+            return True
+    return False
+
+
+def _restore_untracked_files(ctx: RepoContext, holding: Path, paths: list[str]) -> list[str]:
+    failures = []
+    for rel in paths:
+        dst = ctx.path / rel
+        # lexists(), not exists(): a dangling symlink the fast-forward just
+        # checked out is a real collision too, but exists() follows it and
+        # reports False, which would let rename() replace the symlink itself.
+        if os.path.lexists(dst):
+            # The fast-forward checked out something new at this path (e.g.
+            # upstream added a tracked file/dir here); renaming over it would
+            # silently destroy that content, so leave our copy in `holding`
+            # for manual reconciliation instead.
+            failures.append(f"{rel} (a path now exists there; left under {holding})")
+            continue
+        if _has_unsafe_parent(ctx.path, dst):
+            failures.append(
+                f"{rel} (a parent directory is now a symlink or non-directory; "
+                f"left under {holding})"
+            )
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            (holding / rel).rename(dst)
+        except OSError as exc:
+            failures.append(f"{rel} ({exc}; left under {holding})")
+    if not failures:
+        try:
+            shutil.rmtree(holding)
+        except OSError:
+            pass
+    return failures
+
+
+def _snapshot_anchor_ref(tracked_sha: str) -> str:
+    return f"refs/drain-prs/autostash/{tracked_sha}"
+
+
+def _anchor_snapshot(ctx: RepoContext, tracked_sha: str) -> str:
+    # `git stash create` returns a commit reachable from no ref at all. If
+    # the process died right after this -- before `reset --hard` even runs,
+    # let alone before restoration -- that commit would be the *only* copy
+    # of the user's changes, and eligible for gc. Anchor it under a private
+    # ref immediately, before doing anything destructive to the worktree.
+    ref_name = _snapshot_anchor_ref(tracked_sha)
+    run(["git", "update-ref", ref_name, tracked_sha], cwd=ctx.path)
+    return ref_name
+
+
+def _release_snapshot_anchor(ctx: RepoContext, ref_name: str) -> None:
+    run(["git", "update-ref", "-d", ref_name], cwd=ctx.path, check=False)
+
+
+def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:
+    # May already be anchored under refs/drain-prs/autostash/<sha> from
+    # earlier in the flow, or may not be (e.g. anchoring itself is what
+    # failed) -- (re)creating it here is idempotent either way. Also try to
+    # surface it through the more familiar `git stash list`, and say plainly
+    # where it actually landed rather than assuming success.
+    store_proc = run(
+        ["git", "stash", "store", "-m", message, tracked_sha],
+        cwd=ctx.path,
+        check=False,
+    )
+    if store_proc.returncode == 0:
+        return "The snapshotted changes were recovered into `git stash list` for manual resolution."
+    ref_name = _snapshot_anchor_ref(tracked_sha)
+    ref_proc = run(["git", "update-ref", ref_name, tracked_sha], cwd=ctx.path, check=False)
+    if ref_proc.returncode == 0:
+        return (
+            "The snapshotted changes could not be added to `git stash list`, but are "
+            f"preserved at `{ref_name}`; restore with `git stash apply --index {tracked_sha}`."
+        )
+    return (
+        "The snapshotted changes could NOT be preserved under any ref and may be "
+        f"garbage-collected; restore them immediately with `git stash apply --index {tracked_sha}`."
+    )
+
+
+def _snapshot_tracked_changes(ctx: RepoContext, message: str) -> str | None:
+    # `git stash create` snapshots the index/working-tree diff into a
+    # floating commit without touching the shared refs/stash reflog at all,
+    # so there is no shared position for a concurrent stash to disturb.
+    proc = run(["git", "stash", "create", message], cwd=ctx.path, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(detail)
+    return (proc.stdout or "").strip() or None
+
+
+def _restore_snapshot(
+    ctx: RepoContext,
+    tracked_sha: str | None,
+    untracked: tuple[Path, list[str]] | None,
+    anchor_ref: str | None,
+) -> None:
+    problems = []
+    if tracked_sha is not None:
+        apply_proc = run(
+            ["git", "stash", "apply", "--index", tracked_sha],
+            cwd=ctx.path,
+            check=False,
+        )
+        if apply_proc.returncode != 0:
+            detail = (apply_proc.stderr or apply_proc.stdout or "").strip()
+            where = _preserve_unreachable_snapshot(
+                ctx, tracked_sha, f"drain-prs-autostash-recovery {tracked_sha}"
+            )
+            problems.append(
+                f"tracked changes (commit {tracked_sha}) could not be reapplied"
+                + (f": {detail}" if detail else "")
+                + f"; {where}"
+            )
+        elif anchor_ref is not None:
+            # Changes are safely back in the working tree; the anchor was
+            # only ever needed to survive a crash before this point.
+            _release_snapshot_anchor(ctx, anchor_ref)
+    if untracked is not None:
+        holding, paths = untracked
+        failures = _restore_untracked_files(ctx, holding, paths)
+        if failures:
+            problems.append(
+                f"untracked files could not be restored and remain at {holding}: "
+                + ", ".join(failures)
+            )
+    if problems:
+        raise DrainError(
+            "Fast-forward succeeded, but restoring local changes failed:\n- "
+            + "\n- ".join(problems)
+        )
+
+
 def fast_forward_default_branch(
     ctx: RepoContext,
     *,
@@ -1333,36 +1521,41 @@ def fast_forward_default_branch(
     try:
         try_ff()
         return
-    except DrainError:
-        stash_name = f"drain-prs-autostash-{int(time.time())}"
-        stash_proc = run(
-            [
-                "git",
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                stash_name,
-            ],
-            cwd=ctx.path,
-            check=False,
-        )
-        stashed = "No local changes to save" not in (stash_proc.stdout or "")
-        if not stashed:
+    except DrainError as ff_exc:
+        message = f"drain-prs-autostash-{int(time.time())}-{os.getpid()}"
+        untracked = None
+        tracked_sha = None
+        anchor_ref = None
+        try:
+            untracked = _relocate_untracked_files(ctx)
+            tracked_sha = _snapshot_tracked_changes(ctx, message)
+            if tracked_sha is not None:
+                # Anchor before doing anything destructive: once
+                # `reset --hard` runs, this floating commit is the only
+                # copy of the user's changes until restoration completes.
+                anchor_ref = _anchor_snapshot(ctx, tracked_sha)
+                run(["git", "reset", "--hard", "HEAD"], cwd=ctx.path)
+        except DrainError as prep_exc:
+            if untracked is not None:
+                _restore_untracked_files(ctx, *untracked)
+            recovery_note = ""
+            if tracked_sha is not None:
+                recovery_note = " " + _preserve_unreachable_snapshot(ctx, tracked_sha, message)
+            raise DrainError(
+                "Local changes blocked fast-forward, and preparing a temporary "
+                f"snapshot of them failed; aborting.\n{prep_exc}{recovery_note}"
+            ) from ff_exc
+
+        if tracked_sha is None and untracked is None:
             raise
+
         log("Local changes blocked fast-forward; stashed them temporarily")
         try:
             try_ff()
         except DrainError:
             raise
         finally:
-            try:
-                run(["git", "stash", "pop"], cwd=ctx.path)
-            except DrainError as exc:
-                raise DrainError(
-                    "Fast-forward succeeded, but restoring stashed local changes failed.\n"
-                    "Your changes remain in the stash; inspect `git stash list`."
-                ) from exc
+            _restore_snapshot(ctx, tracked_sha, untracked, anchor_ref)
 
 
 def cleanup_after_merge(
