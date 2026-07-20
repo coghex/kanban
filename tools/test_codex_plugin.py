@@ -480,6 +480,72 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
                 readme.write_text("overwritten")
             module.make_tree_writable(destination)  # so the TemporaryDirectory can clean up
 
+    def test_workflow_gives_dual_reviewers_unrelated_non_sibling_source_roots(self):
+        # End-to-end regression for the round-6 finding: dual-review sources
+        # must not be predictably-named siblings under one shared writable
+        # parent (e.g. temp/codex, temp/claude), which either concurrently
+        # running reviewer could traverse into via `..`. Uses the real
+        # extract_source/tempfile.mkdtemp path against this actual repo;
+        # only GitHub calls and the reviewer subprocess spawns are mocked.
+        module = load_review_pr_module()
+        pr = {
+            "number": 89,
+            "url": "https://github.com/coghex/kanban/pull/89",
+            "state": "OPEN",
+            "headRefOid": "a" * 40,
+            "body": "no origin marker here",  # forces the dual/unknown route
+            "isCrossRepository": False,
+            "labels": [],
+            "closingIssuesReferences": [],
+        }
+        gate = {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": "k1"}
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        pr["headRefOid"] = head
+
+        captured_sources = {}
+
+        def fake_run_reviews(reviewers, context, sources, rereview):
+            captured_sources.update(sources)
+            return [
+                {"reviewer": item.key, "display_name": item.display_name, "verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}
+                for item in reviewers
+            ]
+
+        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            module, "pr_view", return_value=pr
+        ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
+            module, "collect_context", return_value={}
+        ), mock.patch.object(
+            module, "run_reviews", side_effect=fake_run_reviews
+        ), mock.patch.object(
+            module, "render_review", return_value=("APPROVE", "APPROVE\n\nok\n")
+        ), mock.patch.object(
+            module, "require_current_review_state", return_value=gate
+        ), mock.patch.object(
+            module, "post_comment", return_value="https://github.com/coghex/kanban/pull/89#issuecomment-1"
+        ), mock.patch.object(module, "set_verdict_label"), mock.patch.object(
+            module, "verify_publication", return_value={"comment_url": "url", "labels": ["reviewed:approve"]}
+        ):
+            module.workflow(REPO_ROOT, 89, rereview=False, dry_run=False, allow_no_issue=False)
+
+        self.assertEqual(set(captured_sources), {"codex", "claude"})
+        codex_source, claude_source = captured_sources["codex"], captured_sources["claude"]
+        self.assertNotEqual(codex_source, claude_source)
+        # Both necessarily share the OS temp root as a distant ancestor
+        # (unavoidable with tempfile), but neither may be a predictably-
+        # named, directly-created subdirectory of the other — the actual
+        # gap this test guards: a sibling `../claude` next to `../codex`
+        # under one parent this coordinator itself made writable.
+        self.assertNotIn(claude_source, codex_source.parents, "claude's source must not be an ancestor directory of codex's")
+        self.assertNotIn(codex_source, claude_source.parents, "codex's source must not be an ancestor directory of claude's")
+        self.assertNotIn(codex_source.name, {"codex", "claude"}, "source directory names must not be predictable")
+        self.assertNotIn(claude_source.name, {"codex", "claude"}, "source directory names must not be predictable")
+        # workflow() must have cleaned both up on the way out.
+        self.assertFalse(codex_source.exists())
+        self.assertFalse(claude_source.exists())
+
 
 COORDINATOR_LOOKUP = (
     'find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '

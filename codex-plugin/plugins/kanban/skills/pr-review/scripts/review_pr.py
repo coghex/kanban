@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -69,10 +70,11 @@ class Reviewer:
     display_name: str
 
 
-# Brand identity only: this coordinator does not pin, and cannot verify,
-# which specific model actually runs the nested reviewer it spawns (see
-# invoke_codex/invoke_claude). Which executable runs — codex or claude — is
-# the one thing it does control and publish as fact.
+# Brand identity only, per docs/agent-workflow-contract.md §2.2's
+# "Cross-brand handoff model policy": this coordinator does not pin, and
+# cannot verify, which specific model actually runs the nested reviewer it
+# spawns (see invoke_codex/invoke_claude). Which executable runs — codex or
+# claude — is the one thing it does control and publish as fact.
 CODEX_REVIEWER = Reviewer("codex", "Codex")
 CLAUDE_REVIEWER = Reviewer("claude", "Claude")
 
@@ -801,17 +803,24 @@ def workflow(
         return 0, {**base, "status": "ready", "comment_status": "dry-run"}
 
     context = collect_context(root, repo, pr, gate["issues"])
-    with tempfile.TemporaryDirectory(prefix=f"pr-{number}-source-") as temp:
-        try:
-            sources: dict[str, Path] = {}
-            for item in reviewers:
-                reviewer_source = Path(temp) / item.key
-                reviewer_source.mkdir()
-                extract_source(root, number, pr["headRefOid"], reviewer_source)
-                sources[item.key] = reviewer_source
-            results = run_reviews(reviewers, context, sources, rereview)
-        finally:
-            make_tree_writable(Path(temp))
+    # Each reviewer gets its own independently-rooted temp directory
+    # (tempfile.mkdtemp, not a predictably-named subdirectory of one shared
+    # parent): with invoke_codex/invoke_claude's sandbox/tool restrictions
+    # deliberately removed, a same-user sibling subdirectory (e.g. `../claude`
+    # next to `../codex`) would be a guessable, traversable path either
+    # concurrently-running reviewer could reach. An unrelated, randomly
+    # named top-level directory has no such predictable relationship.
+    sources: dict[str, Path] = {}
+    try:
+        for item in reviewers:
+            reviewer_source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-{item.key}-source-"))
+            extract_source(root, number, pr["headRefOid"], reviewer_source)
+            sources[item.key] = reviewer_source
+        results = run_reviews(reviewers, context, sources, rereview)
+    finally:
+        for reviewer_source in sources.values():
+            make_tree_writable(reviewer_source)
+            shutil.rmtree(reviewer_source, ignore_errors=True)
 
     refreshed_pr = pr_view(root, number)
     refreshed_gate = gate_status(
