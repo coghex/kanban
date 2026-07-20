@@ -26,6 +26,14 @@ REVIEW_MARKER_RE = re.compile(
     r"<!-- pr-review:v2 reviewers=(?P<reviewers>\S+) models=(?P<models>\S+) "
     r"head=(?P<head>[0-9a-f]{40}) verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED) -->"
 )
+# The marker's `models=` field is kept for pr-review:v2 format compatibility
+# with existing tooling (tools/drain_prs.py's PR_REVIEW_V2_RE expects a
+# non-whitespace token there), but this coordinator does not pin or verify a
+# specific model for the reviewer it spawns, so it publishes this literal
+# token rather than an unverifiable model@effort claim. `reviewers=` (which
+# executable actually ran) remains the one identity claim this coordinator
+# controls and can back.
+UNVERIFIED_MODEL_TOKEN = "unspecified"
 
 REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -59,17 +67,14 @@ class WorkflowError(RuntimeError):
 class Reviewer:
     key: str
     display_name: str
-    model: str
-    effort: str = "xhigh"
 
 
-# These are Kanban's canonical review-action models (docs/design.md,
-# src/Kanban/PullRequestFlow.hs's codexModel/claudeModel): the identity this
-# coordinator spawns as the opposite-brand reviewer, not a model override of
-# the top-level $pr-review/$pr-rereview/$pr-revise invocation itself, which
-# Kanban's own CLI spawn already pins.
-CODEX_REVIEWER = Reviewer("codex", "GPT-5.6-Terra", "gpt-5.6-terra")
-CLAUDE_REVIEWER = Reviewer("claude", "Claude Opus 4.8", "claude-opus-4-8")
+# Brand identity only: this coordinator does not pin, and cannot verify,
+# which specific model actually runs the nested reviewer it spawns (see
+# invoke_codex/invoke_claude). Which executable runs — codex or claude — is
+# the one thing it does control and publish as fact.
+CODEX_REVIEWER = Reviewer("codex", "Codex")
+CLAUDE_REVIEWER = Reviewer("claude", "Claude")
 
 
 def run(
@@ -465,8 +470,6 @@ def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
     return {
         "reviewer": reviewer.key,
         "display_name": reviewer.display_name,
-        "model": reviewer.model,
-        "effort": reviewer.effort,
         "verdict": verdict,
         "summary": summary.strip(),
         "blocking_concerns": concerns,
@@ -480,12 +483,13 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         # No -m/-c model_reasoning_effort/-s/--dangerously-bypass-approvals-and-sandbox:
         # this coordinator does not pin model, reasoning effort, sandbox, or
-        # approval policy for the reviewer it spawns. `reviewer.model`/
-        # `reviewer.effort` label the canonical review-policy identity in
-        # the published comment/marker (docs/design.md's pinned table); they
-        # are not passed as CLI configuration here. `codex exec` without
-        # -s/-a runs a read-only inspection task to completion under its own
-        # non-interactive defaults.
+        # approval policy for the reviewer it spawns, and cannot verify
+        # after the fact which model this installation's `codex` defaulted
+        # to (its --json output and session logs carry no model field).
+        # The published comment/marker therefore claims only the reviewer
+        # key (`codex`) as verified fact, via UNVERIFIED_MODEL_TOKEN.
+        # `codex exec` without -s/-a runs a read-only inspection task to
+        # completion under its own non-interactive defaults.
         run(
             [
                 "codex",
@@ -529,12 +533,13 @@ def parse_claude_output(stdout: str) -> Any:
 def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
     # No --model/--effort/--permission-mode/--tools: this coordinator does
     # not pin model, reasoning effort, or permission policy for the
-    # reviewer it spawns. `reviewer.model`/`reviewer.effort` label the
-    # canonical review-policy identity in the published comment/marker
-    # (docs/design.md's pinned table); they are not passed as CLI
-    # configuration here. `claude -p` without --permission-mode runs a
-    # read-only inspection task to completion under its own non-interactive
-    # defaults.
+    # reviewer it spawns. The published comment/marker therefore claims
+    # only the reviewer key (`claude`) as verified fact, via
+    # UNVERIFIED_MODEL_TOKEN, for the same reason as invoke_codex above —
+    # kept symmetric even though Claude's own JSON output happens to expose
+    # a `modelUsage` field, since Codex's does not. `claude -p` without
+    # --permission-mode runs a read-only inspection task to completion
+    # under its own non-interactive defaults.
     proc = run(
         [
             "claude",
@@ -589,7 +594,7 @@ def aggregate_verdict(results: list[dict[str, Any]]) -> str:
 
 def review_marker(reviewers: list[Reviewer], head: str, verdict: str) -> str:
     reviewer_keys = ",".join(item.key for item in reviewers)
-    models = ",".join(f"{item.model}@{item.effort}" for item in reviewers)
+    models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
     return (
         f"<!-- pr-review:v2 reviewers={reviewer_keys} models={models} "
         f"head={head} verdict={verdict} -->"
@@ -698,7 +703,7 @@ def verify_publication(
     if latest is None:
         raise WorkflowError("published review marker was not found")
     marker, url = latest
-    expected_models = ",".join(f"{item.model}@{item.effort}" for item in reviewers)
+    expected_models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
     expected_reviewers = ",".join(item.key for item in reviewers)
     if (
         marker.group("head") != head
@@ -742,7 +747,6 @@ def workflow(
         "head": pr["headRefOid"],
         "origin": origin or "unknown",
         "route": "+".join(item.key for item in reviewers),
-        "models": [f"{item.model}@{item.effort}" for item in reviewers],
         "review_mode": "standalone" if allow_no_issue else "issue-gated",
         "issue_gate": gate,
     }
@@ -844,10 +848,10 @@ def workflow(
 
 
 def self_test() -> None:
-    assert CODEX_REVIEWER.model == "gpt-5.6-terra"
-    assert CODEX_REVIEWER.effort == "xhigh"
-    assert CLAUDE_REVIEWER.model == "claude-opus-4-8"
-    assert CLAUDE_REVIEWER.effort == "xhigh"
+    assert CODEX_REVIEWER.key == "codex"
+    assert CODEX_REVIEWER.display_name == "Codex"
+    assert CLAUDE_REVIEWER.key == "claude"
+    assert CLAUDE_REVIEWER.display_name == "Claude"
     assert origin_from_body("body\n\n<!-- pr-origin:claude -->") == "claude"
     assert origin_from_body("body\n\n<!-- pr-origin:codex -->") == "codex"
     assert origin_from_body("external contribution") is None
@@ -881,6 +885,7 @@ def self_test() -> None:
     review = review_marker([CODEX_REVIEWER, CLAUDE_REVIEWER], "a" * 40, "APPROVE")
     match = REVIEW_MARKER_RE.fullmatch(review)
     assert match and match.group("reviewers") == "codex,claude"
+    assert match.group("models") == f"{UNVERIFIED_MODEL_TOKEN},{UNVERIFIED_MODEL_TOKEN}"
     print("self-test passed")
 
 

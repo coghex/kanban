@@ -343,9 +343,7 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
         gate = {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": "k1"}
         review_result = {
             "reviewer": "codex",
-            "display_name": "GPT-5.6-Terra",
-            "model": "gpt-5.6-terra",
-            "effort": "xhigh",
+            "display_name": "Codex",
             "verdict": "APPROVE",
             "summary": "looks good",
             "blocking_concerns": [],

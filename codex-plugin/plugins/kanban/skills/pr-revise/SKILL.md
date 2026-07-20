@@ -7,7 +7,7 @@ description: "Repair one GitHub pull request after its canonical review returns 
 
 Repair one positive PR number. Treat the canonical review as the contract; do not manually change `reviewed:approve` or `reviewed:changes`, post substitute review comments, force-push, or merge the PR.
 
-The canonical rereview route is fixed: a Claude-origin PR uses GPT-5.6-Terra (`gpt-5.6-terra`) at xhigh; a Codex-origin PR uses Claude Opus 4.8 (`claude-opus-4-8`) at xhigh; unknown or external origin uses both independently. This session runs on the PR's own origin brand (Kanban only ever resumes the original solver to revise); the rereview below therefore always hands off to the opposite brand's canonical reviewer identity, never to this session's own model.
+The canonical rereview route is fixed by brand: a Claude-origin PR uses the Codex reviewer; a Codex-origin PR uses the Claude reviewer; unknown or external origin uses both independently. Neither a specific model nor reasoning effort is pinned or verified; only the brand is selected, deferring to that installation's own configured default. This session runs on the PR's own origin brand (Kanban only ever resumes the original solver to revise); the rereview below therefore always hands off to the opposite brand's canonical reviewer identity, never to this session's own model.
 
 ## 1. Establish the review contract
 
@@ -58,4 +58,4 @@ Do not independently review, comment, label, retry a failed model, or compensate
 
 ## 5. Report and clean up
 
-Return the PR number, starting head and pushed head, fixed review items, validation and CI results, canonical rereview route/models/verdict, review-comment URL, and final labels. Remove only the temporary worktree created for this run after confirming it is clean; never remove a user-owned or `issue-<n>-*` worktree.
+Return the PR number, starting head and pushed head, fixed review items, validation and CI results, canonical rereview route/verdict, review-comment URL, and final labels. Remove only the temporary worktree created for this run after confirming it is clean; never remove a user-owned or `issue-<n>-*` worktree.
