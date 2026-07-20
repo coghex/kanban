@@ -379,7 +379,15 @@ def stop_service(repo_path: Path) -> dict[str, Any]:
         time.sleep(0.25)
         current = status_snapshot(repo_path)
         if current["state"] == "stopped":
-            return {"stopped": True, **current}
+            cleared_incidents = resolve_open_incidents(
+                repo_path,
+                "Cleared when the PR drainer was intentionally stopped.",
+            )
+            return {
+                "stopped": True,
+                "cleared_incidents": len(cleared_incidents),
+                **status_snapshot(repo_path),
+            }
     raise ServiceError("Timed out waiting for the PR drainer to stop.")
 
 
@@ -506,6 +514,20 @@ def acknowledge_incident(
     return incident
 
 
+def resolve_open_incidents(repo_path: Path, note: str) -> list[Path]:
+    resolved: list[Path] = []
+    for path in incident_files(repo_path=repo_path, open_only=True):
+        incident = read_json(path)
+        if incident is None:
+            continue
+        incident["status"] = "resolved"
+        incident["resolved_at"] = utc_stamp()
+        incident["resolution"] = note
+        atomic_write_json(path, incident)
+        resolved.append(path)
+    return resolved
+
+
 def run_service(repo_path: Path) -> int:
     ensure_dirs()
     command = [
@@ -610,7 +632,9 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("install", help="Install or refresh the launchd job.")
     subparsers.add_parser("start", help="Start the PR drainer.")
-    subparsers.add_parser("stop", help="Stop the PR drainer without an incident alert.")
+    subparsers.add_parser(
+        "stop", help="Stop the PR drainer and clear its open incidents."
+    )
     subparsers.add_parser("status", help="Show live state and the latest open incident.")
 
     logs_parser = subparsers.add_parser("logs", help="Show the end of the current drainer log.")

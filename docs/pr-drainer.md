@@ -75,7 +75,7 @@ The endpoint is stored in a private configuration file and is not written into t
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`
 
-The controller records unexpected exits as incidents. Expected pull-request failures remain in the queue and are retried without stopping the service.
+The controller records unexpected exits as incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository.
 
 ## Manual status
 

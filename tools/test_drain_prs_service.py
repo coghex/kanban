@@ -89,6 +89,68 @@ class ControllerConfigurationTests(unittest.TestCase):
                 )
         self.assertEqual(result, [matching])
 
+    def test_intentional_stop_resolves_all_open_incidents_for_its_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            incident_dir = Path(tmp)
+            matching_one = incident_dir / "incident-3.json"
+            matching_two = incident_dir / "incident-2.json"
+            other = incident_dir / "incident-1.json"
+            already_resolved = incident_dir / "incident-0.json"
+            for path, incident in (
+                (matching_one, {"repo": "/tmp/a", "status": "open"}),
+                (matching_two, {"repo": "/tmp/a", "status": "open"}),
+                (other, {"repo": "/tmp/b", "status": "open"}),
+                (already_resolved, {"repo": "/tmp/a", "status": "resolved"}),
+            ):
+                path.write_text(json.dumps(incident), encoding="utf-8")
+            with mock.patch.object(drain_prs_service, "INCIDENT_DIR", incident_dir):
+                resolved = drain_prs_service.resolve_open_incidents(
+                    Path("/tmp/a"), "Cleared when the PR drainer was intentionally stopped."
+                )
+                matching_one_incident = json.loads(matching_one.read_text(encoding="utf-8"))
+                matching_two_incident = json.loads(matching_two.read_text(encoding="utf-8"))
+                other_incident = json.loads(other.read_text(encoding="utf-8"))
+                already_resolved_incident = json.loads(
+                    already_resolved.read_text(encoding="utf-8")
+                )
+        self.assertEqual(set(resolved), {matching_one, matching_two})
+        for incident in (matching_one_incident, matching_two_incident):
+            self.assertEqual(incident["status"], "resolved")
+            self.assertIn("resolved_at", incident)
+            self.assertEqual(
+                incident["resolution"],
+                "Cleared when the PR drainer was intentionally stopped.",
+            )
+        self.assertEqual(other_incident["status"], "open")
+        self.assertEqual(already_resolved_incident["status"], "resolved")
+
+    def test_stop_clears_incidents_after_the_drainer_has_stopped(self):
+        running = {"state": "running"}
+        stopped = {"state": "stopped"}
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[running, stopped, stopped],
+            ),
+            mock.patch.object(drain_prs_service, "run_command") as run_command,
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "resolve_open_incidents",
+                return_value=[Path("incident-1.json"), Path("incident-2.json")],
+            ) as resolve_open_incidents,
+        ):
+            result = drain_prs_service.stop_service(repo)
+        run_command.assert_called_once_with(
+            ["launchctl", "kill", "SIGTERM", drain_prs_service.launch_target()]
+        )
+        resolve_open_incidents.assert_called_once_with(
+            repo, "Cleared when the PR drainer was intentionally stopped."
+        )
+        self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
+
 
 if __name__ == "__main__":
     unittest.main()
