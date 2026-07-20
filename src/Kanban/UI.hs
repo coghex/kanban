@@ -1,5 +1,7 @@
 module Kanban.UI
   ( ChatTranscript (..),
+    Name (..),
+    OverlayMouseAction (..),
     PendingReviewInteraction (..),
     PullRequestReviewSession (..),
     ReviewDigitAction (..),
@@ -7,6 +9,7 @@ module Kanban.UI
     SolveSession (..),
     failureActivity,
     orphanMessage,
+    overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
     resolveReviewDigitAction,
@@ -1729,16 +1732,8 @@ handleEvent event = do
     (Just ProcessesOverlay, MouseDown ProcessesPanel _ _ _) -> pure ()
     (Just ProcessesOverlay, _) -> pure ()
     (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just (ReviewOverlay _), MouseDown ReviewPanel Vty.BRight _ _) -> closeOverlay
-    (Just (ReviewOverlay _), MouseDown ReviewViewport Vty.BScrollUp _ _) -> scrollReview (-3)
-    (Just (ReviewOverlay _), MouseDown ReviewViewport Vty.BScrollDown _ _) -> scrollReview 3
-    (Just (ReviewOverlay _), MouseDown ReviewPanel Vty.BScrollUp _ _) -> scrollReview (-3)
-    (Just (ReviewOverlay _), MouseDown ReviewPanel Vty.BScrollDown _ _) -> scrollReview 3
-    (Just (ReviewOverlay _), MouseDown ReviewPanel _ _ _) -> pure ()
-    (Just (ReviewOverlay _), VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollUp _)) -> scrollReview (-3)
-    (Just (ReviewOverlay _), VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollDown _)) -> scrollReview 3
-    (Just (ReviewOverlay _), MouseDown _ _ _ _) -> closeOverlay
-    (Just (ReviewOverlay _), VtyEvent (Vty.EvMouseDown _ _ _ _)) -> closeOverlay
+    (Just (ReviewOverlay _), mouseEvent)
+      | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction scrollReview action
     (Just (ReviewOverlay issueNumber), reviewInputEvent) -> handleReviewOverlayEvent issueNumber reviewInputEvent
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> startIssueSolve issue workflow CodexSolver
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> startIssueSolve issue workflow ClaudeSolver
@@ -1746,33 +1741,20 @@ handleEvent event = do
     (Just (SolveChooser _ _), _) -> pure ()
     (Just (SolveOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (SolveOverlay issueNumber), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptSolveSession issueNumber
-    (Just (SolveOverlay _), MouseDown SolvePanel Vty.BRight _ _) -> closeOverlay
-    (Just (SolveOverlay _), MouseDown SolveViewport Vty.BScrollUp _ _) -> scrollSolve (-3)
-    (Just (SolveOverlay _), MouseDown SolveViewport Vty.BScrollDown _ _) -> scrollSolve 3
-    (Just (SolveOverlay _), MouseDown SolvePanel Vty.BScrollUp _ _) -> scrollSolve (-3)
-    (Just (SolveOverlay _), MouseDown SolvePanel Vty.BScrollDown _ _) -> scrollSolve 3
-    (Just (SolveOverlay _), MouseDown SolvePanel _ _ _) -> pure ()
-    (Just (SolveOverlay _), VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollUp _)) -> scrollSolve (-3)
-    (Just (SolveOverlay _), VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollDown _)) -> scrollSolve 3
-    (Just (SolveOverlay _), MouseDown _ _ _ _) -> closeOverlay
-    (Just (SolveOverlay _), VtyEvent (Vty.EvMouseDown _ _ _ _)) -> closeOverlay
+    (Just (SolveOverlay _), mouseEvent)
+      | Just action <- overlayMouseAction SolvePanel mouseEvent -> applyOverlayMouseAction scrollSolve action
     (Just (SolveOverlay issueNumber), solveInputEvent) -> handleSolveOverlayEvent issueNumber solveInputEvent
     (Just (PullRequestReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (PullRequestReviewOverlay number), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptPullRequestSession number
-    (Just (PullRequestReviewOverlay _), MouseDown PullRequestReviewPanel Vty.BRight _ _) -> closeOverlay
-    (Just (PullRequestReviewOverlay _), MouseDown PullRequestReviewViewport Vty.BScrollUp _ _) -> scrollPullRequestReview (-3)
-    (Just (PullRequestReviewOverlay _), MouseDown PullRequestReviewViewport Vty.BScrollDown _ _) -> scrollPullRequestReview 3
-    (Just (PullRequestReviewOverlay _), MouseDown PullRequestReviewPanel _ _ _) -> pure ()
-    (Just (PullRequestReviewOverlay _), MouseDown _ _ _ _) -> closeOverlay
+    (Just (PullRequestReviewOverlay _), mouseEvent)
+      | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction scrollPullRequestReview action
     (Just (PullRequestReviewOverlay number), inputEvent) -> handlePullRequestOverlayEvent number inputEvent
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startItemReview item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openItemSolveChooser SolveOnly item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openItemSolveChooser AutoSolve item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killItemWorkingProcess item
-    (Just (DetailsOverlay _), MouseDown DetailsPanel Vty.BRight _ _) -> closeOverlay
-    (Just (DetailsOverlay _), MouseDown DetailsPanel _ _ _) -> pure ()
-    (Just (DetailsOverlay _), MouseDown _ _ _ _) -> closeOverlay
-    (Just (DetailsOverlay _), VtyEvent (Vty.EvMouseDown _ _ _ _)) -> closeOverlay
+    (Just (DetailsOverlay _), mouseEvent)
+      | Just action <- overlayMouseAction DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> vScrollBy (viewportScroll DetailsViewport) 1
@@ -1847,6 +1829,39 @@ requestDashboardQuit = do
 
 closeOverlay :: EventM Name AppState ()
 closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
+
+-- | The decision a content overlay's shared mouse policy reaches for a given
+-- event, independent of how that decision gets carried out. Wheel events
+-- always resolve to a scroll regardless of which name they land on
+-- (background card, the panel, or the viewport itself) and never close the
+-- overlay; any other click outside the panel closes it, matching the
+-- outside-click contract. Pure so the policy can be unit tested without a
+-- running EventM.
+data OverlayMouseAction
+  = OverlayMouseScroll Int
+  | OverlayMouseClose
+  | OverlayMouseNoOp
+  deriving stock (Eq, Show)
+
+overlayMouseAction :: Name -> BrickEvent Name AppEvent -> Maybe OverlayMouseAction
+overlayMouseAction panel event = case event of
+  MouseDown _ Vty.BScrollUp _ _ -> Just (OverlayMouseScroll (-3))
+  MouseDown _ Vty.BScrollDown _ _ -> Just (OverlayMouseScroll 3)
+  VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollUp _) -> Just (OverlayMouseScroll (-3))
+  VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollDown _) -> Just (OverlayMouseScroll 3)
+  MouseDown name Vty.BRight _ _
+    | name == panel -> Just OverlayMouseClose
+  MouseDown name _ _ _
+    | name == panel -> Just OverlayMouseNoOp
+  MouseDown _ _ _ _ -> Just OverlayMouseClose
+  VtyEvent (Vty.EvMouseDown _ _ _ _) -> Just OverlayMouseClose
+  _ -> Nothing
+
+applyOverlayMouseAction :: (Int -> EventM Name AppState ()) -> OverlayMouseAction -> EventM Name AppState ()
+applyOverlayMouseAction scrollOverlay = \case
+  OverlayMouseScroll amount -> scrollOverlay amount
+  OverlayMouseClose -> closeOverlay
+  OverlayMouseNoOp -> pure ()
 
 chooseChatVerbosity :: ChatVerbosity -> EventM Name AppState ()
 chooseChatVerbosity verbosity = do
@@ -2070,6 +2085,9 @@ scrollSolve = vScrollBy (viewportScroll SolveViewport)
 
 scrollPullRequestReview :: Int -> EventM Name AppState ()
 scrollPullRequestReview = vScrollBy (viewportScroll PullRequestReviewViewport)
+
+scrollDetails :: Int -> EventM Name AppState ()
+scrollDetails = vScrollBy (viewportScroll DetailsViewport)
 
 handlePullRequestOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
 handlePullRequestOverlayEvent number event = case event of
