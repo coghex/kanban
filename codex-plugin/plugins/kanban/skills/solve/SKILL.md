@@ -15,11 +15,14 @@ Take one issue through a tested pull request. Stop after opening the PR; review 
    gh issue list --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"
    ```
 
-2. Before claiming, require the canonical cross-agent gate. Resolve the repository root first (`git rev-parse --show-toplevel`), then run the tracked backend directly from it — never a personal path:
+2. Before claiming, require the canonical cross-agent gate. Kanban can solve issues in any repository it is pointed at, so this backend is not necessarily tracked inside the repository under review; resolve the Kanban-managed install location the same way `Kanban.Review.canonicalIssueReviewerPath` does (`KANBAN_ISSUE_REVIEW_INSTALL_DIR` when set, otherwise `~/Library/Application Support/kanban/issue-review/approve_issues.py`) rather than a path relative to the repository being solved or any other personal path:
 
    ```bash
-   python3 "$(git rev-parse --show-toplevel)/tools/approve_issues.py" --path "$(git rev-parse --show-toplevel)" --check <issue> --legacy-policy dual --json
+   BACKEND="${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}/approve_issues.py"
+   python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --check <issue> --legacy-policy dual --json
    ```
+
+   If `$BACKEND` does not exist, stop and report: "Canonical issue reviewer was not found at $BACKEND. Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
 
    Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and report the reasons. Direct a canonical `CHANGES_REQUESTED` issue through `$issue-rereview <issue>`; direct an issue with no canonical review through `$issue-review <issue>`. Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
 3. Claim it before doing any work:

@@ -86,6 +86,7 @@ runs) checks that:
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration;
 - no packaged asset references a personal absolute path or the pre-migration
-  `~/work/approve-issues.py` launcher;
+  compatibility launcher path (see
+  [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary));
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone.

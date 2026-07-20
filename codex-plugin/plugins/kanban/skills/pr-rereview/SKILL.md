@@ -5,10 +5,11 @@ description: Rerun the canonical issue-gated review for a changed GitHub pull re
 
 # Rereview Pull Request
 
-Require one positive PR number. Read and follow the complete `$pr-review` policy, then use its bundled coordinator in rereview mode:
+Require one positive PR number. Read and follow the complete `$pr-review` policy, then use its bundled coordinator in rereview mode. Kanban spawns this workflow with the *reviewed* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 ```bash
-python3 ../pr-review/scripts/review_pr.py \
+COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/pr-review/scripts/review_pr.py' 2>/dev/null | head -n1)"
+python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
   --json

@@ -44,10 +44,11 @@ Commit the focused fix with a clear message. Before push, fetch the PR branch an
 
 Wait for the PR's required checks for the pushed head to complete successfully. If CI fails, diagnose and fix only when the failure is attributable to this revision; otherwise report the external failure and stop.
 
-Then invoke the coordinator exactly once, from this worktree's checkout of this plugin (adjust the path if this skill is not running from its installed plugin layout: it lives two directories below the pr-review skill's `scripts/` directory as `../pr-review/scripts/review_pr.py`):
+Then invoke the coordinator exactly once. Kanban resumes this session with the *revised* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 ```bash
-python3 ../pr-review/scripts/review_pr.py \
+COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/pr-review/scripts/review_pr.py' 2>/dev/null | head -n1)"
+python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
   --json

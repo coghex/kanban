@@ -203,6 +203,16 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertNotIn('"work" / "approve-issues.py"', coordinator_source)
         self.assertIn("python3 tools/install_issue_review.py", coordinator_source)
 
+    def test_solve_gate_check_matches_the_haskell_canonical_resolution(self):
+        # solve can run against any repository Kanban is pointed at, so its
+        # gate check must resolve the Kanban-managed install location
+        # rather than assume the repository under review tracks
+        # tools/approve_issues.py itself.
+        solve_source = (SKILLS_ROOT / "solve" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", solve_source)
+        self.assertIn("Library/Application Support/kanban/issue-review/approve_issues.py", solve_source)
+        self.assertIn("python3 tools/install_issue_review.py", solve_source)
+
 
 class ReviewCoordinatorSelfTestTests(unittest.TestCase):
     def test_review_pr_self_test_passes_standalone(self):
@@ -221,18 +231,46 @@ class ReviewCoordinatorSelfTestTests(unittest.TestCase):
             py_compile.compile(str(REVIEW_COORDINATOR), cfile=str(cfile), doraise=True)
 
 
-class SharedCoordinatorReferenceTests(unittest.TestCase):
-    """pr-rereview and pr-revise both delegate to pr-review's coordinator by
-    a portable sibling-relative path rather than an absolute personal one;
-    confirm the reference actually resolves once skills are installed as
-    siblings under skills/ (verified live in the plugin's own install test)."""
+COORDINATOR_LOOKUP = (
+    'find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+    "-path '*/kanban/*/skills/pr-review/scripts/review_pr.py'"
+)
 
-    def test_pr_rereview_and_pr_revise_reference_the_coordinator_relatively(self):
-        for name in ("pr-rereview", "pr-revise"):
+
+class SharedCoordinatorReferenceTests(unittest.TestCase):
+    """All three PR-flow skills locate the installed coordinator by
+    searching under $CODEX_HOME rather than a path relative to the current
+    directory: Kanban spawns these workflows with the *reviewed* repository
+    as the working directory, not this plugin's own install location, so a
+    cwd- or skill-relative path cannot resolve. Confirm the exact lookup
+    command each SKILL.md uses actually finds the coordinator against a
+    simulated install layout, not just that some string is present."""
+
+    def test_pr_review_family_locates_the_coordinator_via_codex_home(self):
+        for name in ("pr-review", "pr-rereview", "pr-revise"):
             text = (SKILLS_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("../pr-review/scripts/review_pr.py", text, f"{name}/SKILL.md must reference the coordinator relatively")
-            resolved = (SKILLS_ROOT / name / "../pr-review/scripts/review_pr.py").resolve()
-            self.assertEqual(resolved, REVIEW_COORDINATOR)
+            self.assertIn(COORDINATOR_LOOKUP, text, f"{name}/SKILL.md must locate the coordinator under $CODEX_HOME")
+
+    def test_the_codex_home_lookup_command_resolves_against_a_simulated_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_codex_home = Path(tmp) / "fake-codex-home"
+            installed = fake_codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.0.0" / "skills" / "pr-review" / "scripts" / "review_pr.py"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("# stand-in for the installed coordinator\n", encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "find",
+                    str(fake_codex_home / "plugins" / "cache"),
+                    "-path",
+                    "*/kanban/*/skills/pr-review/scripts/review_pr.py",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            found = [line for line in proc.stdout.splitlines() if line]
+            self.assertEqual(found, [str(installed)])
 
 
 if __name__ == "__main__":

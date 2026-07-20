@@ -804,15 +804,15 @@ def workflow(
         allow_no_issue=allow_no_issue,
     )
     post_comment(root, number, body)
-    require_current_review_state(
-        root,
-        repo,
-        number,
-        pr["headRefOid"],
-        gate["key"],
-        allow_no_issue=allow_no_issue,
-    )
     try:
+        require_current_review_state(
+            root,
+            repo,
+            number,
+            pr["headRefOid"],
+            gate["key"],
+            allow_no_issue=allow_no_issue,
+        )
         set_verdict_label(root, number, verdict)
         verified = verify_publication(
             root,

@@ -5,10 +5,11 @@ description: Run the canonical issue-gated review for one GitHub pull request, r
 
 # Review Pull Request
 
-Require one positive PR number. Use the bundled coordinator; do not independently review, comment, label, retry a failed model, or compensate for its result:
+Require one positive PR number. Use the bundled coordinator; do not independently review, comment, label, retry a failed model, or compensate for its result. Kanban spawns this workflow with the *reviewed* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 ```bash
-python3 ./scripts/review_pr.py \
+COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/pr-review/scripts/review_pr.py' 2>/dev/null | head -n1)"
+python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --review <pr> \
   --json
