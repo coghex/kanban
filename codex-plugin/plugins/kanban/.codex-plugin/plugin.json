@@ -1,0 +1,27 @@
+{
+  "name": "kanban",
+  "version": "1.0.0",
+  "description": "Kanban's tracked Codex workflows: solve, pr-review, pr-rereview, and pr-revise.",
+  "author": {
+    "name": "Terry"
+  },
+  "homepage": "https://github.com/coghex/kanban",
+  "repository": "https://github.com/coghex/kanban",
+  "license": "MIT",
+  "keywords": ["kanban", "solve", "pr-review", "pr-rereview", "pr-revise"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Kanban Workflows",
+    "shortDescription": "Kanban's solve, pr-review, pr-rereview, and pr-revise workflows",
+    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, and $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md.",
+    "developerName": "Terry",
+    "category": "Engineering",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Use $solve to claim GitHub issue #123, implement it in an isolated worktree, and open a tested PR.",
+      "Use $pr-review to review pull request #38 through the canonical opposite-brand workflow.",
+      "Use $pr-rereview to rereview pull request #38 after its author pushes changes.",
+      "Use $pr-revise to address the canonical changes-requested review on PR #38."
+    ]
+  }
+}

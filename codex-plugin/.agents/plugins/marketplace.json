@@ -1,0 +1,20 @@
+{
+  "name": "kanban",
+  "interface": {
+    "displayName": "Kanban"
+  },
+  "plugins": [
+    {
+      "name": "kanban",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kanban"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Engineering"
+    }
+  ]
+}

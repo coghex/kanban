@@ -3,7 +3,8 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
-solve, PR-flow, and canonical issue-review invocation surface so a new
+solve, PR-flow, and canonical issue-review invocation surface, and against
+the tracked Codex plugin's own packaged-workflow bash surface, so a new
 external command or home-relative path cannot land undocumented.
 """
 
@@ -29,6 +30,19 @@ SURFACE_FILES = [
     "src/Kanban/Repository.hs",
     "src/Kanban/Drainer.hs",
     "src/Kanban/Process.hs",
+]
+
+# The tracked Codex plugin's own packaged workflows (issue #76): a separate,
+# non-Haskell invocation surface reconciled against the same manifest. The
+# bundled coordinator (.py) is scanned with a different extractor than the
+# SKILL.md files (bash fences) since it invokes commands as Python list
+# literals, not shell text.
+PLUGIN_SURFACE_FILES = [
+    "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
 ]
 
 MANIFEST_ROW_RE = re.compile(
@@ -121,6 +135,59 @@ def home_relative_segments(content):
     return segments
 
 
+# A fenced ```bash ... ``` block in a packaged SKILL.md. The closing fence
+# may be indented (these skills nest bash blocks inside numbered list
+# items), so the leading whitespace before both fences is not anchored.
+BASH_FENCE_RE = re.compile(r"```bash\n(.*?)\n[ \t]*```", re.DOTALL)
+# A command invoked inside a subshell/command-substitution or after a pipe,
+# e.g. `$(find ...)` or `| head -n1`.
+SUBSHELL_OR_PIPE_COMMAND_RE = re.compile(r'(?:\$\(|\|)\s*([A-Za-z][A-Za-z0-9_.-]*)')
+# The leading word of a non-continuation, non-assignment line, e.g.
+# `python3 "$COORDINATOR" \` or `gh issue list ...`.
+LEADING_COMMAND_RE = re.compile(r'^([A-Za-z][A-Za-z0-9_.-]*)(?=[ \t]|$)')
+ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def discovered_plugin_commands(content):
+    """Every external command a packaged SKILL.md's bash blocks invoke,
+    whether as the leading word of a line or inside `$( ... )`/after `|`."""
+    names = set()
+    for fence in BASH_FENCE_RE.finditer(content):
+        body = fence.group(1)
+        names |= {match.group(1) for match in SUBSHELL_OR_PIPE_COMMAND_RE.finditer(body)}
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or ASSIGNMENT_RE.match(stripped):
+                continue
+            leading = LEADING_COMMAND_RE.match(stripped)
+            if leading:
+                names.add(leading.group(1))
+    return names
+
+
+# run(["gh", ...]) / subprocess.run(["git", ...]) / run(\n    [\n        "codex", —
+# the coordinator's own external-command invocation surface. `\s` matches
+# newlines without needing re.DOTALL, so this covers both the single-line
+# and the multi-line list-literal call styles review_pr.py uses.
+PYTHON_COMMAND_CALL_RE = re.compile(r'(?:subprocess\.)?run\(\s*\[\s*"([^"]+)"')
+
+
+def discovered_python_commands(content):
+    """Every external command a packaged coordinator's own Python source
+    invokes as the first element of a `run`/`subprocess.run` argument
+    list. Deliberately does not match a dynamically-resolved first
+    argument like `sys.executable` (no leading string literal there) —
+    that path is python3, already covered via the SKILL.md bash surface
+    that invokes this script with `python3 ...`."""
+    return {match.group(1) for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
+
+
+def discovered_commands_for_plugin_file(relative_path, content):
+    if relative_path.endswith(".py"):
+        return discovered_python_commands(content)
+    return discovered_plugin_commands(content)
+
+
 def looks_like_path_segment(segment):
     return (
         "/" in segment
@@ -171,6 +238,52 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{name!r}; add it to the manifest in "
                     "docs/agent-workflow-contract.md",
                 )
+
+    def test_every_plugin_bash_command_is_documented(self):
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in PLUGIN_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+
+    def test_review_pr_coordinator_command_invocations_are_documented(self):
+        # The coordinator scan uses a different extractor (Python list
+        # literals, not bash) than the SKILL.md files; pin it directly
+        # against the actual coordinator so a regression in either the
+        # extractor or the coordinator's own invocations is caught here,
+        # not just via the generic loop above.
+        content = (REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
+    def test_plugin_bash_command_discovery_finds_find_and_head(self):
+        # Pins the extractor against the actual pr-review skill rather than
+        # a synthetic snippet, so a change to its coordinator-lookup command
+        # that silently drops find/head fails this test instead of the
+        # completeness check simply having nothing left to discover.
+        content = (REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md").read_text(encoding="utf-8")
+        found = discovered_plugin_commands(content)
+        self.assertIn("find", found)
+        self.assertIn("head", found)
+        self.assertIn("python3", found)
+        self.assertIn("git", found)
+
+    def test_plugin_bash_command_discovery_skips_variable_assignments(self):
+        snippet = (
+            "```bash\n"
+            'COORDINATOR="$(find "$HOME/.codex" -path \'*/review_pr.py\' | head -n1)"\n'
+            'python3 "$COORDINATOR" --review <pr>\n'
+            "```\n"
+        )
+        self.assertEqual(discovered_plugin_commands(snippet), {"find", "head", "python3"})
 
     def test_indirect_solver_brand_mappings_are_discovered(self):
         # Solve.hs and PullRequestFlow.hs resolve codex/claude through a
