@@ -121,6 +121,62 @@ class MarketplaceAndPluginManifestTests(unittest.TestCase):
         self.assertEqual(hits, [], f"marketplace.json must not set model/effort/sandbox/approval/cwd config: {hits}")
 
 
+NESTED_REVIEWER_INVOCATION_RE = re.compile(
+    r"def invoke_codex\(.*?(?=\ndef |\Z)|def invoke_claude\(.*?(?=\ndef |\Z)",
+    re.DOTALL,
+)
+
+# Literal CLI flags that would pin model, reasoning effort, sandbox, or
+# approval/permission policy for the reviewer this coordinator spawns —
+# forbidden even inside the coordinator's own subprocess argument lists,
+# not just in the plugin's JSON manifests. Kanban's own invoking code (and,
+# for the nested reviewer identity, docs/design.md's pinned policy table)
+# owns these; the coordinator must defer to that installation's own
+# configuration rather than setting them itself.
+FORBIDDEN_INVOCATION_FLAGS = (
+    '"-m"',
+    '"--model"',
+    '"-c"',
+    "model_reasoning_effort",
+    '"--effort"',
+    '"-s"',
+    '"--sandbox"',
+    "--dangerously-bypass-approvals-and-sandbox",
+    '"--permission-mode"',
+    '"--ignore-user-config"',
+)
+
+
+class PackagedCodeInvocationTests(unittest.TestCase):
+    """Structural coverage over the coordinator's own code, not just its
+    JSON manifests: the nested reviewer subprocess calls in invoke_codex/
+    invoke_claude must not pin model/effort/sandbox/approval either."""
+
+    def test_nested_reviewer_invocations_set_no_forbidden_cli_flags(self):
+        source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        offenders = []
+        for match in NESTED_REVIEWER_INVOCATION_RE.finditer(source):
+            # Strip full-line and trailing comments so an explanatory
+            # comment naming a flag that was deliberately removed (e.g.
+            # "No -m/--model: ...") cannot itself trip this check; only the
+            # actual argument-list code is scanned.
+            code_only = "\n".join(
+                line for line in match.group(0).splitlines() if not line.strip().startswith("#")
+            )
+            for flag in FORBIDDEN_INVOCATION_FLAGS:
+                if flag in code_only:
+                    offenders.append(f"{flag!r} appears in {match.group(0).splitlines()[0]}")
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_forbidden_flag_scan_actually_detects_a_planted_violation(self):
+        # Guards against the regex/substring scan above silently matching
+        # nothing due to a function-boundary or naming drift.
+        planted = 'def invoke_codex(reviewer, prompt, cwd):\n    run(["codex", "exec", "-m", reviewer.model])\n'
+        match = NESTED_REVIEWER_INVOCATION_RE.search(planted)
+        self.assertIsNotNone(match)
+        self.assertIn('"-m"', match.group(0))
+
+
 class SkillDiscoveryTests(unittest.TestCase):
     def test_skills_directory_contains_exactly_the_four_packaged_workflows(self):
         found = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}

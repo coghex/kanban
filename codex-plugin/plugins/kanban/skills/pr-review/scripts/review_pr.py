@@ -478,19 +478,20 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         schema_path = Path(temp) / "schema.json"
         output_path = Path(temp) / "result.json"
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
+        # No -m/-c model_reasoning_effort/-s/--dangerously-bypass-approvals-and-sandbox:
+        # this coordinator does not pin model, reasoning effort, sandbox, or
+        # approval policy for the reviewer it spawns. `reviewer.model`/
+        # `reviewer.effort` label the canonical review-policy identity in
+        # the published comment/marker (docs/design.md's pinned table); they
+        # are not passed as CLI configuration here. `codex exec` without
+        # -s/-a runs a read-only inspection task to completion under its own
+        # non-interactive defaults.
         run(
             [
                 "codex",
                 "exec",
                 "--ephemeral",
-                "--ignore-user-config",
                 "--skip-git-repo-check",
-                "-m",
-                reviewer.model,
-                "-c",
-                f'model_reasoning_effort="{reviewer.effort}"',
-                "-s",
-                "read-only",
                 "-C",
                 str(cwd),
                 "--output-schema",
@@ -526,18 +527,18 @@ def parse_claude_output(stdout: str) -> Any:
 
 
 def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
+    # No --model/--effort/--permission-mode/--tools: this coordinator does
+    # not pin model, reasoning effort, or permission policy for the
+    # reviewer it spawns. `reviewer.model`/`reviewer.effort` label the
+    # canonical review-policy identity in the published comment/marker
+    # (docs/design.md's pinned table); they are not passed as CLI
+    # configuration here. `claude -p` without --permission-mode runs a
+    # read-only inspection task to completion under its own non-interactive
+    # defaults.
     proc = run(
         [
             "claude",
             "-p",
-            "--model",
-            reviewer.model,
-            "--effort",
-            reviewer.effort,
-            "--permission-mode",
-            "dontAsk",
-            "--tools",
-            "Read,Grep,Glob",
             "--no-session-persistence",
             "--output-format",
             "json",
