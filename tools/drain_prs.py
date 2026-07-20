@@ -48,6 +48,12 @@ PR_REVIEW_V1_RE = re.compile(
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
 )
+PR_REVIEW_V2_RE = re.compile(
+    r"<!--\s*pr-review:v2\s+reviewers=(claude|codex)\s+"
+    r"models=[^\s]+\s+head=([0-9a-fA-F]{40})\s+"
+    r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
+    re.IGNORECASE,
+)
 LEGACY_CODEX_REVIEW_RE = re.compile(
     r"<!--\s*codex-review\s+head=([0-9a-fA-F]{40})\s+"
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
@@ -548,6 +554,13 @@ def get_pr(ctx: RepoContext, number: int) -> dict[str, Any]:
 
 def parse_review_marker_details(body: str) -> tuple[str, str, str] | None:
     match = PR_REVIEW_V1_RE.search(body)
+    if match:
+        return (
+            match.group(1).lower(),
+            match.group(2).lower(),
+            match.group(3).upper(),
+        )
+    match = PR_REVIEW_V2_RE.search(body)
     if match:
         return (
             match.group(1).lower(),

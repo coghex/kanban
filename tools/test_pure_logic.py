@@ -178,6 +178,19 @@ class ParseReviewMarkerDetailsTests(unittest.TestCase):
             ("codex", "abc123abc123abc123abc123abc123abc123abcd", "APPROVE"),
         )
 
+    def test_v2_marker_parses_reviewer_head_verdict(self):
+        body = (
+            "Looks good.\n"
+            "<!-- pr-review:v2 reviewers=codex models=gpt-5.6-terra@xhigh "
+            "head=abc123abc123abc123abc123abc123abc123abcd "
+            "verdict=APPROVE -->"
+        )
+        details = drain_prs.parse_review_marker_details(body)
+        self.assertEqual(
+            details,
+            ("codex", "abc123abc123abc123abc123abc123abc123abcd", "APPROVE"),
+        )
+
     def test_legacy_codex_review_marker_parses_as_codex(self):
         body = (
             "<!-- codex-review head=abc123abc123abc123abc123abc123abc123abcd "
