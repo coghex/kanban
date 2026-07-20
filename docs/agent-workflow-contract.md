@@ -246,12 +246,12 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 - `mandatory`: `yes` or `no`, matching §2.5 for executables.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs | kanban | supported | no
@@ -310,6 +310,12 @@ runs) parses the manifest in §4 and:
   (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) invoke a command, inside
   a fenced ```` ```bash ```` block, that has no matching `executable`
   manifest entry;
+- fails if the packaged plugin's own bundled coordinator
+  (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`)
+  invokes a command, as the first element of a `run`/`subprocess.run`
+  argument list, that has no matching `executable` manifest entry — the
+  coordinator is Python, not bash, so it is reconciled with a separate
+  extractor from the SKILL.md files above, not exempted from coverage;
 - fails if those same files build a home-relative path segment that has no
   matching `personal-path` manifest entry;
 - fails if a manifest entry's declared `files` no longer contain its token,

@@ -33,12 +33,16 @@ SURFACE_FILES = [
 ]
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
-# non-Haskell invocation surface reconciled against the same manifest.
+# non-Haskell invocation surface reconciled against the same manifest. The
+# bundled coordinator (.py) is scanned with a different extractor than the
+# SKILL.md files (bash fences) since it invokes commands as Python list
+# literals, not shell text.
 PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
 ]
 
 MANIFEST_ROW_RE = re.compile(
@@ -161,6 +165,29 @@ def discovered_plugin_commands(content):
     return names
 
 
+# run(["gh", ...]) / subprocess.run(["git", ...]) / run(\n    [\n        "codex", —
+# the coordinator's own external-command invocation surface. `\s` matches
+# newlines without needing re.DOTALL, so this covers both the single-line
+# and the multi-line list-literal call styles review_pr.py uses.
+PYTHON_COMMAND_CALL_RE = re.compile(r'(?:subprocess\.)?run\(\s*\[\s*"([^"]+)"')
+
+
+def discovered_python_commands(content):
+    """Every external command a packaged coordinator's own Python source
+    invokes as the first element of a `run`/`subprocess.run` argument
+    list. Deliberately does not match a dynamically-resolved first
+    argument like `sys.executable` (no leading string literal there) —
+    that path is python3, already covered via the SKILL.md bash surface
+    that invokes this script with `python3 ...`."""
+    return {match.group(1) for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
+
+
+def discovered_commands_for_plugin_file(relative_path, content):
+    if relative_path.endswith(".py"):
+        return discovered_python_commands(content)
+    return discovered_plugin_commands(content)
+
+
 def looks_like_path_segment(segment):
     return (
         "/" in segment
@@ -218,7 +245,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         }
         for relative_path in PLUGIN_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            for name in discovered_plugin_commands(content):
+            for name in discovered_commands_for_plugin_file(relative_path, content):
                 self.assertIn(
                     name,
                     executable_tokens,
@@ -226,6 +253,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{name!r}; add it to the manifest in "
                     "docs/agent-workflow-contract.md",
                 )
+
+    def test_review_pr_coordinator_command_invocations_are_documented(self):
+        # The coordinator scan uses a different extractor (Python list
+        # literals, not bash) than the SKILL.md files; pin it directly
+        # against the actual coordinator so a regression in either the
+        # extractor or the coordinator's own invocations is caught here,
+        # not just via the generic loop above.
+        content = (REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
     def test_plugin_bash_command_discovery_finds_find_and_head(self):
         # Pins the extractor against the actual pr-review skill rather than

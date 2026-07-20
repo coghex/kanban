@@ -121,6 +121,16 @@ class MarketplaceAndPluginManifestTests(unittest.TestCase):
         resolved = (marketplace_root / source["path"]).resolve()
         self.assertEqual(resolved, PLUGIN_ROOT)
 
+    def test_marketplace_manifest_declares_the_documented_plugin_entry_fields(self):
+        data = load_json(MARKETPLACE_MANIFEST)
+        self.assertIn("interface", data)
+        self.assertIn("displayName", data["interface"])
+        kanban_entry = next(item for item in data["plugins"] if item.get("name") == "kanban")
+        self.assertIn("policy", kanban_entry)
+        self.assertIn("installation", kanban_entry["policy"])
+        self.assertIn("authentication", kanban_entry["policy"])
+        self.assertIn("category", kanban_entry)
+
     def test_plugin_manifest_is_valid_and_declares_no_forbidden_configuration(self):
         data = load_json(PLUGIN_MANIFEST)
         self.assertEqual(data.get("name"), "kanban")
@@ -436,12 +446,24 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
 
             shutil.rmtree(root)  # must not raise either
 
-    def test_run_reviews_gives_each_dual_reviewer_its_own_source_directory(self):
+    def test_run_reviews_serializes_reviewers_one_source_directory_at_a_time(self):
+        # Cross-tree tampering regression test: even independently-rooted
+        # per-reviewer directories are a tampering surface if both exist on
+        # disk at once (an unrestricted reviewer can enumerate/glob for a
+        # peer's prefix). Assert the actual invariant: run_reviews never
+        # has more than one reviewer's source directory on disk at a time.
         module = load_review_pr_module()
-        seen_paths = []
+        created_dirs = []
+        invocation_log = []
+
+        def fake_extract():
+            created = Path(tempfile.mkdtemp(prefix="fake-review-source-"))
+            created_dirs.append(created)
+            return created
 
         def fake_invoke_reviewer(reviewer, prompt, cwd):
-            seen_paths.append((reviewer.key, cwd))
+            still_on_disk = [d for d in created_dirs if d.exists()]
+            invocation_log.append((reviewer.key, cwd, still_on_disk))
             return {
                 "reviewer": reviewer.key,
                 "display_name": reviewer.display_name,
@@ -450,20 +472,22 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
                 "blocking_concerns": [],
             }
 
-        with tempfile.TemporaryDirectory() as temp:
-            sources = {"codex": Path(temp) / "codex", "claude": Path(temp) / "claude"}
-            for path in sources.values():
-                path.mkdir()
-            with mock.patch.object(module, "invoke_reviewer", side_effect=fake_invoke_reviewer):
-                module.run_reviews(
-                    [module.CODEX_REVIEWER, module.CLAUDE_REVIEWER], {}, sources, rereview=False
-                )
+        with mock.patch.object(module, "invoke_reviewer", side_effect=fake_invoke_reviewer):
+            module.run_reviews(
+                [module.CODEX_REVIEWER, module.CLAUDE_REVIEWER], {}, fake_extract, rereview=False
+            )
 
-        used_paths = dict(seen_paths)
-        self.assertEqual(len(used_paths), 2)
-        self.assertNotEqual(used_paths["codex"], used_paths["claude"])
-        self.assertEqual(used_paths["codex"], sources["codex"])
-        self.assertEqual(used_paths["claude"], sources["claude"])
+        self.assertEqual(len(invocation_log), 2)
+        codex_key, codex_cwd, codex_on_disk = invocation_log[0]
+        claude_key, claude_cwd, claude_on_disk = invocation_log[1]
+        self.assertEqual(codex_key, "codex")
+        self.assertEqual(claude_key, "claude")
+        self.assertNotEqual(codex_cwd, claude_cwd)
+        self.assertEqual(codex_on_disk, [codex_cwd], "only codex's own source directory may exist while it runs")
+        self.assertEqual(claude_on_disk, [claude_cwd], "codex's directory must already be gone before claude's is created")
+        self.assertEqual(len(created_dirs), 2)
+        for created in created_dirs:
+            self.assertFalse(created.exists(), "run_reviews must tear each source down before returning")
 
     def test_extract_source_result_is_read_only(self):
         module = load_review_pr_module()
@@ -480,13 +504,13 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
                 readme.write_text("overwritten")
             module.make_tree_writable(destination)  # so the TemporaryDirectory can clean up
 
-    def test_workflow_gives_dual_reviewers_unrelated_non_sibling_source_roots(self):
-        # End-to-end regression for the round-6 finding: dual-review sources
-        # must not be predictably-named siblings under one shared writable
-        # parent (e.g. temp/codex, temp/claude), which either concurrently
-        # running reviewer could traverse into via `..`. Uses the real
-        # extract_source/tempfile.mkdtemp path against this actual repo;
-        # only GitHub calls and the reviewer subprocess spawns are mocked.
+    def test_workflow_serializes_dual_reviewers_with_no_predictable_naming(self):
+        # End-to-end regression for the round-6/round-7 findings: dual
+        # review must never have two reviewers' source trees on disk at
+        # once, and directory names must not encode the reviewer brand.
+        # Uses the real extract_source/tempfile.mkdtemp/run_reviews path
+        # against this actual repo; only GitHub calls and the reviewer
+        # subprocess spawn (invoke_reviewer) are mocked.
         module = load_review_pr_module()
         pr = {
             "number": 89,
@@ -504,21 +528,25 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         ).stdout.strip()
         pr["headRefOid"] = head
 
-        captured_sources = {}
+        invocation_log = []
+        all_sources_seen = []
 
-        def fake_run_reviews(reviewers, context, sources, rereview):
-            captured_sources.update(sources)
-            return [
-                {"reviewer": item.key, "display_name": item.display_name, "verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}
-                for item in reviewers
-            ]
+        def fake_invoke_reviewer(reviewer, prompt, cwd):
+            # Captured at the moment THIS reviewer runs, not after the fact
+            # (every directory is torn down by the time workflow() returns,
+            # which would make a post-hoc check vacuously pass regardless
+            # of whether serialization actually happened).
+            other_still_on_disk = [other for other in all_sources_seen if other != cwd and other.exists()]
+            invocation_log.append((reviewer.key, cwd, cwd.exists(), other_still_on_disk))
+            all_sources_seen.append(cwd)
+            return {"reviewer": reviewer.key, "display_name": reviewer.display_name, "verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}
 
         with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
             module, "pr_view", return_value=pr
         ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
             module, "collect_context", return_value={}
         ), mock.patch.object(
-            module, "run_reviews", side_effect=fake_run_reviews
+            module, "invoke_reviewer", side_effect=fake_invoke_reviewer
         ), mock.patch.object(
             module, "render_review", return_value=("APPROVE", "APPROVE\n\nok\n")
         ), mock.patch.object(
@@ -530,21 +558,17 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         ):
             module.workflow(REPO_ROOT, 89, rereview=False, dry_run=False, allow_no_issue=False)
 
-        self.assertEqual(set(captured_sources), {"codex", "claude"})
-        codex_source, claude_source = captured_sources["codex"], captured_sources["claude"]
-        self.assertNotEqual(codex_source, claude_source)
-        # Both necessarily share the OS temp root as a distant ancestor
-        # (unavoidable with tempfile), but neither may be a predictably-
-        # named, directly-created subdirectory of the other — the actual
-        # gap this test guards: a sibling `../claude` next to `../codex`
-        # under one parent this coordinator itself made writable.
-        self.assertNotIn(claude_source, codex_source.parents, "claude's source must not be an ancestor directory of codex's")
-        self.assertNotIn(codex_source, claude_source.parents, "codex's source must not be an ancestor directory of claude's")
-        self.assertNotIn(codex_source.name, {"codex", "claude"}, "source directory names must not be predictable")
-        self.assertNotIn(claude_source.name, {"codex", "claude"}, "source directory names must not be predictable")
-        # workflow() must have cleaned both up on the way out.
-        self.assertFalse(codex_source.exists())
-        self.assertFalse(claude_source.exists())
+        self.assertEqual(len(invocation_log), 2)
+        for key, cwd, existed_while_running, other_still_on_disk in invocation_log:
+            self.assertTrue(existed_while_running, f"{key}'s own source must exist while it is running")
+            self.assertNotIn(cwd.name, {"codex", "claude"}, "source directory names must not encode the reviewer brand")
+            self.assertEqual(other_still_on_disk, [], f"no other reviewer's source may exist while {key} is running")
+        codex_cwd = next(cwd for key, cwd, _, _ in invocation_log if key == "codex")
+        claude_cwd = next(cwd for key, cwd, _, _ in invocation_log if key == "claude")
+        self.assertNotEqual(codex_cwd, claude_cwd)
+        # workflow() must have torn both down on the way out.
+        self.assertFalse(codex_cwd.exists())
+        self.assertFalse(claude_cwd.exists())
 
 
 COORDINATOR_LOOKUP = (

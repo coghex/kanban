@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import hashlib
 import io
 import json
@@ -17,7 +16,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 REVIEW_TIMEOUT_SECONDS = 7200
@@ -596,31 +595,28 @@ def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any
 def run_reviews(
     reviewers: list[Reviewer],
     context: dict[str, Any],
-    sources: dict[str, Path],
+    extract: Callable[[], Path],
     rereview: bool,
 ) -> list[dict[str, Any]]:
-    # Each reviewer gets its own extraction under `sources` (workflow()
-    # populates one per reviewer key), never a directory shared with
-    # another concurrently-running reviewer: invoke_codex/invoke_claude no
-    # longer restrict the nested reviewer's sandbox/tool access, so a
-    # shared, merely-conventionally-read-only directory would let either
-    # reviewer's process affect what the other sees mid-review.
+    # Reviewers run strictly one at a time, each with a freshly extracted
+    # source that is torn down before the next reviewer's extraction
+    # begins: invoke_codex/invoke_claude no longer restrict a nested
+    # reviewer's own sandbox/tool access, so concurrent dual review — even
+    # with each reviewer in its own directory — would leave two same-user
+    # source trees on disk simultaneously, one of which an unrestricted
+    # reviewer could enumerate and tamper with via its predictable prefix.
+    # Serial execution means at most one reviewer's source ever exists.
     prompts = {item.key: review_prompt(context, item, rereview) for item in reviewers}
-    if len(reviewers) == 1:
-        item = reviewers[0]
-        return [invoke_reviewer(item, prompts[item.key], sources[item.key])]
     results: dict[str, dict[str, Any]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(reviewers)) as pool:
-        futures = {
-            pool.submit(invoke_reviewer, item, prompts[item.key], sources[item.key]): item
-            for item in reviewers
-        }
-        for future in concurrent.futures.as_completed(futures):
-            item = futures[future]
-            try:
-                results[item.key] = future.result()
-            except Exception as exc:
-                raise WorkflowError(f"{item.display_name} review failed: {exc}") from exc
+    for item in reviewers:
+        source = extract()
+        try:
+            results[item.key] = invoke_reviewer(item, prompts[item.key], source)
+        except Exception as exc:
+            raise WorkflowError(f"{item.display_name} review failed: {exc}") from exc
+        finally:
+            make_tree_writable(source)
+            shutil.rmtree(source, ignore_errors=True)
     return [results[item.key] for item in reviewers]
 
 
@@ -803,24 +799,18 @@ def workflow(
         return 0, {**base, "status": "ready", "comment_status": "dry-run"}
 
     context = collect_context(root, repo, pr, gate["issues"])
-    # Each reviewer gets its own independently-rooted temp directory
-    # (tempfile.mkdtemp, not a predictably-named subdirectory of one shared
-    # parent): with invoke_codex/invoke_claude's sandbox/tool restrictions
-    # deliberately removed, a same-user sibling subdirectory (e.g. `../claude`
-    # next to `../codex`) would be a guessable, traversable path either
-    # concurrently-running reviewer could reach. An unrelated, randomly
-    # named top-level directory has no such predictable relationship.
-    sources: dict[str, Path] = {}
-    try:
-        for item in reviewers:
-            reviewer_source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-{item.key}-source-"))
-            extract_source(root, number, pr["headRefOid"], reviewer_source)
-            sources[item.key] = reviewer_source
-        results = run_reviews(reviewers, context, sources, rereview)
-    finally:
-        for reviewer_source in sources.values():
-            make_tree_writable(reviewer_source)
-            shutil.rmtree(reviewer_source, ignore_errors=True)
+
+    def extract_for_next_reviewer() -> Path:
+        # An independently-rooted temp directory with no reviewer-identifying
+        # prefix (tempfile.mkdtemp, not a subdirectory of one shared parent
+        # and not named after the reviewer brand). run_reviews extracts,
+        # reviews, and tears this down before starting the next reviewer, so
+        # at most one such directory ever exists on disk at a time.
+        source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
+        extract_source(root, number, pr["headRefOid"], source)
+        return source
+
+    results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
 
     refreshed_pr = pr_view(root, number)
     refreshed_gate = gate_status(
