@@ -16,7 +16,7 @@ module Kanban.PullRequestFlow
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
@@ -46,6 +46,7 @@ data PullRequestAction = PullRequestReview | PullRequestRevision | PullRequestRe
 
 data PullRequestFlowEvent
   = PullRequestProcessStarted Int PullRequestAction SolverBrand ManagedProcess
+  | PullRequestProcessSpawning Int Bool
   | PullRequestLogOpened Int FilePath
   | PullRequestSessionIdentified Int Text
   | PullRequestFlowOutput Int AgentEvent
@@ -117,13 +118,32 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
   case executable of
     Nothing -> closeWithOutcome sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
-      started <- try (createProcess (processSpec executablePath brand)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+      -- Masked from before the process is even spawned through its
+      -- registration, so a deadline's cancellation can never land in the
+      -- gap between a successful 'createProcess' and the event that
+      -- reaches 'rememberProvider' — the only way the caller ever learns
+      -- about (and can track or kill) this provider. Masking only after
+      -- 'createProcess' returned left exactly that gap open.
+      --
+      -- 'PullRequestProcessSpawning' brackets the spawn attempt itself
+      -- (True before 'createProcess', False on every path that concludes
+      -- without a live registration) — see 'Kanban.Solve.runSolve' for why
+      -- a deadline watchdog racing this exact mask needs this to tell "no
+      -- provider was ever spawned" apart from "one was just spawned but
+      -- has not been recorded yet".
+      started <- uninterruptibleMask_ $ do
+        eventSink (PullRequestProcessSpawning pullRequestNumber True)
+        result <- try (createProcess (processSpec executablePath brand)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+        case result of
+          Right (Nothing, Just _, Just _, processHandle) -> do
+            (managed, groupLeaderProblem) <- managedProcess processHandle
+            mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
+            eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
+          _ -> eventSink (PullRequestProcessSpawning pullRequestNumber False)
+        pure result
       case started of
         Left exception -> closeWithOutcome sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
-          (managed, groupLeaderProblem) <- managedProcess processHandle
-          mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
-          eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           sessionRef <- newIORef existingSession

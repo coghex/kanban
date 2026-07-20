@@ -98,6 +98,7 @@ test-suite kanban-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Spec.hs
+  ghc-options: -threaded -with-rtsopts=-N1
   build-depends:
     aeson,
     base,
