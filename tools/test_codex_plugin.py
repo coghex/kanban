@@ -391,6 +391,96 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
         self.assertIn("both verdict labels were cleared", str(excinfo.exception))
 
 
+class ReviewerSourceIsolationTests(unittest.TestCase):
+    """Round-5 finding: invoke_codex/invoke_claude no longer restrict the
+    nested reviewer's sandbox/tool access (round 3 removed those flags), so
+    a dual review sharing one extracted-source directory would let either
+    reviewer's process affect what the other sees mid-review. Each reviewer
+    must get its own extraction, and that extraction must actually be
+    immutable on disk, not just described as read-only in the prompt."""
+
+    def test_make_tree_read_only_strips_write_permission_from_files_and_dirs(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "extracted"
+            nested = root / "sub"
+            nested.mkdir(parents=True)
+            target_file = nested / "file.txt"
+            target_file.write_text("hello")
+
+            module.make_tree_read_only(root)
+
+            self.assertEqual(root.stat().st_mode & 0o222, 0)
+            self.assertEqual(nested.stat().st_mode & 0o222, 0)
+            self.assertEqual(target_file.stat().st_mode & 0o222, 0)
+            with self.assertRaises(PermissionError):
+                target_file.write_text("overwritten")
+
+    def test_make_tree_writable_reverses_make_tree_read_only_for_cleanup(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "extracted"
+            nested = root / "sub"
+            nested.mkdir(parents=True)
+            target_file = nested / "file.txt"
+            target_file.write_text("hello")
+
+            module.make_tree_read_only(root)
+            module.make_tree_writable(root)
+
+            self.assertNotEqual(root.stat().st_mode & 0o200, 0)
+            self.assertNotEqual(nested.stat().st_mode & 0o200, 0)
+            self.assertNotEqual(target_file.stat().st_mode & 0o200, 0)
+            target_file.write_text("overwritten")  # must not raise
+            import shutil
+
+            shutil.rmtree(root)  # must not raise either
+
+    def test_run_reviews_gives_each_dual_reviewer_its_own_source_directory(self):
+        module = load_review_pr_module()
+        seen_paths = []
+
+        def fake_invoke_reviewer(reviewer, prompt, cwd):
+            seen_paths.append((reviewer.key, cwd))
+            return {
+                "reviewer": reviewer.key,
+                "display_name": reviewer.display_name,
+                "verdict": "APPROVE",
+                "summary": "ok",
+                "blocking_concerns": [],
+            }
+
+        with tempfile.TemporaryDirectory() as temp:
+            sources = {"codex": Path(temp) / "codex", "claude": Path(temp) / "claude"}
+            for path in sources.values():
+                path.mkdir()
+            with mock.patch.object(module, "invoke_reviewer", side_effect=fake_invoke_reviewer):
+                module.run_reviews(
+                    [module.CODEX_REVIEWER, module.CLAUDE_REVIEWER], {}, sources, rereview=False
+                )
+
+        used_paths = dict(seen_paths)
+        self.assertEqual(len(used_paths), 2)
+        self.assertNotEqual(used_paths["codex"], used_paths["claude"])
+        self.assertEqual(used_paths["codex"], sources["codex"])
+        self.assertEqual(used_paths["claude"], sources["claude"])
+
+    def test_extract_source_result_is_read_only(self):
+        module = load_review_pr_module()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "extracted"
+            destination.mkdir()
+            module.extract_source(REPO_ROOT, 0, head, destination)
+            readme = destination / "README.md"
+            self.assertTrue(readme.is_file())
+            with self.assertRaises(PermissionError):
+                readme.write_text("overwritten")
+            module.make_tree_writable(destination)  # so the TemporaryDirectory can clean up
+
+
 COORDINATOR_LOOKUP = (
     'find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
     "-path '*/kanban/*/skills/pr-review/scripts/review_pr.py'"

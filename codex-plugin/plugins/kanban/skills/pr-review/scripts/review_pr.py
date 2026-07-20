@@ -415,6 +415,33 @@ def ensure_commit(root: Path, number: int, head: str) -> None:
     run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=root)
 
 
+def make_tree_read_only(path: Path) -> None:
+    """Strip write permission from every entry under path, then path itself.
+    The review prompt promises reviewers "a read-only extraction of the
+    exact PR head"; without this, a reviewer whose sandbox/permission
+    defaults are not restricted (invoke_codex/invoke_claude no longer pin
+    them) could otherwise write into it."""
+    for dirpath, dirnames, filenames in os.walk(path):
+        for name in dirnames + filenames:
+            entry = Path(dirpath) / name
+            entry.chmod(entry.stat().st_mode & ~0o222)
+    path.chmod(path.stat().st_mode & ~0o222)
+
+
+def make_tree_writable(path: Path) -> None:
+    """Inverse of make_tree_read_only, restoring owner write permission so a
+    caller's own temp-directory cleanup (which needs write access on
+    directories to unlink entries) does not depend on a particular Python
+    version's shutil.rmtree gracefully recovering from PermissionError."""
+    if not path.exists():
+        return
+    path.chmod(path.stat().st_mode | 0o200)
+    for dirpath, dirnames, filenames in os.walk(path):
+        for name in dirnames + filenames:
+            entry = Path(dirpath) / name
+            entry.chmod(entry.stat().st_mode | 0o200)
+
+
 def extract_source(root: Path, number: int, head: str, destination: Path) -> None:
     ensure_commit(root, number, head)
     proc = subprocess.run(
@@ -427,6 +454,7 @@ def extract_source(root: Path, number: int, head: str, destination: Path) -> Non
         raise WorkflowError(f"git archive failed: {proc.stderr.decode(errors='replace')[-2000:]}")
     with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:") as archive:
         archive.extractall(destination, filter="data")
+    make_tree_read_only(destination)
 
 
 def review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bool) -> str:
@@ -566,17 +594,23 @@ def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any
 def run_reviews(
     reviewers: list[Reviewer],
     context: dict[str, Any],
-    source: Path,
+    sources: dict[str, Path],
     rereview: bool,
 ) -> list[dict[str, Any]]:
+    # Each reviewer gets its own extraction under `sources` (workflow()
+    # populates one per reviewer key), never a directory shared with
+    # another concurrently-running reviewer: invoke_codex/invoke_claude no
+    # longer restrict the nested reviewer's sandbox/tool access, so a
+    # shared, merely-conventionally-read-only directory would let either
+    # reviewer's process affect what the other sees mid-review.
     prompts = {item.key: review_prompt(context, item, rereview) for item in reviewers}
     if len(reviewers) == 1:
         item = reviewers[0]
-        return [invoke_reviewer(item, prompts[item.key], source)]
+        return [invoke_reviewer(item, prompts[item.key], sources[item.key])]
     results: dict[str, dict[str, Any]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(reviewers)) as pool:
         futures = {
-            pool.submit(invoke_reviewer, item, prompts[item.key], source): item
+            pool.submit(invoke_reviewer, item, prompts[item.key], sources[item.key]): item
             for item in reviewers
         }
         for future in concurrent.futures.as_completed(futures):
@@ -768,9 +802,16 @@ def workflow(
 
     context = collect_context(root, repo, pr, gate["issues"])
     with tempfile.TemporaryDirectory(prefix=f"pr-{number}-source-") as temp:
-        source = Path(temp)
-        extract_source(root, number, pr["headRefOid"], source)
-        results = run_reviews(reviewers, context, source, rereview)
+        try:
+            sources: dict[str, Path] = {}
+            for item in reviewers:
+                reviewer_source = Path(temp) / item.key
+                reviewer_source.mkdir()
+                extract_source(root, number, pr["headRefOid"], reviewer_source)
+                sources[item.key] = reviewer_source
+            results = run_reviews(reviewers, context, sources, rereview)
+        finally:
+            make_tree_writable(Path(temp))
 
     refreshed_pr = pr_view(root, number)
     refreshed_gate = gate_status(
