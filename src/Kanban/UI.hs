@@ -1,8 +1,12 @@
 module Kanban.UI
-  ( ChatTranscript (..),
+  ( AgentSessionEntry (..),
+    AgentSessionRef (..),
+    ChatTranscript (..),
     Name (..),
     OverlayMouseAction (..),
     PendingReviewInteraction (..),
+    ProcessClickOutcome (..),
+    ProcessSelection (..),
     PullRequestReviewSession (..),
     ReviewDigitAction (..),
     SolvePhase (..),
@@ -12,6 +16,8 @@ module Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    resolveProcessClick,
+    resolveProcessSelection,
     resolveReviewDigitAction,
     runDashboard,
     solveSessionAlreadyResolved,
@@ -162,7 +168,7 @@ data Name
   | SolvePanel
   | PullRequestReviewPanel
   | ProcessesPanel
-  | ProcessTarget Int
+  | ProcessTarget AgentSessionRef
   | DrainerButton
   deriving stock (Eq, Ord, Show)
 
@@ -300,6 +306,21 @@ data AgentSessionRef
   | PullRequestAgent Int
   | ReviewAgent Int
   | WorkerAgent WorkerId
+  deriving stock (Eq, Ord, Show)
+
+-- | Tracks the processes overlay selection by stable session identity
+-- (falling back to a row position only while no entry with that identity
+-- is present), so draw and actions always resolve the same target.
+data ProcessSelection = ProcessSelection
+  { processSelectionRef :: Maybe AgentSessionRef,
+    processSelectionRow :: Int
+  }
+  deriving stock (Eq, Show)
+
+data ProcessClickOutcome
+  = ProcessClickSelect ProcessSelection
+  | ProcessClickOpen
+  | ProcessClickIgnored
   deriving stock (Eq, Show)
 
 data AgentSessionEntry = AgentSessionEntry
@@ -346,7 +367,7 @@ data AppState = AppState
     appSidebarVisible :: Bool,
     appSettings :: Settings,
     appLogRoot :: FilePath,
-    appProcessSelection :: Int,
+    appProcessSelection :: ProcessSelection,
     appOverlay :: Maybe Overlay,
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
@@ -402,7 +423,7 @@ runDashboard options repository = do
             appSidebarVisible = True,
             appSettings = initialSettings,
             appLogRoot = logRoot,
-            appProcessSelection = 0,
+            appProcessSelection = ProcessSelection Nothing 0,
             appOverlay = Nothing,
             appNotice = Just (initialNotice <> maybe "" (" · " <>) usageNotice <> maybe "" (" · " <>) settingsNotice),
             appBoardFreshness = initialFreshness,
@@ -1243,7 +1264,7 @@ drawProcesses state =
     ]
   where
     entries = agentSessionEntries state
-    selectedIndex = max 0 (min state.appProcessSelection (length entries - 1))
+    selectedIndex = (resolveProcessSelection entries state.appProcessSelection).processSelectionRow
     drawEntry index entry =
       let selected = index == selectedIndex
           attribute
@@ -1268,7 +1289,7 @@ drawProcesses state =
               <> " · "
               <> entry.agentSessionActivity
               <> sessionText
-          widget = clickable (ProcessTarget index) (withAttr attribute (txt line))
+          widget = clickable (ProcessTarget entry.agentSessionRef) (withAttr attribute (txt line))
        in if selected then visible widget else widget
 
 agentSessionEntries :: AppState -> [AgentSessionEntry]
@@ -1340,6 +1361,32 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
     workerTaskProvider (SolveWorkerTaskKind task) = solverLabel task.solveWorkerBrand
     workerTaskProvider (PullRequestWorkerTaskKind task) = pullRequestAgentLabel task.pullRequestWorkerAction (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
     reviewSessionHasLiveTurn session = session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning] && session.reviewSessionStage == IssueRevision
+
+-- | Resolves a processes-overlay selection against the current entries: if
+-- the tracked identity is still present, follow it to its (possibly
+-- reordered) row; otherwise clamp the last-known row into the new list and
+-- adopt whatever entry now sits there as the new canonical identity, so a
+-- later reorder follows that fallback instead of re-clamping a vanished ref.
+resolveProcessSelection :: [AgentSessionEntry] -> ProcessSelection -> ProcessSelection
+resolveProcessSelection entries selection =
+  case selection.processSelectionRef of
+    Just ref
+      | Just index <- findIndex ((== ref) . agentSessionRef) entries ->
+          ProcessSelection (Just ref) index
+    _ ->
+      let clampedRow = max 0 (min selection.processSelectionRow (length entries - 1))
+       in ProcessSelection (agentSessionRef <$> safeIndex clampedRow entries) clampedRow
+
+-- | Resolves a processes-overlay click by the identity that was rendered
+-- into the clicked row, so a reorder between render and dispatch can't
+-- redirect the click to a different session at the same position.
+resolveProcessClick :: [AgentSessionEntry] -> ProcessSelection -> AgentSessionRef -> ProcessClickOutcome
+resolveProcessClick entries selection clickedRef =
+  case findIndex ((== clickedRef) . agentSessionRef) entries of
+    Nothing -> ProcessClickIgnored
+    Just clickedIndex
+      | (resolveProcessSelection entries selection).processSelectionRef == Just clickedRef -> ProcessClickOpen
+      | otherwise -> ProcessClickSelect (ProcessSelection (Just clickedRef) clickedIndex)
 
 solveProcessStatus :: SolvePhase -> Text
 solveProcessStatus SolveStarting = "starting"
@@ -1728,7 +1775,7 @@ handleEvent event = do
     (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killSelectedAgentSession
     (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollUp _ _) -> scrollProcesses (-3)
     (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollDown _ _) -> scrollProcesses 3
-    (Just ProcessesOverlay, MouseDown (ProcessTarget index) Vty.BLeft _ _) -> selectOrOpenAgentSession index
+    (Just ProcessesOverlay, MouseDown (ProcessTarget ref) Vty.BLeft _ _) -> selectOrOpenAgentSession ref
     (Just ProcessesOverlay, MouseDown ProcessesPanel _ _ _) -> pure ()
     (Just ProcessesOverlay, _) -> pure ()
     (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
@@ -1882,12 +1929,12 @@ chooseChatVerbosity verbosity = do
 openProcesses :: EventM Name AppState ()
 openProcesses = do
   state <- get
-  let maximumIndex = max 0 (length (agentSessionEntries state) - 1)
+  let resolved = resolveProcessSelection (agentSessionEntries state) state.appProcessSelection
   modify
     ( \current ->
         current
           { appOverlay = Just ProcessesOverlay,
-            appProcessSelection = min current.appProcessSelection maximumIndex,
+            appProcessSelection = resolved,
             appNotice = Nothing
           }
     )
@@ -1895,26 +1942,33 @@ openProcesses = do
 moveProcessSelection :: Int -> EventM Name AppState ()
 moveProcessSelection amount = do
   state <- get
-  let maximumIndex = max 0 (length (agentSessionEntries state) - 1)
-      nextIndex = max 0 (min maximumIndex (state.appProcessSelection + amount))
-  modify (\current -> current {appProcessSelection = nextIndex})
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+      maximumIndex = max 0 (length entries - 1)
+      nextIndex = max 0 (min maximumIndex (resolved.processSelectionRow + amount))
+      nextSelection = ProcessSelection (agentSessionRef <$> safeIndex nextIndex entries) nextIndex
+  modify (\current -> current {appProcessSelection = nextSelection})
 
 scrollProcesses :: Int -> EventM Name AppState ()
 scrollProcesses amount = do
   moveProcessSelection amount
   vScrollBy (viewportScroll ProcessesViewport) amount
 
-selectOrOpenAgentSession :: Int -> EventM Name AppState ()
-selectOrOpenAgentSession index = do
-  selected <- (.appProcessSelection) <$> get
-  if selected == index
-    then openSelectedAgentSession
-    else modify (\state -> state {appProcessSelection = index})
+selectOrOpenAgentSession :: AgentSessionRef -> EventM Name AppState ()
+selectOrOpenAgentSession clickedRef = do
+  state <- get
+  case resolveProcessClick (agentSessionEntries state) state.appProcessSelection clickedRef of
+    ProcessClickIgnored -> pure ()
+    ProcessClickOpen -> openSelectedAgentSession
+    ProcessClickSelect selection -> modify (\current -> current {appProcessSelection = selection})
 
 openSelectedAgentSession :: EventM Name AppState ()
 openSelectedAgentSession = do
   state <- get
-  case safeIndex state.appProcessSelection (agentSessionEntries state) of
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+  modify (\current -> current {appProcessSelection = resolved})
+  case safeIndex resolved.processSelectionRow entries of
     Nothing -> setNotice "No agent session is selected"
     Just entry -> case entry.agentSessionRef of
       SolveAgent issueNumber -> modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
@@ -1925,7 +1979,10 @@ openSelectedAgentSession = do
 killSelectedAgentSession :: EventM Name AppState ()
 killSelectedAgentSession = do
   state <- get
-  case safeIndex state.appProcessSelection (agentSessionEntries state) of
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+  modify (\current -> current {appProcessSelection = resolved})
+  case safeIndex resolved.processSelectionRow entries of
     Nothing -> setNotice "No agent session is selected"
     Just entry
       | not entry.agentSessionLive -> setNotice (entry.agentSessionLabel <> " has no live process to kill")

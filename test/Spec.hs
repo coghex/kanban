@@ -104,10 +104,14 @@ import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
 import Kanban.UI
-  ( ChatTranscript (..),
+  ( AgentSessionEntry (..),
+    AgentSessionRef (..),
+    ChatTranscript (..),
     Name (..),
     OverlayMouseAction (..),
     PendingReviewInteraction (..),
+    ProcessClickOutcome (..),
+    ProcessSelection (..),
     PullRequestReviewSession (..),
     ReviewDigitAction (..),
     SolvePhase (..),
@@ -117,6 +121,8 @@ import Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    resolveProcessClick,
+    resolveProcessSelection,
     resolveReviewDigitAction,
     solveSessionAlreadyResolved,
   )
@@ -2482,6 +2488,57 @@ main = hspec $ do
 
     it "appends digits when nothing is pending" $
       resolveReviewDigitAction Nothing 4 `shouldBe` ReviewDigitAppend
+
+  describe "processes overlay selection resolution" $ do
+    let sessionEntry ref =
+          AgentSessionEntry
+            { agentSessionRef = ref,
+              agentSessionLabel = "label",
+              agentSessionProvider = "provider",
+              agentSessionStatus = "status",
+              agentSessionActivity = "activity",
+              agentSessionId = Nothing,
+              agentSessionLive = True,
+              agentSessionProblem = False
+            }
+        solve = sessionEntry . SolveAgent
+
+    it "keeps the clamped entry as the target when the list shrinks past the selection" $ do
+      let selection = ProcessSelection (Just (SolveAgent 5)) 4
+          shrunk = [solve 1, solve 2]
+      resolveProcessSelection shrunk selection `shouldBe` ProcessSelection (Just (SolveAgent 2)) 1
+
+    it "follows the selected identity across a reorder instead of the row" $ do
+      let selection = ProcessSelection (Just (SolveAgent 2)) 1
+          reordered = [solve 2, solve 1, solve 3]
+      resolveProcessSelection reordered selection `shouldBe` ProcessSelection (Just (SolveAgent 2)) 0
+
+    it "falls back to the nearest remaining row when the selected session disappears" $ do
+      let selection = ProcessSelection (Just (WorkerAgent (WorkerId "w1"))) 2
+          remaining = [solve 1, solve 2]
+      resolveProcessSelection remaining selection `shouldBe` ProcessSelection (Just (SolveAgent 2)) 1
+
+    it "resolves to no selection when no sessions remain" $
+      resolveProcessSelection [] (ProcessSelection (Just (SolveAgent 1)) 0) `shouldBe` ProcessSelection Nothing 0
+
+    it "adopts the fallback entry as canonical so a later reorder follows it, not the vanished identity" $ do
+      let selection = ProcessSelection (Just (WorkerAgent (WorkerId "w1"))) 2
+          afterDisappearance = [solve 1, solve 2, solve 3]
+          afterReorder = [solve 3, solve 2, solve 1]
+          resolvedOnce = resolveProcessSelection afterDisappearance selection
+          resolvedTwice = resolveProcessSelection afterReorder resolvedOnce
+      resolvedOnce `shouldBe` ProcessSelection (Just (SolveAgent 3)) 2
+      resolvedTwice `shouldBe` ProcessSelection (Just (SolveAgent 3)) 0
+
+    it "resolves a click by the identity rendered at that row, not the row itself, across a pre-dispatch reorder" $ do
+      let selection = ProcessSelection (Just (SolveAgent 1)) 0
+          reorderedBeforeDispatch = [solve 3, solve 1, solve 2]
+      resolveProcessClick reorderedBeforeDispatch selection (SolveAgent 2)
+        `shouldBe` ProcessClickSelect (ProcessSelection (Just (SolveAgent 2)) 2)
+      resolveProcessClick reorderedBeforeDispatch selection (SolveAgent 1)
+        `shouldBe` ProcessClickOpen
+      resolveProcessClick [solve 1, solve 2] selection (SolveAgent 9)
+        `shouldBe` ProcessClickIgnored
 
   describe "overlay mouse dispatch" $ do
     let backgroundCard = CardTarget Issues 0
