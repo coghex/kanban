@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -159,6 +160,56 @@ def repository_name(root: Path) -> str:
     if not isinstance(name, str) or "/" not in name:
         raise WorkflowError("could not resolve GitHub repository identity")
     return name
+
+
+def default_kanban_config_path() -> Path:
+    # Mirrors Kanban.Config.defaultConfigPath / tools/kanban_config.py's
+    # default_config_path(): this coordinator reviews arbitrary target
+    # repositories (not necessarily a Kanban checkout), so it cannot import
+    # tools/kanban_config.py and instead resolves the same well-known path
+    # directly.
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_config_home) if xdg_config_home else Path.home() / ".config"
+    return base / "kanban" / "config.toml"
+
+
+def resolve_workflow_labels(config_path: str | None, repo: str) -> tuple[str, str]:
+    """Minimal mirror of Kanban.Config's workflow.approval_label /
+    changes_requested_label resolution (global value, then a matching
+    [repositories."owner/name"] override). This coordinator only mutates and
+    verifies those two labels, so it does not need the rest of the schema
+    kanban_config.py loads for the dashboard and the canonical Python tools;
+    a missing or unreadable file silently keeps the documented defaults."""
+    approval_label, changes_requested_label = "reviewed:approve", "reviewed:changes"
+    path = Path(config_path).expanduser() if config_path else default_kanban_config_path()
+    if not path.is_file():
+        return approval_label, changes_requested_label
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, OSError):
+        return approval_label, changes_requested_label
+
+    def apply(table: Any) -> None:
+        nonlocal approval_label, changes_requested_label
+        if not isinstance(table, dict):
+            return
+        workflow = table.get("workflow")
+        if not isinstance(workflow, dict):
+            return
+        if isinstance(workflow.get("approval_label"), str) and workflow["approval_label"]:
+            approval_label = workflow["approval_label"]
+        if (
+            isinstance(workflow.get("changes_requested_label"), str)
+            and workflow["changes_requested_label"]
+        ):
+            changes_requested_label = workflow["changes_requested_label"]
+
+    apply(data)
+    repositories = data.get("repositories")
+    if isinstance(repositories, dict):
+        apply(repositories.get(repo))
+    return approval_label, changes_requested_label
 
 
 def pr_view(root: Path, number: int) -> dict[str, Any]:
@@ -726,13 +777,17 @@ def require_current_review_state(
     return gate
 
 
-def set_verdict_label(root: Path, number: int, verdict: str) -> None:
-    add = "reviewed:approve" if verdict == "APPROVE" else "reviewed:changes"
-    remove = "reviewed:changes" if verdict == "APPROVE" else "reviewed:approve"
+def set_verdict_label(
+    root: Path, number: int, verdict: str, approval_label: str, changes_requested_label: str
+) -> None:
+    add = approval_label if verdict == "APPROVE" else changes_requested_label
+    remove = changes_requested_label if verdict == "APPROVE" else approval_label
     run(["gh", "pr", "edit", str(number), "--add-label", add, "--remove-label", remove], cwd=root)
 
 
-def clear_verdict_labels(root: Path, number: int) -> None:
+def clear_verdict_labels(
+    root: Path, number: int, approval_label: str, changes_requested_label: str
+) -> None:
     run(
         [
             "gh",
@@ -740,9 +795,9 @@ def clear_verdict_labels(root: Path, number: int) -> None:
             "edit",
             str(number),
             "--remove-label",
-            "reviewed:approve",
+            approval_label,
             "--remove-label",
-            "reviewed:changes",
+            changes_requested_label,
         ],
         cwd=root,
     )
@@ -770,6 +825,8 @@ def verify_publication(
     head: str,
     verdict: str,
     gate_key_value: str,
+    approval_label: str,
+    changes_requested_label: str,
     *,
     allow_no_issue: bool,
 ) -> dict[str, Any]:
@@ -777,8 +834,8 @@ def verify_publication(
     if pr["headRefOid"] != head:
         raise WorkflowError("PR head changed after publication")
     labels = [item.get("name") for item in pr.get("labels") or [] if isinstance(item, dict)]
-    expected = "reviewed:approve" if verdict == "APPROVE" else "reviewed:changes"
-    verdict_labels = [item for item in labels if item in {"reviewed:approve", "reviewed:changes"}]
+    expected = approval_label if verdict == "APPROVE" else changes_requested_label
+    verdict_labels = [item for item in labels if item in {approval_label, changes_requested_label}]
     if verdict_labels != [expected]:
         raise WorkflowError(f"publication label verification failed: {verdict_labels}")
     gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
@@ -825,6 +882,7 @@ def publish_results(
     base: dict[str, Any],
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Safely publish an already-computed set of review results: re-verify
     nothing went stale since `gate`/`pr` were captured, post the
@@ -832,6 +890,7 @@ def publish_results(
     anything changes between commenting and labeling. Shared by workflow()'s
     own nested-reviewer path and publish_verdict()'s self-reviewed path, so
     both go through identical race handling."""
+    approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, number)
     refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue)
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
@@ -873,7 +932,7 @@ def publish_results(
             gate["key"],
             allow_no_issue=allow_no_issue,
         )
-        set_verdict_label(root, number, verdict)
+        set_verdict_label(root, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
             root,
             repo,
@@ -883,11 +942,13 @@ def publish_results(
             pr["headRefOid"],
             verdict,
             gate["key"],
+            approval_label,
+            changes_requested_label,
             allow_no_issue=allow_no_issue,
         )
     except WorkflowError as exc:
         try:
-            clear_verdict_labels(root, number)
+            clear_verdict_labels(root, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             raise WorkflowError(
                 f"publication failed ({exc}); verdict-label cleanup also failed ({cleanup_exc})"
@@ -911,6 +972,7 @@ def workflow(
     dry_run: bool,
     allow_no_issue: bool,
     self_review: bool = False,
+    config_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     repo = repository_name(root)
     pr = pr_view(root, number)
@@ -977,7 +1039,10 @@ def workflow(
         return source
 
     results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
-    return publish_results(root, repo, number, pr, gate, reviewers, results, base, allow_no_issue=allow_no_issue)
+    return publish_results(
+        root, repo, number, pr, gate, reviewers, results, base,
+        allow_no_issue=allow_no_issue, config_path=config_path,
+    )
 
 
 def publish_verdict(
@@ -988,6 +1053,7 @@ def publish_verdict(
     result_path: Path,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Publish a verdict the calling agent already computed itself (the
     self-review path from workflow()'s awaiting_self_review response).
@@ -1030,7 +1096,10 @@ def publish_verdict(
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     result_data = load_json(Path(result_path).read_text(encoding="utf-8"), "self-review result file")
     result = validate_review(result_data, reviewers[0])
-    return publish_results(root, repo, number, pr, gate, reviewers, [result], base, allow_no_issue=allow_no_issue)
+    return publish_results(
+        root, repo, number, pr, gate, reviewers, [result], base,
+        allow_no_issue=allow_no_issue, config_path=config_path,
+    )
 
 
 def self_test() -> None:
@@ -1124,6 +1193,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Print structured output")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks")
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
+    )
     args = parser.parse_args()
     if not args.self_test and args.review is None and args.rereview is None and args.publish_verdict is None:
         parser.error("one of --review, --rereview, --publish-verdict, or --self-test is required")
@@ -1153,6 +1227,7 @@ def main() -> None:
                 args.gate_key,
                 args.result,
                 allow_no_issue=args.allow_no_issue,
+                config_path=args.config,
             )
         else:
             code, result = workflow(
@@ -1162,6 +1237,7 @@ def main() -> None:
                 dry_run=args.dry_run,
                 allow_no_issue=args.allow_no_issue,
                 self_review=args.self_review,
+                config_path=args.config,
             )
     except WorkflowError as exc:
         result = {"pr": number, "status": "error", "error": str(exc)}

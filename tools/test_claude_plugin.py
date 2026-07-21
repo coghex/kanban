@@ -16,6 +16,7 @@ plugin's assets to exist.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -24,6 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin"
@@ -236,6 +238,85 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", solve_source)
         self.assertIn("Library/Application Support/kanban/issue-review/approve_issues.py", solve_source)
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
+
+
+def load_review_pr_module():
+    """Import review_pr.py by file path (it lives under claude-plugin/, not
+    tools/, so it is never on sys.path via `-s tools` discovery)."""
+    spec = importlib.util.spec_from_file_location("kanban_claude_plugin_review_pr", REVIEW_COORDINATOR)
+    module = importlib.util.module_from_spec(spec)
+    # dataclass field resolution looks the module up in sys.modules by name
+    # while exec_module is still running, so it must be registered first.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ConfiguredWorkflowLabelTests(unittest.TestCase):
+    """The coordinator reviews arbitrary target repositories, not necessarily
+    a Kanban checkout, so it cannot import tools/kanban_config.py; it must
+    still resolve the same global+repository-override approval/changes-
+    requested labels from ~/.config/kanban/config.toml (or --config) that
+    the dashboard and tools/approve_issues.py/drain_prs.py use."""
+
+    def test_defaults_when_no_config_file_exists(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "does-not-exist.toml")
+            self.assertEqual(
+                module.resolve_workflow_labels(missing, "coghex/kanban"),
+                ("reviewed:approve", "reviewed:changes"),
+            )
+
+    def test_global_and_repository_override_resolution(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        '[workflow]',
+                        'approval_label = "lgtm"',
+                        'changes_requested_label = "needs-work"',
+                        '',
+                        '[repositories."coghex/kanban".workflow]',
+                        'approval_label = "ship-it"',
+                        '',
+                        '[repositories."other/repo".workflow]',
+                        'approval_label = "should-not-apply"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "coghex/kanban"),
+                ("ship-it", "needs-work"),
+            )
+            # An unrelated repository table has no effect.
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "unrelated/repo"),
+                ("lgtm", "needs-work"),
+            )
+
+    def test_set_and_clear_verdict_label_use_the_resolved_labels(self):
+        module = load_review_pr_module()
+        with mock.patch.object(module, "run") as run_mock:
+            module.set_verdict_label(Path("/fake-repo"), 89, "APPROVE", "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "--add-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+        with mock.patch.object(module, "run") as run_mock:
+            module.clear_verdict_labels(Path("/fake-repo"), 89, "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "--remove-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+
+    def test_accepts_a_config_cli_flag(self):
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"--config"', coordinator_source)
+        self.assertIn("resolve_workflow_labels", coordinator_source)
 
 
 class SolveGateEscalationTests(unittest.TestCase):

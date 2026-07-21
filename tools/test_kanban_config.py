@@ -3,9 +3,11 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import kanban_config as kc
 
@@ -42,9 +44,17 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.repositories, {})
 
     def test_default_config_path_is_under_home_config_kanban(self):
-        self.assertEqual(
-            kc.default_config_path(), Path.home() / ".config" / "kanban" / "config.toml"
-        )
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            self.assertEqual(
+                kc.default_config_path(), Path.home() / ".config" / "kanban" / "config.toml"
+            )
+
+    def test_default_config_path_honors_xdg_config_home_like_the_haskell_side(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/custom-xdg"}):
+            self.assertEqual(
+                kc.default_config_path(), Path("/tmp/custom-xdg") / "kanban" / "config.toml"
+            )
 
 
 FULL_FIXTURE = """

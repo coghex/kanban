@@ -251,7 +251,8 @@ main = hspec $ do
                 workerUserMessage = "continue",
                 workerParent = Just parent,
                 workerCreatedAt = epoch,
-                workerMaxRuntimeSeconds = 14400
+                workerMaxRuntimeSeconds = 14400,
+                workerConfigPath = Nothing
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       eitherDecode (encode (WorkerFinished (SolveNeedsInput "choose a branch")))
@@ -515,7 +516,8 @@ main = hspec $ do
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = now,
-                  workerMaxRuntimeSeconds = 60
+                  workerMaxRuntimeSeconds = 60,
+                  workerConfigPath = Nothing
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"
@@ -1588,7 +1590,8 @@ main = hspec $ do
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = longAgo,
-                  workerMaxRuntimeSeconds = 60
+                  workerMaxRuntimeSeconds = 60,
+                  workerConfigPath = Nothing
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-818-overdue-spawn.spec.json"
@@ -2406,14 +2409,14 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "")
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
@@ -2421,15 +2424,21 @@ main = hspec $ do
       codexOriginRevisionPrompt `shouldNotContain` "create reviewed:revised"
       codexOriginRevisionPrompt `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
 
+    it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
+      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") Nothing ResumeAnswer "")
+          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "")
+      configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
+      defaultPrompt `shouldNotContain` "--config"
+
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
-      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "")
-          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing ResumeAnswer "")
+      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing Nothing ResumeAnswer "")
       initialReviewPrompt `shouldNotContain` "reviewed:revised"
       rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
 
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeAnswer "looks good")
-          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Just "session-1") ResumeInterruptGuidance "check the other file too")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
@@ -3083,10 +3092,14 @@ main = hspec $ do
           pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
       pullRequestStatus config pullRequest `shouldBe` StatusPending "blocked"
       isProblem config (PullRequestItem pullRequest) `shouldBe` False
-    it "applies configured blocking severity to blocked issues as well as pull requests" $ do
+    it "confines configurable blocking severity to pull requests, leaving blocked-issue treatment unchanged" $ do
       let issue = (baseIssue 10 []) {issueLabels = [Label "blocked" "d73a4a"]}
       isProblem defaultWorkflowConfig (IssueItem issue) `shouldBe` True
-      isProblem (defaultWorkflowConfig {blockingSeverity = SeverityAmber}) (IssueItem issue) `shouldBe` False
+      isProblem (defaultWorkflowConfig {blockingSeverity = SeverityAmber}) (IssueItem issue) `shouldBe` True
+
+    it "reports merge-pending, not checks-pending, when checks are unknown rather than a known pending state" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksUnknown}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "merge pending"
 
     it "lets a configured approval label change Done-column membership" $ do
       let config = defaultWorkflowConfig {approvalLabel = "lgtm"}
@@ -3193,6 +3206,14 @@ main = hspec $ do
       decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
       decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
       decodeConfigText "[usage.codex]\ncommand = [\"\"]\n" `shouldSatisfy` errorContains ["command"]
+
+    it "rejects a timeout large enough to overflow when converted to microseconds, but accepts the boundary" $ do
+      let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
+          largestSafeSeconds = (maxBound :: Int) `div` 1000000
+      decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show overflowingSeconds) <> "\n")
+        `shouldSatisfy` errorContains ["github_seconds"]
+      (decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show largestSafeSeconds) <> "\n"))
+        `shouldSatisfy` isRight
 
     it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
       decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
@@ -3491,7 +3512,8 @@ workerFixtureSpec repository identifier issueNumber =
       workerUserMessage = "",
       workerParent = Nothing,
       workerCreatedAt = epoch,
-      workerMaxRuntimeSeconds = 60
+      workerMaxRuntimeSeconds = 60,
+      workerConfigPath = Nothing
     }
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and

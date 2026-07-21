@@ -53,6 +53,7 @@ def repository_root(requested: Path) -> Path:
     required = [
         root / "tools" / "drain_prs.py",
         root / "tools" / "drain_prs_service.py",
+        root / "tools" / "kanban_config.py",
     ]
     missing = [str(item) for item in required if not item.is_file()]
     if missing:
@@ -221,10 +222,12 @@ def install(
     sources = {
         "drainer": repo / "tools" / "drain_prs.py",
         "controller": repo / "tools" / "drain_prs_service.py",
+        "config_module": repo / "tools" / "kanban_config.py",
     }
     destinations = {
         "drainer": install_dir / "drain_prs.py",
         "controller": install_dir / "drain_prs_service.py",
+        "config_module": install_dir / "kanban_config.py",
     }
     for destination in destinations.values():
         validate_symlink_destination(destination)

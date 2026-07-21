@@ -146,14 +146,20 @@ data WorkerSpec = WorkerSpec
     workerUserMessage :: Text,
     workerParent :: Maybe WorkerParent,
     workerCreatedAt :: UTCTime,
-    workerMaxRuntimeSeconds :: Int
+    workerMaxRuntimeSeconds :: Int,
+    -- | The dashboard's selected kanban config.toml path (Nothing means the
+    -- default path), forwarded to a pull-request worker so its spawned agent
+    -- can pass the same --config to the canonical PR-review coordinator.
+    -- Unused by solve workers.
+    workerConfigPath :: Maybe FilePath
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable spec file written before
--- 'workerResumeProvenance' existed still decodes: legacy specs default to
--- 'ResumeAnswer', matching every resume's framing prior to its introduction.
+-- 'workerResumeProvenance'/'workerConfigPath' existed still decodes: legacy
+-- specs default to 'ResumeAnswer'/'Nothing', matching every resume's framing
+-- prior to their introduction.
 instance FromJSON WorkerSpec where
   parseJSON = withObject "WorkerSpec" $ \object ->
     WorkerSpec
@@ -167,6 +173,7 @@ instance FromJSON WorkerSpec where
       <*> object .: "workerParent"
       <*> object .: "workerCreatedAt"
       <*> object .: "workerMaxRuntimeSeconds"
+      <*> object .:? "workerConfigPath" .!= Nothing
 
 data WorkerEvent
   = WorkerProviderStarted Int
@@ -275,11 +282,12 @@ launchSolveWorker repository issueNumber workflow brand existingSession existing
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds
+        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerConfigPath = Nothing
       }
 
-launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> IO (Either Text WorkerDescriptor)
-launchPullRequestWorker repository number origin action existingSession existingLogPath provenance userMessage parent = do
+launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> IO (Either Text WorkerDescriptor)
+launchPullRequestWorker repository number origin action existingSession existingLogPath provenance userMessage parent configPath = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
@@ -293,7 +301,8 @@ launchPullRequestWorker repository number origin action existingSession existing
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds
+        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerConfigPath = configPath
       }
 
 launchWorker :: WorkerSpec -> IO (Either Text WorkerDescriptor)
@@ -517,7 +526,7 @@ defaultRunTask spec rememberProvider emit = case spec.workerTask of
     runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translateSolveEvent rememberProvider emit)
   PullRequestWorkerTaskKind task ->
-    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+    runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerConfigPath spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translatePullRequestEvent rememberProvider emit)
 
 -- | The single source of truth the deadline watchdog and a task's own

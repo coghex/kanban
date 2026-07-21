@@ -18,6 +18,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import kanban_config
+
 
 LABEL = "com.coghex.drain-prs"
 HOME = Path.home()
@@ -61,8 +63,17 @@ def configured_config_path() -> str | None:
     return configured if isinstance(configured, str) and configured else None
 
 
+def configured_remote_name() -> str:
+    try:
+        raw_config, _ = kanban_config.load_raw_config(configured_config_path())
+    except kanban_config.KanbanConfigError:
+        return "origin"
+    return raw_config.remote_name
+
+
 NTFY_URL = configured_ntfy_url()
 CONFIGURED_CONFIG_PATH = configured_config_path()
+CONFIGURED_REMOTE_NAME = configured_remote_name()
 INTERVAL_SECONDS = 60
 START_TIMEOUT_SECONDS = 12
 START_STABILITY_SECONDS = 1.0
@@ -173,7 +184,8 @@ def working_tree_status(repo_path: Path) -> str:
     return (proc.stdout or "").strip()
 
 
-def require_default_branch(repo_path: Path) -> None:
+def require_default_branch(repo_path: Path, remote_name: str | None = None) -> None:
+    remote_name = remote_name if remote_name is not None else CONFIGURED_REMOTE_NAME
     current = run_command(
         ["git", "-C", str(repo_path), "branch", "--show-current"],
         check=False,
@@ -184,22 +196,23 @@ def require_default_branch(repo_path: Path) -> None:
     current_branch = (current.stdout or "").strip()
 
     default = run_command(
-        ["git", "-C", str(repo_path), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        ["git", "-C", str(repo_path), "symbolic-ref", "--short", f"refs/remotes/{remote_name}/HEAD"],
         check=False,
     )
     if default.returncode != 0:
         detail = (default.stderr or default.stdout or f"exit code {default.returncode}").strip()
         raise ServiceError(
-            "Could not determine the repository default branch from origin/HEAD: "
+            f"Could not determine the repository default branch from {remote_name}/HEAD: "
             + detail
         )
     default_ref = (default.stdout or "").strip()
-    if not default_ref.startswith("origin/") or len(default_ref) == len("origin/"):
+    prefix = f"{remote_name}/"
+    if not default_ref.startswith(prefix) or len(default_ref) == len(prefix):
         raise ServiceError(
-            "Could not determine the repository default branch from origin/HEAD: "
+            f"Could not determine the repository default branch from {remote_name}/HEAD: "
             + default_ref
         )
-    default_branch = default_ref.removeprefix("origin/")
+    default_branch = default_ref.removeprefix(prefix)
 
     if current_branch != default_branch:
         raise ServiceError(

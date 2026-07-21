@@ -10,6 +10,7 @@ override merge/array-replacement rules).
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -116,6 +117,12 @@ class ResolvedConfig:
 
 
 def default_config_path() -> Path:
+    # Matches Kanban.Config.defaultConfigPath (getXdgDirectory XdgConfig):
+    # honor $XDG_CONFIG_HOME when set, so the dashboard and these tools agree
+    # on the same file.
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home) / "kanban" / "config.toml"
     return Path.home() / ".config" / "kanban" / "config.toml"
 
 

@@ -294,6 +294,73 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
 
 
+class ConfiguredWorkflowLabelTests(unittest.TestCase):
+    """The coordinator reviews arbitrary target repositories, not necessarily
+    a Kanban checkout, so it cannot import tools/kanban_config.py; it must
+    still resolve the same global+repository-override approval/changes-
+    requested labels from ~/.config/kanban/config.toml (or --config) that
+    the dashboard and tools/approve_issues.py/drain_prs.py use."""
+
+    def test_defaults_when_no_config_file_exists(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "does-not-exist.toml")
+            self.assertEqual(
+                module.resolve_workflow_labels(missing, "coghex/kanban"),
+                ("reviewed:approve", "reviewed:changes"),
+            )
+
+    def test_global_and_repository_override_resolution(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        '[workflow]',
+                        'approval_label = "lgtm"',
+                        'changes_requested_label = "needs-work"',
+                        '',
+                        '[repositories."coghex/kanban".workflow]',
+                        'approval_label = "ship-it"',
+                        '',
+                        '[repositories."other/repo".workflow]',
+                        'approval_label = "should-not-apply"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "coghex/kanban"),
+                ("ship-it", "needs-work"),
+            )
+            # An unrelated repository table has no effect.
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "unrelated/repo"),
+                ("lgtm", "needs-work"),
+            )
+
+    def test_set_and_clear_verdict_label_use_the_resolved_labels(self):
+        module = load_review_pr_module()
+        with mock.patch.object(module, "run") as run_mock:
+            module.set_verdict_label(Path("/fake-repo"), 89, "APPROVE", "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "--add-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+        with mock.patch.object(module, "run") as run_mock:
+            module.clear_verdict_labels(Path("/fake-repo"), 89, "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "--remove-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+
+    def test_accepts_a_config_cli_flag(self):
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"--config"', coordinator_source)
+        self.assertIn("resolve_workflow_labels", coordinator_source)
+
+
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own
     invocation prompt uses (src/Kanban/Solve.hs), not a paraphrase, so
@@ -395,7 +462,9 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
                 module.workflow(Path("/fake-repo"), 89, rereview=False, dry_run=False, allow_no_issue=False)
 
         post_comment_mock.assert_called_once()
-        clear_verdict_labels_mock.assert_called_once_with(Path("/fake-repo"), 89)
+        clear_verdict_labels_mock.assert_called_once_with(
+            Path("/fake-repo"), 89, "reviewed:approve", "reviewed:changes"
+        )
         set_verdict_label_mock.assert_not_called()
         verify_publication_mock.assert_not_called()
         self.assertIn("both verdict labels were cleared", str(excinfo.exception))

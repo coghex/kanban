@@ -370,9 +370,9 @@ limitsOverrideParser = do
 
 timeoutsOverrideParser :: ParseTable Position TimeoutsOverride
 timeoutsOverrideParser = do
-  githubSecondsValue <- optKeyOf "github_seconds" parsePositiveBoundedInt
-  codexSecondsValue <- optKeyOf "codex_seconds" parsePositiveBoundedInt
-  claudeSecondsValue <- optKeyOf "claude_seconds" parsePositiveBoundedInt
+  githubSecondsValue <- optKeyOf "github_seconds" parsePositiveTimeoutSeconds
+  codexSecondsValue <- optKeyOf "codex_seconds" parsePositiveTimeoutSeconds
+  claudeSecondsValue <- optKeyOf "claude_seconds" parsePositiveTimeoutSeconds
   pure
     TimeoutsOverride
       { overrideGithubSeconds = githubSecondsValue,
@@ -453,6 +453,18 @@ parsePositiveBoundedInt value = do
   if number <= (0 :: Int)
     then failAt (valueAnn value) "must be a positive integer"
     else pure number
+
+-- | A timeout in whole seconds must additionally stay small enough to
+-- convert to microseconds ('System.Timeout.timeout' takes an 'Int') without
+-- overflowing.
+parsePositiveTimeoutSeconds :: Value' l -> Matcher l Int
+parsePositiveTimeoutSeconds value = do
+  number <- parsePositiveBoundedInt value
+  if number > maxBound `div` microsecondsPerSecond
+    then failAt (valueAnn value) "must not be large enough to overflow when converted to microseconds"
+    else pure number
+  where
+    microsecondsPerSecond = 1000000 :: Int
 
 parseCommandArgv :: Value' l -> Matcher l UsageCommandConfig
 parseCommandArgv value = do

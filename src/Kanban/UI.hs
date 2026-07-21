@@ -3474,7 +3474,7 @@ launchPullRequestFlow number origin action _brand existingSession provenance inp
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent
+    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig
     case launched of
       Left message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
@@ -4629,12 +4629,15 @@ columnHeadingAttr Active = activeAttr
 columnHeadingAttr Reviewing = reviewingAttr
 columnHeadingAttr Done = doneAttr
 
+-- | Configurable blocking severity governs pull-request status color and
+-- sorting (via 'Kanban.Workflow.pullRequestStatus') only; the label chip
+-- itself always renders the changes-requested/blocked label as a problem,
+-- matching unchanged issue-card treatment.
 labelAttribute :: WorkflowConfig -> Text -> AttrName
 labelAttribute config name
   | folded == Text.toCaseFold config.approvalLabel = labelApprovalAttr
   | folded == "reviewed:revised" = pendingAttr
-  | folded == Text.toCaseFold config.changesRequestedLabel || folded `Set.member` foldedBlockedLabels =
-      if config.blockingSeverity == SeverityAmber then pendingAttr else labelProblemAttr
+  | folded == Text.toCaseFold config.changesRequestedLabel || folded `Set.member` foldedBlockedLabels = labelProblemAttr
   | folded == "bug" = labelProblemAttr
   | folded `elem` ["ui", "input"] = labelUiAttr
   | otherwise = labelDefaultAttr

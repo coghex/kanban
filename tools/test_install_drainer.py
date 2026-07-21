@@ -67,6 +67,7 @@ class InstallerPolicyTests(unittest.TestCase):
         (tools / "drain_prs_service.py").write_text(
             "controller\n", encoding="utf-8"
         )
+        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
         self.install_dir = self.root / "installed"
 
     def test_dry_run_makes_no_files_and_never_starts(self):
