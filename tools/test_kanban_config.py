@@ -228,6 +228,17 @@ class SemanticValidationErrorTests(unittest.TestCase):
             "[timeouts]\ngithub_seconds = 0\n", "timeouts.github_seconds"
         )
 
+    def test_timeout_overflowing_microsecond_conversion_raises_but_the_boundary_is_accepted(self):
+        overflowing = kc._MAX_TIMEOUT_SECONDS + 1
+        self._expect_error(
+            f"[timeouts]\ngithub_seconds = {overflowing}\n", "timeouts.github_seconds"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), f"[timeouts]\ngithub_seconds = {kc._MAX_TIMEOUT_SECONDS}\n")
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(warnings, [])
+        self.assertEqual(raw.timeouts.github_seconds, kc._MAX_TIMEOUT_SECONDS)
+
     def test_empty_command_array_raises(self):
         self._expect_error(
             "[usage.codex]\ncommand = []\n", "usage.codex.command"

@@ -183,6 +183,25 @@ def _pop_positive_int(table: dict, key: str, path: str) -> int | None:
     return value
 
 
+# A 64-bit Int's range, matching Kanban.Config.parsePositiveTimeoutSeconds:
+# Python's arbitrary-precision ints don't overflow themselves, but the
+# Haskell dashboard's `Int` timeout (seconds * 1,000,000 microseconds) does,
+# so this loader rejects the same values to keep both sides' validation
+# semantics identical.
+_MAX_INT64 = 2**63 - 1
+_MICROSECONDS_PER_SECOND = 1_000_000
+_MAX_TIMEOUT_SECONDS = _MAX_INT64 // _MICROSECONDS_PER_SECOND
+
+
+def _pop_positive_timeout_seconds(table: dict, key: str, path: str) -> int | None:
+    value = _pop_positive_int(table, key, path)
+    if value is not None and value > _MAX_TIMEOUT_SECONDS:
+        raise KanbanConfigError(
+            f"{_join(path, key)} must not be large enough to overflow when converted to microseconds"
+        )
+    return value
+
+
 def _pop_enum(table: dict, key: str, path: str, choices: set[str]) -> str | None:
     if key not in table:
         return None
@@ -248,9 +267,9 @@ def _parse_limits_override(value: dict, path: str, warnings: list[str]) -> Limit
 
 def _parse_timeouts_override(value: dict, path: str, warnings: list[str]) -> TimeoutsOverride:
     table = dict(value)
-    github_seconds = _pop_positive_int(table, "github_seconds", path)
-    codex_seconds = _pop_positive_int(table, "codex_seconds", path)
-    claude_seconds = _pop_positive_int(table, "claude_seconds", path)
+    github_seconds = _pop_positive_timeout_seconds(table, "github_seconds", path)
+    codex_seconds = _pop_positive_timeout_seconds(table, "codex_seconds", path)
+    claude_seconds = _pop_positive_timeout_seconds(table, "claude_seconds", path)
     _collect_unknown(table, path, warnings)
     return TimeoutsOverride(
         github_seconds=github_seconds,

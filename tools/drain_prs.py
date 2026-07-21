@@ -1111,7 +1111,7 @@ The queue detected an unexpected push after approval. Review only: do not edit f
 3. For every prior blocking concern, state Resolved, Partially resolved, or Unresolved with file/line evidence. Review the complete current diff for regressions and unmet issue requirements. Nits never block.
 4. Re-fetch the head before publishing. If it changed, do not comment or label.
 5. Post APPROVE or CHANGES REQUESTED as a PR comment ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
-6. Re-fetch the head, then switch `reviewed:approve` / `reviewed:changes` to match the verdict. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
+6. Re-fetch the head, then switch `{APPROVE_LABEL}` / `{CHANGES_LABEL}` to match the verdict. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
 Report the verdict, concern statuses, new findings, reviewed head, and comment/label status.
 """
@@ -1740,7 +1740,7 @@ The PR was previously approved, then required an automated merge-conflict repair
 5. Publish exactly one concise PR comment using the `gh` CLI. Use APPROVE only when no blocker remains; otherwise use CHANGES_REQUESTED with actionable file/line references. Never use a formal `gh pr review` submission because the authenticated account owns the PR. End the comment with exactly one of:
    `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=APPROVE -->`
    `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=CHANGES_REQUESTED -->`
-6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `reviewed:approve` for APPROVE or `reviewed:changes` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
+6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `{APPROVE_LABEL}` for APPROVE or `{CHANGES_LABEL}` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
 Use the `gh` CLI only for GitHub publication. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
 

@@ -16,7 +16,11 @@ module Kanban.UI
     SolveSession (..),
     cacheEnabled,
     canonicalReviewCompletionSuperseded,
+    cardExcerptLimit,
+    claudeRefreshTimeoutMicros,
+    codexRefreshTimeoutMicros,
     failureActivity,
+    githubRefreshTimeoutMicros,
     orphanMessage,
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
@@ -812,13 +816,17 @@ drawCardFrame state selected entry contents =
       PullRequestItem _ -> 8
     verticalEdge = vBox (replicate middleHeight (str [vertical]))
 
+-- | The configured card excerpt height, in rows.
+cardExcerptLimit :: ResolvedConfig -> Int
+cardExcerptLimit config = config.resolvedLimits.limitsExcerptLines
+
 cardLines :: AppState -> Bool -> ColumnEntry -> [Widget Name]
 cardLines state selected entry =
   trackingLine
     <> [ withAttr (if selected then selectedTitleAttr else cardTitleAttr) (txtWrap (itemHeading item)),
     drawCardLabels state item,
     withAttr dimAttr (txtWrap (itemMetadata state item)),
-    vLimit state.appConfig.resolvedLimits.limitsExcerptLines (txtWrap (excerpt (itemBody item)))
+    vLimit (cardExcerptLimit state.appConfig) (txtWrap (excerpt (itemBody item)))
        ]
     <> statusLine
   where
@@ -3963,9 +3971,16 @@ startBoardRefresh = do
         . forkIO
         $ runBoardRefresh state.appOptions state.appConfig state.appRepository state.appEventChannel
 
+-- | The configured GitHub/Codex/Claude provider timeouts, converted from
+-- whole seconds to the microseconds 'System.Timeout.timeout' takes.
+githubRefreshTimeoutMicros, codexRefreshTimeoutMicros, claudeRefreshTimeoutMicros :: ResolvedConfig -> Int
+githubRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsGithubSeconds * 1000000
+codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds * 1000000
+claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
+
 runBoardRefresh :: Options -> ResolvedConfig -> Repository -> BChan AppEvent -> IO ()
 runBoardRefresh options config repository eventChannel = do
-  let timeoutMicros = config.resolvedTimeouts.timeoutsGithubSeconds * 1000000
+  let timeoutMicros = githubRefreshTimeoutMicros config
   timedResult <- timeout timeoutMicros (fetchGitHubSnapshot config.resolvedLimits config.resolvedWorkflow repository)
   result <- case timedResult of
     Nothing -> pure (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds")))
@@ -3995,7 +4010,7 @@ startCodexRefresh = do
       void
         . liftIO
         . forkIO
-        $ runCodexRefresh (state.appConfig.resolvedTimeouts.timeoutsCodexSeconds * 1000000) state.appEventChannel
+        $ runCodexRefresh (codexRefreshTimeoutMicros state.appConfig) state.appEventChannel
 
 runCodexRefresh :: Int -> BChan AppEvent -> IO ()
 runCodexRefresh timeoutMicros eventChannel = fetchCodexUsage timeoutMicros >>= writeBChan eventChannel . CodexRefreshFinished
@@ -4016,7 +4031,7 @@ startClaudeRefresh = do
       void
         . liftIO
         . forkIO
-        $ runClaudeRefresh (state.appConfig.resolvedTimeouts.timeoutsClaudeSeconds * 1000000) state.appEventChannel
+        $ runClaudeRefresh (claudeRefreshTimeoutMicros state.appConfig) state.appEventChannel
 
 runClaudeRefresh :: Int -> BChan AppEvent -> IO ()
 runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>= writeBChan eventChannel . ClaudeRefreshFinished

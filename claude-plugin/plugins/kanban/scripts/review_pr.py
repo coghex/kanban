@@ -303,7 +303,7 @@ def approver_path() -> Path:
     return path
 
 
-def check_issue(root: Path, number: int) -> dict[str, Any]:
+def check_issue(root: Path, number: int, config_path: str | None = None) -> dict[str, Any]:
     proc = run(
         [
             sys.executable,
@@ -315,7 +315,8 @@ def check_issue(root: Path, number: int) -> dict[str, Any]:
             "--legacy-policy",
             "dual",
             "--json",
-        ],
+        ]
+        + (["--config", config_path] if config_path else []),
         cwd=root,
         timeout=180,
         ok_codes=(0, 2),
@@ -379,9 +380,10 @@ def gate_status(
     repo: str,
     *,
     allow_no_issue: bool = False,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     numbers, invalid = linked_issue_numbers(pr, repo)
-    checks = [check_issue(root, number) for number in numbers]
+    checks = [check_issue(root, number, config_path) for number in numbers]
     approved = gate_approved(numbers, invalid, checks, allow_no_issue=allow_no_issue)
     return {
         "approved": approved,
@@ -431,6 +433,7 @@ def publish_gate_comment(
     gate: dict[str, Any],
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> tuple[str, str]:
     marker = gate_marker(
         repo,
@@ -440,7 +443,7 @@ def publish_gate_comment(
     )
     body = f"{GATE_TEXT}\n\n{marker}\n"
     refreshed = pr_view(root, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue)
+    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
     login = viewer_login(root)
@@ -448,7 +451,7 @@ def publish_gate_comment(
     if existing:
         return "existing", existing
     refreshed = pr_view(root, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue)
+    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
     url = post_comment(root, pr["number"], body)
@@ -765,11 +768,12 @@ def require_current_review_state(
     expected_gate_key: str,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError("PR head changed; no current-head verdict may be labeled")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != expected_gate_key:
         raise WorkflowError("linked issues changed; no verdict was published")
     if not gate["approved"]:
@@ -892,7 +896,7 @@ def publish_results(
     both go through identical race handling."""
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, number)
-    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue)
+    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
         raise WorkflowError("PR head changed during review; no verdict was published")
     if refreshed_gate["key"] != gate["key"]:
@@ -904,6 +908,7 @@ def publish_results(
             refreshed_pr,
             refreshed_gate,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
         return 2, {
             **base,
@@ -921,6 +926,7 @@ def publish_results(
         pr["headRefOid"],
         gate["key"],
         allow_no_issue=allow_no_issue,
+        config_path=config_path,
     )
     post_comment(root, number, body)
     try:
@@ -931,6 +937,7 @@ def publish_results(
             pr["headRefOid"],
             gate["key"],
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
         set_verdict_label(root, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
@@ -976,7 +983,7 @@ def workflow(
 ) -> tuple[int, dict[str, Any]]:
     repo = repository_name(root)
     pr = pr_view(root, number)
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin)
     base = {
@@ -997,6 +1004,7 @@ def workflow(
             pr,
             gate,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     if rereview:
@@ -1069,7 +1077,7 @@ def publish_verdict(
             "PR head changed since the self-review context was generated; "
             "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
         )
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != expected_gate_key:
         raise WorkflowError(
             "linked issues changed since the self-review context was generated; "
@@ -1092,7 +1100,9 @@ def publish_verdict(
         "issue_gate": gate,
     }
     if not gate["approved"]:
-        status, url = publish_gate_comment(root, repo, pr, gate, allow_no_issue=allow_no_issue)
+        status, url = publish_gate_comment(
+            root, repo, pr, gate, allow_no_issue=allow_no_issue, config_path=config_path,
+        )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     result_data = load_json(Path(result_path).read_text(encoding="utf-8"), "self-review result file")
     result = validate_review(result_data, reviewers[0])

@@ -360,6 +360,28 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
         self.assertIn('"--config"', coordinator_source)
         self.assertIn("resolve_workflow_labels", coordinator_source)
 
+    def test_check_issue_forwards_config_path_to_the_approval_gate(self):
+        # The gate check shells out to the installed approve_issues.py, which
+        # independently resolves workflow config; without forwarding
+        # --config, a dashboard-selected non-default config could approve a
+        # PR under different labels than this coordinator just published.
+        module = load_review_pr_module()
+        response = json.dumps({"issue": 34, "approved": True})
+        fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=response, stderr="")
+        with mock.patch.object(
+            module, "approver_path", return_value=Path("/fake-approve-issues.py")
+        ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
+            module.check_issue(Path("/fake-repo"), 34, "/tmp/custom-config.toml")
+        called_args = run_mock.call_args.args[0]
+        self.assertIn("--config", called_args)
+        self.assertEqual(called_args[called_args.index("--config") + 1], "/tmp/custom-config.toml")
+
+        with mock.patch.object(
+            module, "approver_path", return_value=Path("/fake-approve-issues.py")
+        ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
+            module.check_issue(Path("/fake-repo"), 34)
+        self.assertNotIn("--config", run_mock.call_args.args[0])
+
 
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own

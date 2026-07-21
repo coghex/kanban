@@ -128,6 +128,10 @@ import Kanban.UI
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
     cacheEnabled,
+    cardExcerptLimit,
+    claudeRefreshTimeoutMicros,
+    codexRefreshTimeoutMicros,
+    githubRefreshTimeoutMicros,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -3117,6 +3121,17 @@ main = hspec $ do
       cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = False}) `shouldBe` False
     it "enables the cache only when neither --no-cache nor configuration disables it" $
       cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = True}) `shouldBe` True
+
+  describe "configured provider timeouts and excerpt height reaching their runtime consumers" $ do
+    it "converts the configured GitHub timeout from seconds to the microseconds System.Timeout.timeout takes" $
+      githubRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 5000000
+    it "converts the configured Codex timeout from seconds to microseconds" $
+      codexRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 7000000
+    it "converts the configured Claude timeout from seconds to microseconds" $
+      claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 9000000
+    it "passes the configured excerpt line count through to the card-rendering limit" $ do
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 3}) `shouldBe` 3
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 9}) `shouldBe` 9
 
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
