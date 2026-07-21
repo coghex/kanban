@@ -24,9 +24,16 @@ codex plugin marketplace add ./codex-plugin
 codex plugin add kanban@kanban
 ```
 
-The equivalent Claude packaging is not implemented yet. See
-[the agent-workflow contract](docs/agent-workflow-contract.md) for the full
-dependency list and what each action requires.
+For Claude, install the equivalent bundle once per checkout from
+[claude-plugin/](claude-plugin/README.md):
+
+```console
+claude plugin marketplace add ./claude-plugin
+claude plugin install kanban@kanban
+```
+
+See [the agent-workflow contract](docs/agent-workflow-contract.md) for the
+full dependency list and what each action requires.
 
 ## Build
 

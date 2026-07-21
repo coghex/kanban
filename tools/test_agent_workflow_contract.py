@@ -4,8 +4,8 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, and against
-the tracked Codex plugin's own packaged-workflow bash surface, so a new
-external command or home-relative path cannot land undocumented.
+the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
+so a new external command or home-relative path cannot land undocumented.
 """
 
 import re
@@ -43,6 +43,19 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+]
+
+# The tracked Claude plugin's own packaged workflows (issue #77): the same
+# kind of separate, non-Haskell invocation surface as PLUGIN_SURFACE_FILES
+# above, reconciled against the same manifest. Claude Code plugin commands
+# resolve their own bundled files via ${CLAUDE_PLUGIN_ROOT}, so this plugin
+# needs no find/head-based coordinator search the way the Codex plugin does.
+CLAUDE_PLUGIN_SURFACE_FILES = [
+    "claude-plugin/plugins/kanban/commands/solve.md",
+    "claude-plugin/plugins/kanban/commands/pr-review.md",
+    "claude-plugin/plugins/kanban/commands/pr-rereview.md",
+    "claude-plugin/plugins/kanban/commands/pr-revise.md",
+    "claude-plugin/plugins/kanban/scripts/review_pr.py",
 ]
 
 MANIFEST_ROW_RE = re.compile(
@@ -261,6 +274,30 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # extractor or the coordinator's own invocations is caught here,
         # not just via the generic loop above.
         content = (REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
+    def test_every_claude_plugin_bash_command_is_documented(self):
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in CLAUDE_PLUGIN_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+
+    def test_claude_review_pr_coordinator_command_invocations_are_documented(self):
+        # The Claude plugin bundles its own copy of the coordinator
+        # (issue #77) so it never depends on the Codex plugin being
+        # installed; pin its command surface directly, the same way the
+        # Codex copy is pinned above.
+        content = (REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
