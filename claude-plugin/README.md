@@ -13,29 +13,63 @@ equivalent Codex-side packaging.
 
 ## Install
 
-From a checkout of this repository, add the marketplace and install the
-plugin in project scope:
+`claude plugin marketplace add` and `claude plugin install` both accept a
+`--scope` flag (`user`, `project`, or `local`) controlling where the
+resulting registration is declared. Kanban spawns `/solve`, `/pr-review`,
+`/pr-rereview`, and `/pr-revise` with the *target* repository — the one
+selected by `--path`, not necessarily a checkout of this repository — as the
+working directory, so which scope to use depends on where that
+registration needs to be discoverable from:
+
+**Project scope, declared in the Kanban-selected repository itself.** From
+the repository Kanban is pointed at (the one you actually want `/solve` and
+friends available in — this can be a checkout of this repository, or any
+other project Kanban manages via `--path`), add the marketplace and install
+the plugin, substituting the path to your own checkout of this repository:
+
+```console
+claude plugin marketplace add /path/to/kanban/claude-plugin --scope project
+claude plugin install kanban@kanban --scope project
+```
+
+This writes `.claude/settings.json` in the *target* repository (the
+project-scope Claude Code convention for settings meant to be shared with
+that project's team), declaring the marketplace and enabling the plugin
+specifically for sessions started from that repository. Verified directly:
+running the two commands above from a freshly initialized, unrelated
+scratch repository (no relation to this repository) produces a
+`.claude/settings.json` there with `"enabledPlugins": {"kanban@kanban":
+true}`, and `claude plugin details kanban@kanban` run from that same
+repository lists all four commands. The embedded marketplace path is
+specific to the machine and checkout it was added from, the same caveat
+[codex-plugin/](../codex-plugin/README.md) documents for its own
+git-sourced install form; commit the resulting `.claude/settings.json` to
+a target repository's own tracking only if every contributor keeps this
+repository at that same path, or use `--scope local` instead to keep the
+registration out of that repository's tracked settings entirely.
+
+**User scope (the default), declared once for every Claude Code session.**
+From a checkout of this repository:
 
 ```console
 claude plugin marketplace add ./claude-plugin
 claude plugin install kanban@kanban
 ```
 
-`claude plugin marketplace add` and `claude plugin install` both accept a
-`--scope` flag (`user`, `project`, or `local`); leave it unset. Both
-commands default to `user` scope, which is the scope this install path
-depends on: a `user`-scope install is recorded once in your own Claude Code
-configuration and resolved independently of the invoking working
-directory, unlike `project`/`local` scope, which only activate when Claude
-Code is started from (or below) the directory the install was declared
-against. Kanban spawns `/solve`, `/pr-review`, `/pr-rereview`, and
-`/pr-revise` with the *target* repository (the one selected by `--path`,
-not necessarily this checkout) as the working directory, so a
-`project`/`local`-scope install declared against this checkout would not be
-discoverable there; only the default `user` scope satisfies that. This
-marketplace's manifest lives at
-`claude-plugin/.claude-plugin/marketplace.json`, so the local-path form
-above is the verified, supported install path from a checkout. Installing
+Both commands default to `user` scope when `--scope` is omitted. A
+`user`-scope install is recorded once in your own Claude Code configuration
+and resolved independently of the invoking working directory, so it covers
+every repository Kanban might point `--path` at without a separate install
+per target repository. Verified directly: after a default install from this
+checkout, `claude plugin details kanban@kanban` run with the working
+directory set to an unrelated scratch directory (no relation to this
+repository, and not separately configured) still lists all four commands
+under `kanban@kanban`, and `claude plugin list --json` shows the install
+with no `projectPath` tying it to this checkout.
+
+Either form's manifest lives at
+`claude-plugin/.claude-plugin/marketplace.json`, so the local-path forms
+above are the verified, supported install paths from a checkout. Installing
 is never automatic, matching the portable-install policy in
 [docs/agent-workflow-contract.md §5](../docs/agent-workflow-contract.md#5-portable-install-policy).
 
@@ -46,15 +80,7 @@ claude plugin list
 ```
 
 `kanban@kanban` should be listed, and the four workflow names should be
-available as `/solve`, `/pr-review`, `/pr-rereview`, and `/pr-revise` in any
-Claude Code session, regardless of which repository it was started from.
-Verified directly: after a default (`user`-scope) install from this
-checkout, `claude plugin details kanban@kanban` run with the working
-directory set to an unrelated scratch directory (no relation to this
-repository) still lists all four commands under `kanban@kanban`, and
-`claude plugin list --json` shows the install with no `projectPath` tying
-it to this checkout — the isolated-target case where the plugin source and
-Kanban's selected repository root are different directories.
+available as `/solve`, `/pr-review`, `/pr-rereview`, and `/pr-revise`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand

@@ -9,10 +9,9 @@ workflows Kanban invokes by name (/solve, /pr-review, /pr-rereview,
 working-directory configuration, depend on an untracked personal path, or
 drift from the invocation strings src/Kanban/Solve.hs and
 src/Kanban/PullRequestFlow.hs actually spawn. The bundled coordinator is a
-tracked copy of the Codex plugin's coordinator (issue #76) so the Claude
-bundle is fully self-sufficient without the Codex plugin installed; a
-byte-parity test keeps the two copies from silently drifting apart, so the
-behavioral coverage in tools/test_codex_plugin.py applies to both.
+tracked copy of the Codex plugin's coordinator (issue #76), tested here
+standalone so the Claude bundle's own coverage never requires the Codex
+plugin's assets to exist.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ PLUGIN_ROOT = CLAUDE_PLUGIN_ROOT / "plugins" / "kanban"
 PLUGIN_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 COMMANDS_ROOT = PLUGIN_ROOT / "commands"
 REVIEW_COORDINATOR = PLUGIN_ROOT / "scripts" / "review_pr.py"
-CODEX_REVIEW_COORDINATOR = REPO_ROOT / "codex-plugin" / "plugins" / "kanban" / "skills" / "pr-review" / "scripts" / "review_pr.py"
 
 SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
@@ -265,26 +263,6 @@ class ReviewCoordinatorSelfTestTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("self-test passed", proc.stdout)
-
-
-class BundledCoordinatorParityTests(unittest.TestCase):
-    """The Claude plugin bundles its own tracked copy of the Codex plugin's
-    review coordinator (issue #77 correction: the Claude bundle must not
-    require issue #76's Codex assets to exist) rather than resolving it via
-    a shared install location. A byte-parity check keeps the two copies
-    from silently drifting apart so tools/test_codex_plugin.py's deep
-    behavioral coverage of review_pr.py continues to apply to both, instead
-    of duplicating hundreds of lines of identical behavioral tests here."""
-
-    def test_claude_coordinator_is_byte_identical_to_the_codex_coordinator(self):
-        claude_bytes = REVIEW_COORDINATOR.read_bytes()
-        codex_bytes = CODEX_REVIEW_COORDINATOR.read_bytes()
-        self.assertEqual(
-            claude_bytes,
-            codex_bytes,
-            f"{REVIEW_COORDINATOR} has drifted from {CODEX_REVIEW_COORDINATOR}; "
-            "update both together or document an intentional divergence here",
-        )
 
 
 class ClaudePluginRootReferenceTests(unittest.TestCase):
