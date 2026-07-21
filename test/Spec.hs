@@ -127,6 +127,7 @@ import Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    autoSolveRevisionPrompt,
     cacheEnabled,
     cardExcerptLimit,
     claudeRefreshTimeoutMicros,
@@ -2431,6 +2432,12 @@ main = hspec $ do
     it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
       let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") Nothing ResumeAnswer "")
           defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "")
+      configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
+      defaultPrompt `shouldNotContain` "--config"
+
+    it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
+      let configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") ClaudeSolver 42 1)
+          defaultPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing ClaudeSolver 42 1)
       configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
       defaultPrompt `shouldNotContain` "--config"
 

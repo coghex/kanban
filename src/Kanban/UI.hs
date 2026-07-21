@@ -14,6 +14,7 @@ module Kanban.UI
     ReviewSession (..),
     SolvePhase (..),
     SolveSession (..),
+    autoSolveRevisionPrompt,
     cacheEnabled,
     canonicalReviewCompletionSuperseded,
     cardExcerptLimit,
@@ -4179,7 +4180,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
         if Map.member issueNumber state.appSolveProcesses
           then pure ()
           else do
-            let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
+            let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow state.appOptions.optionConfig session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
             modifySolveSession issueNumber
               ( \current ->
                   current
@@ -4231,20 +4232,25 @@ failAutoSolve issueNumber reason = do
     )
   setNotice ("Autosolve #" <> showText issueNumber <> " failed: " <> sanitizeText reason)
 
-autoSolveRevisionPrompt :: WorkflowConfig -> SolverBrand -> Int -> Int -> Text
-autoSolveRevisionPrompt config brand pullRequestNumber reviewRound =
+autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> SolverBrand -> Int -> Int -> Text
+autoSolveRevisionPrompt config configPath brand pullRequestNumber reviewRound =
   Text.unlines
-    [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
-      "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
-      "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
-      "Never merge, and leave "
-        <> config.approvalLabel
-        <> ", "
-        <> config.changesRequestedLabel
-        <> ", and reviewed:revised to the canonical review coordinator."
-    ]
+    ( [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
+        "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
+        "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
+        "Never merge, and leave "
+          <> config.approvalLabel
+          <> ", "
+          <> config.changesRequestedLabel
+          <> ", and reviewed:revised to the canonical review coordinator."
+      ]
+        <> configLines
+    )
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
+    configLines = case configPath of
+      Nothing -> []
+      Just path -> ["Pass --config " <> Text.pack path <> " to " <> commandName "pr-revise" <> " so it resolves this dashboard's configured workflow labels."]
 
 autoSolveReviewLimit :: Int
 autoSolveReviewLimit = 5
