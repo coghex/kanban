@@ -1,0 +1,67 @@
+# ~/.config/kanban/config.toml
+#
+# Copy this file to ~/.config/kanban/config.toml (or pass --config FILE to
+# kanban, approve_issues.py, and drain_prs.py) to override the defaults
+# below. A missing file silently uses these defaults. A malformed file, or a
+# known key with an invalid value, fails startup and names the file and the
+# full key path. Unknown keys and tables warn with their full key paths but
+# do not prevent loading.
+#
+# All keys shown here are global defaults.
+
+cache = true
+remote_name = "origin"
+
+[workflow]
+approval_label = "reviewed:approve"
+changes_requested_label = "reviewed:changes"
+blocked_labels = ["blocked"]
+tracker_labels = ["epic"]
+additional_tracker_section_headings = []
+approval_mode = "label"        # "label", "review", or "either"
+blocking_severity = "red"      # "red" or "amber"
+
+[limits]
+max_open_issues = 250
+max_open_pull_requests = 100
+excerpt_lines = 3
+
+# Values are positive whole seconds.
+[timeouts]
+github_seconds = 30
+codex_seconds = 10
+claude_seconds = 45
+
+# Omit `command` to use the built-in provider. When present it is a non-empty
+# argv array whose first element is a non-empty executable path/name. Parsed
+# and validated now; executing a configured command is a follow-up.
+[usage.codex]
+# command = ["/usr/local/bin/my-codex-usage", "--json"]
+
+[usage.claude]
+# command = ["/usr/local/bin/my-claude-usage", "--json"]
+
+# The quoted key is the canonical, case-sensitive owner/name selected for the
+# invocation. Only [workflow], [limits], and [timeouts] may appear below it.
+# `cache`, `remote_name`, and `usage` are global-only and fail if set here.
+# Omitted values inherit from the global table; an array replaces the global
+# array in full rather than extending it.
+
+[repositories."owner/name".workflow]
+# approval_label = "reviewed:approve"
+# changes_requested_label = "reviewed:changes"
+# blocked_labels = ["blocked"]
+# tracker_labels = ["epic"]
+# additional_tracker_section_headings = []
+# approval_mode = "label"
+# blocking_severity = "red"
+
+[repositories."owner/name".limits]
+# max_open_issues = 250
+# max_open_pull_requests = 100
+# excerpt_lines = 3
+
+[repositories."owner/name".timeouts]
+# github_seconds = 30
+# codex_seconds = 10
+# claude_seconds = 45

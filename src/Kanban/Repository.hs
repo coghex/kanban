@@ -14,8 +14,8 @@ import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
-resolveRepository :: FilePath -> Maybe String -> IO (Either Text Repository)
-resolveRepository requestedPath explicitRepository = do
+resolveRepository :: Text -> FilePath -> Maybe String -> IO (Either Text Repository)
+resolveRepository remoteName requestedPath explicitRepository = do
   canonicalResult <- try @IOException (canonicalizePath requestedPath)
   case canonicalResult of
     Left exception -> pure (Left ("cannot resolve repository path: " <> Text.pack (show exception)))
@@ -28,7 +28,7 @@ resolveRepository requestedPath explicitRepository = do
           identityResult <- case explicitRepository of
             Just repositoryName -> pure (parseRepositoryName (Text.pack repositoryName))
             Nothing -> do
-              remoteResult <- runGit root ["remote", "get-url", "origin"]
+              remoteResult <- runGit root ["remote", "get-url", Text.unpack remoteName]
               pure (remoteResult >>= parseRepositoryName . Text.pack . trimString)
           pure $ do
             (owner, name) <- identityResult

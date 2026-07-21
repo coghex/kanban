@@ -3,7 +3,8 @@
 """Safely install Kanban's user-scoped macOS PR drainer LaunchAgent.
 
 The installer never starts the drainer. It only installs stable script links and
-loads a stopped LaunchAgent definition for the selected repository.
+loads a stopped LaunchAgent definition for the selected repository. An optional
+--config path is persisted and forwarded to the installed drain_prs.py runs.
 """
 
 from __future__ import annotations
@@ -163,11 +164,46 @@ def write_notification_config(install_dir: Path, ntfy_url: str) -> Path:
     return path
 
 
+def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
+    """Persist the kanban config.toml path for drain_prs_service.py's runner
+    to forward to drain_prs.py. Merges into the same config.json used for
+    ntfy_url rather than overwriting it."""
+    path = install_dir / "config.json"
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise InstallError(f"Refusing unsafe drainer config path: {path}")
+    install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    install_dir.chmod(0o700)
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            existing = loaded
+    existing["config_path"] = config_path
+    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(existing, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return path
+
+
 def install(
     repo: Path,
     install_dir: Path,
     *,
     ntfy_url: str | None,
+    config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     if sys.platform != "darwin":
@@ -178,6 +214,9 @@ def install(
         )
     if ntfy_url and not ntfy_url.startswith(("https://", "http://")):
         raise InstallError("--ntfy-url must be an http:// or https:// endpoint.")
+    resolved_config_path = (
+        str(Path(config_path).expanduser().resolve()) if config_path else None
+    )
 
     sources = {
         "drainer": repo / "tools" / "drain_prs.py",
@@ -199,6 +238,7 @@ def install(
                 for key, destination in destinations.items()
             },
             "plist": str(PLIST_PATH),
+            "config_path": resolved_config_path,
             "started": False,
         }
 
@@ -209,6 +249,8 @@ def install(
     notification_config = None
     if ntfy_url:
         notification_config = str(write_notification_config(install_dir, ntfy_url))
+    if resolved_config_path:
+        write_installed_config_path(install_dir, resolved_config_path)
     environment = os.environ.copy()
     environment["KANBAN_DRAINER_INSTALL_DIR"] = str(install_dir)
     environment.pop("KANBAN_DRAINER_NTFY_URL", None)
@@ -236,6 +278,7 @@ def install(
         "links": link_results,
         "notifications_configured": notification_config is not None
         or (install_dir / "config.json").is_file(),
+        "config_path": resolved_config_path,
         "controller": controller_result,
         "started": False,
     }
@@ -261,6 +304,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional private ntfy endpoint for crash notifications.",
     )
     parser.add_argument(
+        "--config",
+        default=os.environ.get("KANBAN_DRAINER_CONFIG_PATH"),
+        help="Optional kanban config.toml path forwarded to the installed drainer.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Validate and describe without writing."
     )
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
@@ -276,6 +324,7 @@ def main() -> int:
             repo,
             install_dir,
             ntfy_url=args.ntfy_url,
+            config_path=args.config,
             dry_run=args.dry_run,
         )
         if args.json:

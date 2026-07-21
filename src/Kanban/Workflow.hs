@@ -139,18 +139,23 @@ pullRequestStatus :: WorkflowConfig -> PullRequest -> CardStatus
 pullRequestStatus config pullRequest
   | pullRequest.pullRequestMergeState == MergeConflicting = StatusProblem "merge conflict"
   | checksFailed pullRequest.pullRequestChecks = StatusProblem "CI failed"
-  | hasProblemLabel config pullRequest.pullRequestLabels = StatusProblem "blocked"
+  | hasProblemLabel config pullRequest.pullRequestLabels = blockedStatus config
   | not (approvedPullRequest config pullRequest) = StatusNeutral
+  | not (checksReady pullRequest.pullRequestChecks) = StatusPending "checks pending"
   | not (mergeStateReady pullRequest.pullRequestMergeState) = StatusPending "merge pending"
-  | checksReady pullRequest.pullRequestChecks = StatusReady
-  | otherwise = StatusPending "checks pending"
+  | otherwise = StatusReady
+
+blockedStatus :: WorkflowConfig -> CardStatus
+blockedStatus config = case config.blockingSeverity of
+  SeverityRed -> StatusProblem "blocked"
+  SeverityAmber -> StatusPending "blocked"
 
 isApproved :: WorkflowConfig -> BoardItem -> Bool
 isApproved config (IssueItem issue) = hasLabel config.approvalLabel issue.issueLabels
 isApproved config (PullRequestItem pullRequest) = approvedPullRequest config pullRequest
 
 isProblem :: WorkflowConfig -> BoardItem -> Bool
-isProblem config (IssueItem issue) = hasProblemLabel config issue.issueLabels
+isProblem config (IssueItem issue) = config.blockingSeverity == SeverityRed && hasProblemLabel config issue.issueLabels
 isProblem config (PullRequestItem pullRequest) = case pullRequestStatus config pullRequest of
   StatusProblem _ -> True
   _ -> False

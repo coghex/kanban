@@ -9,6 +9,7 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 """
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -143,6 +144,77 @@ class OpenInvalidIncidentTests(unittest.TestCase):
             )
         self.assertFalse(status["approved"])
         self.assertIsNotNone(status["pipeline_incident"])
+
+
+class ConfiguredLabelsTests(unittest.TestCase):
+    """approve_issues.py's main() reassigns APPROVE_LABEL/CHANGES_LABEL from
+    the resolved kanban_config.toml at startup (see main()). These tests
+    exercise that same reassignment mechanism directly against the pure gate
+    and label-application logic, without any real GitHub or model calls."""
+
+    def _issue(self, *, labels):
+        return {
+            "number": 7,
+            "title": "Example",
+            "body": "Body",
+            "labels": [{"name": name} for name in labels],
+            "state": "OPEN",
+            "url": "https://example.invalid/7",
+        }
+
+    def test_gate_reports_the_configured_approval_label_as_missing(self):
+        with (
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "custom:changes"),
+        ):
+            status = approve_issues.current_gate_status(
+                self._issue(labels=[]), [], legacy_policy="dual"
+            )
+        self.assertIn("missing custom:approve", status["reasons"])
+
+    def test_the_stock_label_no_longer_satisfies_the_gate_once_reconfigured(self):
+        # An issue still wearing the default reviewed:approve label must not
+        # satisfy the gate once the configured label has changed underneath it.
+        with (
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "custom:changes"),
+        ):
+            status = approve_issues.current_gate_status(
+                self._issue(labels=["reviewed:approve"]), [], legacy_policy="dual"
+            )
+        self.assertIn("missing custom:approve", status["reasons"])
+
+    def test_the_configured_changes_label_blocks_the_gate(self):
+        with (
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "custom:changes"),
+        ):
+            status = approve_issues.current_gate_status(
+                self._issue(labels=["custom:approve", "custom:changes"]),
+                [],
+                legacy_policy="dual",
+            )
+        self.assertIn("has custom:changes", status["reasons"])
+
+    def test_set_verdict_label_applies_the_configured_approval_label(self):
+        ctx = make_ctx(Path("/tmp"))
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        before = self._issue(labels=[])
+        after = self._issue(labels=["custom:approve"])
+        with (
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "custom:changes"),
+            mock.patch.object(approve_issues, "run", side_effect=fake_run),
+            mock.patch.object(approve_issues, "get_issue", side_effect=[before, after]),
+        ):
+            approve_issues.set_verdict_label(ctx, 7, "APPROVE")
+        self.assertIn("custom:approve", calls[0])
+        self.assertNotIn("reviewed:approve", calls[0])
 
 
 if __name__ == "__main__":

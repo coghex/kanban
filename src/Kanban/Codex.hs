@@ -33,9 +33,9 @@ import System.Process
   )
 import System.Timeout (timeout)
 
-fetchCodexUsage :: IO (Either ProviderError UsageSnapshot)
-fetchCodexUsage = do
-  result <- try @IOException (withCreateProcess codexProcess runProcess)
+fetchCodexUsage :: Int -> IO (Either ProviderError UsageSnapshot)
+fetchCodexUsage timeoutMicros = do
+  result <- try @IOException (withCreateProcess codexProcess (runProcess timeoutMicros))
   pure $ case result of
     Left exception
       | isDoesNotExistError exception -> Left (ProviderError ExecutableMissing "codex executable was not found")
@@ -50,17 +50,17 @@ codexProcess =
       std_err = NoStream
     }
 
-runProcess :: Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
-runProcess (Just input) (Just output) _ processHandle = do
+runProcess :: Int -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
+runProcess timeoutMicros (Just input) (Just output) _ processHandle = do
   hSetEncoding input utf8
   hSetEncoding output utf8
   hSetBuffering input LineBuffering
-  timedResult <- timeout codexTimeoutMicros (exchange input output)
+  timedResult <- timeout timeoutMicros (exchange input output)
   _ <- terminateAndWait processHandle
   pure $ case timedResult of
-    Nothing -> Left (ProviderError RequestTimedOut "Codex usage refresh timed out after 10 seconds")
+    Nothing -> Left (ProviderError RequestTimedOut ("Codex usage refresh timed out after " <> Text.pack (show (timeoutMicros `div` 1000000)) <> " seconds"))
     Just result -> result
-runProcess _ _ _ processHandle = do
+runProcess _ _ _ _ processHandle = do
   _ <- terminateAndWait processHandle
   pure (Left (ProviderError RequestFailed "could not open Codex app-server pipes"))
 
@@ -187,9 +187,6 @@ terminateAndWait :: ProcessHandle -> IO ExitCode
 terminateAndWait processHandle = do
   terminateProcess processHandle
   waitForProcess processHandle
-
-codexTimeoutMicros :: Int
-codexTimeoutMicros = 10 * 1000 * 1000
 
 initializeRequest, initializedNotification, rateLimitsRequest :: Text
 initializeRequest =

@@ -70,7 +70,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository (..))
+import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
@@ -214,6 +214,7 @@ data ReviewClient = ReviewClient
     reviewToolProcesses :: MVar (Map Text ManagedProcess),
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
+    reviewWorkflowConfig :: WorkflowConfig,
     reviewSessionLog :: Maybe SessionLog,
     reviewOutputDone :: MVar (),
     reviewErrorDone :: MVar ()
@@ -356,10 +357,10 @@ reviewResultOutcome result = case result.reviewResultStage of
     | result.reviewResultApproved -> "APPROVED"
     | otherwise -> "CHANGES REQUESTED"
 
-reviewStageForLabels :: [Text] -> ReviewStage
-reviewStageForLabels labels
+reviewStageForLabels :: WorkflowConfig -> [Text] -> ReviewStage
+reviewStageForLabels config labels
   | hasLabel "reviewed:revised" = IssueRereview
-  | hasLabel "reviewed:changes" = IssueRevision
+  | hasLabel config.changesRequestedLabel = IssueRevision
   | otherwise = InitialReview
   where
     foldedLabels = map Text.toCaseFold labels
@@ -396,8 +397,8 @@ resolveCanonicalIssueReviewer = do
               <> ". Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
           )
 
-runCanonicalIssueReview :: Repository -> Int -> ReviewStage -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)
-runCanonicalIssueReview repository issueNumber stage processStarted
+runCanonicalIssueReview :: Maybe FilePath -> Repository -> Int -> ReviewStage -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)
+runCanonicalIssueReview configPath repository issueNumber stage processStarted
   | stage == IssueRevision = pure (Left "Canonical issue review cannot perform specification revision")
   | otherwise = do
       resolved <- resolveCanonicalIssueReviewer
@@ -413,15 +414,17 @@ runCanonicalIssueReview repository issueNumber stage processStarted
                   repository
                   issueNumber
                   pythonPath
-                  [ scriptPath,
-                    "--path",
-                    repositoryRoot,
-                    stageFlag,
-                    show issueNumber,
-                    "--legacy-policy",
-                    "dual",
-                    "--json"
-                  ]
+                  ( [ scriptPath,
+                      "--path",
+                      repositoryRoot,
+                      stageFlag,
+                      show issueNumber,
+                      "--legacy-policy",
+                      "dual",
+                      "--json"
+                    ]
+                      <> configArguments
+                  )
                   processStarted
               pure (output >>= decodeCanonicalIssueReviewResult)
   where
@@ -430,6 +433,7 @@ runCanonicalIssueReview repository issueNumber stage processStarted
       InitialReview -> "--review"
       IssueRereview -> "--rereview"
       IssueRevision -> "--review"
+    configArguments = maybe [] (\path -> ["--config", path]) configPath
 
 parseWireValue :: Value -> Either Text ReviewWireMessage
 parseWireValue (Object value) = case (KeyMap.lookup "id" value, KeyMap.lookup "method" value) of
@@ -444,8 +448,8 @@ parseWireValue (Object value) = case (KeyMap.lookup "id" value, KeyMap.lookup "m
   _ -> Left "app-server message has neither method nor id"
 parseWireValue _ = Left "app-server message must be a JSON object"
 
-startReviewClient :: Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient repository eventSink = do
+startReviewClient :: WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startReviewClient workflowConfig repository eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
     Left message -> eventSink (ReviewProtocolWarning message) >> pure Nothing
@@ -474,6 +478,7 @@ startReviewClient repository eventSink = do
                 reviewToolProcesses = toolProcesses,
                 reviewEventSink = eventSink,
                 reviewRepositoryRoot = repositoryRoot,
+                reviewWorkflowConfig = workflowConfig,
                 reviewSessionLog = sessionLog,
                 reviewOutputDone = outputDone,
                 reviewErrorDone = errorDone
@@ -554,8 +559,8 @@ beginIssueReview client issueNumber =
           "approvalPolicy" .= ("on-request" :: Text),
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
-          "developerInstructions" .= reviewDeveloperInstructions,
-          "dynamicTools" .= [questionTool, claudeTool, githubTool]
+          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig,
+          "dynamicTools" .= [questionTool, claudeTool, githubTool client.reviewWorkflowConfig]
         ]
 
 sendReviewMessage :: ReviewClient -> Text -> Maybe Text -> Text -> IO (Either Text ())
@@ -790,7 +795,7 @@ handleServerRequest client requestId method params = case method of
               $ runClaudeToolCall client threadId wrappedId claudeRequest
         _ -> void (sendDynamicToolFailure client wrappedId "Claude tool call omitted its thread id or arguments")
     | fieldText "tool" params == Just githubToolName -> case (fieldText "threadId" params, objectField "arguments" params) of
-        (Just threadId, Just arguments) -> case decodeGitHubIssueToolRequest arguments of
+        (Just threadId, Just arguments) -> case decodeGitHubIssueToolRequest client.reviewWorkflowConfig arguments of
           Left message -> do
             void (sendDynamicToolFailure client wrappedId message)
             client.reviewEventSink (ReviewProtocolWarning message)
@@ -1210,12 +1215,19 @@ parseClaudeToolRequest value = case fromJSON value of
 decodeClaudeToolPrompt :: Value -> Either Text Text
 decodeClaudeToolPrompt value = (.claudeToolPrompt) <$> parseClaudeToolRequest value
 
-parseGitHubIssueToolRequest :: Value -> Either Text GitHubIssueToolRequest
-parseGitHubIssueToolRequest value = case fromJSON value of
+parseGitHubIssueToolRequest :: WorkflowConfig -> Value -> Either Text GitHubIssueToolRequest
+parseGitHubIssueToolRequest config value = case fromJSON value of
   Error message -> Left ("Invalid kanban_github_issue arguments: " <> Text.pack message)
   Success request
     | request.githubToolIssue <= 0 -> Left "kanban_github_issue requires a positive issue number"
-    | any (`notElem` reviewWorkflowLabels) allLabels -> Left "kanban_github_issue may only change reviewed:approve, reviewed:changes, and reviewed:revised"
+    | any (`notElem` reviewWorkflowLabels config) allLabels ->
+        Left
+          ( "kanban_github_issue may only change "
+              <> config.approvalLabel
+              <> ", "
+              <> config.changesRequestedLabel
+              <> ", and reviewed:revised"
+          )
     | any (`elem` request.githubToolRemoveLabels) request.githubToolAddLabels -> Left "kanban_github_issue cannot add and remove the same label"
     | maybe False ((> githubCommentLimit) . Text.length) request.githubToolComment -> Left "kanban_github_issue comment exceeds the 100,000-character limit"
     | request.githubToolOperation == GitHubIssueRead && hasMutation -> Left "kanban_github_issue read requests cannot contain mutations"
@@ -1225,11 +1237,11 @@ parseGitHubIssueToolRequest value = case fromJSON value of
       allLabels = request.githubToolAddLabels <> request.githubToolRemoveLabels
       hasMutation = maybe False (not . Text.null . Text.strip) request.githubToolComment || not (null allLabels)
 
-decodeGitHubIssueToolRequest :: Value -> Either Text GitHubIssueToolRequest
+decodeGitHubIssueToolRequest :: WorkflowConfig -> Value -> Either Text GitHubIssueToolRequest
 decodeGitHubIssueToolRequest = parseGitHubIssueToolRequest
 
-reviewWorkflowLabels :: [Text]
-reviewWorkflowLabels = ["reviewed:approve", "reviewed:changes", "reviewed:revised"]
+reviewWorkflowLabels :: WorkflowConfig -> [Text]
+reviewWorkflowLabels config = [config.approvalLabel, config.changesRequestedLabel, "reviewed:revised"]
 
 githubRequestMatchesThread :: ReviewClient -> Text -> GitHubIssueToolRequest -> IO Bool
 githubRequestMatchesThread client threadId request =
@@ -1366,8 +1378,8 @@ claudeTool =
           ]
     ]
 
-githubTool :: Value
-githubTool =
+githubTool :: WorkflowConfig -> Value
+githubTool workflowConfig =
   object
     [ "type" .= ("function" :: Text),
       "name" .= githubToolName,
@@ -1394,12 +1406,12 @@ githubTool =
     reviewLabelArraySchema =
       object
         [ "type" .= ("array" :: Text),
-          "items" .= object ["type" .= ("string" :: Text), "enum" .= reviewWorkflowLabels],
+          "items" .= object ["type" .= ("string" :: Text), "enum" .= reviewWorkflowLabels workflowConfig],
           "uniqueItems" .= True
         ]
 
-reviewDeveloperInstructions :: Text
-reviewDeveloperInstructions =
+reviewDeveloperInstructions :: WorkflowConfig -> Text
+reviewDeveloperInstructions workflowConfig =
   Text.unlines
     [ "You are the interactive issue-review and specification-revision coordinator embedded inside the Kanban terminal dashboard.",
       "Never run ~/work/approve-issues.py, the installed tools/approve_issues.py backend from any path, or any background approval daemon.",
@@ -1411,13 +1423,21 @@ reviewDeveloperInstructions =
       "You MUST use kanban_github_issue for every GitHub issue read, comment, or review-label mutation. Never invoke gh, curl, or a GitHub API through a shell or command tool. The Kanban tool is already authenticated and its update operation is restricted to one issue comment and the three review workflow labels.",
       "Whenever revision requires Claude Sonnet 5 high, you MUST call kanban_run_claude. Never invoke claude, claude-code, or another Claude executable through a shell or command tool. The Kanban tool owns authenticated execution and returns Sonnet's text.",
       "The kanban_run_claude prompt must be standalone: include the issue body, relevant chronological comments/effective specification, repository evidence, blockers, and request exact amendment content. Sonnet runs in plan mode and must not be asked to edit files, post comments, or change labels.",
-      "Choose the one stage from live labels: reviewed:revised means REREVIEW; otherwise reviewed:changes means REVISION; otherwise INITIAL REVIEW.",
+      "Choose the one stage from live labels: reviewed:revised means REREVIEW; otherwise "
+        <> workflowConfig.changesRequestedLabel
+        <> " means REVISION; otherwise INITIAL REVIEW.",
       "INITIAL REVIEW and REREVIEW are owned by the canonical approve-issues.py v2 backend and must never be performed in this app-server thread. This thread performs REVISION only.",
       "REVISION switches back to the issue author's brand: Codex-origin amendment content is authored by you as GPT-5.4 high; Claude-origin amendment content is authored by Claude Sonnet 5 high; unmarked issues default to you as GPT-5.4 high.",
       "During REVISION, classify every latest review blocker. Resolve mechanical, repository-verifiable, or clearly implied omissions without asking. If two or more reasonable answers would change behavior, compatibility, scope, policy, migration semantics, or user-visible outcomes, ask the user through kanban_prompt_user before proceeding.",
       "After resolving every blocker during REVISION, post exactly one canonical issue comment headed '## Specification amendment'. State that it supplements the issue body, list the normative clarifications and acceptance/test changes, and end with <!-- kanban-spec-amendment -->.",
-      "After posting the amendment, ensure the repository has a reviewed:revised label (create it with purple color 8250DF if missing), add it to the issue, and remove reviewed:changes and reviewed:approve. Do NOT rereview or approve in the same invocation.",
-      "If REVISION cannot resolve every blocker, do not post a partial amendment and leave reviewed:changes in place.",
+      "After posting the amendment, ensure the repository has a reviewed:revised label (create it with purple color 8250DF if missing), add it to the issue, and remove "
+        <> workflowConfig.changesRequestedLabel
+        <> " and "
+        <> workflowConfig.approvalLabel
+        <> ". Do NOT rereview or approve in the same invocation.",
+      "If REVISION cannot resolve every blocker, do not post a partial amendment and leave "
+        <> workflowConfig.changesRequestedLabel
+        <> " in place.",
       "Never close the issue. Finish with the requested structured result. Set stage to review, revision, or rereview. For revision set approved=false; commentUrl is the amendment comment and blockingReasons contains only unresolved blockers."
     ]
 

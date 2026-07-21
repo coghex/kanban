@@ -25,8 +25,10 @@ import Kanban.Cache
     writeRepositoryCache,
     writeUsageCache,
   )
+import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
+import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
@@ -49,7 +51,7 @@ import Kanban.Process
     membersStillInGroup,
     readProcessSnapshot,
   )
-import Kanban.Repository (parseRepositoryName)
+import Kanban.Repository (parseRepositoryName, resolveRepository)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestOrigin (..),
@@ -125,6 +127,7 @@ import Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    cacheEnabled,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -137,7 +140,7 @@ import Kanban.UI
     revisedAttr,
     solveSessionAlreadyResolved,
   )
-import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
+import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, pullRequestStatus)
 import Kanban.Worker
   ( ProviderSlot (..),
     PullRequestWorkerTask (..),
@@ -174,7 +177,7 @@ import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -2201,9 +2204,12 @@ main = hspec $ do
           ]
 
     it "selects revision and rereview stages from durable workflow labels" $ do
-      reviewStageForLabels [] `shouldBe` InitialReview
-      reviewStageForLabels ["reviewed:changes"] `shouldBe` IssueRevision
-      reviewStageForLabels ["REVIEWED:REVISED", "reviewed:changes"] `shouldBe` IssueRereview
+      reviewStageForLabels defaultWorkflowConfig [] `shouldBe` InitialReview
+      reviewStageForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` IssueRevision
+      reviewStageForLabels defaultWorkflowConfig ["REVIEWED:REVISED", "reviewed:changes"] `shouldBe` IssueRereview
+
+    it "selects the revision stage from a configured changes-requested label" $
+      reviewStageForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` IssueRevision
 
     it "formats the canonical v2 gate without exposing raw JSON" $ do
       let payload =
@@ -2266,7 +2272,7 @@ main = hspec $ do
                 "addLabels" .= (["reviewed:approve"] :: [Text]),
                 "removeLabels" .= (["reviewed:changes", "reviewed:revised"] :: [Text])
               ]
-      decodeGitHubIssueToolRequest request
+      decodeGitHubIssueToolRequest defaultWorkflowConfig request
         `shouldBe` Right
           GitHubIssueToolRequest
             { githubToolOperation = GitHubIssueUpdate,
@@ -2275,8 +2281,12 @@ main = hspec $ do
               githubToolAddLabels = ["reviewed:approve"],
               githubToolRemoveLabels = ["reviewed:changes", "reviewed:revised"]
             }
-      decodeGitHubIssueToolRequest (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["bug"] :: [Text])])
+      decodeGitHubIssueToolRequest defaultWorkflowConfig (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["bug"] :: [Text])])
         `shouldBe` Left "kanban_github_issue may only change reviewed:approve, reviewed:changes, and reviewed:revised"
+      decodeGitHubIssueToolRequest
+        (defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"})
+        (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["lgtm"] :: [Text])])
+        `shouldSatisfy` isRight
 
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
@@ -2381,10 +2391,13 @@ main = hspec $ do
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
 
     it "advances review, revision, and rereview from durable labels" $ do
-      actionForLabels [] `shouldBe` PullRequestReview
-      actionForLabels ["reviewed:changes"] `shouldBe` PullRequestRevision
-      actionForLabels ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
-      actionForLabels ["reviewed:revised"] `shouldBe` PullRequestRereview
+      actionForLabels defaultWorkflowConfig [] `shouldBe` PullRequestReview
+      actionForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` PullRequestRevision
+      actionForLabels defaultWorkflowConfig ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
+      actionForLabels defaultWorkflowConfig ["reviewed:revised"] `shouldBe` PullRequestRereview
+
+    it "advances to revision from a configured changes-requested label" $
+      actionForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` PullRequestRevision
 
     it "uses the opposite brand to review and the origin brand to revise" $ do
       agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
@@ -2424,10 +2437,13 @@ main = hspec $ do
       interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
     it "derives a pure post-revision verdict from current labels instead of waiting on a reviewed:revised handoff" $ do
-      pullRequestVerdictForLabels [] `shouldBe` PullRequestVerdictPending
-      pullRequestVerdictForLabels ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
-      pullRequestVerdictForLabels ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
-      pullRequestVerdictForLabels ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+      pullRequestVerdictForLabels defaultWorkflowConfig [] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+
+    it "derives a post-revision verdict using a configured approval label" $
+      pullRequestVerdictForLabels (defaultWorkflowConfig {approvalLabel = "lgtm"}) ["lgtm"] `shouldBe` PullRequestVerdictApproved
 
     it "starts a fresh r-key revision round instead of reopening a finished one when the PR changed since it launched" $ do
       let launchedAt = UTCTime (fromGregorian 2026 7 18) 0
@@ -2585,7 +2601,7 @@ main = hspec $ do
               reviewSessionSpinnerFrame = 0
             }
         reconciledPhaseFor issue session =
-          (reconcileReviewSessions [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
+          (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
 
     it "reconciles a failed issue-revision session to the revised state once the issue carries reviewed:revised" $ do
       let issue = (baseIssue 59 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
@@ -2861,14 +2877,14 @@ main = hspec $ do
             "## Related\n- [ ] #99 — A1: Ignore\n"
               <> "## Children\n### Phase A\n- [ ] #2 — **A10:** Later\n- [x] **#1 — A2: Earlier**\n"
               <> "External prerequisite:\n- [ ] #77 — A3: Ignore\n"
-          children = parseTrackerChildren body
+          children = parseTrackerChildren [] body
       map (.trackerChildIssueNumber) children `shouldBe` [2, 1]
       map (.trackerChildComplete) children `shouldBe` [False, True]
       map (.trackerChildImplementationKey) (sortOn implementationSortKey children) `shouldBe` [Just "A2", Just "A10"]
 
     it "reports structural checklist loss while retaining valid children" $ do
       let body = "## Children\n- [ ] #2 — A1: Valid\n- [ ] missing reference\n- [?] #3\n- [x] #2 — duplicate"
-          (children, diagnostics) = parseTrackerBody body
+          (children, diagnostics) = parseTrackerBody [] body
       map (.trackerChildIssueNumber) children `shouldBe` [2]
       diagnostics
         `shouldBe` [ TrackerIssueReferenceMissing 3,
@@ -2889,9 +2905,16 @@ main = hspec $ do
     it "diagnoses a labeled tracker without a tracker section" $ do
       let body = "## Context\n- [ ] #2 — A1: Not authoritative"
           tracker = (baseIssue 100 []) {issueLabels = [Label "epic" "5319e7"], issueBody = body}
-      snd (parseTrackerBody body) `shouldBe` [TrackerSectionMissing]
-      snapshotWarnings (RepoSnapshot [tracker] [] epoch False False)
+      snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
+      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
         `shouldSatisfy` any (Data.Text.isInfixOf "1 tracker")
+
+    it "recognizes a configured additional tracker-section heading" $ do
+      let body = "## Milestones\n- [ ] #2 — A1: Valid"
+      snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
+      snd (parseTrackerBody ["Milestones"] body) `shouldBe` []
+      map (.trackerChildIssueNumber) (parseTrackerChildren ["Milestones"] body) `shouldBe` [2]
+      map (.trackerChildIssueNumber) (parseTrackerChildren [] body) `shouldBe` []
 
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
@@ -2908,10 +2931,16 @@ main = hspec $ do
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
           pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2
-          let warnings = snapshotWarnings (RepoSnapshot [issue] [pullRequest] epoch True True)
+          let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch True True)
           length warnings `shouldBe` 3
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    it "reports configured truncation caps in the board's GitHub warnings" $ do
+      let configuredLimits = LimitsConfig {limitsMaxOpenIssues = 5, limitsMaxOpenPullRequests = 9, limitsExcerptLines = 3}
+          warnings = snapshotWarnings configuredLimits defaultWorkflowConfig (RepoSnapshot [] [] epoch True True)
+      warnings `shouldSatisfy` any (Data.Text.isInfixOf "5+ open issues")
+      warnings `shouldSatisfy` any (Data.Text.isInfixOf "9+ open pull requests")
 
     it "deduplicates rerun checks and treats mergeable policy blocks as protected" $ do
       case decodeGitHubItems (LazyByteString.pack githubRerunResponse) of
@@ -3035,6 +3064,158 @@ main = hspec $ do
       let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeClean, pullRequestChecks = ChecksPassed 4}
       pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusReady
 
+    -- issue #48: approved + BEHIND must report checks-pending before
+    -- merge-pending whenever checks are not yet ready, since a still-running
+    -- check is more actionable information than a stale branch.
+    it "reports checks-pending before merge-pending when approved, behind, and checks are still pending" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPending 1 2}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "checks pending"
+    it "reports merge-pending once approved, behind, and checks have already passed" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPassed 4}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "merge pending"
+
+    it "defaults blocking severity to red, preserving the existing problem presentation" $ do
+      let pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusProblem "blocked"
+      isProblem defaultWorkflowConfig (PullRequestItem pullRequest) `shouldBe` True
+    it "renders and sorts a configured amber blocking severity as pending rather than a problem" $ do
+      let config = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
+      pullRequestStatus config pullRequest `shouldBe` StatusPending "blocked"
+      isProblem config (PullRequestItem pullRequest) `shouldBe` False
+    it "applies configured blocking severity to blocked issues as well as pull requests" $ do
+      let issue = (baseIssue 10 []) {issueLabels = [Label "blocked" "d73a4a"]}
+      isProblem defaultWorkflowConfig (IssueItem issue) `shouldBe` True
+      isProblem (defaultWorkflowConfig {blockingSeverity = SeverityAmber}) (IssueItem issue) `shouldBe` False
+
+    it "lets a configured approval label change Done-column membership" $ do
+      let config = defaultWorkflowConfig {approvalLabel = "lgtm"}
+          pullRequest = basePullRequest 10 [] False [Label "lgtm" "00ff00"]
+          snapshot = RepoSnapshot [] [pullRequest] epoch False False
+          Board customColumns = deriveBoard config snapshot
+          Board defaultColumns = deriveBoard defaultWorkflowConfig snapshot
+      map itemNumber (map entryItem (Map.findWithDefault [] Done customColumns)) `shouldBe` [10]
+      map itemNumber (map entryItem (Map.findWithDefault [] Done defaultColumns)) `shouldBe` []
+
+  describe "cache precedence" $ do
+    it "lets --no-cache disable the cache even when configuration enables it" $
+      cacheEnabled (testOptions {optionNoCache = True}) (testResolvedConfig {resolvedCache = True}) `shouldBe` False
+    it "lets configuration disable the cache without --no-cache" $
+      cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = False}) `shouldBe` False
+    it "enables the cache only when neither --no-cache nor configuration disables it" $
+      cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = True}) `shouldBe` True
+
+  describe "configuration loading" $ do
+    it "yields the stable defaults when no configuration file exists" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          path <- defaultConfigPath
+          doesFileExist path `shouldReturn` False
+          loadRawConfig Nothing `shouldReturn` Right (defaultRawConfig, [])
+          defaultRawConfig.rawCache `shouldBe` True
+          defaultRawConfig.rawRemoteName `shouldBe` "origin"
+          defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
+          defaultRawConfig.rawLimits `shouldBe` LimitsConfig 250 100 3
+          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
+
+    it "honors an explicit --config path pointing at a fixture" $
+      withTemporaryCacheRoot $ \configRoot -> do
+        let fixturePath = configRoot </> "fixture.toml"
+        writeFile fixturePath "remote_name = \"upstream\"\n"
+        loaded <- loadRawConfig (Just fixturePath)
+        let (config, warnings) = unsafeConfig loaded
+        warnings `shouldBe` []
+        config.rawRemoteName `shouldBe` "upstream"
+
+    it "decodes a full-file fixture covering every documented key and warns on an unknown top-level key" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText fullFixtureToml)
+      config.rawCache `shouldBe` False
+      config.rawRemoteName `shouldBe` "upstream"
+      config.rawWorkflow
+        `shouldBe` WorkflowConfig
+          { approvalLabel = "lgtm",
+            changesRequestedLabel = "needs-work",
+            blockedLabels = Set.fromList ["blocked", "urgent"],
+            trackerLabels = Set.fromList ["epic", "tracker"],
+            additionalTrackerSectionHeadings = ["Milestones"],
+            approvalMode = ApprovalByEither,
+            blockingSeverity = SeverityAmber
+          }
+      config.rawLimits `shouldBe` LimitsConfig 500 200 5
+      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
+      config.rawUsage
+        `shouldBe` UsageConfig
+          (Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]))
+          (Just (UsageCommandConfig ["/usr/local/bin/my-claude-usage", "--json"]))
+      Map.member "coghex/kanban" config.rawRepositories `shouldBe` True
+      Map.member "other/repo" config.rawRepositories `shouldBe` True
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unknown_top_level_key"
+
+    it "merges a matching repository override onto the global table, leaving unset fields inherited" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
+      resolved.resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+      resolved.resolvedCache `shouldBe` False
+      resolved.resolvedRemoteName `shouldBe` "upstream"
+
+    it "selects the repository table by an exact, case-sensitive owner/name match" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+      (resolveConfig "COGHEX/KANBAN" config).resolvedWorkflow.approvalLabel `shouldBe` "lgtm"
+
+    it "leaves an unrelated repository table without effect on a different repository's resolution" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldNotBe` "should-not-apply"
+
+    it "replaces rather than extends a global array when a repository override sets it" $ do
+      let toml =
+            "[workflow]\n"
+              <> "blocked_labels = [\"blocked\", \"urgent\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "blocked_labels = [\"custom-block\"]\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+          resolved = resolveConfig "acme/widgets" config
+      resolved.resolvedWorkflow.blockedLabels `shouldBe` Set.fromList ["custom-block"]
+
+    it "fails on syntactically malformed TOML" $
+      decodeConfigText "this is not [valid toml" `shouldSatisfy` isLeftText
+
+    it "rejects each semantically invalid known value, naming the full key path" $ do
+      decodeConfigText "[workflow]\napproval_label = \"\"\n" `shouldSatisfy` errorContains ["workflow", "approval_label"]
+      decodeConfigText "remote_name = \"\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[workflow]\napproval_mode = \"bogus\"\n" `shouldSatisfy` errorContains ["approval_mode"]
+      decodeConfigText "[workflow]\nblocking_severity = \"purple\"\n" `shouldSatisfy` errorContains ["blocking_severity"]
+      decodeConfigText "[limits]\nmax_open_issues = 0\n" `shouldSatisfy` errorContains ["limits", "max_open_issues"]
+      decodeConfigText "[limits]\nexcerpt_lines = -1\n" `shouldSatisfy` errorContains ["excerpt_lines"]
+      decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
+      decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
+      decodeConfigText "[usage.codex]\ncommand = [\"\"]\n" `shouldSatisfy` errorContains ["command"]
+
+    it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
+      decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
+      decodeConfigText "[repositories.\"a/b\"]\nremote_name = \"origin\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".usage]\n" `shouldSatisfy` errorContains ["usage"]
+
+    it "warns, rather than fails, on an unrecognized key while still loading" $ do
+      let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
+
+  describe "global remote resolution" $
+    it "resolves the repository through a configured non-origin remote" $
+      withTemporaryCacheRoot $ \projectRoot -> do
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "init", "--quiet"] ""
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "remote", "add", "upstream", "https://github.com/coghex/kanban.git"] ""
+        result <- resolveRepository "upstream" projectRoot Nothing
+        case result of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right repository -> do
+            repository.repositoryOwner `shouldBe` "coghex"
+            repository.repositoryName `shouldBe` "kanban"
+
   describe "responsive board layout" $ do
     it "shares a wide board across all four columns" $
       responsiveColumnWidths 167 `shouldBe` [41, 41, 40, 40]
@@ -3089,6 +3270,90 @@ epoch = UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)
 isLeft :: Either left right -> Bool
 isLeft (Left _) = True
 isLeft (Right _) = False
+
+isRight :: Either left right -> Bool
+isRight (Right _) = True
+isRight (Left _) = False
+
+isLeftText :: Either Text value -> Bool
+isLeftText (Left _) = True
+isLeftText (Right _) = False
+
+unsafeConfig :: Either Text (RawConfig, [Text]) -> (RawConfig, [Text])
+unsafeConfig = either (error . Data.Text.unpack) id
+
+errorContains :: [Text] -> Either Text value -> Bool
+errorContains needles (Left message) = all (`Data.Text.isInfixOf` message) needles
+errorContains _ (Right _) = False
+
+testOptions :: Options
+testOptions =
+  Options
+    { optionPath = ".",
+      optionRepo = Nothing,
+      optionColor = ColorAuto,
+      optionBorder = BorderBox,
+      optionGlyphTest = False,
+      optionAscii = False,
+      optionNoCache = False,
+      optionConfig = Nothing,
+      optionWorkerSpec = Nothing
+    }
+
+testResolvedConfig :: ResolvedConfig
+testResolvedConfig =
+  ResolvedConfig
+    { resolvedCache = True,
+      resolvedRemoteName = "origin",
+      resolvedWorkflow = defaultWorkflowConfig,
+      resolvedLimits = defaultLimitsConfig,
+      resolvedTimeouts = defaultTimeoutsConfig,
+      resolvedUsage = defaultUsageConfig
+    }
+
+fullFixtureToml :: Text
+fullFixtureToml =
+  "cache = false\n"
+    <> "remote_name = \"upstream\"\n"
+    <> "\n"
+    <> "[workflow]\n"
+    <> "approval_label = \"lgtm\"\n"
+    <> "changes_requested_label = \"needs-work\"\n"
+    <> "blocked_labels = [\"blocked\", \"urgent\"]\n"
+    <> "tracker_labels = [\"epic\", \"tracker\"]\n"
+    <> "additional_tracker_section_headings = [\"Milestones\"]\n"
+    <> "approval_mode = \"either\"\n"
+    <> "blocking_severity = \"amber\"\n"
+    <> "\n"
+    <> "[limits]\n"
+    <> "max_open_issues = 500\n"
+    <> "max_open_pull_requests = 200\n"
+    <> "excerpt_lines = 5\n"
+    <> "\n"
+    <> "[timeouts]\n"
+    <> "github_seconds = 60\n"
+    <> "codex_seconds = 20\n"
+    <> "claude_seconds = 90\n"
+    <> "\n"
+    <> "[usage.codex]\n"
+    <> "command = [\"/usr/local/bin/my-codex-usage\", \"--json\"]\n"
+    <> "\n"
+    <> "[usage.claude]\n"
+    <> "command = [\"/usr/local/bin/my-claude-usage\", \"--json\"]\n"
+    <> "\n"
+    <> "unknown_top_level_key = 1\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".workflow]\n"
+    <> "approval_label = \"ship-it\"\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".limits]\n"
+    <> "max_open_issues = 999\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".timeouts]\n"
+    <> "github_seconds = 15\n"
+    <> "\n"
+    <> "[repositories.\"other/repo\".workflow]\n"
+    <> "approval_label = \"should-not-apply\"\n"
 
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True

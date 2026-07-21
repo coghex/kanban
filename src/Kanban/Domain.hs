@@ -4,6 +4,7 @@
 module Kanban.Domain
   ( ApprovalMode (..),
     Assignee (..),
+    BlockingSeverity (..),
     Board (..),
     BoardColumn (..),
     BoardItem (..),
@@ -235,12 +236,18 @@ data ApprovalMode = ApprovalByLabel | ApprovalByReview | ApprovalByEither
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+data BlockingSeverity = SeverityRed | SeverityAmber
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data WorkflowConfig = WorkflowConfig
   { approvalLabel :: Text,
     changesRequestedLabel :: Text,
     blockedLabels :: Set Text,
     trackerLabels :: Set Text,
-    approvalMode :: ApprovalMode
+    additionalTrackerSectionHeadings :: [Text],
+    approvalMode :: ApprovalMode,
+    blockingSeverity :: BlockingSeverity
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -252,7 +259,9 @@ defaultWorkflowConfig =
       changesRequestedLabel = "reviewed:changes",
       blockedLabels = Set.singleton "blocked",
       trackerLabels = Set.singleton "epic",
-      approvalMode = ApprovalByLabel
+      additionalTrackerSectionHeadings = [],
+      approvalMode = ApprovalByLabel,
+      blockingSeverity = SeverityRed
     }
 
 itemId :: BoardItem -> ItemId

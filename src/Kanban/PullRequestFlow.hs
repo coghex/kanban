@@ -27,7 +27,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository (..))
+import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
@@ -71,10 +71,10 @@ originFromBody body
 occurrenceCount :: Text -> Text -> Int
 occurrenceCount needle haystack = max 0 (length (Text.splitOn needle haystack) - 1)
 
-actionForLabels :: [Text] -> PullRequestAction
-actionForLabels labels
+actionForLabels :: WorkflowConfig -> [Text] -> PullRequestAction
+actionForLabels config labels
   | has "reviewed:revised" = PullRequestRereview
-  | has "reviewed:changes" = PullRequestRevision
+  | has config.changesRequestedLabel = PullRequestRevision
   | otherwise = PullRequestReview
   where
     folded = map Text.toCaseFold labels
@@ -88,10 +88,10 @@ data PullRequestVerdict = PullRequestVerdictApproved | PullRequestVerdictChanges
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-pullRequestVerdictForLabels :: [Text] -> PullRequestVerdict
-pullRequestVerdictForLabels labels
-  | has "reviewed:approve" = PullRequestVerdictApproved
-  | has "reviewed:changes" = PullRequestVerdictChangesRequested
+pullRequestVerdictForLabels :: WorkflowConfig -> [Text] -> PullRequestVerdict
+pullRequestVerdictForLabels config labels
+  | has config.approvalLabel = PullRequestVerdictApproved
+  | has config.changesRequestedLabel = PullRequestVerdictChangesRequested
   | otherwise = PullRequestVerdictPending
   where
     folded = map Text.toCaseFold labels

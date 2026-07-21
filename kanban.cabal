@@ -14,6 +14,7 @@ maintainer:         coghex
 category:           Development
 build-type:         Simple
 extra-doc-files:
+  config.toml.example
   docs/README.md
   docs/development.md
   docs/design.md
@@ -46,6 +47,7 @@ library
     Kanban.Cache
     Kanban.Claude
     Kanban.Codex
+    Kanban.Config
     Kanban.Domain
     Kanban.Drainer
     Kanban.Fixture
@@ -77,6 +79,7 @@ library
     process               >= 1.6 && < 1.7,
     text                  >= 2.1 && < 2.2,
     time                  >= 1.12 && < 1.16,
+    toml-parser           >= 2.0 && < 2.1,
     transformers          >= 0.6 && < 0.7,
     unicode-transforms    >= 0.4 && < 0.5,
     unix                  >= 2.8 && < 2.9,

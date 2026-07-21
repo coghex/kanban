@@ -40,19 +40,29 @@ SERVICE_ERR_PATH = LOG_DIR / "service.err"
 PLIST_PATH = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
+def _read_service_config() -> dict[str, Any]:
+    try:
+        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def configured_ntfy_url() -> str | None:
     environment_url = os.environ.get("KANBAN_DRAINER_NTFY_URL")
     if environment_url:
         return environment_url
-    try:
-        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    configured = value.get("ntfy_url") if isinstance(value, dict) else None
+    configured = _read_service_config().get("ntfy_url")
+    return configured if isinstance(configured, str) and configured else None
+
+
+def configured_config_path() -> str | None:
+    configured = _read_service_config().get("config_path")
     return configured if isinstance(configured, str) and configured else None
 
 
 NTFY_URL = configured_ntfy_url()
+CONFIGURED_CONFIG_PATH = configured_config_path()
 INTERVAL_SECONDS = 60
 START_TIMEOUT_SECONDS = 12
 START_STABILITY_SECONDS = 1.0
@@ -598,6 +608,8 @@ def run_service(repo_path: Path) -> int:
         "--log-dir",
         str(LOG_DIR),
     ]
+    if CONFIGURED_CONFIG_PATH:
+        command.extend(["--config", CONFIGURED_CONFIG_PATH])
     child: subprocess.Popen[str] | None = None
     stop_requested = False
     signal_count = 0
@@ -681,7 +693,12 @@ def print_value(value: Any, *, as_json: bool) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Control the launchd-managed PR drainer.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Control the launchd-managed PR drainer. A config.toml path "
+            "installed via install_drainer.py --config is forwarded to drain_prs.py."
+        )
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument(
         "--path",

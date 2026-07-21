@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+import kanban_config
+
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
@@ -92,6 +94,7 @@ class RepoContext:
     path: Path
     repo_slug: str
     default_branch: str
+    remote_name: str = "origin"
 
 
 @dataclass(frozen=True)
@@ -256,18 +259,18 @@ def parse_repo_slug(remote_url: str) -> str:
     https = re.match(r"https://github\.com/([^/]+)/(.+?)(?:\.git)?$", value)
     if https:
         return f"{https.group(1)}/{https.group(2)}"
-    raise ApproveError(f"Unsupported origin remote URL: {remote_url}")
+    raise ApproveError(f"Unsupported remote URL: {remote_url}")
 
 
-def get_repo_context(path: Path) -> RepoContext:
+def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
     root = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=path).stdout.strip())
-    remote = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
+    remote = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
     slug = parse_repo_slug(remote)
     data = run_json(
         ["gh", "repo", "view", slug, "--json", "defaultBranchRef"],
         cwd=root,
     )
-    return RepoContext(root, slug, data["defaultBranchRef"]["name"])
+    return RepoContext(root, slug, data["defaultBranchRef"]["name"], remote_name)
 
 
 def issue_labels(issue: dict[str, Any]) -> set[str]:
@@ -838,9 +841,9 @@ def select_candidate(
 
 
 def make_review_worktree(ctx: RepoContext, number: int) -> tuple[Path, str]:
-    run(["git", "fetch", "--quiet", "origin", ctx.default_branch], cwd=ctx.path)
+    run(["git", "fetch", "--quiet", ctx.remote_name, ctx.default_branch], cwd=ctx.path)
     base_sha = run(
-        ["git", "rev-parse", f"origin/{ctx.default_branch}"], cwd=ctx.path
+        ["git", "rev-parse", f"{ctx.remote_name}/{ctx.default_branch}"], cwd=ctx.path
     ).stdout.strip()
     path = Path(tempfile.mkdtemp(prefix=f"approve-issues-{number}-", dir="/private/tmp"))
     try:
@@ -1936,6 +1939,14 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_INCIDENT_DIR),
         help="Directory for the pipeline-halting incident circuit breaker.",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to kanban's config.toml "
+            "(default: ~/.config/kanban/config.toml)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1954,11 +1965,30 @@ def main() -> None:
             "approve-issues.py error: --check, --review, and --rereview are mutually exclusive"
         )
     global LOG_DIR, LOG_TO_STDERR, PIPELINE_INCIDENT_DIR
+    global APPROVE_LABEL, CHANGES_LABEL, VERDICT_LABEL_SPECS
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
     LOG_TO_STDERR = args.json
     PIPELINE_INCIDENT_DIR = Path(args.incident_dir).expanduser().resolve()
     try:
-        ctx = get_repo_context(Path(args.path).expanduser().resolve())
+        raw_config, config_warnings = kanban_config.load_raw_config(args.config)
+        for warning in config_warnings:
+            print(f"approve-issues.py warning: {warning}", file=sys.stderr, flush=True)
+        ctx = get_repo_context(
+            Path(args.path).expanduser().resolve(), raw_config.remote_name
+        )
+        resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
+        APPROVE_LABEL = resolved_config.workflow.approval_label
+        CHANGES_LABEL = resolved_config.workflow.changes_requested_label
+        VERDICT_LABEL_SPECS = {
+            APPROVE_LABEL: (
+                "0E8A16",
+                "Canonical issue review passed",
+            ),
+            CHANGES_LABEL: (
+                "B60205",
+                "Canonical issue review found blocking changes",
+            ),
+        }
         if args.check is not None:
             issue = get_issue(ctx, args.check)
             comments = get_comments(ctx, args.check)
@@ -2034,6 +2064,8 @@ def main() -> None:
                 )
         fail(f"approve-issues.py INVALID ISSUE: {exc}")
     except ApproveError as exc:
+        fail(f"approve-issues.py error: {exc}")
+    except kanban_config.KanbanConfigError as exc:
         fail(f"approve-issues.py error: {exc}")
     except KeyboardInterrupt:
         log("Interrupted; exiting")

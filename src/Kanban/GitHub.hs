@@ -28,6 +28,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Encoding as LazyTextEncoding
 import Data.Time (getCurrentTime)
+import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
@@ -79,13 +80,11 @@ data CheckContext = CheckContext
   }
   deriving stock (Eq, Show)
 
-issueLimit, pullRequestLimit, pageLimit :: Int
-issueLimit = 250
-pullRequestLimit = 100
+pageLimit :: Int
 pageLimit = 100
 
-fetchGitHubSnapshot :: Repository -> IO (Either ProviderError GitHubResult)
-fetchGitHubSnapshot repository = fetchPages initialState
+fetchGitHubSnapshot :: LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
+fetchGitHubSnapshot limits workflowConfig repository = fetchPages initialState
   where
     initialState = FetchState [] [] Nothing Nothing True True False False
 
@@ -99,12 +98,12 @@ fetchGitHubSnapshot repository = fetchPages initialState
                   fetchedAt
                   state.issuesTruncated
                   state.pullRequestsTruncated
-          pure (Right (GitHubResult repoSnapshot (snapshotWarnings repoSnapshot)))
+          pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot)))
       | otherwise = do
-          pageResult <- fetchPage repository state
+          pageResult <- fetchPage limits repository state
           case pageResult of
             Left providerError -> pure (Left providerError)
-            Right page -> case advanceState state page of
+            Right page -> case advanceState limits state page of
               Left providerError -> pure (Left providerError)
               Right nextState -> fetchPages nextState
 
@@ -116,13 +115,13 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage repository state = do
+fetchPage :: LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
+fetchPage limits repository state = do
   processResult <-
     try @IOException
       ( readProcessWithExitCode
           "gh"
-          (graphqlArguments repository state)
+          (graphqlArguments limits repository state)
           ""
       )
   pure $ case processResult of
@@ -148,8 +147,8 @@ fetchPage repository state = do
               }
         Right page -> Right page
 
-advanceState :: FetchState -> GitHubPage -> Either ProviderError FetchState
-advanceState previous page = do
+advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError FetchState
+advanceState limits previous page = do
   issueConnection <- requireConnection "issues" previous.fetchMoreIssues page.pageIssues
   pullRequestConnection <- requireConnection "pull requests" previous.fetchMorePullRequests page.pagePullRequests
   let newIssues = maybe [] (.connectionNodes) issueConnection
@@ -171,6 +170,9 @@ advanceState previous page = do
         issuesTruncated = previous.issuesTruncated || truncatedIssues,
         pullRequestsTruncated = previous.pullRequestsTruncated || truncatedPullRequests
       }
+  where
+    issueLimit = limits.limitsMaxOpenIssues
+    pullRequestLimit = limits.limitsMaxOpenPullRequests
 
 requireConnection :: Text -> Bool -> Maybe (Connection item) -> Either ProviderError (Maybe (Connection item))
 requireConnection _ False connection = Right connection
@@ -203,8 +205,8 @@ paginationDecision _ _ True Nothing =
       }
 paginationDecision _ _ True (Just cursor) = Right (True, Just cursor, False)
 
-graphqlArguments :: Repository -> FetchState -> [String]
-graphqlArguments repository state =
+graphqlArguments :: LimitsConfig -> Repository -> FetchState -> [String]
+graphqlArguments limits repository state =
   [ "api",
     "graphql",
     "-F",
@@ -224,8 +226,8 @@ graphqlArguments repository state =
     <> cursorArgument "pullRequestCursor" state.pullRequestCursor
     <> ["-f", "query=" <> Text.unpack graphqlQuery]
   where
-    issuePageSize = max 1 (min pageLimit (issueLimit - length state.fetchedIssues))
-    pullRequestPageSize = max 1 (min pageLimit (pullRequestLimit - length state.fetchedPullRequests))
+    issuePageSize = max 1 (min pageLimit (limits.limitsMaxOpenIssues - length state.fetchedIssues))
+    pullRequestPageSize = max 1 (min pageLimit (limits.limitsMaxOpenPullRequests - length state.fetchedPullRequests))
 
 cursorArgument :: String -> Maybe Text -> [String]
 cursorArgument _ Nothing = []
@@ -506,10 +508,10 @@ graphqlQuery =
       "}"
     ]
 
-snapshotWarnings :: RepoSnapshot -> [Text]
-snapshotWarnings snapshot =
-  [showText issueLimit <> "+ open issues; board is truncated" | snapshot.snapshotIssuesTruncated]
-    <> [showText pullRequestLimit <> "+ open pull requests; board is truncated" | snapshot.snapshotPullRequestsTruncated]
+snapshotWarnings :: LimitsConfig -> WorkflowConfig -> RepoSnapshot -> [Text]
+snapshotWarnings limits workflowConfig snapshot =
+  [showText limits.limitsMaxOpenIssues <> "+ open issues; board is truncated" | snapshot.snapshotIssuesTruncated]
+    <> [showText limits.limitsMaxOpenPullRequests <> "+ open pull requests; board is truncated" | snapshot.snapshotPullRequestsTruncated]
     <> [ nestedCountText nestedOverflowItems
            <> " contain truncated labels, assignees, or linked issues; +N markers show omitted values"
        | nestedOverflowItems > 0
@@ -527,7 +529,7 @@ snapshotWarnings snapshot =
     malformedTrackers =
       length
         ( filter
-            (not . null . trackerDiagnosticsForIssue defaultWorkflowConfig)
+            (not . null . trackerDiagnosticsForIssue workflowConfig)
             snapshot.snapshotIssues
         )
     nestedCountText 1 = "1 card"

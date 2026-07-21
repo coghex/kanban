@@ -63,17 +63,17 @@ import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
-fetchClaudeUsage :: IO (Either ProviderError UsageSnapshot)
-fetchClaudeUsage = do
+fetchClaudeUsage :: Int -> IO (Either ProviderError UsageSnapshot)
+fetchClaudeUsage timeoutMicros = do
   scriptExecutable <- findExecutable "script"
   claudeExecutable <- findExecutable "claude"
   case (scriptExecutable, claudeExecutable) of
     (Nothing, _) -> pure (Left (ProviderError ExecutableMissing "script executable was not found"))
     (_, Nothing) -> pure (Left (ProviderError ExecutableMissing "claude executable was not found"))
-    (Just scriptPath, Just claudePath) -> runClaudeProvider scriptPath claudePath
+    (Just scriptPath, Just claudePath) -> runClaudeProvider timeoutMicros scriptPath claudePath
 
-runClaudeProvider :: FilePath -> FilePath -> IO (Either ProviderError UsageSnapshot)
-runClaudeProvider scriptPath claudePath = do
+runClaudeProvider :: Int -> FilePath -> FilePath -> IO (Either ProviderError UsageSnapshot)
+runClaudeProvider timeoutMicros scriptPath claudePath = do
   scratchDirectory <- claudeScratchDirectory
   createDirectoryIfMissing True scratchDirectory
   setFileMode scratchDirectory 0o700
@@ -81,7 +81,7 @@ runClaudeProvider scriptPath claudePath = do
   fetchedAt <- getCurrentTime
   timeZone <- getCurrentTimeZone
   let createProcess = claudeProcess scriptPath claudePath scratchDirectory environment
-  result <- try @IOException (withCreateProcess createProcess (runProcess fetchedAt timeZone))
+  result <- try @IOException (withCreateProcess createProcess (runProcess timeoutMicros fetchedAt timeZone))
   pure $ case result of
     Left exception -> Left (ProviderError RequestFailed (Text.pack (show exception)))
     Right providerResult -> providerResult
@@ -117,20 +117,20 @@ claudeProcess scriptPath claudePath scratchDirectory environment =
       create_group = True
     }
 
-runProcess :: UTCTime -> TimeZone -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
-runProcess fetchedAt timeZone (Just input) (Just output) _ processHandle = do
+runProcess :: Int -> UTCTime -> TimeZone -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
+runProcess timeoutMicros fetchedAt timeZone (Just input) (Just output) _ processHandle = do
   hSetBuffering input NoBuffering
   hSetBuffering output NoBuffering
-  timedCapture <- timeout claudeTimeoutMicros (captureUsage input output)
+  timedCapture <- timeout timeoutMicros (captureUsage input output)
   case timedCapture of
     Nothing -> do
       _ <- stopProcess processHandle
-      pure (Left (ProviderError RequestTimedOut "Claude usage refresh timed out after 45 seconds"))
+      pure (Left (ProviderError RequestTimedOut ("Claude usage refresh timed out after " <> Text.pack (show (timeoutMicros `div` 1000000)) <> " seconds")))
     Just transcript -> do
       requestCleanExit input
       _ <- finishProcess processHandle
       pure (decodeClaudeUsageText timeZone fetchedAt transcript)
-runProcess _ _ _ _ _ processHandle = do
+runProcess _ _ _ _ _ _ processHandle = do
   _ <- stopProcess processHandle
   pure (Left (ProviderError RequestFailed "could not open Claude pseudo-terminal pipes"))
 
@@ -334,8 +334,7 @@ inferResetTime timeZone fetchedAt resetTime = localTimeToUTC timeZone resetLocal
 diffMicros :: UTCTime -> UTCTime -> Int
 diffMicros earlier later = floor (realToFrac (later `diffUTCTime` earlier) * (1000000 :: Double))
 
-claudeTimeoutMicros, cleanExitMicros, interruptGraceMicros, quietPeriodMicros :: Int
-claudeTimeoutMicros = 45 * 1000 * 1000
+cleanExitMicros, interruptGraceMicros, quietPeriodMicros :: Int
 cleanExitMicros = 2 * 1000 * 1000
 interruptGraceMicros = 1 * 1000 * 1000
 quietPeriodMicros = 2 * 1000 * 1000
