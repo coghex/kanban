@@ -237,13 +237,15 @@ commands need.
 
 Machine-readable; parsed verbatim by `tools/test_agent_workflow_contract.py`,
 which also reconciles this manifest against the tracked Codex plugin's own
-bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) in addition
-to the Haskell invocation surface — a command a packaged workflow shells out
-to is as undocumented-if-missing as one Kanban's own Haskell code spawns.
+bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) and the
+tracked Claude plugin's own bash surface
+(`claude-plugin/plugins/kanban/commands/*.md`) in addition to the Haskell
+invocation surface — a command a packaged workflow shells out to is as
+undocumented-if-missing as one Kanban's own Haskell code spawns.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
 - `kind`: `executable` (a literal command Kanban's Haskell source or the
-  tracked Codex plugin's packaged workflows spawn or resolve) or
+  tracked Codex or Claude plugin's packaged workflows spawn or resolve) or
   `personal-path` (a home-relative path Kanban's Haskell source builds or
   depends on).
 - `token`: the exact literal string the check searches for.
@@ -257,12 +259,12 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 - `mandatory`: `yes` or `no`, matching §2.5 for executables.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs | kanban | supported | no
@@ -274,7 +276,13 @@ head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKIL
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 the installed Codex plugin's shared review coordinator from `$pr-review`,
 `$pr-rereview`, and `$pr-revise`, themselves optional AI actions, and every
-supported macOS/Linux shell already provides both.
+supported macOS/Linux shell already provides both. The Claude plugin's
+equivalent commands need neither: Claude Code exposes `${CLAUDE_PLUGIN_ROOT}`
+inside a plugin's own commands, so `/pr-review`, `/pr-rereview`, and
+`/pr-revise` resolve their bundled coordinator directly at
+`${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py` without a filesystem search, and
+that plugin bundles its own copy of the coordinator so it never depends on
+the Codex plugin being installed.
 
 ## 5. Portable-install policy
 
@@ -318,15 +326,18 @@ runs) parses the manifest in §4 and:
   `Process.hs`) invoke a literal external command that has no matching
   `executable` manifest entry;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files
-  (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) invoke a command, inside
-  a fenced ```` ```bash ```` block, that has no matching `executable`
-  manifest entry;
-- fails if the packaged plugin's own bundled coordinator
-  (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`)
-  invokes a command, as the first element of a `run`/`subprocess.run`
-  argument list, that has no matching `executable` manifest entry — the
-  coordinator is Python, not bash, so it is reconciled with a separate
-  extractor from the SKILL.md files above, not exempted from coverage;
+  (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) or the tracked Claude
+  plugin's packaged `commands/*.md` files
+  (`claude-plugin/plugins/kanban/commands/*.md`) invoke a command, inside a
+  fenced ```` ```bash ```` block, that has no matching `executable` manifest
+  entry;
+- fails if either packaged plugin's own bundled coordinator
+  (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py` or
+  `claude-plugin/plugins/kanban/scripts/review_pr.py`) invokes a command, as
+  the first element of a `run`/`subprocess.run` argument list, that has no
+  matching `executable` manifest entry — the coordinator is Python, not
+  bash, so it is reconciled with a separate extractor from the `.md` files
+  above, not exempted from coverage;
 - fails if those same files build a home-relative path segment that has no
   matching `personal-path` manifest entry;
 - fails if a manifest entry's declared `files` no longer contain its token,

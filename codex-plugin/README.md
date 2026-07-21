@@ -10,8 +10,9 @@ the full dependency contract these workflows implement, including the
 `solve`/PR-flow authority boundaries and the canonical issue-review backend
 they call into.
 
-Claude packaging is a separate, not-yet-implemented phase; nothing here
-covers `/solve` or the other Claude-side commands.
+Claude packaging is a separate marketplace tracked at
+[claude-plugin/](../claude-plugin/README.md); nothing here covers `/solve` or
+the other Claude-side commands.
 
 ## Install
 

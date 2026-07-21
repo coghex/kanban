@@ -1,0 +1,9 @@
+{
+  "name": "kanban",
+  "version": "1.0.0",
+  "description": "Kanban's Claude-side workflow bundle: /solve, /pr-review, /pr-rereview, /pr-revise.",
+  "author": {
+    "name": "Kanban"
+  },
+  "commands": "./commands/"
+}
