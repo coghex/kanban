@@ -97,6 +97,18 @@ manages or something I must set up myself."
   invocation itself, which Kanban's own CLI spawn continues to pin per
   action as documented above.
 
+  The Claude plugin's bundled coordinator
+  (`claude-plugin/plugins/kanban/scripts/review_pr.py`) is a deliberate,
+  reviewed exception to this one nested-call policy: unlike the Codex
+  plugin's otherwise-identical coordinator copy, it pins and verifies that
+  nested reviewer to the exact `gpt-5.6-terra`/`claude-opus-4-8` at `xhigh`
+  values `codexModel`/`claudeModel`/`codexEffort`/`claudeEffort` already use
+  for `PullRequestReview`/`PullRequestRereview`, and binds the verified
+  model in the published `pr-review:v2` marker instead of `unspecified`.
+  See [claude-plugin/README.md](../claude-plugin/README.md) for the
+  rationale; this remains a host-configuration concern for the Codex
+  plugin's own nested call.
+
 ### 2.3 Canonical issue review, rereview, and the solve readiness gate
 
 - **Owning source:** `src/Kanban/Review.hs`.

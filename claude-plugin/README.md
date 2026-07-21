@@ -112,23 +112,36 @@ directory under `~/Library/Application Support/kanban/issue-review/`); it
 never hard-codes a personal path. None of the four commands set their own
 model, reasoning effort, permission mode, or working directory — Kanban's own
 CLI invocation pins those per action, and `tools/test_claude_plugin.py`
-asserts none of the packaged manifests (or the coordinator's own nested-
-reviewer invocations) override them.
+asserts none of the packaged manifests override them.
 
 For known-origin `/pr-review`/`/pr-rereview` — the case Kanban's own
 invocation always produces — the calling session already *is* the
 correctly-pinned canonical reviewer, so it reviews directly and uses the
-coordinator (`--self-review`) only for safe publication; no nested,
-unpinned reviewer is spawned. Only `pr-revise`'s cross-brand handoff (it
-runs on the PR's own origin brand but must hand off to the opposite brand)
-and the rare dual-review fallback for unknown/external origin — which
-Kanban's own invocation never triggers — spawn a nested `codex`/`claude`
-reviewer, and that nested call selects brand only, deferring to whatever
-model that installation defaults to; see
-[docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md#22-pr-review-rereview-and-revise)
-for why. Dual review runs its two reviewers strictly one at a time, each
-in its own unpredictably-named, read-only temp directory torn down before
-the next begins — never two reviewers' source trees on disk at once.
+coordinator (`--self-review`) only for safe publication; no nested reviewer
+is spawned, and this coordinator still cannot verify which model actually
+ran that top-level session (that pin happened outside its visibility), so
+it publishes `models=unspecified` for this path, matching
+[docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md#22-pr-review-rereview-and-revise).
+Only `pr-revise`'s cross-brand handoff (it runs on the PR's own origin
+brand but must hand off to the opposite brand) and the rare dual-review
+fallback for unknown/external origin — which Kanban's own invocation never
+triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
+self-reviewed path, this coordinator fully constructs that nested
+subprocess call itself, so — for this plugin's bundled coordinator only,
+per a round-2 review finding on issue #77 — it pins that nested reviewer to
+the same canonical `gpt-5.6-terra`/`claude-opus-4-8` at `xhigh` values
+`src/Kanban/PullRequestFlow.hs` already uses for Kanban's own top-level
+review invocation, and binds the verified model in the published
+`pr-review:v2` marker instead of `unspecified`. This is a deliberate,
+reviewed divergence from §2.2's general "brand only, no pinned model"
+policy for this one nested-spawn path, and from
+[codex-plugin/](../codex-plugin/README.md)'s otherwise-identical
+coordinator copy, which still leaves it unpinned; see
+`CODEX_NESTED_REVIEW_MODEL`/`CLAUDE_NESTED_REVIEW_MODEL` in
+`scripts/review_pr.py` for the exact values. Dual review runs its two
+reviewers strictly one at a time, each in its own unpredictably-named,
+read-only temp directory torn down before the next begins — never two
+reviewers' source trees on disk at once.
 
 ## Structural and contract coverage
 
@@ -146,7 +159,10 @@ runs) checks that:
   compatibility launcher path (see
   [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary));
 - the bundled coordinator resolves the canonical issue-review backend the
-  same way Kanban's Haskell code does, and its self-test passes standalone.
+  same way Kanban's Haskell code does, and its self-test passes standalone;
+- the coordinator's nested-reviewer model/effort pin matches the exact
+  values `src/Kanban/PullRequestFlow.hs` uses for Kanban's own review
+  invocation, so the two cannot silently drift apart.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
 surface (`claude-plugin/plugins/kanban/commands/*.md`) and bundled

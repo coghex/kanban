@@ -35,6 +35,25 @@ REVIEW_MARKER_RE = re.compile(
 # controls and can back.
 UNVERIFIED_MODEL_TOKEN = "unspecified"
 
+# Canonical nested-reviewer model/effort (issue #77 round-2 review). Unlike
+# the self-reviewed known-origin case, invoke_codex/invoke_claude below
+# fully construct the subprocess they spawn, so — for this plugin's
+# bundled coordinator only — they pin it and can therefore verify and
+# publish it, matching the exact gpt-5.6-terra/claude-opus-4-8 at xhigh
+# values src/Kanban/PullRequestFlow.hs's codexModel/claudeModel/
+# codexEffort/claudeEffort already use for PullRequestReview/
+# PullRequestRereview. This is a deliberate, reviewed divergence from
+# codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py's
+# otherwise-identical copy and from docs/agent-workflow-contract.md §2.2's
+# general "brand only, no pinned model" policy for this nested-spawn path;
+# the self-reviewed path is unaffected and still cannot verify a model,
+# since Kanban's own top-level spawn — outside this coordinator's
+# visibility — is what pins that one.
+CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"
+CODEX_NESTED_REVIEW_EFFORT = "xhigh"
+CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-4-8"
+CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
+
 REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -501,7 +520,7 @@ REVIEW_PAYLOAD:
 """
 
 
-def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
+def validate_review(value: Any, reviewer: Reviewer, model: str = UNVERIFIED_MODEL_TOKEN) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkflowError(f"{reviewer.display_name} returned a non-object result")
     verdict = value.get("verdict")
@@ -530,6 +549,7 @@ def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
         "verdict": verdict,
         "summary": summary.strip(),
         "blocking_concerns": concerns,
+        "model": model,
     }
 
 
@@ -538,14 +558,11 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         schema_path = Path(temp) / "schema.json"
         output_path = Path(temp) / "result.json"
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-        # No -m/-c model_reasoning_effort/-s/--dangerously-bypass-approvals-and-sandbox:
-        # this coordinator does not pin model, reasoning effort, sandbox, or
-        # approval policy for the reviewer it spawns, and cannot verify
-        # after the fact which model this installation's `codex` defaulted
-        # to (its --json output and session logs carry no model field).
-        # The published comment/marker therefore claims only the reviewer
-        # key (`codex`) as verified fact, via UNVERIFIED_MODEL_TOKEN.
-        # `codex exec` without -s/-a runs a read-only inspection task to
+        # -m/-c model_reasoning_effort pin the canonical nested-reviewer
+        # model (see CODEX_NESTED_REVIEW_MODEL above); no
+        # -s/--dangerously-bypass-approvals-and-sandbox: sandbox/approval
+        # policy is still left to this installation's own default. `codex
+        # exec` without -s/-a runs a read-only inspection task to
         # completion under its own non-interactive defaults.
         run(
             [
@@ -555,6 +572,10 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
                 "--skip-git-repo-check",
                 "-C",
                 str(cwd),
+                "--model",
+                CODEX_NESTED_REVIEW_MODEL,
+                "--config",
+                f'model_reasoning_effort="{CODEX_NESTED_REVIEW_EFFORT}"',
                 "--output-schema",
                 str(schema_path),
                 "-o",
@@ -571,7 +592,7 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
             value = json.loads(output_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise WorkflowError(f"{reviewer.display_name} did not return structured JSON") from exc
-    return validate_review(value, reviewer)
+    return validate_review(value, reviewer, f"{CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT}")
 
 
 def parse_claude_output(stdout: str) -> Any:
@@ -588,19 +609,19 @@ def parse_claude_output(stdout: str) -> Any:
 
 
 def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
-    # No --model/--effort/--permission-mode/--tools: this coordinator does
-    # not pin model, reasoning effort, or permission policy for the
-    # reviewer it spawns. The published comment/marker therefore claims
-    # only the reviewer key (`claude`) as verified fact, via
-    # UNVERIFIED_MODEL_TOKEN, for the same reason as invoke_codex above —
-    # kept symmetric even though Claude's own JSON output happens to expose
-    # a `modelUsage` field, since Codex's does not. `claude -p` without
-    # --permission-mode runs a read-only inspection task to completion
-    # under its own non-interactive defaults.
+    # --model/--effort pin the canonical nested-reviewer model (see
+    # CLAUDE_NESTED_REVIEW_MODEL above); no --permission-mode/--tools:
+    # permission policy is still left to this installation's own default.
+    # `claude -p` without --permission-mode runs a read-only inspection
+    # task to completion under its own non-interactive defaults.
     proc = run(
         [
             "claude",
             "-p",
+            "--model",
+            CLAUDE_NESTED_REVIEW_MODEL,
+            "--effort",
+            CLAUDE_NESTED_REVIEW_EFFORT,
             "--no-session-persistence",
             "--output-format",
             "json",
@@ -611,7 +632,7 @@ def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
         input_text=prompt,
         timeout=REVIEW_TIMEOUT_SECONDS,
     )
-    return validate_review(parse_claude_output(proc.stdout), reviewer)
+    return validate_review(parse_claude_output(proc.stdout), reviewer, f"{CLAUDE_NESTED_REVIEW_MODEL}@{CLAUDE_NESTED_REVIEW_EFFORT}")
 
 
 def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
@@ -652,13 +673,17 @@ def aggregate_verdict(results: list[dict[str, Any]]) -> str:
     return "CHANGES_REQUESTED" if any(item["verdict"] == "CHANGES_REQUESTED" for item in results) else "APPROVE"
 
 
-def review_marker(reviewers: list[Reviewer], head: str, verdict: str) -> str:
+def review_marker(reviewers: list[Reviewer], models: list[str], head: str, verdict: str) -> str:
     reviewer_keys = ",".join(item.key for item in reviewers)
-    models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
+    models_field = ",".join(models)
     return (
-        f"<!-- pr-review:v2 reviewers={reviewer_keys} models={models} "
+        f"<!-- pr-review:v2 reviewers={reviewer_keys} models={models_field} "
         f"head={head} verdict={verdict} -->"
     )
+
+
+def result_models(results: list[dict[str, Any]]) -> list[str]:
+    return [result.get("model", UNVERIFIED_MODEL_TOKEN) for result in results]
 
 
 def render_review(results: list[dict[str, Any]], reviewers: list[Reviewer], head: str) -> tuple[str, str]:
@@ -674,7 +699,7 @@ def render_review(results: list[dict[str, Any]], reviewers: list[Reviewer], head
             lines.append(f"- {label}: {concern['body'].strip()}")
         if result["blocking_concerns"]:
             lines.append("")
-    lines.append(review_marker(reviewers, head, verdict))
+    lines.append(review_marker(reviewers, result_models(results), head, verdict))
     body = "\n".join(lines).rstrip() + "\n"
     if len(body.encode()) > 60000:
         raise WorkflowError("consolidated review comment is too large to publish safely")
@@ -741,6 +766,7 @@ def verify_publication(
     repo: str,
     number: int,
     reviewers: list[Reviewer],
+    models: list[str],
     head: str,
     verdict: str,
     gate_key_value: str,
@@ -763,7 +789,7 @@ def verify_publication(
     if latest is None:
         raise WorkflowError("published review marker was not found")
     marker, url = latest
-    expected_models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
+    expected_models = ",".join(models)
     expected_reviewers = ",".join(item.key for item in reviewers)
     if (
         marker.group("head") != head
@@ -853,6 +879,7 @@ def publish_results(
             repo,
             number,
             reviewers,
+            result_models(results),
             pr["headRefOid"],
             verdict,
             gate["key"],
@@ -1041,10 +1068,21 @@ def self_test() -> None:
     assert gate_key("coghex/kanban", [], [], allow_no_issue=True) != gate_key(
         "coghex/kanban", [], []
     )
-    review = review_marker([CODEX_REVIEWER, CLAUDE_REVIEWER], "a" * 40, "APPROVE")
+    review = review_marker(
+        [CODEX_REVIEWER, CLAUDE_REVIEWER], [UNVERIFIED_MODEL_TOKEN, UNVERIFIED_MODEL_TOKEN], "a" * 40, "APPROVE"
+    )
     match = REVIEW_MARKER_RE.fullmatch(review)
     assert match and match.group("reviewers") == "codex,claude"
     assert match.group("models") == f"{UNVERIFIED_MODEL_TOKEN},{UNVERIFIED_MODEL_TOKEN}"
+    assert result_models([{"model": "x@y"}, {"verdict": "APPROVE"}]) == ["x@y", UNVERIFIED_MODEL_TOKEN]
+    pinned = review_marker(
+        [CODEX_REVIEWER],
+        [f"{CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT}"],
+        "b" * 40,
+        "CHANGES_REQUESTED",
+    )
+    pinned_match = REVIEW_MARKER_RE.fullmatch(pinned)
+    assert pinned_match and pinned_match.group("models") == "gpt-5.6-terra@xhigh"
     print("self-test passed")
 
 

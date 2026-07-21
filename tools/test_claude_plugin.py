@@ -265,6 +265,55 @@ class ReviewCoordinatorSelfTestTests(unittest.TestCase):
         self.assertIn("self-test passed", proc.stdout)
 
 
+class NestedReviewerModelPinningTests(unittest.TestCase):
+    """Round-2 review finding: unlike the self-reviewed known-origin case
+    (where Kanban's own top-level spawn pins the model outside this
+    coordinator's visibility), invoke_codex/invoke_claude fully construct
+    the nested-reviewer subprocess call for /pr-revise's cross-brand
+    handoff and the dual-review fallback, so they can and must pin and
+    verify the canonical reviewer model/effort rather than deferring to an
+    arbitrary local default. Pinned against the exact values
+    src/Kanban/PullRequestFlow.hs's codexModel/claudeModel/codexEffort/
+    claudeEffort already use for PullRequestReview/PullRequestRereview, so
+    the two cannot silently drift apart. This is a deliberate, reviewed
+    divergence from codex-plugin's otherwise-identical coordinator copy and
+    from docs/agent-workflow-contract.md §2.2's general policy for this one
+    nested-spawn path in this plugin only."""
+
+    def test_nested_reviewer_models_match_the_haskell_canonical_review_models(self):
+        pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
+        self.assertIn('codexModel _ = "gpt-5.6-terra"', pr_flow_source)
+        self.assertIn('codexEffort _ = "xhigh"', pr_flow_source)
+        self.assertIn('claudeModel _ = "claude-opus-4-8"', pr_flow_source)
+        self.assertIn('claudeEffort _ = "xhigh"', pr_flow_source)
+
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"', coordinator_source)
+        self.assertIn('CODEX_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
+        self.assertIn('CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-4-8"', coordinator_source)
+        self.assertIn('CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
+
+    def test_invoke_codex_and_invoke_claude_pass_the_pinned_model_flags(self):
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        codex_match = re.search(r"def invoke_codex\(.*?(?=\ndef |\Z)", coordinator_source, re.DOTALL)
+        self.assertIsNotNone(codex_match)
+        self.assertIn('"--model",\n                CODEX_NESTED_REVIEW_MODEL', codex_match.group(0))
+        self.assertIn("model_reasoning_effort", codex_match.group(0))
+
+        claude_match = re.search(r"def invoke_claude\(.*?(?=\ndef |\Z)", coordinator_source, re.DOTALL)
+        self.assertIsNotNone(claude_match)
+        self.assertIn('"--model",\n            CLAUDE_NESTED_REVIEW_MODEL', claude_match.group(0))
+        self.assertIn('"--effort",\n            CLAUDE_NESTED_REVIEW_EFFORT', claude_match.group(0))
+
+    def test_self_test_covers_the_pinned_marker_binding(self):
+        # Pins the coordinator's own --self-test (already run standalone by
+        # ReviewCoordinatorSelfTestTests) to actually exercise the pinned
+        # branch, not just the pre-existing unspecified-model assertions.
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT", coordinator_source)
+        self.assertIn('"gpt-5.6-terra@xhigh"', coordinator_source)
+
+
 class ClaudePluginRootReferenceTests(unittest.TestCase):
     """All three PR-flow commands locate the bundled coordinator via
     ${CLAUDE_PLUGIN_ROOT}, the portable path Claude Code substitutes to this
