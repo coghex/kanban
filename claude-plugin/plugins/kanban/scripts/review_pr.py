@@ -833,6 +833,7 @@ def verify_publication(
     changes_requested_label: str,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, number)
     if pr["headRefOid"] != head:
@@ -842,7 +843,7 @@ def verify_publication(
     verdict_labels = [item for item in labels if item in {approval_label, changes_requested_label}]
     if verdict_labels != [expected]:
         raise WorkflowError(f"publication label verification failed: {verdict_labels}")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != gate_key_value or not gate["approved"]:
         raise WorkflowError("publication issue-gate verification failed")
     login = viewer_login(root)
@@ -952,6 +953,7 @@ def publish_results(
             approval_label,
             changes_requested_label,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
     except WorkflowError as exc:
         try:

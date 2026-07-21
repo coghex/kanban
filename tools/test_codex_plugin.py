@@ -382,6 +382,48 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
             module.check_issue(Path("/fake-repo"), 34)
         self.assertNotIn("--config", run_mock.call_args.args[0])
 
+    def test_verify_publication_forwards_config_path_to_its_gate_recheck(self):
+        # verify_publication's final issue-gate recheck must use the same
+        # config as the initial gate and the label mutation; otherwise a
+        # non-default --config publishes under custom labels but then fails
+        # this recheck (which would use approve_issues.py's own defaults)
+        # and clears the just-set verdict label.
+        module = load_review_pr_module()
+        pr = {"number": 89, "headRefOid": "a" * 40, "labels": [{"name": "lgtm"}]}
+        gate = {"approved": True, "key": "k1"}
+        marker = mock.Mock()
+        marker.group.side_effect = lambda name: {
+            "head": "a" * 40,
+            "verdict": "APPROVE",
+            "models": "unspecified",
+            "reviewers": "codex",
+        }[name]
+        with mock.patch.object(module, "pr_view", return_value=pr), mock.patch.object(
+            module, "gate_status", return_value=gate
+        ) as gate_status_mock, mock.patch.object(
+            module, "viewer_login", return_value="kanban-bot"
+        ), mock.patch.object(
+            module, "pr_comments", return_value=[]
+        ), mock.patch.object(
+            module, "latest_owned_review_marker", return_value=(marker, "https://example.test/comment")
+        ):
+            module.verify_publication(
+                Path("/fake-repo"),
+                "coghex/kanban",
+                89,
+                [module.CODEX_REVIEWER],
+                "a" * 40,
+                "APPROVE",
+                "k1",
+                "lgtm",
+                "needs-work",
+                allow_no_issue=False,
+                config_path="/tmp/custom-config.toml",
+            )
+        gate_status_mock.assert_called_once_with(
+            Path("/fake-repo"), pr, "coghex/kanban", allow_no_issue=False, config_path="/tmp/custom-config.toml",
+        )
+
 
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own

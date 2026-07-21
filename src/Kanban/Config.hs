@@ -24,6 +24,7 @@ module Kanban.Config
     loadRawConfig,
     resolveConfig,
     repositoryIdentity,
+    resolveConfigPathOption,
   )
 where
 
@@ -44,7 +45,7 @@ import Kanban.Domain
     WorkflowConfig (..),
     defaultWorkflowConfig,
   )
-import System.Directory (XdgDirectory (XdgConfig), doesFileExist, getXdgDirectory)
+import System.Directory (XdgDirectory (XdgConfig), doesFileExist, getXdgDirectory, makeAbsolute)
 import System.FilePath ((</>))
 import Toml
   ( Position,
@@ -283,6 +284,14 @@ defaultConfigPath :: IO FilePath
 defaultConfigPath = do
   configRoot <- getXdgDirectory XdgConfig "kanban"
   pure (configRoot </> "config.toml")
+
+-- | Resolve an explicit @--config@ option (if any) to an absolute path,
+-- against the current process's own directory, before it is forwarded to a
+-- canonical issue-review or pull-request worker that runs from the target
+-- repository's directory instead — a relative path would otherwise name a
+-- different (or missing) file once read from there.
+resolveConfigPathOption :: Maybe FilePath -> IO (Maybe FilePath)
+resolveConfigPathOption = traverse makeAbsolute
 
 -- | Load and decode the configuration file at the given path, or the default
 -- path when 'Nothing'. A missing file silently yields 'defaultRawConfig'. A

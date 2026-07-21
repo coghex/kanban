@@ -176,7 +176,7 @@ import Kanban.Worker
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
@@ -3154,6 +3154,15 @@ main = hspec $ do
         let (config, warnings) = unsafeConfig loaded
         warnings `shouldBe` []
         config.rawRemoteName `shouldBe` "upstream"
+
+    it "resolves an explicit --config path to an absolute path so a worker spawned from a different directory still finds it" $ do
+      resolveConfigPathOption Nothing `shouldReturn` Nothing
+      absolutePath <- resolveConfigPathOption (Just "/already/absolute/config.toml")
+      absolutePath `shouldBe` Just "/already/absolute/config.toml"
+      relativeResult <- resolveConfigPathOption (Just "relative-config.toml")
+      case relativeResult of
+        Just resolved -> isAbsolute resolved `shouldBe` True
+        Nothing -> expectationFailure "expected a resolved path"
 
     it "decodes a full-file fixture covering every documented key and warns on an unknown top-level key" $ do
       let (config, warnings) = unsafeConfig (decodeConfigText fullFixtureToml)
