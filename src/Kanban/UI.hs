@@ -11,6 +11,7 @@ module Kanban.UI
     ReviewCancelAction (..),
     ReviewDigitAction (..),
     ReviewPhase (..),
+    ReviewSession (..),
     SolvePhase (..),
     SolveSession (..),
     canonicalReviewCompletionSuperseded,
@@ -19,11 +20,16 @@ module Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
+    reviewPhaseAttribute,
+    reviewPhaseGlyphFor,
+    reviewPhaseLabel,
     reviewSessionReusable,
+    revisedAttr,
     runDashboard,
     solveSessionAlreadyResolved,
   )
@@ -278,6 +284,7 @@ data ReviewPhase
   | ReviewFinished
   | ReviewNeedsChanges
   | ReviewFailed
+  | ReviewRevised
   | ReviewInterrupted
   deriving stock (Eq, Show)
 
@@ -1070,14 +1077,18 @@ pullRequestSessionGlyph state session
       SolveOrphanedPhase -> "⚠ "
 
 reviewPhaseGlyph :: AppState -> ReviewSession -> Text
-reviewPhaseGlyph state session
-  | state.appOptions.optionAscii = case session.reviewSessionPhase of
+reviewPhaseGlyph state = reviewPhaseGlyphFor state.appOptions.optionAscii
+
+reviewPhaseGlyphFor :: Bool -> ReviewSession -> Text
+reviewPhaseGlyphFor useAscii session
+  | useAscii = case session.reviewSessionPhase of
       ReviewStarting -> "* "
       ReviewRunning -> "* "
       ReviewWaiting -> "? "
       ReviewFinished -> "+ "
       ReviewNeedsChanges -> "! "
       ReviewFailed -> "! "
+      ReviewRevised -> "^ "
       ReviewInterrupted -> "- "
   | otherwise = case session.reviewSessionPhase of
       ReviewStarting -> spinnerGlyph session.reviewSessionSpinnerFrame <> " "
@@ -1086,6 +1097,7 @@ reviewPhaseGlyph state session
       ReviewFinished -> "✓ "
       ReviewNeedsChanges -> "! "
       ReviewFailed -> "× "
+      ReviewRevised -> "◆ "
       ReviewInterrupted -> "· "
 
 spinnerGlyph :: Int -> Text
@@ -1129,6 +1141,7 @@ reviewPhaseAttribute phase = case phase of
   ReviewFinished -> readyAttr
   ReviewNeedsChanges -> pendingAttr
   ReviewFailed -> problemAttr
+  ReviewRevised -> revisedAttr
   ReviewInterrupted -> dimAttr
 
 drawFooter :: AppState -> Widget Name
@@ -1410,6 +1423,7 @@ reviewProcessStatus ReviewWaiting = "waiting for input"
 reviewProcessStatus ReviewFinished = "finished"
 reviewProcessStatus ReviewNeedsChanges = "changes requested"
 reviewProcessStatus ReviewFailed = "failed"
+reviewProcessStatus ReviewRevised = "awaiting rereview"
 reviewProcessStatus ReviewInterrupted = "interrupted"
 
 persistentProcessStatus :: UTCTime -> Maybe WorkerDescriptor -> Text -> Text
@@ -1607,6 +1621,7 @@ reviewPhaseLabel session = case session.reviewSessionPhase of
     IssueRevision -> "Specification revision remains blocked"
     _ -> "Review completed with changes requested"
   ReviewFailed -> stageActivity session.reviewSessionStage <> " failed"
+  ReviewRevised -> "Specification revised · awaiting opposite-brand rereview"
   ReviewInterrupted -> stageActivity session.reviewSessionStage <> " interrupted"
   where
     stageActivity InitialReview = "review"
@@ -4242,6 +4257,10 @@ reconcileReviewSessions issues = Map.mapWithKey reconcile
           }
     reconciledPhase issue session
       | issueHasLabel "reviewed:approve" issue = ReviewFinished
+      | issueHasLabel "reviewed:revised" issue
+          && session.reviewSessionPhase == ReviewFailed
+          && session.reviewSessionStage == IssueRevision =
+          ReviewRevised
       | issueHasLabel "reviewed:changes" issue && session.reviewSessionPhase == ReviewFailed = ReviewNeedsChanges
       | otherwise = session.reviewSessionPhase
 
@@ -4576,6 +4595,7 @@ themeFor options
           (readyAttr, foreground Vty.brightGreen),
           (problemAttr, foreground Vty.brightRed `Vty.withStyle` Vty.bold),
           (trackerAttr, foreground (Vty.rgbColor (128 :: Int) 90 213) `Vty.withStyle` Vty.bold),
+          (revisedAttr, foreground (Vty.rgbColor (130 :: Int) 80 223) `Vty.withStyle` Vty.bold),
           (cardTitleAttr, Vty.defAttr `Vty.withStyle` Vty.bold),
           (selectedTitleAttr, foreground Vty.brightCyan `Vty.withStyle` Vty.bold),
           (linkAttr, foreground Vty.brightBlue),
@@ -4611,6 +4631,7 @@ labelAttribute name
 titleAttr, headingAttr, providerAttr, footerAttr, noticeAttr, dimAttr :: AttrName
 neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, attentionAttr, readyAttr, problemAttr :: AttrName
 trackerAttr :: AttrName
+revisedAttr :: AttrName
 cardTitleAttr, selectedTitleAttr, linkAttr, labelDefaultAttr, labelApprovalAttr, labelProblemAttr, labelUiAttr :: AttrName
 issuesAttr, activeAttr, reviewingAttr, doneAttr :: AttrName
 titleAttr = attrName "title"
@@ -4628,6 +4649,7 @@ attentionAttr = attrName "status.attention"
 readyAttr = attrName "status.ready"
 problemAttr = attrName "status.problem"
 trackerAttr = attrName "tracker"
+revisedAttr = attrName "status.revised"
 cardTitleAttr = attrName "card.title"
 selectedTitleAttr = attrName "card.title.selected"
 linkAttr = attrName "link"
@@ -4657,6 +4679,7 @@ allAttributeNames =
     readyAttr,
     problemAttr,
     trackerAttr,
+    revisedAttr,
     cardTitleAttr,
     selectedTitleAttr,
     linkAttr,
