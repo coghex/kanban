@@ -22,13 +22,12 @@ module Kanban.Solve
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try, uninterruptibleMask_)
+import Control.Exception (IOException, finally, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Char8 as ByteStringChar8
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
 import GHC.Generics (Generic)
@@ -41,10 +40,11 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Settings (ChatVerbosity (..))
+import Kanban.StreamReader (onStreamAbandoned, runStreamReader)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
-import System.IO (BufferMode (..), Handle, hIsEOF, hSetBuffering)
+import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -150,12 +150,14 @@ runSolve repository issueNumber workflow brand configPath config existingSession
       -- not be treated as vacuously verified) — both look identical from
       -- outside as long as the caller's own provider reference is still
       -- unset.
+      managedRef <- newIORef Nothing
       started <- uninterruptibleMask_ $ do
         eventSink (SolveProcessSpawning issueNumber True)
         result <- try (createProcess (processSpec executablePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
         case result of
           Right (Nothing, Just _, Just _, processHandle) -> do
             (managed, groupLeaderProblem) <- managedProcess processHandle
+            writeIORef managedRef (Just managed)
             mapM_ (\problem -> eventSink (SolveDiagnostic issueNumber ("process group leadership: " <> problem))) groupLeaderProblem
             eventSink (SolveProcessStarted issueNumber brand managed)
           _ -> eventSink (SolveProcessSpawning issueNumber False)
@@ -165,16 +167,25 @@ runSolve repository issueNumber workflow brand configPath config existingSession
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
-          sessionRef <- newIORef existingSession
-          lastMessageRef <- newIORef ""
-          diagnosticsDone <- newEmptyMVar
-          void . forkIO $ streamDiagnostics sessionLog errorHandle eventSink issueNumber >> putMVar diagnosticsDone ()
-          streamOutput sessionLog outputHandle sessionRef lastMessageRef eventSink issueNumber
-          exitCode <- waitForProcess processHandle
-          takeMVar diagnosticsDone
-          lastMessage <- readIORef lastMessageRef
-          let outcome = solveOutcome exitCode lastMessage
-          closeWithOutcome sessionLog outcome
+          managedResult <- readIORef managedRef
+          case managedResult of
+            Nothing -> finishWithoutProcess sessionLog (SolveFailed "internal error: provider process was not registered as managed")
+            Just managed -> do
+              sessionRef <- newIORef existingSession
+              lastMessageRef <- newIORef ""
+              abandonReasonRef <- newIORef Nothing
+              diagnosticsDone <- newEmptyMVar
+              let abandon = onStreamAbandoned (eventSink . SolveDiagnostic issueNumber) managed abandonReasonRef
+              void . forkIO $
+                void (runStreamReader errorHandle "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
+                  `finally` putMVar diagnosticsDone ()
+              _ <- runStreamReader outputHandle "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
+              exitCode <- waitForProcess processHandle
+              takeMVar diagnosticsDone
+              lastMessage <- readIORef lastMessageRef
+              abandonReason <- readIORef abandonReasonRef
+              let outcome = maybe (solveOutcome exitCode lastMessage) SolveFailed abandonReason
+              closeWithOutcome sessionLog outcome
         Right _ -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " did not provide stdout and stderr pipes"))
   where
     repositoryRoot = repository.repositoryRoot
@@ -436,29 +447,23 @@ compactValue = TextEncoding.decodeUtf8With lenientDecode . LazyByteString.toStri
 Just value <|> _ = Just value
 Nothing <|> fallback = fallback
 
-streamOutput :: Maybe SessionLog -> Handle -> IORef (Maybe Text) -> IORef Text -> (SolveEvent -> IO ()) -> Int -> IO ()
-streamOutput sessionLog handle sessionRef lastMessageRef eventSink issueNumber = do
-  eof <- hIsEOF handle
-  if eof
-    then pure ()
-    else do
-      lineResult <- try (ByteStringChar8.hGetLine handle) :: IO (Either IOException ByteString.ByteString)
-      case lineResult of
-        Left exception -> eventSink (SolveDiagnostic issueNumber ("Could not read solver output: " <> exceptionText exception))
-        Right line -> do
-          mapM_ (\value -> logRawLine value "stdout" line) sessionLog
-          case parseSolveOutputLine line of
-            Left _ ->
-              let plain = decodeBytes line
-               in if Text.null plain then pure () else eventSink (SolveDiagnostic issueNumber plain)
-            Right (sessionId, messages) -> do
-              case sessionId of
-                Nothing -> pure ()
-                Just value -> do
-                  writeIORef sessionRef (Just value)
-                  eventSink (SolveSessionIdentified issueNumber value)
-              mapM_ (emitMessage lastMessageRef eventSink issueNumber) messages
-          streamOutput sessionLog handle sessionRef lastMessageRef eventSink issueNumber
+-- | Per-line handler for the stdout reader: raw-line session logging,
+-- session-id capture, and agent-message forwarding, unchanged from before
+-- this module's reader loop was unified in "Kanban.StreamReader".
+stdoutOnLine :: Maybe SessionLog -> IORef (Maybe Text) -> IORef Text -> (SolveEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber line = do
+  mapM_ (\value -> logRawLine value "stdout" line) sessionLog
+  case parseSolveOutputLine line of
+    Left _ ->
+      let plain = decodeBytes line
+       in if Text.null plain then pure () else eventSink (SolveDiagnostic issueNumber plain)
+    Right (sessionId, messages) -> do
+      case sessionId of
+        Nothing -> pure ()
+        Just value -> do
+          writeIORef sessionRef (Just value)
+          eventSink (SolveSessionIdentified issueNumber value)
+      mapM_ (emitMessage lastMessageRef eventSink issueNumber) messages
 
 emitMessage :: IORef Text -> (SolveEvent -> IO ()) -> Int -> AgentEvent -> IO ()
 emitMessage lastMessageRef eventSink issueNumber agentEvent
@@ -467,21 +472,15 @@ emitMessage lastMessageRef eventSink issueNumber agentEvent
       mapM_ (\message -> atomicModifyIORef' lastMessageRef (const (message, ()))) agentEvent.agentEventOutcomeText
       eventSink (SolveOutput issueNumber agentEvent)
 
-streamDiagnostics :: Maybe SessionLog -> Handle -> (SolveEvent -> IO ()) -> Int -> IO ()
-streamDiagnostics sessionLog handle eventSink issueNumber = do
-  eof <- hIsEOF handle
-  if eof
-    then pure ()
-    else do
-      lineResult <- try (ByteStringChar8.hGetLine handle) :: IO (Either IOException ByteString.ByteString)
-      case lineResult of
-        Left _ -> pure ()
-        Right line
-          | ByteString.null line -> pure ()
-          | otherwise -> do
-              mapM_ (\value -> logRawLine value "stderr" line) sessionLog
-              eventSink (SolveDiagnostic issueNumber (decodeBytes line))
-      streamDiagnostics sessionLog handle eventSink issueNumber
+-- | Per-line handler for the stderr reader: raw-line session logging and
+-- diagnostic forwarding, unchanged from before this module's reader loop
+-- was unified in "Kanban.StreamReader".
+stderrOnLine :: Maybe SessionLog -> (SolveEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stderrOnLine sessionLog eventSink issueNumber line
+  | ByteString.null line = pure ()
+  | otherwise = do
+      mapM_ (\value -> logRawLine value "stderr" line) sessionLog
+      eventSink (SolveDiagnostic issueNumber (decodeBytes line))
 
 solveOutcome :: ExitCode -> Text -> SolveOutcome
 solveOutcome ExitSuccess lastMessage = case needsInputQuestion lastMessage of

@@ -16,11 +16,10 @@ module Kanban.PullRequestFlow
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try, uninterruptibleMask_)
+import Control.Exception (IOException, finally, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Char8 as ByteStringChar8
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -30,10 +29,11 @@ import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
+import Kanban.StreamReader (onStreamAbandoned, runStreamReader)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
-import System.IO (BufferMode (..), Handle, hIsEOF, hSetBuffering)
+import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe, NoStream), createProcess, proc, waitForProcess)
 
 data PullRequestOrigin = PullRequestCodex | PullRequestClaude
@@ -131,12 +131,14 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
       -- a deadline watchdog racing this exact mask needs this to tell "no
       -- provider was ever spawned" apart from "one was just spawned but
       -- has not been recorded yet".
+      managedRef <- newIORef Nothing
       started <- uninterruptibleMask_ $ do
         eventSink (PullRequestProcessSpawning pullRequestNumber True)
         result <- try (createProcess (processSpec executablePath brand)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
         case result of
           Right (Nothing, Just _, Just _, processHandle) -> do
             (managed, groupLeaderProblem) <- managedProcess processHandle
+            writeIORef managedRef (Just managed)
             mapM_ (\problem -> eventSink (PullRequestFlowDiagnostic pullRequestNumber ("process group leadership: " <> problem))) groupLeaderProblem
             eventSink (PullRequestProcessStarted pullRequestNumber action brand managed)
           _ -> eventSink (PullRequestProcessSpawning pullRequestNumber False)
@@ -146,15 +148,25 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
-          sessionRef <- newIORef existingSession
-          lastMessageRef <- newIORef ""
-          diagnosticsDone <- newEmptyMVar
-          void . forkIO $ streamDiagnostics sessionLog errorHandle eventSink pullRequestNumber >> putMVar diagnosticsDone ()
-          streamOutput sessionLog outputHandle sessionRef lastMessageRef eventSink pullRequestNumber
-          exitCode <- waitForProcess processHandle
-          takeMVar diagnosticsDone
-          lastMessage <- readIORef lastMessageRef
-          closeWithOutcome sessionLog (flowOutcome exitCode lastMessage)
+          managedResult <- readIORef managedRef
+          case managedResult of
+            Nothing -> closeWithOutcome sessionLog (SolveFailed "internal error: PR agent process was not registered as managed")
+            Just managed -> do
+              sessionRef <- newIORef existingSession
+              lastMessageRef <- newIORef ""
+              abandonReasonRef <- newIORef Nothing
+              diagnosticsDone <- newEmptyMVar
+              let abandon = onStreamAbandoned (eventSink . PullRequestFlowDiagnostic pullRequestNumber) managed abandonReasonRef
+              void . forkIO $
+                void (runStreamReader errorHandle "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
+                  `finally` putMVar diagnosticsDone ()
+              _ <- runStreamReader outputHandle "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
+              exitCode <- waitForProcess processHandle
+              takeMVar diagnosticsDone
+              lastMessage <- readIORef lastMessageRef
+              abandonReason <- readIORef abandonReasonRef
+              let outcome = maybe (flowOutcome exitCode lastMessage) SolveFailed abandonReason
+              closeWithOutcome sessionLog outcome
         Right _ -> closeWithOutcome sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot
@@ -264,42 +276,36 @@ actionName PullRequestReview = "review"
 actionName PullRequestRevision = "revision"
 actionName PullRequestRereview = "rereview"
 
-streamOutput :: Maybe SessionLog -> Handle -> IORef (Maybe Text) -> IORef Text -> (PullRequestFlowEvent -> IO ()) -> Int -> IO ()
-streamOutput sessionLog handle sessionRef lastMessageRef eventSink number = do
-  eof <- hIsEOF handle
-  if eof then pure () else do
-    lineResult <- try (ByteStringChar8.hGetLine handle) :: IO (Either IOException ByteString.ByteString)
-    case lineResult of
-      Left exception -> eventSink (PullRequestFlowDiagnostic number (exceptionText exception))
-      Right line -> do
-        mapM_ (\value -> logRawLine value "stdout" line) sessionLog
-        case parseSolveOutputLine line of
-          Left _ -> emitDiagnostic line
-          Right (sessionId, messages) -> do
-            case sessionId of
-              Nothing -> pure ()
-              Just value -> writeIORef sessionRef (Just value) >> eventSink (PullRequestSessionIdentified number value)
-            mapM_ emitMessage messages
-    streamOutput sessionLog handle sessionRef lastMessageRef eventSink number
+-- | Per-line handler for the stdout reader: raw-line session logging,
+-- session-id capture, and agent-message forwarding, unchanged from before
+-- this module's reader loop was unified in "Kanban.StreamReader".
+stdoutOnLine :: Maybe SessionLog -> IORef (Maybe Text) -> IORef Text -> (PullRequestFlowEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stdoutOnLine sessionLog sessionRef lastMessageRef eventSink number line = do
+  mapM_ (\value -> logRawLine value "stdout" line) sessionLog
+  case parseSolveOutputLine line of
+    Left _ -> emitDiagnostic line
+    Right (sessionId, messages) -> do
+      case sessionId of
+        Nothing -> pure ()
+        Just value -> writeIORef sessionRef (Just value) >> eventSink (PullRequestSessionIdentified number value)
+      mapM_ emitMessage messages
   where
     emitMessage agentEvent
       | Text.null (Text.strip agentEvent.agentEventSummary) = pure ()
       | otherwise = do
           mapM_ (\message -> atomicModifyIORef' lastMessageRef (const (message, ()))) agentEvent.agentEventOutcomeText
           eventSink (PullRequestFlowOutput number agentEvent)
-    emitDiagnostic line = let message = decodeBytes line in if Text.null message then pure () else eventSink (PullRequestFlowDiagnostic number message)
+    emitDiagnostic rawLine = let message = decodeBytes rawLine in if Text.null message then pure () else eventSink (PullRequestFlowDiagnostic number message)
 
-streamDiagnostics :: Maybe SessionLog -> Handle -> (PullRequestFlowEvent -> IO ()) -> Int -> IO ()
-streamDiagnostics sessionLog handle eventSink number = do
-  eof <- hIsEOF handle
-  if eof then pure () else do
-    result <- try (ByteStringChar8.hGetLine handle) :: IO (Either IOException ByteString.ByteString)
-    case result of
-      Right line | not (ByteString.null line) -> do
-        mapM_ (\value -> logRawLine value "stderr" line) sessionLog
-        eventSink (PullRequestFlowDiagnostic number (decodeBytes line))
-      _ -> pure ()
-    streamDiagnostics sessionLog handle eventSink number
+-- | Per-line handler for the stderr reader: raw-line session logging and
+-- diagnostic forwarding, unchanged from before this module's reader loop
+-- was unified in "Kanban.StreamReader".
+stderrOnLine :: Maybe SessionLog -> (PullRequestFlowEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stderrOnLine sessionLog eventSink number line
+  | ByteString.null line = pure ()
+  | otherwise = do
+      mapM_ (\value -> logRawLine value "stderr" line) sessionLog
+      eventSink (PullRequestFlowDiagnostic number (decodeBytes line))
 
 flowOutcome :: ExitCode -> Text -> SolveOutcome
 flowOutcome ExitSuccess message = case Text.breakOnEnd "KANBAN_NEEDS_INPUT:" message of

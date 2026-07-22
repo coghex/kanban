@@ -2,13 +2,13 @@ module Main (main) where
 
 import Brick (BrickEvent (..), Location (..))
 import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, SomeException, bracket, finally, try, uninterruptibleMask_)
+import Control.Exception (IOException, SomeException, bracket, finally, throwIO, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (find, isInfixOf, sortOn)
+import Data.List (find, findIndex, isInfixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -54,6 +54,7 @@ import Kanban.Process
 import Kanban.Repository (parseRepositoryName, resolveRepository)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
+    PullRequestFlowEvent (..),
     PullRequestOrigin (..),
     PullRequestVerdict (..),
     actionForLabels,
@@ -61,6 +62,7 @@ import Kanban.PullRequestFlow
     originFromBody,
     pullRequestArguments,
     pullRequestVerdictForLabels,
+    runPullRequestFlow,
   )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -94,6 +96,7 @@ import Kanban.Review
 import Kanban.Solve
   ( AgentEvent (..),
     ResumeProvenance (..),
+    SolveEvent (..),
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
@@ -104,9 +107,17 @@ import Kanban.Solve
     parseSolveOutputLine,
     renderAgentEvent,
     resumeProvenanceHeader,
+    runSolve,
     solveArguments,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
+import Kanban.StreamReader
+  ( StreamOutcome (..),
+    maxConsecutiveReadFailures,
+    onStreamAbandoned,
+    runStreamReader,
+    runStreamReaderWith,
+  )
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
@@ -195,7 +206,7 @@ import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe), createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -2345,6 +2356,88 @@ main = hspec $ do
       githubLabelCreateArguments repo `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
       githubIssueEditArguments repo request `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
 
+  describe "Kanban.StreamReader" $ do
+    it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
+      cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
+      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
+      abandonSeen <- newIORef ([] :: [Text])
+      let readLine = do
+            queued <- readIORef cursor
+            case queued of
+              [] -> pure (Right Nothing)
+              (line : rest) -> writeIORef cursor rest >> pure (Right (Just line))
+      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
+      outcome `shouldBe` StreamCompleted
+      seenLines <- reverse <$> readIORef onLineSeen
+      seenLines `shouldBe` ["one", "two", "three"]
+      readIORef abandonSeen `shouldReturn` []
+
+    it "resets its consecutive-failure budget after every successful read, tolerating many isolated failures over a long stream" $ do
+      -- Each simulated round fails one short of the bound, then succeeds:
+      -- never a run long enough to exhaust it, even though the total
+      -- failure count across the whole stream far exceeds the bound.
+      let failsBetweenSuccesses = maxConsecutiveReadFailures - 1
+          rounds = 12 :: Int
+          failure = Left (userError "simulated transient read failure")
+          scriptRound n = replicate failsBetweenSuccesses failure <> [Right (Just (ByteString.pack ("line-" <> show n)))]
+          script = concatMap scriptRound [1 .. rounds] <> [Right Nothing]
+      cursor <- newIORef script
+      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
+      abandonSeen <- newIORef ([] :: [Text])
+      let readLine = do
+            queued <- readIORef cursor
+            case queued of
+              [] -> pure (Right Nothing)
+              (next : rest) -> writeIORef cursor rest >> pure next
+      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
+      outcome `shouldBe` StreamCompleted
+      seenLines <- reverse <$> readIORef onLineSeen
+      length seenLines `shouldBe` rounds
+      readIORef abandonSeen `shouldReturn` []
+
+    it "gives up after maxConsecutiveReadFailures consecutive read failures instead of retrying forever or abandoning silently" $ do
+      attempts <- newIORef (0 :: Int)
+      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
+      abandonSeen <- newIORef ([] :: [Text])
+      let readLine = do
+            modifyIORef attempts (+ 1)
+            pure (Left (userError "simulated persistent read failure"))
+      outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
+      outcome `shouldBe` StreamAbandoned
+      readIORef attempts `shouldReturn` maxConsecutiveReadFailures
+      readIORef onLineSeen `shouldReturn` []
+      reasons <- readIORef abandonSeen
+      case reasons of
+        [reason] -> do
+          reason `shouldSatisfy` Data.Text.isInfixOf (Data.Text.pack (show maxConsecutiveReadFailures))
+          reason `shouldSatisfy` Data.Text.isInfixOf "simulated persistent read failure"
+        _ -> expectationFailure ("expected exactly one abandonment diagnostic, got " <> show (length reasons))
+
+    it "onStreamAbandoned reports the diagnostic, remembers only the first reason, and terminates the still-live process" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        managed <- managedProcessFor process
+        abandonReasonRef <- newIORef Nothing
+        diagnostics <- newIORef ([] :: [Text])
+        let emitDiagnostic message = modifyIORef diagnostics (message :)
+        onStreamAbandoned emitDiagnostic managed abandonReasonRef "stdout gave up"
+        onStreamAbandoned emitDiagnostic managed abandonReasonRef "stderr gave up too"
+        readIORef abandonReasonRef `shouldReturn` Just "stdout gave up"
+        seenDiagnostics <- reverse <$> readIORef diagnostics
+        seenDiagnostics `shouldBe` ["stdout gave up", "stderr gave up too"]
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "runStreamReader reads a real provider pipe through to EOF, exactly like the injected-action path" $ do
+      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "printf 'alpha\\nbeta\\n'"]) {std_out = CreatePipe}
+      onLineSeen <- newIORef ([] :: [ByteString.ByteString])
+      abandonSeen <- newIORef ([] :: [Text])
+      outcome <- runStreamReader outputHandle "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
+      _ <- waitForProcess process
+      outcome `shouldBe` StreamCompleted
+      seenLines <- reverse <$> readIORef onLineSeen
+      seenLines `shouldBe` ["alpha", "beta"]
+      readIORef abandonSeen `shouldReturn` []
+
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
       codexSolverModel `shouldBe` "gpt-5.4 high"
@@ -2434,6 +2527,92 @@ main = hspec $ do
           renderAgentEvent StandardChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "git status --short")
           renderAgentEvent FullChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "command")
         result -> expectationFailure ("unexpected parsed tool event: " <> show result)
+
+    it "identifies the session before forwarding agent output, and reports normal completion" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"stream-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            case (findIndex isSolveSessionIdentifiedEvent collected, findIndex isSolveOutputEvent collected) of
+              (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
+              _ -> expectationFailure "expected both a session-identified and an output event"
+            case reverse collected of
+              (SolveProcessFinished _ SolveCompleted : _) -> pure ()
+              (SolveProcessFinished _ (SolveFailed message) : _) -> expectationFailure ("expected completion, got failure: " <> Data.Text.unpack message)
+              (SolveProcessFinished _ (SolveNeedsInput question) : _) -> expectationFailure ("expected completion, got needs-input: " <> Data.Text.unpack question)
+              _ -> expectationFailure "expected the final event to be SolveProcessFinished"
+
+    it "reports a needs-input outcome when the agent's last message carries the KANBAN_NEEDS_INPUT marker" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"needs-input-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"KANBAN_NEEDS_INPUT: which branch?\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            case reverse collected of
+              (SolveProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which branch?"
+              _ -> expectationFailure "expected a needs-input terminal outcome"
+
+    it "signals stderr-reader completion (and returns) even when diagnostic delivery for a stderr line throws" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "echo 'stderr-poison-line' >&2",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"stderr-poison-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            let poisonedSink event = case event of
+                  SolveDiagnostic _ message
+                    | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
+                  _ -> pure ()
+            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
 
   describe "settings" $ do
     it "defaults chat output to standard and persists a selected verbosity" $
@@ -2570,6 +2749,92 @@ main = hspec $ do
       pullRequestSessionReusable False True PullRequestRevision PullRequestRevision launchedAt afterFreshVerdict `shouldBe` True
       -- forceFresh always starts a new session.
       pullRequestSessionReusable True False PullRequestRevision PullRequestRevision launchedAt unchanged `shouldBe` False
+
+    it "identifies the session before forwarding agent output, and reports normal completion" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"pr-stream-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reviewed\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            case (findIndex isPullRequestSessionIdentifiedEvent collected, findIndex isPullRequestFlowOutputEvent collected) of
+              (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
+              _ -> expectationFailure "expected both a session-identified and an output event"
+            case reverse collected of
+              (PullRequestProcessFinished _ SolveCompleted : _) -> pure ()
+              (PullRequestProcessFinished _ (SolveFailed message) : _) -> expectationFailure ("expected completion, got failure: " <> Data.Text.unpack message)
+              (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> expectationFailure ("expected completion, got needs-input: " <> Data.Text.unpack question)
+              _ -> expectationFailure "expected the final event to be PullRequestProcessFinished"
+
+    it "reports a needs-input outcome when the agent's last message carries the KANBAN_NEEDS_INPUT marker" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"pr-needs-input-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"KANBAN_NEEDS_INPUT: which reviewer wins?\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            case reverse collected of
+              (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which reviewer wins?"
+              _ -> expectationFailure "expected a needs-input terminal outcome"
+
+    it "signals stderr-reader completion (and returns) even when diagnostic delivery for a stderr line throws" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "echo 'stderr-poison-line' >&2",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"pr-stderr-poison-session\"}'",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reviewed\"}}'"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            let poisonedSink event = case event of
+                  PullRequestFlowDiagnostic _ message
+                    | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
+                  _ -> pure ()
+            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
 
   describe "review overlay digit dispatch" $ do
     let requestId = ReviewRequestId (String "req-1")
@@ -3692,6 +3957,22 @@ isDiagnosticEvent _ = False
 isWorkerFailedEvent :: WorkerEvent -> Bool
 isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
 isWorkerFailedEvent _ = False
+
+isSolveSessionIdentifiedEvent :: SolveEvent -> Bool
+isSolveSessionIdentifiedEvent (SolveSessionIdentified _ _) = True
+isSolveSessionIdentifiedEvent _ = False
+
+isSolveOutputEvent :: SolveEvent -> Bool
+isSolveOutputEvent (SolveOutput _ _) = True
+isSolveOutputEvent _ = False
+
+isPullRequestSessionIdentifiedEvent :: PullRequestFlowEvent -> Bool
+isPullRequestSessionIdentifiedEvent (PullRequestSessionIdentified _ _) = True
+isPullRequestSessionIdentifiedEvent _ = False
+
+isPullRequestFlowOutputEvent :: PullRequestFlowEvent -> Bool
+isPullRequestFlowOutputEvent (PullRequestFlowOutput _ _) = True
+isPullRequestFlowOutputEvent _ = False
 
 workerFixtureSpec :: Repository -> WorkerId -> Int -> WorkerSpec
 workerFixtureSpec repository identifier issueNumber =
