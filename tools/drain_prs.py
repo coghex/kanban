@@ -1700,7 +1700,7 @@ def codex_conflict_fix_prompt(
 The current PR head must be {expected_head}. A fresh Claude reviewer requested changes to the prior merge-conflict repair.
 
 Your job:
-1. Fetch `headRefOid` and stop without changing anything unless it is exactly {expected_head}.
+1. Fetch `headRefOid` (pass `--repo {ctx.repo_slug}` to the `gh` command; never rely on gh's own default-repository inference) and stop without changing anything unless it is exactly {expected_head}.
 2. Read the newest `<!-- pr-review:v1 reviewer=claude ... verdict=CHANGES_REQUESTED -->` PR comment and resolve every blocking concern.
 3. Inspect the linked issue, the complete current PR diff, and relevant code so the fix preserves both the PR's intent and current {ctx.default_branch} behavior.
 4. Keep changes minimal and limited to the review findings.
@@ -1726,6 +1726,8 @@ def claude_conflict_review_prompt(
 
 The PR was previously approved, then required an automated merge-conflict repair by Codex. Review only: do not edit files, commit, push, merge, close or modify issues, or remove worktrees.
 
+Pass `--repo {ctx.repo_slug}` to every `gh` command below (for example `gh pr view {pr['number']} --repo {ctx.repo_slug} --json headRefOid`, `gh pr comment {pr['number']} --repo {ctx.repo_slug}`, `gh pr edit {pr['number']} --repo {ctx.repo_slug}`). Never rely on gh's own default-repository inference, which can target a different repository than {ctx.repo_slug} in a checkout with more than one remote.
+
 1. Fetch `headRefOid` and require it to equal {expected_head}; if it differs, do not comment or label.
 2. Read the PR body, linked issue and authoritative comments, commits, CI, the latest prior `pr-review:v1` comment, and the complete current merge-base diff.
 3. Inspect the conflict-resolution commit and any later Codex review-fix commits especially carefully. Verify that they preserve the approved PR's intent while incorporating current {ctx.default_branch}. Recheck prior blocking concerns and inspect for regressions or unmet requirements. Nits never block.
@@ -1735,7 +1737,7 @@ The PR was previously approved, then required an automated merge-conflict repair
    `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=CHANGES_REQUESTED -->`
 6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `{APPROVE_LABEL}` for APPROVE or `{CHANGES_LABEL}` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
-Use the `gh` CLI only for GitHub publication. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
+Use the `gh` CLI only for GitHub publication, always with `--repo {ctx.repo_slug}`. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
 
 
 def run_codex_conflict_agent(
