@@ -16,6 +16,7 @@ module Kanban.Solve
     renderAgentEvent,
     resumeProvenanceHeader,
     runSolve,
+    runSolveWith,
     solveArguments,
     solverLabel,
   )
@@ -40,7 +41,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Settings (ChatVerbosity (..))
-import Kanban.StreamReader (onStreamAbandoned, runStreamReader)
+import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -122,7 +123,17 @@ solverLabel CodexSolver = "codex · " <> codexSolverModel
 solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
 runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
-runSolve repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage eventSink = do
+runSolve = runSolveWith handleReadLine
+
+-- | As 'runSolve', but reads stdout/stderr via an injected primitive instead
+-- of always wrapping the real 'Handle' with 'handleReadLine' — the seam a
+-- test uses to deterministically drive a still-live provider through the
+-- shared reader's abandonment path (bounded retries exhausted, provider
+-- killed, terminal outcome forced to a failure) without depending on a real
+-- OS-level read failure, which a live pipe cannot be made to produce
+-- deterministically without corrupting the reading side out from under it.
+runSolveWith :: (Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
+runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -177,9 +188,9 @@ runSolve repository issueNumber workflow brand configPath config existingSession
               diagnosticsDone <- newEmptyMVar
               let abandon = onStreamAbandoned (eventSink . SolveDiagnostic issueNumber) managed abandonReasonRef
               void . forkIO $
-                void (runStreamReader errorHandle "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
+                void (runStreamReaderWith (readLineFor errorHandle) "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReader outputHandle "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
+              _ <- runStreamReaderWith (readLineFor outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef

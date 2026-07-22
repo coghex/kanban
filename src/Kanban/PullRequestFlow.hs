@@ -12,6 +12,7 @@ module Kanban.PullRequestFlow
     pullRequestArguments,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
+    runPullRequestFlowWith,
   )
 where
 
@@ -29,7 +30,7 @@ import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
-import Kanban.StreamReader (onStreamAbandoned, runStreamReader)
+import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -104,7 +105,15 @@ agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
 runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlow repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
+runPullRequestFlow = runPullRequestFlowWith handleReadLine
+
+-- | As 'runPullRequestFlow', but reads stdout/stderr via an injected
+-- primitive instead of always wrapping the real 'Handle' with
+-- 'handleReadLine' — see 'Kanban.Solve.runSolveWith' for why this seam
+-- exists: it is what lets a test deterministically drive a still-live
+-- provider through the shared reader's abandonment path.
+runPullRequestFlowWith :: (Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
@@ -158,9 +167,9 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
               diagnosticsDone <- newEmptyMVar
               let abandon = onStreamAbandoned (eventSink . PullRequestFlowDiagnostic pullRequestNumber) managed abandonReasonRef
               void . forkIO $
-                void (runStreamReader errorHandle "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
+                void (runStreamReaderWith (readLineFor errorHandle) "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReader outputHandle "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
+              _ <- runStreamReaderWith (readLineFor outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef

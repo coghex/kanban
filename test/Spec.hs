@@ -2,7 +2,7 @@ module Main (main) where
 
 import Brick (BrickEvent (..), Location (..))
 import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, SomeException, bracket, finally, throwIO, try, uninterruptibleMask_)
+import Control.Exception (IOException, SomeException, bracket, finally, throwIO, throwTo, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -63,6 +63,7 @@ import Kanban.PullRequestFlow
     pullRequestArguments,
     pullRequestVerdictForLabels,
     runPullRequestFlow,
+    runPullRequestFlowWith,
   )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -108,11 +109,13 @@ import Kanban.Solve
     renderAgentEvent,
     resumeProvenanceHeader,
     runSolve,
+    runSolveWith,
     solveArguments,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.StreamReader
   ( StreamOutcome (..),
+    handleReadLine,
     maxConsecutiveReadFailures,
     onStreamAbandoned,
     runStreamReader,
@@ -2438,6 +2441,34 @@ main = hspec $ do
       seenLines `shouldBe` ["alpha", "beta"]
       readIORef abandonSeen `shouldReturn` []
 
+    it "handleReadLine reports a failure when the EOF probe itself throws" $ do
+      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "sleep 30"]) {std_out = CreatePipe}
+      hClose outputHandle
+      result <- handleReadLine outputHandle
+      case result of
+        Left _ -> pure ()
+        Right _ -> expectationFailure "expected hIsEOF on a closed handle to fail"
+      managedProcessFor process >>= killManagedProcess
+      void (timeout 3000000 (waitForProcess process))
+
+    it "handleReadLine reports a failure when the line read is interrupted after the EOF probe already reported more to read" $ do
+      (_, Just outputHandle, _, process) <- createProcess (proc "sh" ["-c", "printf '%s' 'partial-line-without-a-newline'; sleep 30"]) {std_out = CreatePipe}
+      resultVar <- newEmptyMVar
+      readerThread <- forkIO (handleReadLine outputHandle >>= putMVar resultVar)
+      -- Long enough that the reader thread has certainly finished its
+      -- (non-blocking, data-already-pending) EOF probe and parked in the
+      -- blocking line read before the injected exception lands, so it
+      -- exercises the line-read 'try', not the EOF probe's.
+      threadDelay 500000
+      throwTo readerThread (userError "simulated line-read cancellation")
+      result <- timeout 5000000 (takeMVar resultVar)
+      case result of
+        Just (Left _) -> pure ()
+        Just (Right _) -> expectationFailure "expected the interrupted read to fail"
+        Nothing -> expectationFailure "handleReadLine did not return after being interrupted"
+      managedProcessFor process >>= killManagedProcess
+      void (timeout 3000000 (waitForProcess process))
+
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
       codexSolverModel `shouldBe` "gpt-5.4 high"
@@ -2613,6 +2644,55 @@ main = hspec $ do
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
             timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+
+    it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        -- A provider that just sleeps, kept alive so 'runSolveWith' has a
+        -- real, still-live process to terminate. The always-failing read
+        -- primitive below drives the abandonment path deterministically;
+        -- what the provider would otherwise have written is irrelevant,
+        -- since runStreamReaderWith never actually calls through to a real
+        -- read here.
+        ByteString.writeFile fakeCodex (ByteString.unlines ["#!/bin/sh", "sleep 30"])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            spawnedIdentity <- newIORef Nothing
+            let sink event = do
+                  modifyIORef events (event :)
+                  case event of
+                    SolveProcessStarted _ _ managed -> do
+                      maybePid <- managedProcessPid managed
+                      case maybePid of
+                        Nothing -> pure ()
+                        Just pid -> do
+                          snapshot <- readProcessSnapshot
+                          case snapshot of
+                            Right identities -> writeIORef spawnedIdentity (identityForPid (fromIntegral pid) identities)
+                            Left _ -> pure ()
+                    _ -> pure ()
+                alwaysFails = \_ -> pure (Left (userError "simulated persistent read failure"))
+            timeout 20000000 (runSolveWith alwaysFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            collected <- reverse <$> readIORef events
+            case reverse collected of
+              (SolveProcessFinished _ (SolveFailed _) : _) -> pure ()
+              _ -> expectationFailure "expected a failed terminal outcome after the stdout reader was abandoned"
+            identity <- readIORef spawnedIdentity
+            case identity of
+              Nothing -> expectationFailure "expected to capture the spawned provider's process identity"
+              Just recorded -> do
+                snapshotAfter <- readProcessSnapshot
+                case snapshotAfter of
+                  Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
+                  Right identities -> matchingIdentities identities [recorded] `shouldBe` []
 
   describe "settings" $ do
     it "defaults chat output to standard and persists a selected verbosity" $
@@ -2835,6 +2915,55 @@ main = hspec $ do
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
             timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+
+    it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        -- A provider that just sleeps, kept alive so
+        -- 'runPullRequestFlowWith' has a real, still-live process to
+        -- terminate. The always-failing read primitive below drives the
+        -- abandonment path deterministically; what the provider would
+        -- otherwise have written is irrelevant, since runStreamReaderWith
+        -- never actually calls through to a real read here.
+        ByteString.writeFile fakeCodex (ByteString.unlines ["#!/bin/sh", "sleep 30"])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            spawnedIdentity <- newIORef Nothing
+            let sink event = do
+                  modifyIORef events (event :)
+                  case event of
+                    PullRequestProcessStarted _ _ _ managed -> do
+                      maybePid <- managedProcessPid managed
+                      case maybePid of
+                        Nothing -> pure ()
+                        Just pid -> do
+                          snapshot <- readProcessSnapshot
+                          case snapshot of
+                            Right identities -> writeIORef spawnedIdentity (identityForPid (fromIntegral pid) identities)
+                            Left _ -> pure ()
+                    _ -> pure ()
+                alwaysFails = \_ -> pure (Left (userError "simulated persistent read failure"))
+            timeout 20000000 (runPullRequestFlowWith alwaysFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            collected <- reverse <$> readIORef events
+            case reverse collected of
+              (PullRequestProcessFinished _ (SolveFailed _) : _) -> pure ()
+              _ -> expectationFailure "expected a failed terminal outcome after the stdout reader was abandoned"
+            identity <- readIORef spawnedIdentity
+            case identity of
+              Nothing -> expectationFailure "expected to capture the spawned provider's process identity"
+              Just recorded -> do
+                snapshotAfter <- readProcessSnapshot
+                case snapshotAfter of
+                  Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
+                  Right identities -> matchingIdentities identities [recorded] `shouldBe` []
 
   describe "review overlay digit dispatch" $ do
     let requestId = ReviewRequestId (String "req-1")
