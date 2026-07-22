@@ -16,10 +16,9 @@ subsequent slices.
 ## 1. Purpose
 
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
-repository. It is intended to live comfortably in tmux, work over SSH, remain
-idle without consuming meaningful CPU, and make no network requests unless the
-application starts, the user explicitly updates data, or an explicitly started
-review/solve workflow performs its bounded work.
+repository. It remains idle without consuming meaningful CPU and makes no
+network requests unless the application starts, the user explicitly updates
+data, or an explicitly started review/solve workflow performs its bounded work.
 
 The dashboard combines:
 
@@ -943,8 +942,7 @@ manual checks.
 
 ### Manual checks
 
-- macOS Terminal in a local tmux session.
-- SSH attachment to the same tmux session.
+- Common terminal emulators on supported platforms.
 - Truecolor and 256-color modes.
 - Large and narrow terminal dimensions.
 - Real GitHub refresh against a configured repository.
@@ -974,10 +972,9 @@ and the pure domain/test packages build warning-clean.
 - Implement split cyan/status selected borders.
 - Add the golden-frame rendering suite over the fixture boards.
 
-Exit criteria: a fixture board is attractive and fully navigable in macOS
-Terminal, tmux, and SSH, with no mouse-dependent navigation, no idle redraw
-loop, and a passing golden-frame suite at wide, minimum four-column, and narrow
-sizes.
+Exit criteria: a fixture board is attractive and fully navigable in a terminal,
+with no mouse-dependent navigation, no idle redraw loop, and a passing
+golden-frame suite at wide, minimum four-column, and narrow sizes.
 
 ### Milestone 2 — GitHub snapshot and workflow board
 
@@ -1194,7 +1191,7 @@ The first solve/autosolve-compatible slice is implemented.
 - Add installation instructions and a `cabal install` workflow.
 - Complete the release-gate manual Codex and Claude usage refreshes without
   submitting a model prompt.
-- Tag the first release only after real tmux and SSH use.
+- Tag the first release only after real terminal use.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status

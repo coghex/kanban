@@ -1,12 +1,11 @@
 # Kanban
 
-Kanban is a terminal board for GitHub projects on macOS. It sorts issues and pull requests into four columns: Issues, Active, Reviewing, and Done.
+Kanban is a terminal board for GitHub projects. It sorts issues and pull requests into four columns: Issues, Active, Reviewing, and Done.
 
 It can also show Codex and Claude usage, run reviews, start work on issues, and track those jobs without leaving the terminal.
 
 ## Requirements
 
-- macOS
 - [Git](https://git-scm.com/)
 - [GitHub CLI](https://cli.github.com/) signed in with `gh auth login`
 - GHC and Cabal to build from source

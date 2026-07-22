@@ -7,7 +7,7 @@ cabal update
 cabal build all
 ```
 
-CI uses GHC 9.12.2 and Cabal 3.16.1.0 on macOS. The required
+CI uses GHC 9.12.2 and Cabal 3.16.1.0 on Linux. The required
 `build-test` check validates package metadata, builds the application, and runs
 both test suites. Pull requests also require the `review-approved` check, which
 passes while the current pull request carries `reviewed:approve`. A head change
