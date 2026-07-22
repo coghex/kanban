@@ -127,12 +127,20 @@ import Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    approvedAttr,
+    approvedInteriorAttr,
     autoSolveRevisionPrompt,
     cacheEnabled,
     cardExcerptLimit,
+    cardInteriorAttribute,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
     githubRefreshTimeoutMicros,
+    neutralAttr,
+    pendingAttr,
+    problemAttr,
+    pullRequestCardAttribute,
+    readyAttr,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -3166,6 +3174,23 @@ main = hspec $ do
     it "leaves an unapproved PR with pending checks neutral rather than showing checks-pending" $ do
       let pullRequest = (basePullRequest 10 [] False []) {pullRequestChecks = ChecksPending 1 2}
       pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusNeutral
+
+    it "renders an approved, amber-blocked PR's card as pending rather than approved" $ do
+      let amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00", Label "reviewed:changes" "ff0000"]
+      pullRequestCardAttribute amberConfig pullRequest `shouldBe` pendingAttr
+      pullRequestCardAttribute amberConfig pullRequest `shouldNotBe` approvedAttr
+      cardInteriorAttribute (pullRequestCardAttribute amberConfig pullRequest) `shouldBe` neutralAttr
+
+    it "renders a fully ready, approved PR's card as ready with an approved interior wash" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeClean, pullRequestChecks = ChecksPassed 4}
+      pullRequestCardAttribute defaultWorkflowConfig pullRequest `shouldBe` readyAttr
+      cardInteriorAttribute (pullRequestCardAttribute defaultWorkflowConfig pullRequest) `shouldBe` approvedInteriorAttr
+
+    it "keeps a red-severity blocked PR's card as a problem, with a neutral interior" $ do
+      let pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00", Label "reviewed:changes" "ff0000"]
+      pullRequestCardAttribute defaultWorkflowConfig pullRequest `shouldBe` problemAttr
+      cardInteriorAttribute (pullRequestCardAttribute defaultWorkflowConfig pullRequest) `shouldBe` neutralAttr
 
     it "confines configurable blocking severity to pull requests, leaving blocked-issue treatment unchanged" $ do
       let issue = (baseIssue 10 []) {issueLabels = [Label "blocked" "d73a4a"]}

@@ -14,18 +14,26 @@ module Kanban.UI
     ReviewSession (..),
     SolvePhase (..),
     SolveSession (..),
+    approvedAttr,
+    approvedInteriorAttr,
     autoSolveRevisionPrompt,
     cacheEnabled,
     canonicalReviewCompletionSuperseded,
     cardExcerptLimit,
+    cardInteriorAttribute,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
     failureActivity,
     githubRefreshTimeoutMicros,
+    neutralAttr,
     orphanMessage,
     overlayMouseAction,
+    pendingAttr,
+    problemAttr,
+    pullRequestCardAttribute,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    readyAttr,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -808,7 +816,7 @@ drawCardFrame state selected entry contents =
     statusAttribute = cardStatusAttribute state item
     topBottomAttribute = if selected then selectedAttr else statusAttribute
     leftAttribute = if selected then selectedAttr else statusAttribute
-    interiorAttribute = if isApproved state.appConfig.resolvedWorkflow item then approvedInteriorAttr else neutralAttr
+    interiorAttribute = cardInteriorAttribute statusAttribute
     middleHeight = baseHeight + case entry of
       Standalone _ -> 0
       Tracked _ _ -> 1
@@ -978,18 +986,40 @@ mergeText MergeConflicting = "merge conflict"
 mergeText MergeUnstable = "unstable"
 mergeText MergeUnknown = "calculating"
 
+-- | A pull request's card color is always derived from its
+-- 'pullRequestStatus', not the generic approved-item shortcut used for
+-- issues: an approved PR that 'pullRequestStatus' reports as merely pending
+-- (for example amber-blocked, once a configured 'SeverityAmber'
+-- 'blockingSeverity' downgrades it from a problem) must still render
+-- pending rather than the plain approved color, and only a fully ready PR
+-- gets the ready color.
 cardStatusAttribute :: AppState -> BoardItem -> AttrName
+cardStatusAttribute state (PullRequestItem pullRequest) = pullRequestCardAttribute state.appConfig.resolvedWorkflow pullRequest
 cardStatusAttribute state item
   | isProblem state.appConfig.resolvedWorkflow item = problemAttr
   | Just solveAttribute <- solveCardAttribute state item = solveAttribute
   | itemHasAmberWarning state.appConfig.resolvedWorkflow item = pendingAttr
   | isApproved state.appConfig.resolvedWorkflow item = approvedAttr
-cardStatusAttribute state (PullRequestItem pullRequest) = case pullRequestStatus state.appConfig.resolvedWorkflow pullRequest of
-  StatusPending _ -> pendingAttr
-  StatusReady -> readyAttr
-  StatusProblem _ -> problemAttr
-  StatusNeutral -> neutralAttr
 cardStatusAttribute _ _ = neutralAttr
+
+pullRequestCardAttribute :: WorkflowConfig -> PullRequest -> AttrName
+pullRequestCardAttribute config pullRequest
+  | StatusProblem _ <- status = problemAttr
+  | itemHasAmberWarning config (PullRequestItem pullRequest) = pendingAttr
+  | StatusPending _ <- status = pendingAttr
+  | StatusReady <- status = readyAttr
+  | otherwise = neutralAttr
+  where
+    status = pullRequestStatus config pullRequest
+
+-- | Whether a card's interior wash should read as approved: mirrors
+-- 'cardStatusAttribute' rather than a raw 'isApproved' check, so an
+-- approved-but-pending or amber-blocked pull request's interior does not
+-- disagree with its own border.
+cardInteriorAttribute :: AttrName -> AttrName
+cardInteriorAttribute statusAttribute
+  | statusAttribute == approvedAttr || statusAttribute == readyAttr = approvedInteriorAttr
+  | otherwise = neutralAttr
 
 solveCardAttribute :: AppState -> BoardItem -> Maybe AttrName
 solveCardAttribute _ (PullRequestItem _) = Nothing

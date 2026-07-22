@@ -135,12 +135,50 @@ def paginated_api(root: Path, endpoint: str) -> list[dict[str, Any]]:
     return flattened
 
 
-def repository_name(root: Path) -> str:
-    value = gh_json(root, ["repo", "view", "--json", "nameWithOwner"])
-    name = value.get("nameWithOwner") if isinstance(value, dict) else None
-    if not isinstance(name, str) or "/" not in name:
-        raise WorkflowError("could not resolve GitHub repository identity")
-    return name
+def parse_repository_name(raw_value: str) -> str | None:
+    """Mirrors Kanban.Repository.parseRepositoryName: derives OWNER/NAME
+    from a git remote URL (SSH, HTTPS, or already-bare OWNER/NAME)."""
+    stripped = raw_value.strip()
+    for prefix in ("https://", "http://", "ssh://", "git://"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    normalized = stripped.replace("git@github.com", "github.com").replace(":", "/").rstrip("/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    if len(segments) < 2:
+        return None
+    owner, name = segments[-2], segments[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not owner or not name:
+        return None
+    return f"{owner}/{name}"
+
+
+def resolve_repository(root: Path, config_path: str | None) -> str:
+    """Resolves OWNER/NAME from the dashboard-configured remote (mirrors
+    Kanban.Repository.resolveRepository), not gh's own default-repo
+    inference: a checkout whose `origin` points at a fork while
+    remote_name=upstream is configured would otherwise let every gh call
+    below silently target the fork instead of the configured repository."""
+    remote_name = resolve_remote_name(config_path)
+    proc = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise WorkflowError(
+            f"could not resolve git remote {remote_name!r}: {proc.stderr.strip()}"
+        )
+    parsed = parse_repository_name(proc.stdout)
+    if parsed is None:
+        raise WorkflowError(
+            f"cannot derive OWNER/NAME from remote {remote_name!r}: {proc.stdout.strip()}"
+        )
+    return parsed
 
 
 def default_kanban_config_path() -> Path:
@@ -209,7 +247,7 @@ def resolve_remote_name(config_path: str | None) -> str:
     return remote_name if isinstance(remote_name, str) and remote_name else "origin"
 
 
-def pr_view(root: Path, number: int) -> dict[str, Any]:
+def pr_view(root: Path, repo: str, number: int) -> dict[str, Any]:
     fields = ",".join(
         [
             "number",
@@ -231,7 +269,7 @@ def pr_view(root: Path, number: int) -> dict[str, Any]:
             "isCrossRepository",
         ]
     )
-    value = gh_json(root, ["pr", "view", str(number), "--json", fields])
+    value = gh_json(root, ["pr", "view", str(number), "-R", repo, "--json", fields])
     if not isinstance(value, dict):
         raise WorkflowError(f"PR #{number} returned an unexpected response")
     if value.get("state") != "OPEN":
@@ -415,11 +453,11 @@ def has_owned_gate_comment(comments: list[dict[str, Any]], login: str, body: str
     return None
 
 
-def post_comment(root: Path, number: int, body: str) -> str:
+def post_comment(root: Path, repo: str, number: int, body: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="pr-review-", suffix=".md") as handle:
         handle.write(body)
         handle.flush()
-        proc = run(["gh", "pr", "comment", str(number), "--body-file", handle.name], cwd=root)
+        proc = run(["gh", "pr", "comment", str(number), "-R", repo, "--body-file", handle.name], cwd=root)
     return proc.stdout.strip()
 
 
@@ -439,7 +477,7 @@ def publish_gate_comment(
         allow_no_issue=allow_no_issue,
     )
     body = f"{GATE_TEXT}\n\n{marker}\n"
-    refreshed = pr_view(root, pr["number"])
+    refreshed = pr_view(root, repo, pr["number"])
     refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
@@ -447,25 +485,25 @@ def publish_gate_comment(
     existing = has_owned_gate_comment(pr_comments(root, repo, pr["number"]), login, body)
     if existing:
         return "existing", existing
-    refreshed = pr_view(root, pr["number"])
+    refreshed = pr_view(root, repo, pr["number"])
     refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
-    url = post_comment(root, pr["number"], body)
+    url = post_comment(root, repo, pr["number"], body)
     return "posted", url
 
 
 def issue_context(root: Path, repo: str, number: int) -> dict[str, Any]:
     issue = gh_json(
         root,
-        ["issue", "view", str(number), "--json", "number,title,body,state,url,author,labels"],
+        ["issue", "view", str(number), "-R", repo, "--json", "number,title,body,state,url,author,labels"],
     )
     comments = paginated_api(root, f"repos/{repo}/issues/{number}/comments?per_page=100")
     return {"issue": issue, "comments": comments}
 
 
 def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: list[int]) -> dict[str, Any]:
-    diff = run(["gh", "pr", "diff", str(pr["number"])], cwd=root).stdout
+    diff = run(["gh", "pr", "diff", str(pr["number"]), "-R", repo], cwd=root).stdout
     review_comments = paginated_api(root, f"repos/{repo}/pulls/{pr['number']}/comments?per_page=100")
     ordinary_comments = pr_comments(root, repo, pr["number"])
     issues = [issue_context(root, repo, number) for number in issue_numbers]
@@ -761,7 +799,7 @@ def require_current_review_state(
     allow_no_issue: bool,
     config_path: str | None = None,
 ) -> dict[str, Any]:
-    pr = pr_view(root, number)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError("PR head changed; no current-head verdict may be labeled")
     gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
@@ -773,15 +811,15 @@ def require_current_review_state(
 
 
 def set_verdict_label(
-    root: Path, number: int, verdict: str, approval_label: str, changes_requested_label: str
+    root: Path, repo: str, number: int, verdict: str, approval_label: str, changes_requested_label: str
 ) -> None:
     add = approval_label if verdict == "APPROVE" else changes_requested_label
     remove = changes_requested_label if verdict == "APPROVE" else approval_label
-    run(["gh", "pr", "edit", str(number), "--add-label", add, "--remove-label", remove], cwd=root)
+    run(["gh", "pr", "edit", str(number), "-R", repo, "--add-label", add, "--remove-label", remove], cwd=root)
 
 
 def clear_verdict_labels(
-    root: Path, number: int, approval_label: str, changes_requested_label: str
+    root: Path, repo: str, number: int, approval_label: str, changes_requested_label: str
 ) -> None:
     run(
         [
@@ -789,6 +827,8 @@ def clear_verdict_labels(
             "pr",
             "edit",
             str(number),
+            "-R",
+            repo,
             "--remove-label",
             approval_label,
             "--remove-label",
@@ -825,7 +865,7 @@ def verify_publication(
     allow_no_issue: bool,
     config_path: str | None = None,
 ) -> dict[str, Any]:
-    pr = pr_view(root, number)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != head:
         raise WorkflowError("PR head changed after publication")
     labels = [item.get("name") for item in pr.get("labels") or [] if isinstance(item, dict)]
@@ -886,7 +926,7 @@ def publish_results(
     own nested-reviewer path and publish_verdict()'s self-reviewed path, so
     both go through identical race handling."""
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
-    refreshed_pr = pr_view(root, number)
+    refreshed_pr = pr_view(root, repo, number)
     refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
         raise WorkflowError("PR head changed during review; no verdict was published")
@@ -919,7 +959,7 @@ def publish_results(
         allow_no_issue=allow_no_issue,
         config_path=config_path,
     )
-    post_comment(root, number, body)
+    post_comment(root, repo, number, body)
     try:
         require_current_review_state(
             root,
@@ -930,7 +970,7 @@ def publish_results(
             allow_no_issue=allow_no_issue,
             config_path=config_path,
         )
-        set_verdict_label(root, number, verdict, approval_label, changes_requested_label)
+        set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
             root,
             repo,
@@ -946,7 +986,7 @@ def publish_results(
         )
     except WorkflowError as exc:
         try:
-            clear_verdict_labels(root, number, approval_label, changes_requested_label)
+            clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             raise WorkflowError(
                 f"publication failed ({exc}); verdict-label cleanup also failed ({cleanup_exc})"
@@ -972,8 +1012,8 @@ def workflow(
     self_review: bool = False,
     config_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    repo = repository_name(root)
-    pr = pr_view(root, number)
+    repo = resolve_repository(root, config_path)
+    pr = pr_view(root, repo, number)
     gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin)
@@ -1063,8 +1103,8 @@ def publish_verdict(
     whatever the caller provides, it is the same safe-publish machinery
     the nested-reviewer path uses, just fed an externally-supplied result
     instead of one from a spawned subprocess."""
-    repo = repository_name(root)
-    pr = pr_view(root, number)
+    repo = resolve_repository(root, config_path)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError(
             "PR head changed since the self-review context was generated; "

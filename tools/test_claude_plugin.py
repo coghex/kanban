@@ -301,15 +301,15 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
     def test_set_and_clear_verdict_label_use_the_resolved_labels(self):
         module = load_review_pr_module()
         with mock.patch.object(module, "run") as run_mock:
-            module.set_verdict_label(Path("/fake-repo"), 89, "APPROVE", "lgtm", "needs-work")
+            module.set_verdict_label(Path("/fake-repo"), "coghex/kanban", 89, "APPROVE", "lgtm", "needs-work")
         run_mock.assert_called_once_with(
-            ["gh", "pr", "edit", "89", "--add-label", "lgtm", "--remove-label", "needs-work"],
+            ["gh", "pr", "edit", "89", "-R", "coghex/kanban", "--add-label", "lgtm", "--remove-label", "needs-work"],
             cwd=Path("/fake-repo"),
         )
         with mock.patch.object(module, "run") as run_mock:
-            module.clear_verdict_labels(Path("/fake-repo"), 89, "lgtm", "needs-work")
+            module.clear_verdict_labels(Path("/fake-repo"), "coghex/kanban", 89, "lgtm", "needs-work")
         run_mock.assert_called_once_with(
-            ["gh", "pr", "edit", "89", "--remove-label", "lgtm", "--remove-label", "needs-work"],
+            ["gh", "pr", "edit", "89", "-R", "coghex/kanban", "--remove-label", "lgtm", "--remove-label", "needs-work"],
             cwd=Path("/fake-repo"),
         )
 
@@ -419,6 +419,45 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
             with mock.patch.object(module.tarfile, "open"):
                 module.extract_source(Path("/fake-repo"), 89, "a" * 40, Path("/fake-dest"), "upstream")
         ensure_commit_mock.assert_called_once_with(Path("/fake-repo"), 89, "a" * 40, "upstream")
+
+    def test_parse_repository_name_handles_ssh_https_and_bare_forms(self):
+        module = load_review_pr_module()
+        self.assertEqual(module.parse_repository_name("git@github.com:coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("https://github.com/coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("https://github.com/coghex/kanban"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("coghex/kanban"), "coghex/kanban")
+        self.assertIsNone(module.parse_repository_name("not-a-repo"))
+
+    def test_resolve_repository_uses_the_configured_remote_not_ghs_own_inference(self):
+        # A checkout whose "origin" points at a fork while remote_name=upstream
+        # is configured must resolve the upstream owner/name — proving this
+        # never falls back to gh's own (potentially different) inferred repo.
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('remote_name = "upstream"\n', encoding="utf-8")
+            with mock.patch.object(module, "subprocess") as subprocess_mock:
+                subprocess_mock.run.return_value = mock.Mock(
+                    returncode=0, stdout="git@github.com:coghex/kanban.git\n", stderr=""
+                )
+                repo = module.resolve_repository(Path("/fake-repo"), str(config_path))
+            self.assertEqual(repo, "coghex/kanban")
+            subprocess_mock.run.assert_called_once_with(
+                ["git", "remote", "get-url", "upstream"],
+                cwd=Path("/fake-repo"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_resolve_repository_raises_when_the_configured_remote_is_missing(self):
+        module = load_review_pr_module()
+        with mock.patch.object(module, "subprocess") as subprocess_mock:
+            subprocess_mock.run.return_value = mock.Mock(
+                returncode=1, stdout="", stderr="No such remote 'upstream'"
+            )
+            with self.assertRaises(module.WorkflowError):
+                module.resolve_repository(Path("/fake-repo"), None)
 
 
 class SolveGateEscalationTests(unittest.TestCase):
