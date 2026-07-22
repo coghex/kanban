@@ -123,7 +123,7 @@ solverLabel CodexSolver = "codex · " <> codexSolverModel
 solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
 runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
-runSolve = runSolveWith handleReadLine
+runSolve = runSolveWith (const handleReadLine)
 
 -- | As 'runSolve', but reads stdout/stderr via an injected primitive instead
 -- of always wrapping the real 'Handle' with 'handleReadLine' — the seam a
@@ -132,7 +132,10 @@ runSolve = runSolveWith handleReadLine
 -- killed, terminal outcome forced to a failure) without depending on a real
 -- OS-level read failure, which a live pipe cannot be made to produce
 -- deterministically without corrupting the reading side out from under it.
-runSolveWith :: (Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
+-- The primitive is given the stream tag ("stdout"/"stderr") alongside the
+-- handle so a test can target one stream's abandonment path without racing
+-- the other's.
+runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
 runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
@@ -188,9 +191,9 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
               diagnosticsDone <- newEmptyMVar
               let abandon = onStreamAbandoned (eventSink . SolveDiagnostic issueNumber) managed abandonReasonRef
               void . forkIO $
-                void (runStreamReaderWith (readLineFor errorHandle) "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
+                void (runStreamReaderWith (readLineFor "stderr" errorHandle) "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReaderWith (readLineFor outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
+              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef

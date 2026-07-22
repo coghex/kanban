@@ -2654,11 +2654,11 @@ main = hspec $ do
         createDirectory repositoryRoot
         createDirectory binaryRoot
         -- A provider that just sleeps, kept alive so 'runSolveWith' has a
-        -- real, still-live process to terminate. The always-failing read
-        -- primitive below drives the abandonment path deterministically;
-        -- what the provider would otherwise have written is irrelevant,
-        -- since runStreamReaderWith never actually calls through to a real
-        -- read here.
+        -- real, still-live process to terminate. The stdout-only-failing
+        -- read primitive below drives that path's abandonment
+        -- deterministically; what the provider would otherwise have
+        -- written on stdout is irrelevant, since the stdout reader never
+        -- actually calls through to a real read here.
         ByteString.writeFile fakeCodex (ByteString.unlines ["#!/bin/sh", "sleep 30"])
         setFileMode fakeCodex 0o700
         originalPath <- maybe "" id <$> lookupEnv "PATH"
@@ -2679,9 +2679,18 @@ main = hspec $ do
                             Right identities -> writeIORef spawnedIdentity (identityForPid (fromIntegral pid) identities)
                             Left _ -> pure ()
                     _ -> pure ()
-                alwaysFails = \_ -> pure (Left (userError "simulated persistent read failure"))
-            timeout 20000000 (runSolveWith alwaysFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+                -- Fails only the stdout handle; the stderr reader keeps
+                -- using the real primitive (and so completes normally once
+                -- the provider is killed), so the failed terminal outcome
+                -- below can only be attributed to the stdout path, not a
+                -- race with stderr's own abandonment.
+                stdoutOnlyFails tag handle
+                  | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
+                  | otherwise = handleReadLine handle
+            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
+            let stdoutAbandonments = [message | SolveDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
+            stdoutAbandonments `shouldSatisfy` (not . null)
             case reverse collected of
               (SolveProcessFinished _ (SolveFailed _) : _) -> pure ()
               _ -> expectationFailure "expected a failed terminal outcome after the stdout reader was abandoned"
@@ -2926,10 +2935,10 @@ main = hspec $ do
         createDirectory binaryRoot
         -- A provider that just sleeps, kept alive so
         -- 'runPullRequestFlowWith' has a real, still-live process to
-        -- terminate. The always-failing read primitive below drives the
-        -- abandonment path deterministically; what the provider would
-        -- otherwise have written is irrelevant, since runStreamReaderWith
-        -- never actually calls through to a real read here.
+        -- terminate. The stdout-only-failing read primitive below drives
+        -- that path's abandonment deterministically; what the provider
+        -- would otherwise have written on stdout is irrelevant, since the
+        -- stdout reader never actually calls through to a real read here.
         ByteString.writeFile fakeCodex (ByteString.unlines ["#!/bin/sh", "sleep 30"])
         setFileMode fakeCodex 0o700
         originalPath <- maybe "" id <$> lookupEnv "PATH"
@@ -2950,9 +2959,18 @@ main = hspec $ do
                             Right identities -> writeIORef spawnedIdentity (identityForPid (fromIntegral pid) identities)
                             Left _ -> pure ()
                     _ -> pure ()
-                alwaysFails = \_ -> pure (Left (userError "simulated persistent read failure"))
-            timeout 20000000 (runPullRequestFlowWith alwaysFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+                -- Fails only the stdout handle; the stderr reader keeps
+                -- using the real primitive (and so completes normally once
+                -- the provider is killed), so the failed terminal outcome
+                -- below can only be attributed to the stdout path, not a
+                -- race with stderr's own abandonment.
+                stdoutOnlyFails tag handle
+                  | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
+                  | otherwise = handleReadLine handle
+            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
+            let stdoutAbandonments = [message | PullRequestFlowDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
+            stdoutAbandonments `shouldSatisfy` (not . null)
             case reverse collected of
               (PullRequestProcessFinished _ (SolveFailed _) : _) -> pure ()
               _ -> expectationFailure "expected a failed terminal outcome after the stdout reader was abandoned"

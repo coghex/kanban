@@ -105,14 +105,16 @@ agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
 runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlow = runPullRequestFlowWith handleReadLine
+runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 
 -- | As 'runPullRequestFlow', but reads stdout/stderr via an injected
 -- primitive instead of always wrapping the real 'Handle' with
 -- 'handleReadLine' — see 'Kanban.Solve.runSolveWith' for why this seam
 -- exists: it is what lets a test deterministically drive a still-live
--- provider through the shared reader's abandonment path.
-runPullRequestFlowWith :: (Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+-- provider through the shared reader's abandonment path. The primitive is
+-- given the stream tag ("stdout"/"stderr") alongside the handle so a test
+-- can target one stream's abandonment path without racing the other's.
+runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
 runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
@@ -167,9 +169,9 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
               diagnosticsDone <- newEmptyMVar
               let abandon = onStreamAbandoned (eventSink . PullRequestFlowDiagnostic pullRequestNumber) managed abandonReasonRef
               void . forkIO $
-                void (runStreamReaderWith (readLineFor errorHandle) "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
+                void (runStreamReaderWith (readLineFor "stderr" errorHandle) "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReaderWith (readLineFor outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
+              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef
