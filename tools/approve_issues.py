@@ -65,6 +65,7 @@ INSTALL_DIR = Path(
 DEFAULT_LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "issue-review"
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
+INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 # Optional: unset by default. No private endpoint ships as a tracked default
 # (docs/agent-workflow-contract.md §5); a reviewer-model failure or a
 # singular INVALID verdict is simply not pushed anywhere until the user sets
@@ -1888,6 +1889,31 @@ def self_test() -> None:
     print("approve-issues.py self-test passed")
 
 
+def installed_config_reference() -> str | None:
+    """The kanban config.toml path install_issue_review.py persisted
+    alongside this installed backend (see write_config_reference in that
+    script), if any. Read fresh on every call — mirrors
+    drain_prs_service.py's configured_config_path() — so an explicit
+    --config always takes precedence and a missing/corrupt reference file
+    silently falls back to kanban_config's own default resolution."""
+    try:
+        value = json.loads(INSTALLED_CONFIG_REFERENCE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    configured = value.get("config_path")
+    return configured if isinstance(configured, str) and configured else None
+
+
+def resolve_effective_config_path(explicit_config_path: str | None) -> str | None:
+    """Explicit --config always wins; otherwise falls back to whatever
+    install_issue_review.py persisted for this installed backend, so an
+    installed backend invoked without --config still resolves the same
+    configured labels/remote instead of silently reverting to defaults."""
+    return explicit_config_path if explicit_config_path is not None else installed_config_reference()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Continuously cross-review GitHub issues before autonomous solving."
@@ -1970,7 +1996,8 @@ def main() -> None:
     LOG_TO_STDERR = args.json
     PIPELINE_INCIDENT_DIR = Path(args.incident_dir).expanduser().resolve()
     try:
-        raw_config, config_warnings = kanban_config.load_raw_config(args.config)
+        effective_config_path = resolve_effective_config_path(args.config)
+        raw_config, config_warnings = kanban_config.load_raw_config(effective_config_path)
         for warning in config_warnings:
             print(f"approve-issues.py warning: {warning}", file=sys.stderr, flush=True)
         ctx = get_repo_context(

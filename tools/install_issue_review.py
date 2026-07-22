@@ -172,9 +172,12 @@ def migrate_legacy_launcher(
 
 
 def write_config_reference(install_dir: Path, config_path: str) -> Path:
-    """Persist the kanban config.toml path beside the installed backend so
-    whatever launches approve_issues.py (a launchd job or the review-issues
-    skill) can forward --config to it."""
+    """Persist the kanban config.toml path beside the installed backend.
+    approve_issues.py itself reads this reference (installed_config_reference/
+    resolve_effective_config_path) when invoked without an explicit --config,
+    so any launcher (a launchd job, the review-issues skill, or a bare
+    invocation) resolves the same configured labels/remote without needing
+    to forward --config itself."""
     path = install_dir / "config.json"
     if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
         raise InstallError(f"Refusing unsafe configuration reference path: {path}")

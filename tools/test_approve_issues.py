@@ -55,6 +55,55 @@ class PortableDefaultPathTests(unittest.TestCase):
         self.assertIsNone(approve_issues.NTFY_URL)
 
 
+class InstalledConfigReferenceTests(unittest.TestCase):
+    """install_issue_review.py persists a --config path beside the installed
+    backend (config.json's config_path key) so a backend invoked without an
+    explicit --config still resolves the same configured labels/remote
+    instead of silently reverting to kanban_config's defaults."""
+
+    def test_returns_none_when_no_reference_file_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "does-not-exist" / "config.json"
+            with mock.patch.object(approve_issues, "INSTALLED_CONFIG_REFERENCE_PATH", missing):
+                self.assertIsNone(approve_issues.installed_config_reference())
+
+    def test_returns_none_on_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = Path(tmp) / "config.json"
+            reference.write_text("not json", encoding="utf-8")
+            with mock.patch.object(approve_issues, "INSTALLED_CONFIG_REFERENCE_PATH", reference):
+                self.assertIsNone(approve_issues.installed_config_reference())
+
+    def test_reads_the_persisted_config_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = Path(tmp) / "config.json"
+            reference.write_text(
+                json.dumps({"config_path": "/home/user/.config/kanban/config.toml"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(approve_issues, "INSTALLED_CONFIG_REFERENCE_PATH", reference):
+                self.assertEqual(
+                    approve_issues.installed_config_reference(),
+                    "/home/user/.config/kanban/config.toml",
+                )
+
+    def test_explicit_config_always_takes_precedence_over_the_installed_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = Path(tmp) / "config.json"
+            reference.write_text(
+                json.dumps({"config_path": "/installed/config.toml"}), encoding="utf-8"
+            )
+            with mock.patch.object(approve_issues, "INSTALLED_CONFIG_REFERENCE_PATH", reference):
+                self.assertEqual(
+                    approve_issues.resolve_effective_config_path("/explicit/config.toml"),
+                    "/explicit/config.toml",
+                )
+                self.assertEqual(
+                    approve_issues.resolve_effective_config_path(None),
+                    "/installed/config.toml",
+                )
+
+
 def make_ctx(root: Path, repo_slug: str = "acme/example") -> "approve_issues.RepoContext":
     return approve_issues.RepoContext(path=root, repo_slug=repo_slug, default_branch="main")
 
