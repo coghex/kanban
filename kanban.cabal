@@ -61,6 +61,7 @@ library
     Kanban.Review
     Kanban.Settings
     Kanban.Solve
+    Kanban.StreamReader
     Kanban.Text
     Kanban.Transcript
     Kanban.Tracker
