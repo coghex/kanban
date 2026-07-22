@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+import kanban_config
+
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
@@ -104,6 +106,7 @@ class RepoContext:
     repo_slug: str
     repo_name: str
     default_branch: str
+    remote_name: str = "origin"
 
 
 @dataclass(frozen=True)
@@ -243,28 +246,21 @@ def require_clean_worktree(root: Path) -> None:
 
 
 def parse_repo_slug(remote_url: str) -> str:
-    remote_url = remote_url.strip()
-    ssh_match = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", remote_url)
-    if ssh_match:
-        return f"{ssh_match.group(1)}/{ssh_match.group(2)}"
-    https_match = re.match(
-        r"https://github\.com/([^/]+)/(.+?)(?:\.git)?$",
-        remote_url,
-    )
-    if https_match:
-        return f"{https_match.group(1)}/{https_match.group(2)}"
-    raise DrainError(f"Unsupported origin remote URL: {remote_url}")
+    try:
+        return kanban_config.parse_repository_name(remote_url)
+    except kanban_config.KanbanConfigError as exc:
+        raise DrainError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(path: Path) -> RepoContext:
+def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
     root = repo_root(path)
     require_clean_worktree(root)
-    remote_url = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
+    remote_url = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
     repo_slug = parse_repo_slug(remote_url)
     repo_name = repo_slug.split("/", 1)[1]
     try:
         ref = run(
-            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            ["git", "symbolic-ref", "--short", f"refs/remotes/{remote_name}/HEAD"],
             cwd=root,
         ).stdout.strip()
         default_branch = ref.split("/", 1)[1]
@@ -290,6 +286,7 @@ def get_repo_context(path: Path) -> RepoContext:
         repo_slug=repo_slug,
         repo_name=repo_name,
         default_branch=default_branch,
+        remote_name=remote_name,
     )
 
 
@@ -1082,7 +1079,7 @@ def prepare_review_worktree(
     tmpdir = Path(
         tempfile.mkdtemp(prefix=f"drain-prs-rereview-{pr['number']}-", dir="/private/tmp")
     )
-    run(["git", "fetch", "--quiet", "origin", pr["headRefName"]], cwd=ctx.path)
+    run(["git", "fetch", "--quiet", ctx.remote_name, pr["headRefName"]], cwd=ctx.path)
     run(
         [
             "git",
@@ -1090,24 +1087,26 @@ def prepare_review_worktree(
             "add",
             "--detach",
             str(tmpdir),
-            f"origin/{pr['headRefName']}",
+            f"{ctx.remote_name}/{pr['headRefName']}",
         ],
         cwd=ctx.path,
     )
     return tmpdir, True
 
 
-def drain_rereview_prompt(number: int, expected_head: str) -> str:
-    return f"""You are GPT-5.6-Terra, the final drain-queue reviewer for PR #{number}.
+def drain_rereview_prompt(ctx: RepoContext, number: int, expected_head: str) -> str:
+    return f"""You are GPT-5.6-Terra, the final drain-queue reviewer for PR #{number} in {ctx.repo_slug}.
 
 The queue detected an unexpected push after approval. Review only: do not edit files, commit, push, merge, close issues, or remove worktrees.
+
+Pass `--repo {ctx.repo_slug}` to every `gh` command below. Never rely on gh's own default-repository inference, which can target a different repository than {ctx.repo_slug} in a checkout with more than one remote.
 
 1. Fetch `headRefOid` and require it to equal {expected_head}; otherwise report a stale request and do not comment or label.
 2. Read the linked issue and authoritative comments, PR body, checks, latest prior `<!-- pr-review:v1 ... -->` comment (or legacy `<!-- codex-review ... -->` comment), new commits, and full merge-base diff.
 3. For every prior blocking concern, state Resolved, Partially resolved, or Unresolved with file/line evidence. Review the complete current diff for regressions and unmet issue requirements. Nits never block.
 4. Re-fetch the head before publishing. If it changed, do not comment or label.
-5. Post APPROVE or CHANGES REQUESTED as a PR comment ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
-6. Re-fetch the head, then switch `reviewed:approve` / `reviewed:changes` to match the verdict. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
+5. Post APPROVE or CHANGES REQUESTED as a PR comment (`gh pr comment {number} --repo {ctx.repo_slug}`) ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
+6. Re-fetch the head, then switch `{APPROVE_LABEL}` / `{CHANGES_LABEL}` to match the verdict using `gh pr edit {number} --repo {ctx.repo_slug}`. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
 Report the verdict, concern statuses, new findings, reviewed head, and comment/label status.
 """
@@ -1130,7 +1129,7 @@ def rereview_pr_with_codex(
 
     review_path, temporary = prepare_review_worktree(ctx, pr)
     output_file = Path(f"/private/tmp/drain-prs-rereview-{number}.out")
-    prompt = drain_rereview_prompt(number, expected_head)
+    prompt = drain_rereview_prompt(ctx, number, expected_head)
 
     try:
         try:
@@ -1330,7 +1329,7 @@ def delete_local_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> None
 
 def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> None:
     proc = run(
-        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
+        ["git", "ls-remote", "--exit-code", "--heads", ctx.remote_name, branch],
         cwd=ctx.path,
         check=False,
     )
@@ -1339,7 +1338,7 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     log(f"Deleting remote branch {branch}")
     if dry_run:
         return
-    run(["git", "push", "origin", "--delete", branch], cwd=ctx.path)
+    run(["git", "push", ctx.remote_name, "--delete", branch], cwd=ctx.path)
 
 
 def _git_dir(ctx: RepoContext) -> Path:
@@ -1538,11 +1537,11 @@ def fast_forward_default_branch(
     if dry_run:
         return
 
-    run(["git", "fetch", "--quiet", "origin"], cwd=ctx.path)
+    run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
 
     def try_ff() -> None:
         run(
-            ["git", "merge", "--ff-only", f"origin/{ctx.default_branch}"],
+            ["git", "merge", "--ff-only", f"{ctx.remote_name}/{ctx.default_branch}"],
             cwd=ctx.path,
         )
 
@@ -1611,7 +1610,7 @@ def inspect_conflict_files(
         tempfile.mkdtemp(prefix=f"drain-prs-conflict-{pr['number']}-", dir="/private/tmp")
     )
     repair_branch = f"drain-prs-repair-{pr['number']}-{int(time.time())}"
-    run(["git", "fetch", "--quiet", "origin"], cwd=ctx.path)
+    run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
     run(
         [
             "git",
@@ -1620,13 +1619,13 @@ def inspect_conflict_files(
             "-b",
             repair_branch,
             str(tmpdir),
-            f"origin/{pr['headRefName']}",
+            f"{ctx.remote_name}/{pr['headRefName']}",
         ],
         cwd=ctx.path,
     )
 
     proc = run(
-        ["git", "merge", "--no-commit", "--no-ff", f"origin/{ctx.default_branch}"],
+        ["git", "merge", "--no-commit", "--no-ff", f"{ctx.remote_name}/{ctx.default_branch}"],
         cwd=tmpdir,
         check=False,
     )
@@ -1662,11 +1661,11 @@ def codex_conflict_prompt(
 Repository main checkout: {ctx.path}
 Temporary repair worktree: current working directory
 Default branch: {ctx.default_branch}
-PR head branch on origin: {pr['headRefName']}
+PR head branch on {ctx.remote_name}: {pr['headRefName']}
 Linked issues: {linked_issues}
 
-Current branch is a temporary local repair branch created from origin/{pr['headRefName']}.
-A merge of origin/{ctx.default_branch} into the current branch has already been started and is currently conflicted.
+Current branch is a temporary local repair branch created from {ctx.remote_name}/{pr['headRefName']}.
+A merge of {ctx.remote_name}/{ctx.default_branch} into the current branch has already been started and is currently conflicted.
 
 Conflict files:
 {conflict_lines}
@@ -1676,7 +1675,7 @@ Your job:
 2. Keep the scope tightly limited to the merge repair.
 3. Run the smallest relevant validation for the files you touched.
 4. Commit the merge resolution.
-5. Push the repaired result back to origin/{pr['headRefName']} using the current HEAD.
+5. Push the repaired result back to {ctx.remote_name}/{pr['headRefName']} using the current HEAD.
 
 Constraints:
 - Do not merge the PR.
@@ -1703,11 +1702,11 @@ def codex_conflict_fix_prompt(
 The current PR head must be {expected_head}. A fresh Claude reviewer requested changes to the prior merge-conflict repair.
 
 Your job:
-1. Fetch `headRefOid` and stop without changing anything unless it is exactly {expected_head}.
+1. Fetch `headRefOid` (pass `--repo {ctx.repo_slug}` to the `gh` command; never rely on gh's own default-repository inference) and stop without changing anything unless it is exactly {expected_head}.
 2. Read the newest `<!-- pr-review:v1 reviewer=claude ... verdict=CHANGES_REQUESTED -->` PR comment and resolve every blocking concern.
 3. Inspect the linked issue, the complete current PR diff, and relevant code so the fix preserves both the PR's intent and current {ctx.default_branch} behavior.
 4. Keep changes minimal and limited to the review findings.
-5. Run the smallest relevant validation, commit the fixes, and push current HEAD to origin/{pr['headRefName']}.
+5. Run the smallest relevant validation, commit the fixes, and push current HEAD to {ctx.remote_name}/{pr['headRefName']}.
 
 Constraints:
 - Do not merge the PR or modify/close its issue.
@@ -1729,6 +1728,8 @@ def claude_conflict_review_prompt(
 
 The PR was previously approved, then required an automated merge-conflict repair by Codex. Review only: do not edit files, commit, push, merge, close or modify issues, or remove worktrees.
 
+Pass `--repo {ctx.repo_slug}` to every `gh` command below (for example `gh pr view {pr['number']} --repo {ctx.repo_slug} --json headRefOid`, `gh pr comment {pr['number']} --repo {ctx.repo_slug}`, `gh pr edit {pr['number']} --repo {ctx.repo_slug}`). Never rely on gh's own default-repository inference, which can target a different repository than {ctx.repo_slug} in a checkout with more than one remote.
+
 1. Fetch `headRefOid` and require it to equal {expected_head}; if it differs, do not comment or label.
 2. Read the PR body, linked issue and authoritative comments, commits, CI, the latest prior `pr-review:v1` comment, and the complete current merge-base diff.
 3. Inspect the conflict-resolution commit and any later Codex review-fix commits especially carefully. Verify that they preserve the approved PR's intent while incorporating current {ctx.default_branch}. Recheck prior blocking concerns and inspect for regressions or unmet requirements. Nits never block.
@@ -1736,9 +1737,9 @@ The PR was previously approved, then required an automated merge-conflict repair
 5. Publish exactly one concise PR comment using the `gh` CLI. Use APPROVE only when no blocker remains; otherwise use CHANGES_REQUESTED with actionable file/line references. Never use a formal `gh pr review` submission because the authenticated account owns the PR. End the comment with exactly one of:
    `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=APPROVE -->`
    `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=CHANGES_REQUESTED -->`
-6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `reviewed:approve` for APPROVE or `reviewed:changes` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
+6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `{APPROVE_LABEL}` for APPROVE or `{CHANGES_LABEL}` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
-Use the `gh` CLI only for GitHub publication. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
+Use the `gh` CLI only for GitHub publication, always with `--repo {ctx.repo_slug}`. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
 
 
 def run_codex_conflict_agent(
@@ -2328,15 +2329,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail immediately on merge conflicts instead of invoking Codex repair.",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to kanban's config.toml "
+            "(default: ~/.config/kanban/config.toml)."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    global LOG_DIR
+    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
     try:
-        ctx = get_repo_context(Path(args.path).expanduser().resolve())
+        raw_config, config_warnings = kanban_config.load_raw_config(args.config)
+        for warning in config_warnings:
+            print(f"drain_prs.py warning: {warning}", file=sys.stderr, flush=True)
+        ctx = get_repo_context(
+            Path(args.path).expanduser().resolve(), raw_config.remote_name
+        )
+        resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
+        APPROVE_LABEL = resolved_config.workflow.approval_label
+        CHANGES_LABEL = resolved_config.workflow.changes_requested_label
         gates = load_gate_config(ctx)
         log(
             f"Watching {ctx.repo_slug} at {ctx.path} "
@@ -2359,6 +2376,8 @@ def main() -> None:
             gates=gates,
         )
     except DrainError as exc:
+        fail(f"drain_prs.py error: {exc}")
+    except kanban_config.KanbanConfigError as exc:
         fail(f"drain_prs.py error: {exc}")
     except KeyboardInterrupt:
         log("Interrupted; exiting")

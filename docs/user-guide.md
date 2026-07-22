@@ -14,9 +14,32 @@ To open a different checkout:
 cabal run kanban -- --path /path/to/project
 ```
 
-Kanban uses the repository's `origin` remote by default. Run `gh auth login` first if GitHub CLI is not already signed in.
+Kanban uses the repository's `origin` remote by default; set `remote_name` in `config.toml` to use another one. Run `gh auth login` first if GitHub CLI is not already signed in.
 
 Use `cabal run kanban -- --help` to see all command-line options.
+
+## Configuration
+
+Kanban reads `~/.config/kanban/config.toml` at startup, or the file named by
+`--config FILE`. A missing file uses built-in defaults. Copy
+[`config.toml.example`](../config.toml.example) to get started; it documents
+every key, its type, and its default.
+
+The file lets you rename the workflow labels Kanban looks for (approval,
+changes-requested, blocked, tracker), add extra tracker-section headings,
+choose how PR approval is determined, set the blocking-label severity, cap
+GitHub fetch sizes and the card excerpt height, tune provider timeouts, and
+override the git remote used to resolve `owner/name`. Repository-specific
+overrides live under `[repositories."owner/name"]` and replace the matching
+global values for that repository only.
+
+The `[usage.codex]`/`[usage.claude]` `command` keys are parsed and validated
+today but not yet executed by Kanban — usage refresh still uses the built-in
+provider regardless of what `command` names.
+
+`tools/approve_issues.py` and `tools/drain_prs.py` read the same file (with
+the same `--config FILE` override) so the canonical issue reviewer and PR
+drainer agree with the dashboard on workflow labels and the remote to use.
 
 ## The board
 
@@ -101,5 +124,6 @@ Kanban stores local state in the following places:
 - Agent logs: `~/.cache/kanban/logs/`
 - Background job records: `~/.cache/kanban/workers/`
 - Display settings: `~/.config/kanban/settings.json`
+- Workflow and provider configuration: `~/.config/kanban/config.toml`
 
-Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. It does not disable job logs or settings.
+Use `--no-cache` to stop Kanban from reading or writing board and usage snapshots. It does not disable job logs or settings. A global `cache = false` in `config.toml` has the same effect; `--no-cache` always wins if both are set.

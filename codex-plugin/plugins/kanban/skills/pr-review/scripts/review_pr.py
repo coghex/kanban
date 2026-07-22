@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -134,15 +135,127 @@ def paginated_api(root: Path, endpoint: str) -> list[dict[str, Any]]:
     return flattened
 
 
-def repository_name(root: Path) -> str:
-    value = gh_json(root, ["repo", "view", "--json", "nameWithOwner"])
-    name = value.get("nameWithOwner") if isinstance(value, dict) else None
-    if not isinstance(name, str) or "/" not in name:
-        raise WorkflowError("could not resolve GitHub repository identity")
-    return name
+def parse_repository_name(raw_value: str) -> str | None:
+    """Mirrors Kanban.Repository.parseRepositoryName: derives OWNER/NAME
+    from a git remote URL (SSH, HTTPS, or already-bare OWNER/NAME)."""
+    stripped = raw_value.strip()
+    for prefix in ("https://", "http://", "ssh://", "git://"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    normalized = stripped.replace("git@github.com", "github.com").replace(":", "/").rstrip("/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    if len(segments) < 2:
+        return None
+    owner, name = segments[-2], segments[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not owner or not name:
+        return None
+    return f"{owner}/{name}"
 
 
-def pr_view(root: Path, number: int) -> dict[str, Any]:
+def resolve_repository(root: Path, config_path: str | None, explicit_repo: str | None = None) -> str:
+    """Resolves OWNER/NAME. An explicit --repo (matching Kanban's own
+    --repo option) always wins and is never re-derived from the checkout's
+    remote — this is how a fork checkout launched with, say, --repo
+    upstream/repo reviews upstream's PR rather than gh's own default-repo
+    inference (or even the configured remote) silently targeting the fork.
+    Otherwise resolves from the dashboard-configured remote (mirrors
+    Kanban.Repository.resolveRepository), not gh's own default-repo
+    inference."""
+    if explicit_repo:
+        parsed = parse_repository_name(explicit_repo)
+        if parsed is None:
+            raise WorkflowError(f"cannot derive OWNER/NAME from --repo: {explicit_repo}")
+        return parsed
+    remote_name = resolve_remote_name(config_path)
+    proc = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise WorkflowError(
+            f"could not resolve git remote {remote_name!r}: {proc.stderr.strip()}"
+        )
+    parsed = parse_repository_name(proc.stdout)
+    if parsed is None:
+        raise WorkflowError(
+            f"cannot derive OWNER/NAME from remote {remote_name!r}: {proc.stdout.strip()}"
+        )
+    return parsed
+
+
+def default_kanban_config_path() -> Path:
+    # Mirrors Kanban.Config.defaultConfigPath / tools/kanban_config.py's
+    # default_config_path(): this coordinator reviews arbitrary target
+    # repositories (not necessarily a Kanban checkout), so it cannot import
+    # tools/kanban_config.py and instead resolves the same well-known path
+    # directly.
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_config_home) if xdg_config_home else Path.home() / ".config"
+    return base / "kanban" / "config.toml"
+
+
+def resolve_workflow_labels(config_path: str | None, repo: str) -> tuple[str, str]:
+    """Minimal mirror of Kanban.Config's workflow.approval_label /
+    changes_requested_label resolution (global value, then a matching
+    [repositories."owner/name"] override). This coordinator only mutates and
+    verifies those two labels, so it does not need the rest of the schema
+    kanban_config.py loads for the dashboard and the canonical Python tools;
+    a missing or unreadable file silently keeps the documented defaults."""
+    approval_label, changes_requested_label = "reviewed:approve", "reviewed:changes"
+    path = Path(config_path).expanduser() if config_path else default_kanban_config_path()
+    if not path.is_file():
+        return approval_label, changes_requested_label
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, OSError):
+        return approval_label, changes_requested_label
+
+    def apply(table: Any) -> None:
+        nonlocal approval_label, changes_requested_label
+        if not isinstance(table, dict):
+            return
+        workflow = table.get("workflow")
+        if not isinstance(workflow, dict):
+            return
+        if isinstance(workflow.get("approval_label"), str) and workflow["approval_label"]:
+            approval_label = workflow["approval_label"]
+        if (
+            isinstance(workflow.get("changes_requested_label"), str)
+            and workflow["changes_requested_label"]
+        ):
+            changes_requested_label = workflow["changes_requested_label"]
+
+    apply(data)
+    repositories = data.get("repositories")
+    if isinstance(repositories, dict):
+        apply(repositories.get(repo))
+    return approval_label, changes_requested_label
+
+
+def resolve_remote_name(config_path: str | None) -> str:
+    """Minimal mirror of Kanban.Config's global-only remote_name resolution
+    (see resolve_workflow_labels for why this doesn't import
+    tools/kanban_config.py)."""
+    path = Path(config_path).expanduser() if config_path else default_kanban_config_path()
+    if not path.is_file():
+        return "origin"
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, OSError):
+        return "origin"
+    remote_name = data.get("remote_name")
+    return remote_name if isinstance(remote_name, str) and remote_name else "origin"
+
+
+def pr_view(root: Path, repo: str, number: int) -> dict[str, Any]:
     fields = ",".join(
         [
             "number",
@@ -164,7 +277,7 @@ def pr_view(root: Path, number: int) -> dict[str, Any]:
             "isCrossRepository",
         ]
     )
-    value = gh_json(root, ["pr", "view", str(number), "--json", fields])
+    value = gh_json(root, ["pr", "view", str(number), "-R", repo, "--json", fields])
     if not isinstance(value, dict):
         raise WorkflowError(f"PR #{number} returned an unexpected response")
     if value.get("state") != "OPEN":
@@ -233,19 +346,22 @@ def approver_path() -> Path:
     return path
 
 
-def check_issue(root: Path, number: int) -> dict[str, Any]:
+def check_issue(root: Path, repo: str, number: int, config_path: str | None = None) -> dict[str, Any]:
     proc = run(
         [
             sys.executable,
             str(approver_path()),
             "--path",
             str(root),
+            "--repo",
+            repo,
             "--check",
             str(number),
             "--legacy-policy",
             "dual",
             "--json",
-        ],
+        ]
+        + (["--config", config_path] if config_path else []),
         cwd=root,
         timeout=180,
         ok_codes=(0, 2),
@@ -309,9 +425,10 @@ def gate_status(
     repo: str,
     *,
     allow_no_issue: bool = False,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
     numbers, invalid = linked_issue_numbers(pr, repo)
-    checks = [check_issue(root, number) for number in numbers]
+    checks = [check_issue(root, repo, number, config_path) for number in numbers]
     approved = gate_approved(numbers, invalid, checks, allow_no_issue=allow_no_issue)
     return {
         "approved": approved,
@@ -346,11 +463,11 @@ def has_owned_gate_comment(comments: list[dict[str, Any]], login: str, body: str
     return None
 
 
-def post_comment(root: Path, number: int, body: str) -> str:
+def post_comment(root: Path, repo: str, number: int, body: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="pr-review-", suffix=".md") as handle:
         handle.write(body)
         handle.flush()
-        proc = run(["gh", "pr", "comment", str(number), "--body-file", handle.name], cwd=root)
+        proc = run(["gh", "pr", "comment", str(number), "-R", repo, "--body-file", handle.name], cwd=root)
     return proc.stdout.strip()
 
 
@@ -361,6 +478,7 @@ def publish_gate_comment(
     gate: dict[str, Any],
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> tuple[str, str]:
     marker = gate_marker(
         repo,
@@ -369,33 +487,33 @@ def publish_gate_comment(
         allow_no_issue=allow_no_issue,
     )
     body = f"{GATE_TEXT}\n\n{marker}\n"
-    refreshed = pr_view(root, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue)
+    refreshed = pr_view(root, repo, pr["number"])
+    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
     login = viewer_login(root)
     existing = has_owned_gate_comment(pr_comments(root, repo, pr["number"]), login, body)
     if existing:
         return "existing", existing
-    refreshed = pr_view(root, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue)
+    refreshed = pr_view(root, repo, pr["number"])
+    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
-    url = post_comment(root, pr["number"], body)
+    url = post_comment(root, repo, pr["number"], body)
     return "posted", url
 
 
 def issue_context(root: Path, repo: str, number: int) -> dict[str, Any]:
     issue = gh_json(
         root,
-        ["issue", "view", str(number), "--json", "number,title,body,state,url,author,labels"],
+        ["issue", "view", str(number), "-R", repo, "--json", "number,title,body,state,url,author,labels"],
     )
     comments = paginated_api(root, f"repos/{repo}/issues/{number}/comments?per_page=100")
     return {"issue": issue, "comments": comments}
 
 
 def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: list[int]) -> dict[str, Any]:
-    diff = run(["gh", "pr", "diff", str(pr["number"])], cwd=root).stdout
+    diff = run(["gh", "pr", "diff", str(pr["number"]), "-R", repo], cwd=root).stdout
     review_comments = paginated_api(root, f"repos/{repo}/pulls/{pr['number']}/comments?per_page=100")
     ordinary_comments = pr_comments(root, repo, pr["number"])
     issues = [issue_context(root, repo, number) for number in issue_numbers]
@@ -408,7 +526,26 @@ def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: li
     }
 
 
-def ensure_commit(root: Path, number: int, head: str) -> None:
+def resolve_fetch_source(root: Path, remote_name: str, repo: str) -> str:
+    """A git fetch source (a registered remote name, or a direct HTTPS URL)
+    that actually points at repo. If the configured/default remote resolves
+    to a different repository than the effective repo (e.g. --repo selected
+    upstream/repo from a fork checkout whose remote still points at the
+    fork), fetching by that remote's name would silently pull the wrong
+    repository's ref; fetch directly from repo's URL instead."""
+    proc = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0 and parse_repository_name(proc.stdout) == repo:
+        return remote_name
+    return f"https://github.com/{repo}.git"
+
+
+def ensure_commit(root: Path, repo: str, number: int, head: str, remote_name: str = "origin") -> None:
     present = subprocess.run(
         ["git", "cat-file", "-e", f"{head}^{{commit}}"],
         cwd=root,
@@ -416,7 +553,8 @@ def ensure_commit(root: Path, number: int, head: str) -> None:
         check=False,
     ).returncode == 0
     if not present:
-        run(["git", "fetch", "--no-tags", "origin", f"pull/{number}/head"], cwd=root, timeout=600)
+        fetch_source = resolve_fetch_source(root, remote_name, repo)
+        run(["git", "fetch", "--no-tags", fetch_source, f"pull/{number}/head"], cwd=root, timeout=600)
     run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=root)
 
 
@@ -447,8 +585,8 @@ def make_tree_writable(path: Path) -> None:
             entry.chmod(entry.stat().st_mode | 0o200)
 
 
-def extract_source(root: Path, number: int, head: str, destination: Path) -> None:
-    ensure_commit(root, number, head)
+def extract_source(root: Path, repo: str, number: int, head: str, destination: Path, remote_name: str = "origin") -> None:
+    ensure_commit(root, repo, number, head, remote_name)
     proc = subprocess.run(
         ["git", "archive", "--format=tar", head],
         cwd=root,
@@ -689,11 +827,12 @@ def require_current_review_state(
     expected_gate_key: str,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
-    pr = pr_view(root, number)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError("PR head changed; no current-head verdict may be labeled")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != expected_gate_key:
         raise WorkflowError("linked issues changed; no verdict was published")
     if not gate["approved"]:
@@ -701,23 +840,29 @@ def require_current_review_state(
     return gate
 
 
-def set_verdict_label(root: Path, number: int, verdict: str) -> None:
-    add = "reviewed:approve" if verdict == "APPROVE" else "reviewed:changes"
-    remove = "reviewed:changes" if verdict == "APPROVE" else "reviewed:approve"
-    run(["gh", "pr", "edit", str(number), "--add-label", add, "--remove-label", remove], cwd=root)
+def set_verdict_label(
+    root: Path, repo: str, number: int, verdict: str, approval_label: str, changes_requested_label: str
+) -> None:
+    add = approval_label if verdict == "APPROVE" else changes_requested_label
+    remove = changes_requested_label if verdict == "APPROVE" else approval_label
+    run(["gh", "pr", "edit", str(number), "-R", repo, "--add-label", add, "--remove-label", remove], cwd=root)
 
 
-def clear_verdict_labels(root: Path, number: int) -> None:
+def clear_verdict_labels(
+    root: Path, repo: str, number: int, approval_label: str, changes_requested_label: str
+) -> None:
     run(
         [
             "gh",
             "pr",
             "edit",
             str(number),
+            "-R",
+            repo,
             "--remove-label",
-            "reviewed:approve",
+            approval_label,
             "--remove-label",
-            "reviewed:changes",
+            changes_requested_label,
         ],
         cwd=root,
     )
@@ -744,18 +889,21 @@ def verify_publication(
     head: str,
     verdict: str,
     gate_key_value: str,
+    approval_label: str,
+    changes_requested_label: str,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> dict[str, Any]:
-    pr = pr_view(root, number)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != head:
         raise WorkflowError("PR head changed after publication")
     labels = [item.get("name") for item in pr.get("labels") or [] if isinstance(item, dict)]
-    expected = "reviewed:approve" if verdict == "APPROVE" else "reviewed:changes"
-    verdict_labels = [item for item in labels if item in {"reviewed:approve", "reviewed:changes"}]
+    expected = approval_label if verdict == "APPROVE" else changes_requested_label
+    verdict_labels = [item for item in labels if item in {approval_label, changes_requested_label}]
     if verdict_labels != [expected]:
         raise WorkflowError(f"publication label verification failed: {verdict_labels}")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != gate_key_value or not gate["approved"]:
         raise WorkflowError("publication issue-gate verification failed")
     login = viewer_login(root)
@@ -799,6 +947,7 @@ def publish_results(
     base: dict[str, Any],
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Safely publish an already-computed set of review results: re-verify
     nothing went stale since `gate`/`pr` were captured, post the
@@ -806,8 +955,9 @@ def publish_results(
     anything changes between commenting and labeling. Shared by workflow()'s
     own nested-reviewer path and publish_verdict()'s self-reviewed path, so
     both go through identical race handling."""
-    refreshed_pr = pr_view(root, number)
-    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue)
+    approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
+    refreshed_pr = pr_view(root, repo, number)
+    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
         raise WorkflowError("PR head changed during review; no verdict was published")
     if refreshed_gate["key"] != gate["key"]:
@@ -819,6 +969,7 @@ def publish_results(
             refreshed_pr,
             refreshed_gate,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
         return 2, {
             **base,
@@ -836,8 +987,9 @@ def publish_results(
         pr["headRefOid"],
         gate["key"],
         allow_no_issue=allow_no_issue,
+        config_path=config_path,
     )
-    post_comment(root, number, body)
+    post_comment(root, repo, number, body)
     try:
         require_current_review_state(
             root,
@@ -846,8 +998,9 @@ def publish_results(
             pr["headRefOid"],
             gate["key"],
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
-        set_verdict_label(root, number, verdict)
+        set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
             root,
             repo,
@@ -856,11 +1009,14 @@ def publish_results(
             pr["headRefOid"],
             verdict,
             gate["key"],
+            approval_label,
+            changes_requested_label,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
     except WorkflowError as exc:
         try:
-            clear_verdict_labels(root, number)
+            clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             raise WorkflowError(
                 f"publication failed ({exc}); verdict-label cleanup also failed ({cleanup_exc})"
@@ -884,10 +1040,12 @@ def workflow(
     dry_run: bool,
     allow_no_issue: bool,
     self_review: bool = False,
+    config_path: str | None = None,
+    explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    repo = repository_name(root)
-    pr = pr_view(root, number)
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    repo = resolve_repository(root, config_path, explicit_repo)
+    pr = pr_view(root, repo, number)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin)
     base = {
@@ -908,6 +1066,7 @@ def workflow(
             pr,
             gate,
             allow_no_issue=allow_no_issue,
+            config_path=config_path,
         )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     if rereview:
@@ -939,6 +1098,8 @@ def workflow(
             "instructions": self_review_prompt(context, reviewer, rereview, number),
         }
 
+    remote_name = resolve_remote_name(config_path)
+
     def extract_for_next_reviewer() -> Path:
         # An independently-rooted temp directory with no reviewer-identifying
         # prefix (tempfile.mkdtemp, not a subdirectory of one shared parent
@@ -946,11 +1107,14 @@ def workflow(
         # reviews, and tears this down before starting the next reviewer, so
         # at most one such directory ever exists on disk at a time.
         source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
-        extract_source(root, number, pr["headRefOid"], source)
+        extract_source(root, repo, number, pr["headRefOid"], source, remote_name)
         return source
 
     results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
-    return publish_results(root, repo, number, pr, gate, reviewers, results, base, allow_no_issue=allow_no_issue)
+    return publish_results(
+        root, repo, number, pr, gate, reviewers, results, base,
+        allow_no_issue=allow_no_issue, config_path=config_path,
+    )
 
 
 def publish_verdict(
@@ -961,6 +1125,8 @@ def publish_verdict(
     result_path: Path,
     *,
     allow_no_issue: bool,
+    config_path: str | None = None,
+    explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Publish a verdict the calling agent already computed itself (the
     self-review path from workflow()'s awaiting_self_review response).
@@ -969,14 +1135,14 @@ def publish_verdict(
     whatever the caller provides, it is the same safe-publish machinery
     the nested-reviewer path uses, just fed an externally-supplied result
     instead of one from a spawned subprocess."""
-    repo = repository_name(root)
-    pr = pr_view(root, number)
+    repo = resolve_repository(root, config_path, explicit_repo)
+    pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError(
             "PR head changed since the self-review context was generated; "
             "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
         )
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue)
+    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     if gate["key"] != expected_gate_key:
         raise WorkflowError(
             "linked issues changed since the self-review context was generated; "
@@ -999,11 +1165,16 @@ def publish_verdict(
         "issue_gate": gate,
     }
     if not gate["approved"]:
-        status, url = publish_gate_comment(root, repo, pr, gate, allow_no_issue=allow_no_issue)
+        status, url = publish_gate_comment(
+            root, repo, pr, gate, allow_no_issue=allow_no_issue, config_path=config_path,
+        )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     result_data = load_json(Path(result_path).read_text(encoding="utf-8"), "self-review result file")
     result = validate_review(result_data, reviewers[0])
-    return publish_results(root, repo, number, pr, gate, reviewers, [result], base, allow_no_issue=allow_no_issue)
+    return publish_results(
+        root, repo, number, pr, gate, reviewers, [result], base,
+        allow_no_issue=allow_no_issue, config_path=config_path,
+    )
 
 
 def self_test() -> None:
@@ -1086,6 +1257,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Print structured output")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks")
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
+    )
+    parser.add_argument(
+        "--repo",
+        metavar="OWNER/NAME",
+        help=(
+            "Explicit repository identity, overriding the one derived from "
+            "the configured git remote (matches Kanban's own --repo option, "
+            "so a fork checkout reviews the same repository the dashboard "
+            "displays)."
+        ),
+    )
     args = parser.parse_args()
     if not args.self_test and args.review is None and args.rereview is None and args.publish_verdict is None:
         parser.error("one of --review, --rereview, --publish-verdict, or --self-test is required")
@@ -1115,6 +1301,8 @@ def main() -> None:
                 args.gate_key,
                 args.result,
                 allow_no_issue=args.allow_no_issue,
+                config_path=args.config,
+                explicit_repo=args.repo,
             )
         else:
             code, result = workflow(
@@ -1124,6 +1312,8 @@ def main() -> None:
                 dry_run=args.dry_run,
                 allow_no_issue=args.allow_no_issue,
                 self_review=args.self_review,
+                config_path=args.config,
+                explicit_repo=args.repo,
             )
     except WorkflowError as exc:
         result = {"pr": number, "status": "error", "error": str(exc)}

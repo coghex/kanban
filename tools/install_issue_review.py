@@ -6,7 +6,8 @@ This installer never starts a daemon. It only installs a stable
 Kanban-managed link to the tracked `tools/approve_issues.py` backend, in the
 same manner as `tools/install_drainer.py`, and optionally migrates the
 pre-Kanban compatibility launcher at `~/work/approve-issues.py` to a symlink
-that points at it.
+that points at it. An optional --config path is persisted alongside the
+installed backend for whatever launches it to forward.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -47,10 +49,12 @@ def repository_root(requested: Path) -> Path:
         raise InstallError(
             f"Install from the repository's main checkout, not a linked worktree: {root}"
         )
-    required = root / "tools" / "approve_issues.py"
-    if not required.is_file():
+    required = [root / "tools" / "approve_issues.py", root / "tools" / "kanban_config.py"]
+    missing = [str(item) for item in required if not item.is_file()]
+    if missing:
         raise InstallError(
-            f"Repository does not contain the required backend file: {required}"
+            "Repository does not contain the required backend file(s): "
+            + ", ".join(missing)
         )
     return root
 
@@ -167,24 +171,61 @@ def migrate_legacy_launcher(
     return plan
 
 
+def write_config_reference(install_dir: Path, config_path: str) -> Path:
+    """Persist the kanban config.toml path beside the installed backend.
+    approve_issues.py itself reads this reference (installed_config_reference/
+    resolve_effective_config_path) when invoked without an explicit --config,
+    so any launcher (a launchd job, the review-issues skill, or a bare
+    invocation) resolves the same configured labels/remote without needing
+    to forward --config itself."""
+    path = install_dir / "config.json"
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise InstallError(f"Refusing unsafe configuration reference path: {path}")
+    install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    install_dir.chmod(0o700)
+    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"config_path": config_path}, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return path
+
+
 def install(
     repo: Path,
     install_dir: Path,
     legacy_path: Path,
     *,
     migrate_legacy_launcher_flag: bool,
+    config_path: str | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     source = repo / "tools" / "approve_issues.py"
-    if not source.is_file():
+    config_module_source = repo / "tools" / "kanban_config.py"
+    missing = [str(item) for item in (source, config_module_source) if not item.is_file()]
+    if missing:
         raise InstallError(
-            f"Repository does not contain the required backend file: {source}"
+            "Repository does not contain the required backend file(s): "
+            + ", ".join(missing)
         )
     install_dir = install_dir.resolve()
     kanban_link = install_dir / "approve_issues.py"
+    config_module_link = install_dir / "kanban_config.py"
+    resolved_config_path = (
+        str(Path(config_path).expanduser().resolve()) if config_path else None
+    )
 
     if dry_run:
         resolved_source = source.resolve(strict=True)
+        resolved_config_module_source = config_module_source.resolve(strict=True)
         return {
             "installed": False,
             "dry_run": True,
@@ -195,15 +236,24 @@ def install(
                 "destination": str(kanban_link),
                 "result": plan_symlink(resolved_source, kanban_link),
             },
+            "config_module_link": {
+                "source": str(config_module_source),
+                "destination": str(config_module_link),
+                "result": plan_symlink(resolved_config_module_source, config_module_link),
+            },
             "legacy_launcher": plan_legacy_launcher(
                 legacy_path, kanban_link, allow_migration=migrate_legacy_launcher_flag
             ),
+            "config_path": resolved_config_path,
         }
 
     kanban_result = install_symlink(source, kanban_link)
+    config_module_result = install_symlink(config_module_source, config_module_link)
     legacy_result = migrate_legacy_launcher(
         legacy_path, kanban_link, allow_migration=migrate_legacy_launcher_flag
     )
+    if resolved_config_path:
+        write_config_reference(install_dir, resolved_config_path)
     return {
         "installed": True,
         "repo": str(repo),
@@ -213,7 +263,13 @@ def install(
             "destination": str(kanban_link),
             "result": kanban_result,
         },
+        "config_module_link": {
+            "source": str(config_module_source),
+            "destination": str(config_module_link),
+            "result": config_module_result,
+        },
         "legacy_launcher": legacy_result,
+        "config_path": resolved_config_path,
     }
 
 
@@ -248,6 +304,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--config",
+        default=os.environ.get("KANBAN_ISSUE_REVIEW_CONFIG_PATH"),
+        help="Optional kanban config.toml path persisted for the installed backend.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Validate and describe without writing."
     )
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
@@ -273,6 +334,8 @@ def print_plan(result: dict[str, Any], *, repo: Path) -> None:
         if legacy.get("backup_path"):
             note = "would back up" if dry_run else "backed up"
             print(f"  ({note} the previous file to {legacy['backup_path']})")
+    if result.get("config_path"):
+        print(f"Config reference: {result['config_path']}")
 
 
 def main() -> int:
@@ -286,6 +349,7 @@ def main() -> int:
             install_dir,
             legacy_path,
             migrate_legacy_launcher_flag=args.migrate_legacy_launcher,
+            config_path=args.config,
             dry_run=args.dry_run,
         )
         if args.json:

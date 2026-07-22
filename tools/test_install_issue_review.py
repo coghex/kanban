@@ -164,6 +164,7 @@ class InstallerPolicyTests(unittest.TestCase):
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
         (tools / "approve_issues.py").write_text("backend\n", encoding="utf-8")
+        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
 
@@ -314,6 +315,7 @@ class CLIOutputTests(unittest.TestCase):
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
         (tools / "approve_issues.py").write_text("backend\n", encoding="utf-8")
+        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
         subprocess.run(
             ["git", "init", "-q", str(self.repo)], check=True, capture_output=True
         )

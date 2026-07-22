@@ -14,12 +14,26 @@ module Kanban.UI
     ReviewSession (..),
     SolvePhase (..),
     SolveSession (..),
+    approvedAttr,
+    approvedInteriorAttr,
+    autoSolveRevisionPrompt,
+    cacheEnabled,
     canonicalReviewCompletionSuperseded,
+    cardExcerptLimit,
+    cardInteriorAttribute,
+    claudeRefreshTimeoutMicros,
+    codexRefreshTimeoutMicros,
     failureActivity,
+    githubRefreshTimeoutMicros,
+    neutralAttr,
     orphanMessage,
     overlayMouseAction,
+    pendingAttr,
+    problemAttr,
+    pullRequestCardAttribute,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    readyAttr,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -66,6 +80,7 @@ import Kanban.Cache
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
+import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), TimeoutsConfig (..))
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerController,
@@ -401,26 +416,30 @@ data AppState = AppState
     appEventChannel :: BChan AppEvent,
     appNow :: UTCTime,
     appTimeZone :: TimeZone,
-    appOptions :: Options
+    appOptions :: Options,
+    appConfig :: ResolvedConfig
   }
 
-runDashboard :: Options -> Repository -> IO ()
-runDashboard options repository = do
+cacheEnabled :: Options -> ResolvedConfig -> Bool
+cacheEnabled options config = not options.optionNoCache && config.resolvedCache
+
+runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
+runDashboard options config repository = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
   cacheLoad <-
-    if options.optionNoCache
-      then pure CacheAbsent
-      else loadRepositoryCache repository
+    if cacheEnabled options config
+      then loadRepositoryCache repository
+      else pure CacheAbsent
   usageCacheLoad <-
-    if options.optionNoCache
-      then pure UsageCacheAbsent
-      else loadUsageCache
+    if cacheEnabled options config
+      then loadUsageCache
+      else pure UsageCacheAbsent
   drainerController <- discoverDrainerController repository
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
-  let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState now cacheLoad
+  let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState config.resolvedWorkflow config.resolvedLimits now cacheLoad
       (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
         AppState
@@ -460,7 +479,8 @@ runDashboard options repository = do
             appEventChannel = eventChannel,
             appNow = now,
             appTimeZone = timeZone,
-            appOptions = options
+            appOptions = options,
+            appConfig = config
           }
   (finalState, finalVty) <- customMainWithDefaultVty (Just eventChannel) application initialState
   case finalState.appReviewBackend of
@@ -471,18 +491,18 @@ runDashboard options repository = do
   mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appPullRequestProcesses))
   Vty.shutdown finalVty
 
-initialBoardState :: UTCTime -> CacheLoad -> (Board, Freshness, Maybe UTCTime, Bool, Bool, Text)
-initialBoardState now cacheLoad = case cacheLoad of
+initialBoardState :: WorkflowConfig -> LimitsConfig -> UTCTime -> CacheLoad -> (Board, Freshness, Maybe UTCTime, Bool, Bool, Text)
+initialBoardState workflowConfig limits now cacheLoad = case cacheLoad of
   CacheLoaded snapshot ->
-    ( deriveBoard defaultWorkflowConfig snapshot,
+    ( deriveBoard workflowConfig snapshot,
       Fresh snapshot.snapshotFetchedAt,
       Just snapshot.snapshotFetchedAt,
       snapshot.snapshotIssuesTruncated,
       snapshot.snapshotPullRequestsTruncated,
-      appendWarnings "Cached GitHub snapshot loaded · press u to update" (snapshotWarnings snapshot)
+      appendWarnings "Cached GitHub snapshot loaded · press u to update" (snapshotWarnings limits workflowConfig snapshot)
     )
   CacheAbsent ->
-    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now False False),
+    ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
       NotLoaded,
       Nothing,
       False,
@@ -490,7 +510,7 @@ initialBoardState now cacheLoad = case cacheLoad of
       "No cached GitHub snapshot · press u to update"
     )
   CacheInvalid warning ->
-    ( deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] now False False),
+    ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
       NotLoaded,
       Nothing,
       False,
@@ -796,7 +816,7 @@ drawCardFrame state selected entry contents =
     statusAttribute = cardStatusAttribute state item
     topBottomAttribute = if selected then selectedAttr else statusAttribute
     leftAttribute = if selected then selectedAttr else statusAttribute
-    interiorAttribute = if isApproved defaultWorkflowConfig item then approvedInteriorAttr else neutralAttr
+    interiorAttribute = cardInteriorAttribute statusAttribute
     middleHeight = baseHeight + case entry of
       Standalone _ -> 0
       Tracked _ _ -> 1
@@ -805,13 +825,17 @@ drawCardFrame state selected entry contents =
       PullRequestItem _ -> 8
     verticalEdge = vBox (replicate middleHeight (str [vertical]))
 
+-- | The configured card excerpt height, in rows.
+cardExcerptLimit :: ResolvedConfig -> Int
+cardExcerptLimit config = config.resolvedLimits.limitsExcerptLines
+
 cardLines :: AppState -> Bool -> ColumnEntry -> [Widget Name]
 cardLines state selected entry =
   trackingLine
     <> [ withAttr (if selected then selectedTitleAttr else cardTitleAttr) (txtWrap (itemHeading item)),
     drawCardLabels state item,
     withAttr dimAttr (txtWrap (itemMetadata state item)),
-    txtWrap (excerpt (itemBody item))
+    vLimit (cardExcerptLimit state.appConfig) (txtWrap (excerpt (itemBody item)))
        ]
     <> statusLine
   where
@@ -820,10 +844,10 @@ cardLines state selected entry =
       Standalone _ -> []
       Tracked context _ -> [drawTrackingLine context]
     statusLine = case item of
-      IssueItem issue -> case trackerDiagnosticsForIssue defaultWorkflowConfig issue of
+      IssueItem issue -> case trackerDiagnosticsForIssue state.appConfig.resolvedWorkflow issue of
         [] -> []
         diagnostic : _ -> [withAttr pendingAttr (txtWrap ("TRACKER · " <> renderTrackerDiagnostic diagnostic))]
-      PullRequestItem _ -> [withAttr (statusTextAttr item) (txt (itemStatusText item))]
+      PullRequestItem _ -> [withAttr (statusTextAttr state.appConfig.resolvedWorkflow item) (txt (itemStatusText item))]
 
 drawTrackerHeader :: AppState -> BoardColumn -> Int -> Tracker -> Bool -> Widget Name
 drawTrackerHeader state column row tracker expanded =
@@ -891,7 +915,7 @@ primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
 
 drawLabel :: AppState -> Label -> Widget Name
-drawLabel _ label = withAttr (labelAttribute label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
+drawLabel state label = withAttr (labelAttribute state.appConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
 
 drawCardLabels :: AppState -> BoardItem -> Widget Name
 drawCardLabels state item = hBox (map (drawLabel state) visibleLabels <> overflowMarker)
@@ -962,40 +986,62 @@ mergeText MergeConflicting = "merge conflict"
 mergeText MergeUnstable = "unstable"
 mergeText MergeUnknown = "calculating"
 
+-- | A pull request's card color is always derived from its
+-- 'pullRequestStatus', not the generic approved-item shortcut used for
+-- issues: an approved PR that 'pullRequestStatus' reports as merely pending
+-- (for example amber-blocked, once a configured 'SeverityAmber'
+-- 'blockingSeverity' downgrades it from a problem) must still render
+-- pending rather than the plain approved color, and only a fully ready PR
+-- gets the ready color.
 cardStatusAttribute :: AppState -> BoardItem -> AttrName
+cardStatusAttribute state (PullRequestItem pullRequest) = pullRequestCardAttribute state.appConfig.resolvedWorkflow pullRequest
 cardStatusAttribute state item
-  | isProblem defaultWorkflowConfig item = problemAttr
+  | isProblem state.appConfig.resolvedWorkflow item = problemAttr
   | Just solveAttribute <- solveCardAttribute state item = solveAttribute
-  | itemHasAmberWarning item = pendingAttr
-  | isApproved defaultWorkflowConfig item = approvedAttr
-cardStatusAttribute _ (PullRequestItem pullRequest) = case pullRequestStatus defaultWorkflowConfig pullRequest of
-  StatusPending _ -> pendingAttr
-  StatusReady -> readyAttr
-  StatusProblem _ -> problemAttr
-  StatusNeutral -> neutralAttr
+  | itemHasAmberWarning state.appConfig.resolvedWorkflow item = pendingAttr
+  | isApproved state.appConfig.resolvedWorkflow item = approvedAttr
 cardStatusAttribute _ _ = neutralAttr
+
+pullRequestCardAttribute :: WorkflowConfig -> PullRequest -> AttrName
+pullRequestCardAttribute config pullRequest
+  | StatusProblem _ <- status = problemAttr
+  | itemHasAmberWarning config (PullRequestItem pullRequest) = pendingAttr
+  | StatusPending _ <- status = pendingAttr
+  | StatusReady <- status = readyAttr
+  | otherwise = neutralAttr
+  where
+    status = pullRequestStatus config pullRequest
+
+-- | Whether a card's interior wash should read as approved: mirrors
+-- 'cardStatusAttribute' rather than a raw 'isApproved' check, so an
+-- approved-but-pending or amber-blocked pull request's interior does not
+-- disagree with its own border.
+cardInteriorAttribute :: AttrName -> AttrName
+cardInteriorAttribute statusAttribute
+  | statusAttribute == approvedAttr || statusAttribute == readyAttr = approvedInteriorAttr
+  | otherwise = neutralAttr
 
 solveCardAttribute :: AppState -> BoardItem -> Maybe AttrName
 solveCardAttribute _ (PullRequestItem _) = Nothing
 solveCardAttribute state (IssueItem issue) = solveSessionAttribute <$> Map.lookup issue.issueNumber state.appSolveSessions
 
-statusTextAttr :: BoardItem -> AttrName
-statusTextAttr item
-  | isProblem defaultWorkflowConfig item = problemAttr
-  | itemHasAmberWarning item = pendingAttr
-statusTextAttr (PullRequestItem pullRequest) = case pullRequestStatus defaultWorkflowConfig pullRequest of
+statusTextAttr :: WorkflowConfig -> BoardItem -> AttrName
+statusTextAttr config item
+  | isProblem config item = problemAttr
+  | itemHasAmberWarning config item = pendingAttr
+statusTextAttr config (PullRequestItem pullRequest) = case pullRequestStatus config pullRequest of
   StatusPending _ -> pendingAttr
   StatusReady -> readyAttr
   StatusProblem _ -> problemAttr
   StatusNeutral -> dimAttr
-statusTextAttr _ = dimAttr
+statusTextAttr _ _ = dimAttr
 
-itemHasAmberWarning :: BoardItem -> Bool
-itemHasAmberWarning (IssueItem issue) =
+itemHasAmberWarning :: WorkflowConfig -> BoardItem -> Bool
+itemHasAmberWarning config (IssueItem issue) =
   issue.issueLabelOverflow > 0
     || issue.issueAssigneeOverflow > 0
-    || not (null (trackerDiagnosticsForIssue defaultWorkflowConfig issue))
-itemHasAmberWarning (PullRequestItem pullRequest) =
+    || not (null (trackerDiagnosticsForIssue config issue))
+itemHasAmberWarning _ (PullRequestItem pullRequest) =
   pullRequest.pullRequestLabelOverflow > 0 || pullRequest.pullRequestLinkedIssueOverflow > 0
 
 solveBadge :: AppState -> BoardItem -> Widget Name
@@ -1683,7 +1729,7 @@ drawDetails state item =
            ]
     )
   where
-    drawLabelForDetails label = withAttr (labelAttribute label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
+    drawLabelForDetails label = withAttr (labelAttribute state.appConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
     detailsOverflowMarker
       | itemLabelOverflow item > 0 = [withAttr pendingAttr (txt ("+" <> showText (itemLabelOverflow item) <> " labels omitted"))]
       | otherwise = []
@@ -1691,7 +1737,7 @@ drawDetails state item =
       Just (Tracked context _) -> drawTrackingDetails context
       _ -> []
     trackerDiagnosticDetails = case item of
-      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue defaultWorkflowConfig issue)
+      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue state.appConfig.resolvedWorkflow issue)
       PullRequestItem _ -> []
 
 drawTrackerDiagnosticDetails :: [TrackerDiagnostic] -> [Widget Name]
@@ -2672,7 +2718,7 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     . liftIO
     . forkIO
     $ do
-      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent
+      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
       case launched of
         Left message -> do
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
@@ -3282,7 +3328,7 @@ startItemReview (PullRequestItem pullRequest) = startPullRequestReview pullReque
 startIssueReview :: Issue -> EventM Name AppState ()
 startIssueReview issue = do
   state <- get
-  let requestedStage = issueReviewStage issue
+  let requestedStage = issueReviewStage state.appConfig.resolvedWorkflow issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
       | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) ->
@@ -3332,8 +3378,8 @@ reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
   | sessionStage == requestedStage = True
   | otherwise = False
 
-issueReviewStage :: Issue -> ReviewStage
-issueReviewStage issue = reviewStageForLabels (map (.labelName) issue.issueLabels)
+issueReviewStage :: WorkflowConfig -> Issue -> ReviewStage
+issueReviewStage config issue = reviewStageForLabels config (map (.labelName) issue.issueLabels)
 
 newReviewSession :: Issue -> ReviewStage -> ReviewSession
 newReviewSession issue stage =
@@ -3355,7 +3401,7 @@ launchCanonicalIssueReview issueNumber stage = do
   state <- get
   let channel = state.appEventChannel
   void . liftIO . forkIO $ do
-    result <- runCanonicalIssueReview state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
+    result <- runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
 -- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded
@@ -3413,7 +3459,7 @@ startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case orig
   Left message -> setNotice message
   Right origin -> do
     state <- get
-    let action = actionForLabels (map (.labelName) pullRequest.pullRequestLabels)
+    let action = actionForLabels state.appConfig.resolvedWorkflow (map (.labelName) pullRequest.pullRequestLabels)
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
         | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
@@ -3467,7 +3513,7 @@ launchPullRequestFlow number origin action _brand existingSession provenance inp
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent
+    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
     case launched of
       Left message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
@@ -3644,7 +3690,7 @@ startReviewBackend = do
   void
     . liftIO
     . forkIO
-    $ startReviewClient state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
+    $ startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
 
 launchIssueReview :: ReviewClient -> Int -> EventM Name AppState ()
 launchIssueReview client issueNumber = do
@@ -3954,16 +4000,24 @@ startBoardRefresh = do
       void
         . liftIO
         . forkIO
-        $ runBoardRefresh state.appOptions state.appRepository state.appEventChannel
+        $ runBoardRefresh state.appOptions state.appConfig state.appRepository state.appEventChannel
 
-runBoardRefresh :: Options -> Repository -> BChan AppEvent -> IO ()
-runBoardRefresh options repository eventChannel = do
-  timedResult <- timeout boardRefreshTimeoutMicros (fetchGitHubSnapshot repository)
+-- | The configured GitHub/Codex/Claude provider timeouts, converted from
+-- whole seconds to the microseconds 'System.Timeout.timeout' takes.
+githubRefreshTimeoutMicros, codexRefreshTimeoutMicros, claudeRefreshTimeoutMicros :: ResolvedConfig -> Int
+githubRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsGithubSeconds * 1000000
+codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds * 1000000
+claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
+
+runBoardRefresh :: Options -> ResolvedConfig -> Repository -> BChan AppEvent -> IO ()
+runBoardRefresh options config repository eventChannel = do
+  let timeoutMicros = githubRefreshTimeoutMicros config
+  timedResult <- timeout timeoutMicros (fetchGitHubSnapshot config.resolvedLimits config.resolvedWorkflow repository)
   result <- case timedResult of
-    Nothing -> pure (Left (ProviderError RequestTimedOut "GitHub refresh timed out after 30 seconds"))
+    Nothing -> pure (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds")))
     Just (Left providerError) -> pure (Left providerError)
     Just (Right githubResult)
-      | options.optionNoCache -> pure (Right githubResult)
+      | not (cacheEnabled options config) -> pure (Right githubResult)
       | otherwise -> do
           cacheResult <- writeRepositoryCache repository githubResult.githubSnapshot
           pure . Right $ case cacheResult of
@@ -3987,10 +4041,10 @@ startCodexRefresh = do
       void
         . liftIO
         . forkIO
-        $ runCodexRefresh state.appEventChannel
+        $ runCodexRefresh (codexRefreshTimeoutMicros state.appConfig) state.appEventChannel
 
-runCodexRefresh :: BChan AppEvent -> IO ()
-runCodexRefresh eventChannel = fetchCodexUsage >>= writeBChan eventChannel . CodexRefreshFinished
+runCodexRefresh :: Int -> BChan AppEvent -> IO ()
+runCodexRefresh timeoutMicros eventChannel = fetchCodexUsage timeoutMicros >>= writeBChan eventChannel . CodexRefreshFinished
 
 startClaudeRefresh :: EventM Name AppState ()
 startClaudeRefresh = do
@@ -4008,13 +4062,10 @@ startClaudeRefresh = do
       void
         . liftIO
         . forkIO
-        $ runClaudeRefresh state.appEventChannel
+        $ runClaudeRefresh (claudeRefreshTimeoutMicros state.appConfig) state.appEventChannel
 
-runClaudeRefresh :: BChan AppEvent -> IO ()
-runClaudeRefresh eventChannel = fetchClaudeUsage >>= writeBChan eventChannel . ClaudeRefreshFinished
-
-boardRefreshTimeoutMicros :: Int
-boardRefreshTimeoutMicros = 30 * 1000 * 1000
+runClaudeRefresh :: Int -> BChan AppEvent -> IO ()
+runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>= writeBChan eventChannel . ClaudeRefreshFinished
 
 applyBoardRefresh :: Either ProviderError GitHubResult -> EventM Name AppState ()
 applyBoardRefresh result = do
@@ -4026,10 +4077,10 @@ applyBoardRefresh result = do
         }
     Right githubResult ->
       let snapshot = githubResult.githubSnapshot
-          refreshedBoard = deriveBoard defaultWorkflowConfig snapshot
+          refreshedBoard = deriveBoard state.appConfig.resolvedWorkflow snapshot
           (selectedColumn, selectedRows) = preserveSelection state refreshedBoard
           (refreshedOverlay, overlayNotice) = refreshOverlay refreshedBoard state.appOverlay
-          refreshedReviewSessions = reconcileReviewSessions snapshot.snapshotIssues state.appReviewSessions
+          refreshedReviewSessions = reconcileReviewSessions state.appConfig.resolvedWorkflow snapshot.snapshotIssues state.appReviewSessions
           refreshedPullRequestSessions = reconcilePullRequestSessions snapshot.snapshotPullRequests state.appPullRequestReviewSessions
           successNotice = refreshSuccessNotice snapshot githubResult.githubWarnings
        in state
@@ -4123,8 +4174,8 @@ advanceAutoSolveReview snapshot issueNumber session progress = case progress.aut
           modifySolveSession issueNumber
             (\current -> current {solveSessionActivity = "PR review needs input; press p"})
         SolveFinished
-          | pullRequestHasLabel "reviewed:approve" pullRequest -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
-          | pullRequestHasLabel "reviewed:changes" pullRequest -> resumeAutoSolveRevision issueNumber pullRequest session progress
+          | pullRequestHasLabel state.appConfig.resolvedWorkflow.approvalLabel pullRequest -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
+          | pullRequestHasLabel state.appConfig.resolvedWorkflow.changesRequestedLabel pullRequest -> resumeAutoSolveRevision issueNumber pullRequest session progress
           | otherwise ->
               modifySolveSession issueNumber
                 (\current -> current {solveSessionActivity = "waiting for review verdict; press u to retry"})
@@ -4139,12 +4190,14 @@ advanceAutoSolveReview snapshot issueNumber session progress = case progress.aut
 advanceAutoSolveAwaitingRereview :: RepoSnapshot -> Int -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
 advanceAutoSolveAwaitingRereview snapshot issueNumber session progress = case progress.autoSolvePullRequest >>= findSnapshotPullRequest snapshot of
   Nothing -> stopAutoSolve issueNumber "the autosolve PR disappeared after revision"
-  Just pullRequest -> case pullRequestVerdictForLabels (map (.labelName) pullRequest.pullRequestLabels) of
-    PullRequestVerdictApproved -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
-    PullRequestVerdictChangesRequested -> resumeAutoSolveRevision issueNumber pullRequest session (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1})
-    PullRequestVerdictPending ->
-      modifySolveSession issueNumber
-        (\current -> current {solveSessionActivity = "waiting for the canonical rereview verdict; press u to retry"})
+  Just pullRequest -> do
+    state <- get
+    case pullRequestVerdictForLabels state.appConfig.resolvedWorkflow (map (.labelName) pullRequest.pullRequestLabels) of
+      PullRequestVerdictApproved -> completeAutoSolve issueNumber pullRequest.pullRequestNumber
+      PullRequestVerdictChangesRequested -> resumeAutoSolveRevision issueNumber pullRequest session (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1})
+      PullRequestVerdictPending ->
+        modifySolveSession issueNumber
+          (\current -> current {solveSessionActivity = "waiting for the canonical rereview verdict; press u to retry"})
 
 resumeAutoSolveRevision :: Int -> PullRequest -> SolveSession -> AutoSolveProgress -> EventM Name AppState ()
 resumeAutoSolveRevision issueNumber pullRequest session progress
@@ -4157,7 +4210,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
         if Map.member issueNumber state.appSolveProcesses
           then pure ()
           else do
-            let prompt = autoSolveRevisionPrompt session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
+            let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow state.appOptions.optionConfig state.appRepository session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
             modifySolveSession issueNumber
               ( \current ->
                   current
@@ -4209,16 +4262,33 @@ failAutoSolve issueNumber reason = do
     )
   setNotice ("Autosolve #" <> showText issueNumber <> " failed: " <> sanitizeText reason)
 
-autoSolveRevisionPrompt :: SolverBrand -> Int -> Int -> Text
-autoSolveRevisionPrompt brand pullRequestNumber reviewRound =
+autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Int -> Int -> Text
+autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound =
   Text.unlines
-    [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
-      "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
-      "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
-      "Never merge, and leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator."
-    ]
+    ( [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
+        "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
+        "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
+        "Never merge, and leave "
+          <> config.approvalLabel
+          <> ", "
+          <> config.changesRequestedLabel
+          <> ", and reviewed:revised to the canonical review coordinator."
+      ]
+        <> configLines
+    )
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
+    -- Explicit --repo always accompanies pr-revise, not only when a custom
+    -- --config is set: Kanban's own resolved repository (which may come
+    -- from an explicit --repo override, e.g. reviewing upstream from a fork
+    -- checkout) must never be silently re-derived by pr-revise from the
+    -- checkout's configured remote instead.
+    configLines =
+      [ "Pass --repo " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> " to " <> commandName "pr-revise" <> " so it resolves the same repository as this dashboard."
+      ]
+        <> case configPath of
+          Nothing -> []
+          Just path -> ["Pass --config " <> Text.pack path <> " to " <> commandName "pr-revise" <> " so it resolves this dashboard's configured workflow labels."]
 
 autoSolveReviewLimit :: Int
 autoSolveReviewLimit = 5
@@ -4244,8 +4314,8 @@ boardPullRequestNumbers board =
         PullRequestItem pullRequest <- [entryItem entry]
     ]
 
-reconcileReviewSessions :: [Issue] -> Map Int ReviewSession -> Map Int ReviewSession
-reconcileReviewSessions issues = Map.mapWithKey reconcile
+reconcileReviewSessions :: WorkflowConfig -> [Issue] -> Map Int ReviewSession -> Map Int ReviewSession
+reconcileReviewSessions config issues = Map.mapWithKey reconcile
   where
     issuesByNumber = Map.fromList [(issue.issueNumber, issue) | issue <- issues]
     reconcile issueNumber session = case Map.lookup issueNumber issuesByNumber of
@@ -4256,12 +4326,12 @@ reconcileReviewSessions issues = Map.mapWithKey reconcile
             reviewSessionPhase = reconciledPhase issue session
           }
     reconciledPhase issue session
-      | issueHasLabel "reviewed:approve" issue = ReviewFinished
+      | issueHasLabel config.approvalLabel issue = ReviewFinished
       | issueHasLabel "reviewed:revised" issue
           && session.reviewSessionPhase == ReviewFailed
           && session.reviewSessionStage == IssueRevision =
           ReviewRevised
-      | issueHasLabel "reviewed:changes" issue && session.reviewSessionPhase == ReviewFailed = ReviewNeedsChanges
+      | issueHasLabel config.changesRequestedLabel issue && session.reviewSessionPhase == ReviewFailed = ReviewNeedsChanges
       | otherwise = session.reviewSessionPhase
 
 issueHasLabel :: Text -> Issue -> Bool
@@ -4288,9 +4358,9 @@ applyUsageRefresh provider displayName result = case result of
     state <- get
     let snapshots = Map.insert provider snapshot state.appUsage
     cacheWarning <-
-      if state.appOptions.optionNoCache
-        then pure Nothing
-        else either Just (const Nothing) <$> liftIO (writeUsageCache snapshots)
+      if cacheEnabled state.appOptions state.appConfig
+        then either Just (const Nothing) <$> liftIO (writeUsageCache snapshots)
+        else pure Nothing
     modify
       ( \current ->
           current
@@ -4618,15 +4688,21 @@ columnHeadingAttr Active = activeAttr
 columnHeadingAttr Reviewing = reviewingAttr
 columnHeadingAttr Done = doneAttr
 
-labelAttribute :: Text -> AttrName
-labelAttribute name
-  | folded == "reviewed:approve" = labelApprovalAttr
+-- | Configurable blocking severity governs pull-request status color and
+-- sorting (via 'Kanban.Workflow.pullRequestStatus') only; the label chip
+-- itself always renders the changes-requested/blocked label as a problem,
+-- matching unchanged issue-card treatment.
+labelAttribute :: WorkflowConfig -> Text -> AttrName
+labelAttribute config name
+  | folded == Text.toCaseFold config.approvalLabel = labelApprovalAttr
   | folded == "reviewed:revised" = pendingAttr
-  | folded `elem` ["blocked", "reviewed:changes", "bug"] = labelProblemAttr
+  | folded == Text.toCaseFold config.changesRequestedLabel || folded `Set.member` foldedBlockedLabels = labelProblemAttr
+  | folded == "bug" = labelProblemAttr
   | folded `elem` ["ui", "input"] = labelUiAttr
   | otherwise = labelDefaultAttr
   where
     folded = Text.toCaseFold name
+    foldedBlockedLabels = Set.map Text.toCaseFold config.blockedLabels
 
 titleAttr, headingAttr, providerAttr, footerAttr, noticeAttr, dimAttr :: AttrName
 neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, attentionAttr, readyAttr, problemAttr :: AttrName

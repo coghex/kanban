@@ -590,5 +590,60 @@ class ExtractIssueNumbersTests(unittest.TestCase):
         self.assertEqual(drain_prs.extract_issue_numbers(pr), [])
 
 
+class ConfiguredLabelsTests(unittest.TestCase):
+    """drain_prs.py's main() reassigns APPROVE_LABEL/CHANGES_LABEL from the
+    resolved kanban_config.toml at startup (see main()). These tests exercise
+    that same reassignment mechanism directly, without any real GitHub calls."""
+
+    def _context(self, path):
+        return drain_prs.RepoContext(path, "example/project", "project", "master")
+
+    def test_get_open_approved_prs_honors_a_configured_approval_label(self):
+        prs = [
+            {
+                "number": 1,
+                "labels": [{"name": "custom:approve"}],
+                "isDraft": False,
+                "headRefOid": "a" * 40,
+            },
+            {
+                "number": 2,
+                "labels": [{"name": "reviewed:approve"}],
+                "isDraft": False,
+                "headRefOid": "b" * 40,
+            },
+        ]
+        with (
+            mock.patch.object(drain_prs, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(drain_prs, "CHANGES_LABEL", "custom:changes"),
+            mock.patch.object(drain_prs, "run_json", return_value=prs),
+        ):
+            approved = drain_prs.get_open_approved_prs(
+                self._context(Path("/tmp")), dry_run=True
+            )
+        self.assertEqual([pr["number"] for pr in approved], [1])
+
+    def test_mark_changes_requested_applies_the_configured_labels(self):
+        calls: list[list[str]] = []
+
+        def fake_run(args, *, cwd, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        before = {"number": 9, "labels": [{"name": "custom:approve"}]}
+        after = {"number": 9, "labels": [{"name": "custom:changes"}]}
+        with (
+            mock.patch.object(drain_prs, "APPROVE_LABEL", "custom:approve"),
+            mock.patch.object(drain_prs, "CHANGES_LABEL", "custom:changes"),
+            mock.patch.object(drain_prs, "run", side_effect=fake_run),
+            mock.patch.object(drain_prs, "get_pr", side_effect=[before, after]),
+        ):
+            drain_prs.mark_changes_requested(self._context(Path("/tmp")), 9)
+        self.assertIn("custom:changes", calls[0])
+        self.assertIn("custom:approve", calls[0])
+        self.assertNotIn("reviewed:changes", calls[0])
+        self.assertNotIn("reviewed:approve", calls[0])
+
+
 if __name__ == "__main__":
     unittest.main()

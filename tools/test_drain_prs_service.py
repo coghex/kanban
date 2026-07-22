@@ -2,6 +2,7 @@
 
 import json
 import plistlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -211,6 +212,55 @@ class ControllerConfigurationTests(unittest.TestCase):
         self.assertEqual(result, 0)
         service_log.assert_called_once()
         write_incident.assert_not_called()
+
+    def test_default_branch_preflight_honors_a_configured_non_origin_remote(self):
+        with tempfile.TemporaryDirectory() as remote_dir, tempfile.TemporaryDirectory() as repo_dir:
+            remote = Path(remote_dir)
+            repo = Path(repo_dir)
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.email", "test@example.test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "user.name", "Test"], check=True
+            )
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "branch", "-M", "main"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "upstream", str(remote)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "push", "-q", "upstream", "main"], check=True
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "set-head",
+                    "upstream",
+                    "main",
+                ],
+                check=True,
+            )
+            with mock.patch.object(
+                drain_prs_service, "CONFIGURED_REMOTE_NAME", "upstream"
+            ):
+                drain_prs_service.require_default_branch(repo)
+                with self.assertRaisesRegex(
+                    drain_prs_service.ServiceError, "origin/HEAD"
+                ):
+                    drain_prs_service.require_default_branch(repo, remote_name="origin")
 
 
 if __name__ == "__main__":

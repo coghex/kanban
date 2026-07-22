@@ -1,5 +1,6 @@
 """Safety tests for the macOS PR drainer installer."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -67,6 +68,7 @@ class InstallerPolicyTests(unittest.TestCase):
         (tools / "drain_prs_service.py").write_text(
             "controller\n", encoding="utf-8"
         )
+        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
         self.install_dir = self.root / "installed"
 
     def test_dry_run_makes_no_files_and_never_starts(self):
@@ -142,6 +144,44 @@ class InstallerPolicyTests(unittest.TestCase):
                 self.install_dir, "https://notify.example.test/topic"
             )
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep\n")
+
+    def test_writing_the_notification_url_preserves_a_previously_persisted_config_path(
+        self,
+    ):
+        install_drainer.write_installed_config_path(
+            self.install_dir, "/home/user/.config/kanban/config.toml"
+        )
+        install_drainer.write_notification_config(
+            self.install_dir, "https://notify.example.test/topic"
+        )
+        contents = json.loads(
+            (self.install_dir / "config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            contents["config_path"], "/home/user/.config/kanban/config.toml"
+        )
+        self.assertEqual(
+            contents["ntfy_url"], "https://notify.example.test/topic"
+        )
+
+    def test_writing_the_config_path_preserves_a_previously_persisted_notification_url(
+        self,
+    ):
+        install_drainer.write_notification_config(
+            self.install_dir, "https://notify.example.test/topic"
+        )
+        install_drainer.write_installed_config_path(
+            self.install_dir, "/home/user/.config/kanban/config.toml"
+        )
+        contents = json.loads(
+            (self.install_dir / "config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            contents["ntfy_url"], "https://notify.example.test/topic"
+        )
+        self.assertEqual(
+            contents["config_path"], "/home/user/.config/kanban/config.toml"
+        )
 
 
 if __name__ == "__main__":

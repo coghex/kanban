@@ -27,7 +27,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository (..))
+import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
@@ -71,10 +71,10 @@ originFromBody body
 occurrenceCount :: Text -> Text -> Int
 occurrenceCount needle haystack = max 0 (length (Text.splitOn needle haystack) - 1)
 
-actionForLabels :: [Text] -> PullRequestAction
-actionForLabels labels
+actionForLabels :: WorkflowConfig -> [Text] -> PullRequestAction
+actionForLabels config labels
   | has "reviewed:revised" = PullRequestRereview
-  | has "reviewed:changes" = PullRequestRevision
+  | has config.changesRequestedLabel = PullRequestRevision
   | otherwise = PullRequestReview
   where
     folded = map Text.toCaseFold labels
@@ -88,10 +88,10 @@ data PullRequestVerdict = PullRequestVerdictApproved | PullRequestVerdictChanges
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-pullRequestVerdictForLabels :: [Text] -> PullRequestVerdict
-pullRequestVerdictForLabels labels
-  | has "reviewed:approve" = PullRequestVerdictApproved
-  | has "reviewed:changes" = PullRequestVerdictChangesRequested
+pullRequestVerdictForLabels :: WorkflowConfig -> [Text] -> PullRequestVerdict
+pullRequestVerdictForLabels config labels
+  | has config.approvalLabel = PullRequestVerdictApproved
+  | has config.changesRequestedLabel = PullRequestVerdictChangesRequested
   | otherwise = PullRequestVerdictPending
   where
     folded = map Text.toCaseFold labels
@@ -103,8 +103,8 @@ agentForAction PullRequestClaude PullRequestRevision = ClaudeSolver
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlow repository pullRequestNumber origin action existingSession existingLogPath provenance userMessage eventSink = do
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlow repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
@@ -162,7 +162,7 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand existingSession provenance userMessage))
+      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,
           std_out = CreatePipe,
@@ -170,17 +170,17 @@ runPullRequestFlow repository pullRequestNumber origin action existingSession ex
           create_group = True
         }
 
-pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> [String]
-pullRequestArguments number origin action CodexSolver existingSession provenance userMessage = case existingSession of
-  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action CodexSolver)]
-  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt action provenance userMessage)]
+pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
+pullRequestArguments number origin action CodexSolver configPath repository config existingSession provenance userMessage = case existingSession of
+  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath repository config CodexSolver)]
+  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt config action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
     codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-pullRequestArguments number origin action ClaudeSolver existingSession provenance userMessage =
+pullRequestArguments number origin action ClaudeSolver configPath repository config existingSession provenance userMessage =
   ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action ClaudeSolver else resumePrompt action provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath repository config ClaudeSolver else resumePrompt config action provenance userMessage)]
 
 codexModel :: PullRequestAction -> String
 codexModel PullRequestRevision = "gpt-5.4"
@@ -197,10 +197,41 @@ claudeModel _ = "claude-opus-4-8"
 claudeEffort :: PullRequestAction -> String
 claudeEffort _ = "xhigh"
 
-initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Text
-initialPrompt number _origin action brand = Text.unlines (actionLines <> interactionLines)
+initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> Repository -> WorkflowConfig -> SolverBrand -> Text
+initialPrompt number _origin action configPath repository config brand = Text.unlines (actionLines <> configLines <> interactionLines)
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
+    -- Explicit --repo always accompanies these commands, not only when a
+    -- custom --config is set: Kanban's own resolved repository (which may
+    -- come from an explicit --repo override, e.g. reviewing upstream from a
+    -- fork checkout) must never be silently re-derived by the canonical
+    -- coordinator from the checkout's configured remote instead.
+    configLines =
+      [ "Pass --repo "
+          <> repository.repositoryOwner
+          <> "/"
+          <> repository.repositoryName
+          <> " to "
+          <> commandName "pr-review"
+          <> ", "
+          <> commandName "pr-rereview"
+          <> ", or "
+          <> commandName "pr-revise"
+          <> " (whichever applies) so it resolves the same repository as this dashboard."
+      ]
+        <> case configPath of
+          Nothing -> []
+          Just path ->
+            [ "Pass --config "
+                <> Text.pack path
+                <> " to "
+                <> commandName "pr-review"
+                <> ", "
+                <> commandName "pr-rereview"
+                <> ", or "
+                <> commandName "pr-revise"
+                <> " (whichever applies) so it resolves the same configured workflow labels as this dashboard."
+            ]
     actionLines = case action of
       PullRequestReview ->
         [ "Run " <> commandName "pr-review" <> " for PR #" <> numberText <> ".",
@@ -213,7 +244,11 @@ initialPrompt number _origin action brand = Text.unlines (actionLines <> interac
       PullRequestRevision ->
         [ "Run " <> commandName "pr-revise" <> " for PR #" <> numberText <> ".",
           "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
-          "Never merge, and leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator."
+          "Never merge, and leave "
+            <> config.approvalLabel
+            <> ", "
+            <> config.changesRequestedLabel
+            <> ", and reviewed:revised to the canonical review coordinator."
         ]
     interactionLines =
       [ "If ambiguity, credentials, or a product decision blocks safe progress, stop with exactly KANBAN_NEEDS_INPUT: <one concrete question>. Do not guess.",
@@ -221,8 +256,8 @@ initialPrompt number _origin action brand = Text.unlines (actionLines <> interac
       ]
     numberText = Text.pack (show number)
 
-resumePrompt :: PullRequestAction -> ResumeProvenance -> Text -> Text
-resumePrompt action provenance answer = Text.unlines [resumeProvenanceHeader provenance, Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
+resumePrompt :: WorkflowConfig -> PullRequestAction -> ResumeProvenance -> Text -> Text
+resumePrompt config action provenance answer = Text.unlines [resumeProvenanceHeader config provenance, Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
 
 actionName :: PullRequestAction -> Text
 actionName PullRequestReview = "review"

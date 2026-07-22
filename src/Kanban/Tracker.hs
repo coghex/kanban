@@ -29,7 +29,7 @@ trackerFromIssue :: WorkflowConfig -> Issue -> Maybe Tracker
 trackerFromIssue config issue
   | not (hasTrackerLabel config issue.issueLabels) = Nothing
   | otherwise =
-      let (children, diagnostics) = parseTrackerBody issue.issueBody
+      let (children, diagnostics) = parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody
           childMap = Map.fromList [(child.trackerChildIssueNumber, child) | child <- children]
        in Just
             Tracker
@@ -40,24 +40,24 @@ trackerFromIssue config issue
                 trackerDiagnostics = diagnostics
               }
 
-parseTrackerChildren :: Text -> [TrackerChild]
-parseTrackerChildren = fst . parseTrackerBody
+parseTrackerChildren :: [Text] -> Text -> [TrackerChild]
+parseTrackerChildren additionalHeadings = fst . parseTrackerBody additionalHeadings
 
-parseTrackerBody :: Text -> ([TrackerChild], [TrackerDiagnostic])
-parseTrackerBody body =
+parseTrackerBody :: [Text] -> Text -> ([TrackerChild], [TrackerDiagnostic])
+parseTrackerBody additionalHeadings body =
   (reverse finalState.parsedChildren, finalizeDiagnostics finalState)
   where
     initialState = ParseState Nothing False False 0 [] []
-    finalState = foldl' parseLine initialState (zip [1 ..] (Text.lines body))
+    finalState = foldl' (parseLine additionalHeadings) initialState (zip [1 ..] (Text.lines body))
     finalizeDiagnostics state
       | not state.trackerHeadingSeen = [TrackerSectionMissing]
       | null state.parsedChildren = reverse state.parseDiagnostics <> [TrackerChildrenMissing]
       | otherwise = reverse state.parseDiagnostics
 
-parseLine :: ParseState -> (Int, Text) -> ParseState
-parseLine state (lineNumber, rawLine) = case parseHeading rawLine of
+parseLine :: [Text] -> ParseState -> (Int, Text) -> ParseState
+parseLine additionalHeadings state (lineNumber, rawLine) = case parseHeading rawLine of
   Just (level, heading)
-    | isTrackerHeading heading -> state {activeHeadingLevel = Just level, sectionExcluded = False, trackerHeadingSeen = True}
+    | isTrackerHeading additionalHeadings heading -> state {activeHeadingLevel = Just level, sectionExcluded = False, trackerHeadingSeen = True}
     | otherwise -> case state.activeHeadingLevel of
         Just activeLevel
           | level <= activeLevel -> state {activeHeadingLevel = Nothing, sectionExcluded = False}
@@ -172,13 +172,14 @@ parseHeading rawLine =
         then Nothing
         else Just (Text.length hashes, heading)
 
-isTrackerHeading :: Text -> Bool
-isTrackerHeading rawHeading =
+isTrackerHeading :: [Text] -> Text -> Bool
+isTrackerHeading additionalHeadings rawHeading =
   normalized == "children"
     || "children " `Text.isPrefixOf` normalized
     || normalized == "phase plan"
     || "phase plan " `Text.isPrefixOf` normalized
     || isNumberedPhase normalized
+    || normalized `elem` map normalizeHeading additionalHeadings
   where
     normalized = normalizeHeading rawHeading
 
@@ -206,7 +207,7 @@ hasTrackerLabel config labels =
 
 trackerDiagnosticsForIssue :: WorkflowConfig -> Issue -> [TrackerDiagnostic]
 trackerDiagnosticsForIssue config issue
-  | hasTrackerLabel config issue.issueLabels = snd (parseTrackerBody issue.issueBody)
+  | hasTrackerLabel config issue.issueLabels = snd (parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody)
   | otherwise = []
 
 renderTrackerDiagnostic :: TrackerDiagnostic -> Text

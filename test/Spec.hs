@@ -25,8 +25,10 @@ import Kanban.Cache
     writeRepositoryCache,
     writeUsageCache,
   )
+import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
+import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
@@ -49,7 +51,7 @@ import Kanban.Process
     membersStillInGroup,
     readProcessSnapshot,
   )
-import Kanban.Repository (parseRepositoryName)
+import Kanban.Repository (parseRepositoryName, resolveRepository)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestOrigin (..),
@@ -78,7 +80,12 @@ import Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    githubIssueCommentArguments,
+    githubIssueEditArguments,
+    githubIssueViewArguments,
+    githubLabelCreateArguments,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     renderCanonicalIssueReviewResult,
@@ -125,6 +132,20 @@ import Kanban.UI
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
+    approvedAttr,
+    approvedInteriorAttr,
+    autoSolveRevisionPrompt,
+    cacheEnabled,
+    cardExcerptLimit,
+    cardInteriorAttribute,
+    claudeRefreshTimeoutMicros,
+    codexRefreshTimeoutMicros,
+    githubRefreshTimeoutMicros,
+    neutralAttr,
+    pendingAttr,
+    problemAttr,
+    pullRequestCardAttribute,
+    readyAttr,
     reconcileReviewSessions,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -137,7 +158,7 @@ import Kanban.UI
     revisedAttr,
     solveSessionAlreadyResolved,
   )
-import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, pullRequestStatus)
+import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, pullRequestStatus)
 import Kanban.Worker
   ( ProviderSlot (..),
     PullRequestWorkerTask (..),
@@ -169,12 +190,12 @@ import Kanban.Worker
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -248,7 +269,9 @@ main = hspec $ do
                 workerUserMessage = "continue",
                 workerParent = Just parent,
                 workerCreatedAt = epoch,
-                workerMaxRuntimeSeconds = 14400
+                workerMaxRuntimeSeconds = 14400,
+                workerConfigPath = Nothing,
+                workerWorkflowConfig = defaultWorkflowConfig
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       eitherDecode (encode (WorkerFinished (SolveNeedsInput "choose a branch")))
@@ -512,7 +535,9 @@ main = hspec $ do
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = now,
-                  workerMaxRuntimeSeconds = 60
+                  workerMaxRuntimeSeconds = 60,
+                  workerConfigPath = Nothing,
+                  workerWorkflowConfig = defaultWorkflowConfig
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"
@@ -1585,7 +1610,9 @@ main = hspec $ do
                   workerUserMessage = "",
                   workerParent = Nothing,
                   workerCreatedAt = longAgo,
-                  workerMaxRuntimeSeconds = 60
+                  workerMaxRuntimeSeconds = 60,
+                  workerConfigPath = Nothing,
+                  workerWorkflowConfig = defaultWorkflowConfig
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-818-overdue-spawn.spec.json"
@@ -2201,9 +2228,12 @@ main = hspec $ do
           ]
 
     it "selects revision and rereview stages from durable workflow labels" $ do
-      reviewStageForLabels [] `shouldBe` InitialReview
-      reviewStageForLabels ["reviewed:changes"] `shouldBe` IssueRevision
-      reviewStageForLabels ["REVIEWED:REVISED", "reviewed:changes"] `shouldBe` IssueRereview
+      reviewStageForLabels defaultWorkflowConfig [] `shouldBe` InitialReview
+      reviewStageForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` IssueRevision
+      reviewStageForLabels defaultWorkflowConfig ["REVIEWED:REVISED", "reviewed:changes"] `shouldBe` IssueRereview
+
+    it "selects the revision stage from a configured changes-requested label" $
+      reviewStageForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` IssueRevision
 
     it "formats the canonical v2 gate without exposing raw JSON" $ do
       let payload =
@@ -2228,6 +2258,24 @@ main = hspec $ do
             "  Blocking reasons:",
             "    • latest current review verdict is CHANGES_REQUESTED"
           ]
+
+    it "passes an explicit --repo, matching Kanban's own resolved repository, to the canonical issue reviewer" $ do
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          arguments = canonicalIssueReviewArguments "/opt/approve_issues.py" repository 844 InitialReview Nothing
+      arguments `shouldContain` ["--repo", "coghex/kanban"]
+      arguments `shouldContain` ["--path", "/tmp/repo"]
+
+    it "resolves a --repo override the same way regardless of the checkout's own remote, mirroring a fork checkout" $ do
+      -- The dashboard's own --repo option can point at a different
+      -- repository than the checkout's configured remote (e.g. reviewing
+      -- upstream from a fork checkout); the canonical reviewer must be told
+      -- the same explicit identity Kanban resolved, not left to re-derive
+      -- one from the remote itself.
+      let forkCheckout = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          arguments = canonicalIssueReviewArguments "/opt/approve_issues.py" forkCheckout 844 IssueRereview (Just "/tmp/custom.toml")
+      arguments `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      arguments `shouldContain` ["--rereview", "844"]
+      arguments `shouldContain` ["--config", "/tmp/custom.toml"]
 
     it "resolves the bundled canonical issue reviewer from its Kanban-managed install directory" $ do
       temporaryRoot <- createTemporaryDirectory
@@ -2266,7 +2314,7 @@ main = hspec $ do
                 "addLabels" .= (["reviewed:approve"] :: [Text]),
                 "removeLabels" .= (["reviewed:changes", "reviewed:revised"] :: [Text])
               ]
-      decodeGitHubIssueToolRequest request
+      decodeGitHubIssueToolRequest defaultWorkflowConfig request
         `shouldBe` Right
           GitHubIssueToolRequest
             { githubToolOperation = GitHubIssueUpdate,
@@ -2275,8 +2323,27 @@ main = hspec $ do
               githubToolAddLabels = ["reviewed:approve"],
               githubToolRemoveLabels = ["reviewed:changes", "reviewed:revised"]
             }
-      decodeGitHubIssueToolRequest (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["bug"] :: [Text])])
+      decodeGitHubIssueToolRequest defaultWorkflowConfig (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["bug"] :: [Text])])
         `shouldBe` Left "kanban_github_issue may only change reviewed:approve, reviewed:changes, and reviewed:revised"
+      decodeGitHubIssueToolRequest
+        (defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"})
+        (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["lgtm"] :: [Text])])
+        `shouldSatisfy` isRight
+
+    it "passes an explicit --repo, matching Kanban's own resolved repository, to every embedded GitHub tool command" $ do
+      let repo = "upstream-owner/upstream-repo"
+          request =
+            GitHubIssueToolRequest
+              { githubToolOperation = GitHubIssueUpdate,
+                githubToolIssue = 844,
+                githubToolComment = Just "## Review result\nApproved.",
+                githubToolAddLabels = ["reviewed:approve"],
+                githubToolRemoveLabels = ["reviewed:changes", "reviewed:revised"]
+              }
+      githubIssueViewArguments repo 844 `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubIssueCommentArguments repo 844 `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubLabelCreateArguments repo `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubIssueEditArguments repo request `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
 
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
@@ -2286,8 +2353,8 @@ main = hspec $ do
       claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer ""
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
@@ -2295,10 +2362,10 @@ main = hspec $ do
       claudeArguments `shouldContain` ["--effort", "high"]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing ResumeAnswer "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing ResumeAnswer "")
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -2308,8 +2375,19 @@ main = hspec $ do
       claudeAutoSolvePrompt `shouldNotContain` "/autosolve"
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
+    it "passes a configured --config path through to the read-only gate-check instruction" $ do
+      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
+      promptWithoutConfig `shouldNotContain` "Pass --config"
+
+    it "always passes Kanban's own resolved --repo to the read-only gate-check instruction, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to the read-only v2 gate check"
+
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing ResumeAnswer "")
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "existing worktree for issue #782"
       solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
       solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
@@ -2317,17 +2395,23 @@ main = hspec $ do
       solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeAnswer "pick option B")
-          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
-          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
-      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
       interruptPrompt `shouldNotContain` "The user answered"
       interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      automatedPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAutomatedChangesRequested)
+      automatedPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAutomatedChangesRequested)
       automatedPrompt `shouldNotContain` "The user answered"
       automatedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+
+    it "names the configured changes-requested label in the automated resume header instead of the literal default" $ do
+      let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
+          customAutomatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      customAutomatedPrompt `shouldContain` "the PR received needs-work"
+      customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
     it "extracts Codex session ids and readable agent output" $ do
       parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
@@ -2381,10 +2465,13 @@ main = hspec $ do
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
 
     it "advances review, revision, and rereview from durable labels" $ do
-      actionForLabels [] `shouldBe` PullRequestReview
-      actionForLabels ["reviewed:changes"] `shouldBe` PullRequestRevision
-      actionForLabels ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
-      actionForLabels ["reviewed:revised"] `shouldBe` PullRequestRereview
+      actionForLabels defaultWorkflowConfig [] `shouldBe` PullRequestReview
+      actionForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` PullRequestRevision
+      actionForLabels defaultWorkflowConfig ["reviewed:changes", "reviewed:revised"] `shouldBe` PullRequestRereview
+      actionForLabels defaultWorkflowConfig ["reviewed:revised"] `shouldBe` PullRequestRereview
+
+    it "advances to revision from a configured changes-requested label" $
+      actionForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` PullRequestRevision
 
     it "uses the opposite brand to review and the origin brand to revise" $ do
       agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
@@ -2393,14 +2480,14 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing ResumeAnswer "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing ResumeAnswer "")
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
@@ -2408,26 +2495,64 @@ main = hspec $ do
       codexOriginRevisionPrompt `shouldNotContain` "create reviewed:revised"
       codexOriginRevisionPrompt `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
 
+    it "builds the revision prompt's coordinator-owned labels from the configured workflow labels, not literals" $ do
+      let customConfig = defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"}
+          customPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig Nothing ResumeAnswer "")
+      customPrompt `shouldContain` "leave lgtm, needs-work, and reviewed:revised to the canonical review coordinator"
+      customPrompt `shouldNotContain` "reviewed:approve, reviewed:changes"
+
+    it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
+      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+      configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
+      defaultPrompt `shouldNotContain` "--config"
+
+    it "always tells a spawned reviewer to pass Kanban's own resolved --repo to the canonical coordinator, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
+
+    it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") repository ClaudeSolver 42 1)
+          defaultPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing repository ClaudeSolver 42 1)
+      configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
+      defaultPrompt `shouldNotContain` "--config"
+
+    it "always tells a resumed autosolve pr-revise to pass Kanban's own resolved --repo, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing forkRepository ClaudeSolver 42 1)
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
+
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
-      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing ResumeAnswer "")
-          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing ResumeAnswer "")
+      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       initialReviewPrompt `shouldNotContain` "reviewed:revised"
       rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
 
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeAnswer "looks good")
-          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "session-1") ResumeInterruptGuidance "check the other file too")
-      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
       interruptPrompt `shouldNotContain` "The user answered"
       interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
 
+    it "names the configured changes-requested label in a resumed PR revision's automated-handoff header" $ do
+      let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
+          customAutomatedPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      customAutomatedPrompt `shouldContain` "the PR received needs-work"
+      customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
+
     it "derives a pure post-revision verdict from current labels instead of waiting on a reviewed:revised handoff" $ do
-      pullRequestVerdictForLabels [] `shouldBe` PullRequestVerdictPending
-      pullRequestVerdictForLabels ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
-      pullRequestVerdictForLabels ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
-      pullRequestVerdictForLabels ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+      pullRequestVerdictForLabels defaultWorkflowConfig [] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:revised"] `shouldBe` PullRequestVerdictPending
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:approve"] `shouldBe` PullRequestVerdictApproved
+      pullRequestVerdictForLabels defaultWorkflowConfig ["reviewed:changes"] `shouldBe` PullRequestVerdictChangesRequested
+
+    it "derives a post-revision verdict using a configured approval label" $
+      pullRequestVerdictForLabels (defaultWorkflowConfig {approvalLabel = "lgtm"}) ["lgtm"] `shouldBe` PullRequestVerdictApproved
 
     it "starts a fresh r-key revision round instead of reopening a finished one when the PR changed since it launched" $ do
       let launchedAt = UTCTime (fromGregorian 2026 7 18) 0
@@ -2585,7 +2710,7 @@ main = hspec $ do
               reviewSessionSpinnerFrame = 0
             }
         reconciledPhaseFor issue session =
-          (reconcileReviewSessions [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
+          (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
 
     it "reconciles a failed issue-revision session to the revised state once the issue carries reviewed:revised" $ do
       let issue = (baseIssue 59 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
@@ -2861,14 +2986,14 @@ main = hspec $ do
             "## Related\n- [ ] #99 — A1: Ignore\n"
               <> "## Children\n### Phase A\n- [ ] #2 — **A10:** Later\n- [x] **#1 — A2: Earlier**\n"
               <> "External prerequisite:\n- [ ] #77 — A3: Ignore\n"
-          children = parseTrackerChildren body
+          children = parseTrackerChildren [] body
       map (.trackerChildIssueNumber) children `shouldBe` [2, 1]
       map (.trackerChildComplete) children `shouldBe` [False, True]
       map (.trackerChildImplementationKey) (sortOn implementationSortKey children) `shouldBe` [Just "A2", Just "A10"]
 
     it "reports structural checklist loss while retaining valid children" $ do
       let body = "## Children\n- [ ] #2 — A1: Valid\n- [ ] missing reference\n- [?] #3\n- [x] #2 — duplicate"
-          (children, diagnostics) = parseTrackerBody body
+          (children, diagnostics) = parseTrackerBody [] body
       map (.trackerChildIssueNumber) children `shouldBe` [2]
       diagnostics
         `shouldBe` [ TrackerIssueReferenceMissing 3,
@@ -2889,9 +3014,16 @@ main = hspec $ do
     it "diagnoses a labeled tracker without a tracker section" $ do
       let body = "## Context\n- [ ] #2 — A1: Not authoritative"
           tracker = (baseIssue 100 []) {issueLabels = [Label "epic" "5319e7"], issueBody = body}
-      snd (parseTrackerBody body) `shouldBe` [TrackerSectionMissing]
-      snapshotWarnings (RepoSnapshot [tracker] [] epoch False False)
+      snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
+      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
         `shouldSatisfy` any (Data.Text.isInfixOf "1 tracker")
+
+    it "recognizes a configured additional tracker-section heading" $ do
+      let body = "## Milestones\n- [ ] #2 — A1: Valid"
+      snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
+      snd (parseTrackerBody ["Milestones"] body) `shouldBe` []
+      map (.trackerChildIssueNumber) (parseTrackerChildren ["Milestones"] body) `shouldBe` [2]
+      map (.trackerChildIssueNumber) (parseTrackerChildren [] body) `shouldBe` []
 
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
@@ -2908,10 +3040,16 @@ main = hspec $ do
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
           pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2
-          let warnings = snapshotWarnings (RepoSnapshot [issue] [pullRequest] epoch True True)
+          let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch True True)
           length warnings `shouldBe` 3
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    it "reports configured truncation caps in the board's GitHub warnings" $ do
+      let configuredLimits = LimitsConfig {limitsMaxOpenIssues = 5, limitsMaxOpenPullRequests = 9, limitsExcerptLines = 3}
+          warnings = snapshotWarnings configuredLimits defaultWorkflowConfig (RepoSnapshot [] [] epoch True True)
+      warnings `shouldSatisfy` any (Data.Text.isInfixOf "5+ open issues")
+      warnings `shouldSatisfy` any (Data.Text.isInfixOf "9+ open pull requests")
 
     it "deduplicates rerun checks and treats mergeable policy blocks as protected" $ do
       case decodeGitHubItems (LazyByteString.pack githubRerunResponse) of
@@ -3035,6 +3173,263 @@ main = hspec $ do
       let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeClean, pullRequestChecks = ChecksPassed 4}
       pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusReady
 
+    -- issue #48: approved + BEHIND must report checks-pending before
+    -- merge-pending whenever checks are not yet ready, since a still-running
+    -- check is more actionable information than a stale branch.
+    it "reports checks-pending before merge-pending when approved, behind, and checks are still pending" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPending 1 2}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "checks pending"
+    it "reports merge-pending once approved, behind, and checks have already passed" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPassed 4}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "merge pending"
+
+    it "defaults blocking severity to red, preserving the existing problem presentation" $ do
+      let pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusProblem "blocked"
+      isProblem defaultWorkflowConfig (PullRequestItem pullRequest) `shouldBe` True
+    it "renders and sorts a configured amber blocking severity as pending rather than a problem" $ do
+      let config = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
+      pullRequestStatus config pullRequest `shouldBe` StatusPending "blocked"
+      isProblem config (PullRequestItem pullRequest) `shouldBe` False
+
+    it "reorders standalone board entries when amber blocking severity drops a blocked PR out of the problem bucket" $ do
+      let blocked = (basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]) {pullRequestCreatedAt = addUTCTime 3600 epoch}
+          neutral = basePullRequest 11 [] False []
+          snapshot = RepoSnapshot [] [blocked, neutral] epoch False False
+          Board redColumns = deriveBoard defaultWorkflowConfig snapshot
+          amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          Board amberColumns = deriveBoard amberConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [10, 11]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
+
+    it "reorders tracker groups when amber blocking severity drops a blocked child PR out of the problem bucket" $ do
+      let blockedTracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #1 — A1: Child",
+                issueCreatedAt = addUTCTime 3600 epoch
+              }
+          neutralTracker =
+            (baseIssue 200 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #2 — A1: Child",
+                issueCreatedAt = epoch
+              }
+          blockedPr = basePullRequest 10 [1] False [Label "reviewed:changes" "ff0000"]
+          neutralPr = basePullRequest 11 [2] False []
+          snapshot = RepoSnapshot [blockedTracker, neutralTracker, baseIssue 1 [], baseIssue 2 []] [blockedPr, neutralPr] epoch False False
+          Board redColumns = deriveBoard defaultWorkflowConfig snapshot
+          amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          Board amberColumns = deriveBoard amberConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [10, 11]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
+
+    it "leaves an unapproved PR with pending checks neutral rather than showing checks-pending" $ do
+      let pullRequest = (basePullRequest 10 [] False []) {pullRequestChecks = ChecksPending 1 2}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusNeutral
+
+    it "renders an approved, amber-blocked PR's card as pending rather than approved" $ do
+      let amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00", Label "reviewed:changes" "ff0000"]
+      pullRequestCardAttribute amberConfig pullRequest `shouldBe` pendingAttr
+      pullRequestCardAttribute amberConfig pullRequest `shouldNotBe` approvedAttr
+      cardInteriorAttribute (pullRequestCardAttribute amberConfig pullRequest) `shouldBe` neutralAttr
+
+    it "renders a fully ready, approved PR's card as ready with an approved interior wash" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeClean, pullRequestChecks = ChecksPassed 4}
+      pullRequestCardAttribute defaultWorkflowConfig pullRequest `shouldBe` readyAttr
+      cardInteriorAttribute (pullRequestCardAttribute defaultWorkflowConfig pullRequest) `shouldBe` approvedInteriorAttr
+
+    it "keeps a red-severity blocked PR's card as a problem, with a neutral interior" $ do
+      let pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00", Label "reviewed:changes" "ff0000"]
+      pullRequestCardAttribute defaultWorkflowConfig pullRequest `shouldBe` problemAttr
+      cardInteriorAttribute (pullRequestCardAttribute defaultWorkflowConfig pullRequest) `shouldBe` neutralAttr
+
+    it "confines configurable blocking severity to pull requests, leaving blocked-issue treatment unchanged" $ do
+      let issue = (baseIssue 10 []) {issueLabels = [Label "blocked" "d73a4a"]}
+      isProblem defaultWorkflowConfig (IssueItem issue) `shouldBe` True
+      isProblem (defaultWorkflowConfig {blockingSeverity = SeverityAmber}) (IssueItem issue) `shouldBe` True
+
+    it "reports merge-pending, not checks-pending, when checks are unknown rather than a known pending state" $ do
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksUnknown}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "merge pending"
+
+    it "lets a configured approval label change Done-column membership" $ do
+      let config = defaultWorkflowConfig {approvalLabel = "lgtm"}
+          pullRequest = basePullRequest 10 [] False [Label "lgtm" "00ff00"]
+          snapshot = RepoSnapshot [] [pullRequest] epoch False False
+          Board customColumns = deriveBoard config snapshot
+          Board defaultColumns = deriveBoard defaultWorkflowConfig snapshot
+      map itemNumber (map entryItem (Map.findWithDefault [] Done customColumns)) `shouldBe` [10]
+      map itemNumber (map entryItem (Map.findWithDefault [] Done defaultColumns)) `shouldBe` []
+
+  describe "cache precedence" $ do
+    it "lets --no-cache disable the cache even when configuration enables it" $
+      cacheEnabled (testOptions {optionNoCache = True}) (testResolvedConfig {resolvedCache = True}) `shouldBe` False
+    it "lets configuration disable the cache without --no-cache" $
+      cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = False}) `shouldBe` False
+    it "enables the cache only when neither --no-cache nor configuration disables it" $
+      cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = True}) `shouldBe` True
+
+  describe "configured provider timeouts and excerpt height reaching their runtime consumers" $ do
+    it "converts the configured GitHub timeout from seconds to the microseconds System.Timeout.timeout takes" $
+      githubRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 5000000
+    it "converts the configured Codex timeout from seconds to microseconds" $
+      codexRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 7000000
+    it "converts the configured Claude timeout from seconds to microseconds" $
+      claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 9000000
+    it "passes the configured excerpt line count through to the card-rendering limit" $ do
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 3}) `shouldBe` 3
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 9}) `shouldBe` 9
+
+  describe "configuration loading" $ do
+    it "yields the stable defaults when no configuration file exists" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          path <- defaultConfigPath
+          doesFileExist path `shouldReturn` False
+          loadRawConfig Nothing `shouldReturn` Right (defaultRawConfig, [])
+          defaultRawConfig.rawCache `shouldBe` True
+          defaultRawConfig.rawRemoteName `shouldBe` "origin"
+          defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
+          defaultRawConfig.rawLimits `shouldBe` LimitsConfig 250 100 3
+          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
+
+    it "honors an explicit --config path pointing at a fixture" $
+      withTemporaryCacheRoot $ \configRoot -> do
+        let fixturePath = configRoot </> "fixture.toml"
+        writeFile fixturePath "remote_name = \"upstream\"\n"
+        loaded <- loadRawConfig (Just fixturePath)
+        let (config, warnings) = unsafeConfig loaded
+        warnings `shouldBe` []
+        config.rawRemoteName `shouldBe` "upstream"
+
+    it "resolves an explicit --config path to an absolute path so a worker spawned from a different directory still finds it" $ do
+      resolveConfigPathOption Nothing `shouldReturn` Nothing
+      absolutePath <- resolveConfigPathOption (Just "/already/absolute/config.toml")
+      absolutePath `shouldBe` Just "/already/absolute/config.toml"
+      relativeResult <- resolveConfigPathOption (Just "relative-config.toml")
+      case relativeResult of
+        Just resolved -> isAbsolute resolved `shouldBe` True
+        Nothing -> expectationFailure "expected a resolved path"
+
+    it "decodes a full-file fixture covering every documented key and warns on an unknown top-level key" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText fullFixtureToml)
+      config.rawCache `shouldBe` False
+      config.rawRemoteName `shouldBe` "upstream"
+      config.rawWorkflow
+        `shouldBe` WorkflowConfig
+          { approvalLabel = "lgtm",
+            changesRequestedLabel = "needs-work",
+            blockedLabels = Set.fromList ["blocked", "urgent"],
+            trackerLabels = Set.fromList ["epic", "tracker"],
+            additionalTrackerSectionHeadings = ["Milestones"],
+            approvalMode = ApprovalByEither,
+            blockingSeverity = SeverityAmber
+          }
+      config.rawLimits `shouldBe` LimitsConfig 500 200 5
+      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
+      config.rawUsage
+        `shouldBe` UsageConfig
+          (Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]))
+          (Just (UsageCommandConfig ["/usr/local/bin/my-claude-usage", "--json"]))
+      Map.member "coghex/kanban" config.rawRepositories `shouldBe` True
+      Map.member "other/repo" config.rawRepositories `shouldBe` True
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unknown_top_level_key"
+
+    it "merges a matching repository override onto the global table, leaving unset fields inherited" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
+      resolved.resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+      resolved.resolvedCache `shouldBe` False
+      resolved.resolvedRemoteName `shouldBe` "upstream"
+
+    it "selects the repository table by an exact, case-sensitive owner/name match" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+      (resolveConfig "COGHEX/KANBAN" config).resolvedWorkflow.approvalLabel `shouldBe` "lgtm"
+
+    it "leaves an unrelated repository table without effect on a different repository's resolution" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldNotBe` "should-not-apply"
+
+    it "replaces rather than extends a global array when a repository override sets it" $ do
+      let toml =
+            "[workflow]\n"
+              <> "blocked_labels = [\"blocked\", \"urgent\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "blocked_labels = [\"custom-block\"]\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+          resolved = resolveConfig "acme/widgets" config
+      resolved.resolvedWorkflow.blockedLabels `shouldBe` Set.fromList ["custom-block"]
+
+    it "fails on syntactically malformed TOML" $
+      decodeConfigText "this is not [valid toml" `shouldSatisfy` isLeftText
+
+    it "rejects each semantically invalid known value, naming the full key path" $ do
+      decodeConfigText "[workflow]\napproval_label = \"\"\n" `shouldSatisfy` errorContains ["workflow", "approval_label"]
+      decodeConfigText "remote_name = \"\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[workflow]\napproval_mode = \"bogus\"\n" `shouldSatisfy` errorContains ["approval_mode"]
+      decodeConfigText "[workflow]\nblocking_severity = \"purple\"\n" `shouldSatisfy` errorContains ["blocking_severity"]
+      decodeConfigText "[limits]\nmax_open_issues = 0\n" `shouldSatisfy` errorContains ["limits", "max_open_issues"]
+      decodeConfigText "[limits]\nexcerpt_lines = -1\n" `shouldSatisfy` errorContains ["excerpt_lines"]
+      decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
+      decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
+      decodeConfigText "[usage.codex]\ncommand = [\"\"]\n" `shouldSatisfy` errorContains ["command"]
+
+    it "rejects a timeout large enough to overflow when converted to microseconds, but accepts the boundary" $ do
+      let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
+          largestSafeSeconds = (maxBound :: Int) `div` 1000000
+      decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show overflowingSeconds) <> "\n")
+        `shouldSatisfy` errorContains ["github_seconds"]
+      (decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show largestSafeSeconds) <> "\n"))
+        `shouldSatisfy` isRight
+
+    it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
+      decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
+      decodeConfigText "[repositories.\"a/b\"]\nremote_name = \"origin\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".usage]\n" `shouldSatisfy` errorContains ["usage"]
+
+    it "warns, rather than fails, on an unrecognized key while still loading" $ do
+      let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
+
+    it "rejects a global approval_label and changes_requested_label that resolve to the same label" $
+      decodeConfigText "[workflow]\napproval_label = \"lgtm\"\nchanges_requested_label = \"LGTM\"\n"
+        `shouldSatisfy` errorContains ["workflow.approval_label", "workflow.changes_requested_label"]
+
+    it "rejects a configured label that collides with the reserved reviewed:revised protocol label" $ do
+      decodeConfigText "[workflow]\napproval_label = \"reviewed:revised\"\n"
+        `shouldSatisfy` errorContains ["approval_label", "reviewed:revised"]
+      decodeConfigText "[workflow]\nchanges_requested_label = \"Reviewed:Revised\"\n"
+        `shouldSatisfy` errorContains ["changes_requested_label", "reviewed:revised"]
+
+    it "rejects a repository override whose merged labels collide, even though neither table alone does" $ do
+      let toml =
+            "[workflow]\n"
+              <> "approval_label = \"lgtm\"\n"
+              <> "changes_requested_label = \"needs-work\"\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "changes_requested_label = \"lgtm\"\n"
+      decodeConfigText toml `shouldSatisfy` errorContains ["repositories.\"acme/widgets\".workflow"]
+
+  describe "global remote resolution" $
+    it "resolves the repository through a configured non-origin remote" $
+      withTemporaryCacheRoot $ \projectRoot -> do
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "init", "--quiet"] ""
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "remote", "add", "upstream", "https://github.com/coghex/kanban.git"] ""
+        result <- resolveRepository "upstream" projectRoot Nothing
+        case result of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right repository -> do
+            repository.repositoryOwner `shouldBe` "coghex"
+            repository.repositoryName `shouldBe` "kanban"
+
   describe "responsive board layout" $ do
     it "shares a wide board across all four columns" $
       responsiveColumnWidths 167 `shouldBe` [41, 41, 40, 40]
@@ -3089,6 +3484,90 @@ epoch = UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)
 isLeft :: Either left right -> Bool
 isLeft (Left _) = True
 isLeft (Right _) = False
+
+isRight :: Either left right -> Bool
+isRight (Right _) = True
+isRight (Left _) = False
+
+isLeftText :: Either Text value -> Bool
+isLeftText (Left _) = True
+isLeftText (Right _) = False
+
+unsafeConfig :: Either Text (RawConfig, [Text]) -> (RawConfig, [Text])
+unsafeConfig = either (error . Data.Text.unpack) id
+
+errorContains :: [Text] -> Either Text value -> Bool
+errorContains needles (Left message) = all (`Data.Text.isInfixOf` message) needles
+errorContains _ (Right _) = False
+
+testOptions :: Options
+testOptions =
+  Options
+    { optionPath = ".",
+      optionRepo = Nothing,
+      optionColor = ColorAuto,
+      optionBorder = BorderBox,
+      optionGlyphTest = False,
+      optionAscii = False,
+      optionNoCache = False,
+      optionConfig = Nothing,
+      optionWorkerSpec = Nothing
+    }
+
+testResolvedConfig :: ResolvedConfig
+testResolvedConfig =
+  ResolvedConfig
+    { resolvedCache = True,
+      resolvedRemoteName = "origin",
+      resolvedWorkflow = defaultWorkflowConfig,
+      resolvedLimits = defaultLimitsConfig,
+      resolvedTimeouts = defaultTimeoutsConfig,
+      resolvedUsage = defaultUsageConfig
+    }
+
+fullFixtureToml :: Text
+fullFixtureToml =
+  "cache = false\n"
+    <> "remote_name = \"upstream\"\n"
+    <> "\n"
+    <> "[workflow]\n"
+    <> "approval_label = \"lgtm\"\n"
+    <> "changes_requested_label = \"needs-work\"\n"
+    <> "blocked_labels = [\"blocked\", \"urgent\"]\n"
+    <> "tracker_labels = [\"epic\", \"tracker\"]\n"
+    <> "additional_tracker_section_headings = [\"Milestones\"]\n"
+    <> "approval_mode = \"either\"\n"
+    <> "blocking_severity = \"amber\"\n"
+    <> "\n"
+    <> "[limits]\n"
+    <> "max_open_issues = 500\n"
+    <> "max_open_pull_requests = 200\n"
+    <> "excerpt_lines = 5\n"
+    <> "\n"
+    <> "[timeouts]\n"
+    <> "github_seconds = 60\n"
+    <> "codex_seconds = 20\n"
+    <> "claude_seconds = 90\n"
+    <> "\n"
+    <> "[usage.codex]\n"
+    <> "command = [\"/usr/local/bin/my-codex-usage\", \"--json\"]\n"
+    <> "\n"
+    <> "[usage.claude]\n"
+    <> "command = [\"/usr/local/bin/my-claude-usage\", \"--json\"]\n"
+    <> "\n"
+    <> "unknown_top_level_key = 1\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".workflow]\n"
+    <> "approval_label = \"ship-it\"\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".limits]\n"
+    <> "max_open_issues = 999\n"
+    <> "\n"
+    <> "[repositories.\"coghex/kanban\".timeouts]\n"
+    <> "github_seconds = 15\n"
+    <> "\n"
+    <> "[repositories.\"other/repo\".workflow]\n"
+    <> "approval_label = \"should-not-apply\"\n"
 
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
@@ -3226,7 +3705,9 @@ workerFixtureSpec repository identifier issueNumber =
       workerUserMessage = "",
       workerParent = Nothing,
       workerCreatedAt = epoch,
-      workerMaxRuntimeSeconds = 60
+      workerMaxRuntimeSeconds = 60,
+      workerConfigPath = Nothing,
+      workerWorkflowConfig = defaultWorkflowConfig
     }
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and

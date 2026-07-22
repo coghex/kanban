@@ -139,16 +139,24 @@ pullRequestStatus :: WorkflowConfig -> PullRequest -> CardStatus
 pullRequestStatus config pullRequest
   | pullRequest.pullRequestMergeState == MergeConflicting = StatusProblem "merge conflict"
   | checksFailed pullRequest.pullRequestChecks = StatusProblem "CI failed"
-  | hasProblemLabel config pullRequest.pullRequestLabels = StatusProblem "blocked"
+  | hasProblemLabel config pullRequest.pullRequestLabels = blockedStatus config
   | not (approvedPullRequest config pullRequest) = StatusNeutral
+  | checksPending pullRequest.pullRequestChecks = StatusPending "checks pending"
   | not (mergeStateReady pullRequest.pullRequestMergeState) = StatusPending "merge pending"
   | checksReady pullRequest.pullRequestChecks = StatusReady
   | otherwise = StatusPending "checks pending"
+
+blockedStatus :: WorkflowConfig -> CardStatus
+blockedStatus config = case config.blockingSeverity of
+  SeverityRed -> StatusProblem "blocked"
+  SeverityAmber -> StatusPending "blocked"
 
 isApproved :: WorkflowConfig -> BoardItem -> Bool
 isApproved config (IssueItem issue) = hasLabel config.approvalLabel issue.issueLabels
 isApproved config (PullRequestItem pullRequest) = approvedPullRequest config pullRequest
 
+-- | Configurable blocking severity governs pull-request readiness and PR
+-- problem sorting only; issue-card blocking-label treatment always stays red.
 isProblem :: WorkflowConfig -> BoardItem -> Bool
 isProblem config (IssueItem issue) = hasProblemLabel config issue.issueLabels
 isProblem config (PullRequestItem pullRequest) = case pullRequestStatus config pullRequest of
@@ -196,6 +204,13 @@ checksReady :: CheckSummary -> Bool
 checksReady ChecksNone = True
 checksReady (ChecksPassed _) = True
 checksReady _ = False
+
+-- | Only a known pending/queued/in-progress check summary ranks above merge
+-- readiness; 'ChecksUnknown' (a truncated rollup) must not silently gain
+-- that same priority.
+checksPending :: CheckSummary -> Bool
+checksPending (ChecksPending _ _) = True
+checksPending _ = False
 
 mergeStateReady :: MergeState -> Bool
 mergeStateReady MergeClean = True

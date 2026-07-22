@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+import kanban_config
+
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
@@ -63,6 +65,7 @@ INSTALL_DIR = Path(
 DEFAULT_LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "issue-review"
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
+INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 # Optional: unset by default. No private endpoint ships as a tracked default
 # (docs/agent-workflow-contract.md §5); a reviewer-model failure or a
 # singular INVALID verdict is simply not pushed anywhere until the user sets
@@ -92,6 +95,7 @@ class RepoContext:
     path: Path
     repo_slug: str
     default_branch: str
+    remote_name: str = "origin"
 
 
 @dataclass(frozen=True)
@@ -249,25 +253,26 @@ def run_json(args: list[str], *, cwd: Path) -> Any:
 
 
 def parse_repo_slug(remote_url: str) -> str:
-    value = remote_url.strip()
-    ssh = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", value)
-    if ssh:
-        return f"{ssh.group(1)}/{ssh.group(2)}"
-    https = re.match(r"https://github\.com/([^/]+)/(.+?)(?:\.git)?$", value)
-    if https:
-        return f"{https.group(1)}/{https.group(2)}"
-    raise ApproveError(f"Unsupported origin remote URL: {remote_url}")
+    try:
+        return kanban_config.parse_repository_name(remote_url)
+    except kanban_config.KanbanConfigError as exc:
+        raise ApproveError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(path: Path) -> RepoContext:
+def get_repo_context(
+    path: Path, remote_name: str = "origin", explicit_repo: str | None = None
+) -> RepoContext:
     root = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=path).stdout.strip())
-    remote = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
-    slug = parse_repo_slug(remote)
+    if explicit_repo:
+        slug = parse_repo_slug(explicit_repo)
+    else:
+        remote = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
+        slug = parse_repo_slug(remote)
     data = run_json(
         ["gh", "repo", "view", slug, "--json", "defaultBranchRef"],
         cwd=root,
     )
-    return RepoContext(root, slug, data["defaultBranchRef"]["name"])
+    return RepoContext(root, slug, data["defaultBranchRef"]["name"], remote_name)
 
 
 def issue_labels(issue: dict[str, Any]) -> set[str]:
@@ -837,11 +842,28 @@ def select_candidate(
     return None
 
 
+def resolve_fetch_source(path: Path, remote_name: str, repo_slug: str) -> str:
+    """A git fetch source (a registered remote name, or a direct HTTPS URL)
+    that actually points at repo_slug. --repo changes repo_slug for GitHub
+    reads/mutations, but a checkout's configured remote can still point
+    elsewhere (e.g. a fork checkout reviewing an explicitly selected
+    upstream/repo); fetching by that remote's name in that case would
+    silently pull the wrong repository's branch, so fall back to fetching
+    directly from repo_slug's URL instead."""
+    proc = run(["git", "remote", "get-url", remote_name], cwd=path, check=False)
+    if proc.returncode == 0:
+        try:
+            if parse_repo_slug(proc.stdout) == repo_slug:
+                return remote_name
+        except ApproveError:
+            pass
+    return f"https://github.com/{repo_slug}.git"
+
+
 def make_review_worktree(ctx: RepoContext, number: int) -> tuple[Path, str]:
-    run(["git", "fetch", "--quiet", "origin", ctx.default_branch], cwd=ctx.path)
-    base_sha = run(
-        ["git", "rev-parse", f"origin/{ctx.default_branch}"], cwd=ctx.path
-    ).stdout.strip()
+    fetch_source = resolve_fetch_source(ctx.path, ctx.remote_name, ctx.repo_slug)
+    run(["git", "fetch", "--quiet", fetch_source, ctx.default_branch], cwd=ctx.path)
+    base_sha = run(["git", "rev-parse", "FETCH_HEAD"], cwd=ctx.path).stdout.strip()
     path = Path(tempfile.mkdtemp(prefix=f"approve-issues-{number}-", dir="/private/tmp"))
     try:
         run(
@@ -1885,6 +1907,31 @@ def self_test() -> None:
     print("approve-issues.py self-test passed")
 
 
+def installed_config_reference() -> str | None:
+    """The kanban config.toml path install_issue_review.py persisted
+    alongside this installed backend (see write_config_reference in that
+    script), if any. Read fresh on every call — mirrors
+    drain_prs_service.py's configured_config_path() — so an explicit
+    --config always takes precedence and a missing/corrupt reference file
+    silently falls back to kanban_config's own default resolution."""
+    try:
+        value = json.loads(INSTALLED_CONFIG_REFERENCE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    configured = value.get("config_path")
+    return configured if isinstance(configured, str) and configured else None
+
+
+def resolve_effective_config_path(explicit_config_path: str | None) -> str | None:
+    """Explicit --config always wins; otherwise falls back to whatever
+    install_issue_review.py persisted for this installed backend, so an
+    installed backend invoked without --config still resolves the same
+    configured labels/remote instead of silently reverting to defaults."""
+    return explicit_config_path if explicit_config_path is not None else installed_config_reference()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Continuously cross-review GitHub issues before autonomous solving."
@@ -1936,6 +1983,25 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_INCIDENT_DIR),
         help="Directory for the pipeline-halting incident circuit breaker.",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to kanban's config.toml "
+            "(default: ~/.config/kanban/config.toml)."
+        ),
+    )
+    parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="OWNER/NAME",
+        help=(
+            "Explicit repository identity, overriding the one derived from "
+            "the configured git remote (matches Kanban's own --repo option, "
+            "so a fork checkout gates and mutates the same repository the "
+            "dashboard displays)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1954,11 +2020,31 @@ def main() -> None:
             "approve-issues.py error: --check, --review, and --rereview are mutually exclusive"
         )
     global LOG_DIR, LOG_TO_STDERR, PIPELINE_INCIDENT_DIR
+    global APPROVE_LABEL, CHANGES_LABEL, VERDICT_LABEL_SPECS
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
     LOG_TO_STDERR = args.json
     PIPELINE_INCIDENT_DIR = Path(args.incident_dir).expanduser().resolve()
     try:
-        ctx = get_repo_context(Path(args.path).expanduser().resolve())
+        effective_config_path = resolve_effective_config_path(args.config)
+        raw_config, config_warnings = kanban_config.load_raw_config(effective_config_path)
+        for warning in config_warnings:
+            print(f"approve-issues.py warning: {warning}", file=sys.stderr, flush=True)
+        ctx = get_repo_context(
+            Path(args.path).expanduser().resolve(), raw_config.remote_name, args.repo
+        )
+        resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
+        APPROVE_LABEL = resolved_config.workflow.approval_label
+        CHANGES_LABEL = resolved_config.workflow.changes_requested_label
+        VERDICT_LABEL_SPECS = {
+            APPROVE_LABEL: (
+                "0E8A16",
+                "Canonical issue review passed",
+            ),
+            CHANGES_LABEL: (
+                "B60205",
+                "Canonical issue review found blocking changes",
+            ),
+        }
         if args.check is not None:
             issue = get_issue(ctx, args.check)
             comments = get_comments(ctx, args.check)
@@ -2034,6 +2120,8 @@ def main() -> None:
                 )
         fail(f"approve-issues.py INVALID ISSUE: {exc}")
     except ApproveError as exc:
+        fail(f"approve-issues.py error: {exc}")
+    except kanban_config.KanbanConfigError as exc:
         fail(f"approve-issues.py error: {exc}")
     except KeyboardInterrupt:
         log("Interrupted; exiting")

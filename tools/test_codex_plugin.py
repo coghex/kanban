@@ -89,9 +89,23 @@ def load_review_pr_module():
 
 
 def iter_tracked_plugin_files():
-    for path in CODEX_PLUGIN_ROOT.rglob("*"):
-        if path.is_file():
-            yield path
+    # Queries git directly (not a filesystem walk): running the wider test
+    # suite via `unittest discover` (no PYTHONDONTWRITEBYTECODE) imports
+    # review_pr.py and writes a real __pycache__/*.pyc beside it as a side
+    # effect of that very same test run. A directory walk would then flag
+    # that freshly-written, never-committed cache file as a stray tracked
+    # asset; only git's own view of what is actually committed can tell
+    # the two apart.
+    proc = subprocess.run(
+        ["git", "ls-files", "--", "codex-plugin"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for relative_path in proc.stdout.splitlines():
+        if relative_path:
+            yield REPO_ROOT / relative_path
 
 
 def find_forbidden_keys(value: Any, path: str = "") -> list[str]:
@@ -294,6 +308,263 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
 
 
+class ConfiguredWorkflowLabelTests(unittest.TestCase):
+    """The coordinator reviews arbitrary target repositories, not necessarily
+    a Kanban checkout, so it cannot import tools/kanban_config.py; it must
+    still resolve the same global+repository-override approval/changes-
+    requested labels from ~/.config/kanban/config.toml (or --config) that
+    the dashboard and tools/approve_issues.py/drain_prs.py use."""
+
+    def test_defaults_when_no_config_file_exists(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "does-not-exist.toml")
+            self.assertEqual(
+                module.resolve_workflow_labels(missing, "coghex/kanban"),
+                ("reviewed:approve", "reviewed:changes"),
+            )
+
+    def test_global_and_repository_override_resolution(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        '[workflow]',
+                        'approval_label = "lgtm"',
+                        'changes_requested_label = "needs-work"',
+                        '',
+                        '[repositories."coghex/kanban".workflow]',
+                        'approval_label = "ship-it"',
+                        '',
+                        '[repositories."other/repo".workflow]',
+                        'approval_label = "should-not-apply"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "coghex/kanban"),
+                ("ship-it", "needs-work"),
+            )
+            # An unrelated repository table has no effect.
+            self.assertEqual(
+                module.resolve_workflow_labels(str(config_path), "unrelated/repo"),
+                ("lgtm", "needs-work"),
+            )
+
+    def test_set_and_clear_verdict_label_use_the_resolved_labels(self):
+        module = load_review_pr_module()
+        with mock.patch.object(module, "run") as run_mock:
+            module.set_verdict_label(Path("/fake-repo"), "coghex/kanban", 89, "APPROVE", "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "-R", "coghex/kanban", "--add-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+        with mock.patch.object(module, "run") as run_mock:
+            module.clear_verdict_labels(Path("/fake-repo"), "coghex/kanban", 89, "lgtm", "needs-work")
+        run_mock.assert_called_once_with(
+            ["gh", "pr", "edit", "89", "-R", "coghex/kanban", "--remove-label", "lgtm", "--remove-label", "needs-work"],
+            cwd=Path("/fake-repo"),
+        )
+
+    def test_accepts_a_config_cli_flag(self):
+        coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"--config"', coordinator_source)
+        self.assertIn("resolve_workflow_labels", coordinator_source)
+
+    def test_check_issue_forwards_config_path_to_the_approval_gate(self):
+        # The gate check shells out to the installed approve_issues.py, which
+        # independently resolves workflow config; without forwarding
+        # --config, a dashboard-selected non-default config could approve a
+        # PR under different labels than this coordinator just published.
+        module = load_review_pr_module()
+        response = json.dumps({"issue": 34, "approved": True})
+        fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=response, stderr="")
+        with mock.patch.object(
+            module, "approver_path", return_value=Path("/fake-approve-issues.py")
+        ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
+            module.check_issue(Path("/fake-repo"), "coghex/kanban", 34, "/tmp/custom-config.toml")
+        called_args = run_mock.call_args.args[0]
+        self.assertIn("--config", called_args)
+        self.assertEqual(called_args[called_args.index("--config") + 1], "/tmp/custom-config.toml")
+        self.assertIn("--repo", called_args)
+        self.assertEqual(called_args[called_args.index("--repo") + 1], "coghex/kanban")
+
+        with mock.patch.object(
+            module, "approver_path", return_value=Path("/fake-approve-issues.py")
+        ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
+            module.check_issue(Path("/fake-repo"), "coghex/kanban", 34)
+        self.assertNotIn("--config", run_mock.call_args.args[0])
+
+    def test_verify_publication_forwards_config_path_to_its_gate_recheck(self):
+        # verify_publication's final issue-gate recheck must use the same
+        # config as the initial gate and the label mutation; otherwise a
+        # non-default --config publishes under custom labels but then fails
+        # this recheck (which would use approve_issues.py's own defaults)
+        # and clears the just-set verdict label.
+        module = load_review_pr_module()
+        pr = {"number": 89, "headRefOid": "a" * 40, "labels": [{"name": "lgtm"}]}
+        gate = {"approved": True, "key": "k1"}
+        marker = mock.Mock()
+        marker.group.side_effect = lambda name: {
+            "head": "a" * 40,
+            "verdict": "APPROVE",
+            "models": "unspecified",
+            "reviewers": "codex",
+        }[name]
+        with mock.patch.object(module, "pr_view", return_value=pr), mock.patch.object(
+            module, "gate_status", return_value=gate
+        ) as gate_status_mock, mock.patch.object(
+            module, "viewer_login", return_value="kanban-bot"
+        ), mock.patch.object(
+            module, "pr_comments", return_value=[]
+        ), mock.patch.object(
+            module, "latest_owned_review_marker", return_value=(marker, "https://example.test/comment")
+        ):
+            module.verify_publication(
+                Path("/fake-repo"),
+                "coghex/kanban",
+                89,
+                [module.CODEX_REVIEWER],
+                "a" * 40,
+                "APPROVE",
+                "k1",
+                "lgtm",
+                "needs-work",
+                allow_no_issue=False,
+                config_path="/tmp/custom-config.toml",
+            )
+        gate_status_mock.assert_called_once_with(
+            Path("/fake-repo"), pr, "coghex/kanban", allow_no_issue=False, config_path="/tmp/custom-config.toml",
+        )
+
+    def test_resolve_remote_name_defaults_and_reads_a_configured_global_value(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "does-not-exist.toml")
+            self.assertEqual(module.resolve_remote_name(missing), "origin")
+
+            configured = Path(tmp) / "config.toml"
+            configured.write_text('remote_name = "upstream"\n', encoding="utf-8")
+            self.assertEqual(module.resolve_remote_name(str(configured)), "upstream")
+
+    def test_ensure_commit_and_extract_source_fetch_from_the_configured_remote(self):
+        # A dashboard configured with a non-origin remote_name (and no
+        # "origin" remote at all) must still be able to fetch a missing PR
+        # head for review extraction, when that remote already points at
+        # the effective repo.
+        module = load_review_pr_module()
+
+        def fake_subprocess_run(args, **kwargs):
+            if args[:3] == ["git", "cat-file", "-e"]:
+                return mock.Mock(returncode=1)
+            if args[:3] == ["git", "remote", "get-url"]:
+                return mock.Mock(returncode=0, stdout="git@github.com:coghex/kanban.git\n")
+            raise AssertionError(f"unexpected subprocess.run call: {args}")
+
+        with mock.patch.object(module, "subprocess") as subprocess_mock, mock.patch.object(
+            module, "run"
+        ) as run_mock:
+            subprocess_mock.run.side_effect = fake_subprocess_run
+            module.ensure_commit(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, "upstream")
+        fetch_call = run_mock.call_args_list[0]
+        self.assertEqual(
+            fetch_call.args[0], ["git", "fetch", "--no-tags", "upstream", "pull/89/head"]
+        )
+
+        with mock.patch.object(
+            module, "ensure_commit"
+        ) as ensure_commit_mock, mock.patch.object(
+            module, "subprocess"
+        ) as subprocess_mock, mock.patch.object(
+            module, "make_tree_read_only"
+        ):
+            subprocess_mock.run.return_value = mock.Mock(returncode=0, stdout=b"")
+            with mock.patch.object(module.tarfile, "open"):
+                module.extract_source(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, Path("/fake-dest"), "upstream")
+        ensure_commit_mock.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, "upstream")
+
+    def test_ensure_commit_fetches_directly_from_the_explicit_repo_when_the_remote_points_elsewhere(self):
+        # A fork checkout reviewing an explicit --repo upstream/repo whose
+        # local "origin" remote still points at the fork must fetch the PR
+        # ref from upstream directly, not silently pull the fork's #89.
+        module = load_review_pr_module()
+
+        def fake_subprocess_run(args, **kwargs):
+            if args[:3] == ["git", "cat-file", "-e"]:
+                return mock.Mock(returncode=1)
+            if args[:3] == ["git", "remote", "get-url"]:
+                return mock.Mock(returncode=0, stdout="git@github.com:fork-owner/kanban.git\n")
+            raise AssertionError(f"unexpected subprocess.run call: {args}")
+
+        with mock.patch.object(module, "subprocess") as subprocess_mock, mock.patch.object(
+            module, "run"
+        ) as run_mock:
+            subprocess_mock.run.side_effect = fake_subprocess_run
+            module.ensure_commit(Path("/fake-repo"), "upstream-owner/kanban", 89, "a" * 40, "origin")
+        fetch_call = run_mock.call_args_list[0]
+        self.assertEqual(
+            fetch_call.args[0],
+            ["git", "fetch", "--no-tags", "https://github.com/upstream-owner/kanban.git", "pull/89/head"],
+        )
+
+    def test_parse_repository_name_handles_ssh_https_and_bare_forms(self):
+        module = load_review_pr_module()
+        self.assertEqual(module.parse_repository_name("git@github.com:coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("https://github.com/coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("https://github.com/coghex/kanban"), "coghex/kanban")
+        self.assertEqual(module.parse_repository_name("coghex/kanban"), "coghex/kanban")
+        self.assertIsNone(module.parse_repository_name("not-a-repo"))
+
+    def test_resolve_repository_uses_the_configured_remote_not_ghs_own_inference(self):
+        # A checkout whose "origin" points at a fork while remote_name=upstream
+        # is configured must resolve the upstream owner/name — proving this
+        # never falls back to gh's own (potentially different) inferred repo.
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('remote_name = "upstream"\n', encoding="utf-8")
+            with mock.patch.object(module, "subprocess") as subprocess_mock:
+                subprocess_mock.run.return_value = mock.Mock(
+                    returncode=0, stdout="git@github.com:coghex/kanban.git\n", stderr=""
+                )
+                repo = module.resolve_repository(Path("/fake-repo"), str(config_path))
+            self.assertEqual(repo, "coghex/kanban")
+            subprocess_mock.run.assert_called_once_with(
+                ["git", "remote", "get-url", "upstream"],
+                cwd=Path("/fake-repo"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_resolve_repository_raises_when_the_configured_remote_is_missing(self):
+        module = load_review_pr_module()
+        with mock.patch.object(module, "subprocess") as subprocess_mock:
+            subprocess_mock.run.return_value = mock.Mock(
+                returncode=1, stdout="", stderr="No such remote 'upstream'"
+            )
+            with self.assertRaises(module.WorkflowError):
+                module.resolve_repository(Path("/fake-repo"), None)
+
+    def test_resolve_repository_lets_an_explicit_repo_override_win_without_touching_git(self):
+        # Mirrors Kanban's own --repo option: a fork checkout must be able to
+        # review upstream's PR explicitly, without resolve_repository ever
+        # falling back to (or even consulting) the checkout's own remote.
+        module = load_review_pr_module()
+        with mock.patch.object(module, "subprocess") as subprocess_mock:
+            repo = module.resolve_repository(Path("/fake-repo"), None, "upstream-owner/upstream-repo")
+        self.assertEqual(repo, "upstream-owner/upstream-repo")
+        subprocess_mock.run.assert_not_called()
+
+    def test_resolve_repository_raises_on_an_unparseable_explicit_repo(self):
+        module = load_review_pr_module()
+        with self.assertRaises(module.WorkflowError):
+            module.resolve_repository(Path("/fake-repo"), None, "not-a-repo")
+
+
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own
     invocation prompt uses (src/Kanban/Solve.hs), not a paraphrase, so
@@ -370,7 +641,7 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
                 raise module.WorkflowError("PR head changed; no current-head verdict may be labeled")
             return gate
 
-        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+        with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
             module, "pr_view", return_value=pr
         ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
             module, "pr_origin", return_value="claude"
@@ -395,7 +666,9 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
                 module.workflow(Path("/fake-repo"), 89, rereview=False, dry_run=False, allow_no_issue=False)
 
         post_comment_mock.assert_called_once()
-        clear_verdict_labels_mock.assert_called_once_with(Path("/fake-repo"), 89)
+        clear_verdict_labels_mock.assert_called_once_with(
+            Path("/fake-repo"), "coghex/kanban", 89, "reviewed:approve", "reviewed:changes"
+        )
         set_verdict_label_mock.assert_not_called()
         verify_publication_mock.assert_not_called()
         self.assertIn("both verdict labels were cleared", str(excinfo.exception))
@@ -497,7 +770,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "extracted"
             destination.mkdir()
-            module.extract_source(REPO_ROOT, 0, head, destination)
+            module.extract_source(REPO_ROOT, "coghex/kanban", 0, head, destination)
             readme = destination / "README.md"
             self.assertTrue(readme.is_file())
             with self.assertRaises(PermissionError):
@@ -541,7 +814,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
             all_sources_seen.append(cwd)
             return {"reviewer": reviewer.key, "display_name": reviewer.display_name, "verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}
 
-        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+        with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
             module, "pr_view", return_value=pr
         ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
             module, "collect_context", return_value={}
@@ -601,7 +874,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         pr = self._base_pr()  # claude origin -> single reviewer, codex
         gate = self._gate()
 
-        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+        with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
             module, "pr_view", return_value=pr
         ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
             module, "collect_context", return_value={"diff": "..."}
@@ -635,7 +908,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         gate = self._gate()
         fake_source = Path("/fake/source")
 
-        with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+        with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
             module, "pr_view", return_value=pr
         ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
             module, "collect_context", return_value={}
@@ -661,7 +934,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
             result_path = Path(temp) / "result.json"
             result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "looks good", "blocking_concerns": []}))
 
-            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
                 module, "pr_view", return_value=pr
             ), mock.patch.object(module, "gate_status", return_value=gate), mock.patch.object(
                 module, "publish_results", return_value=(0, {"status": "reviewed", "verdict": "APPROVE"})
@@ -686,7 +959,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             result_path = Path(temp) / "result.json"
             result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}))
-            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
                 module, "pr_view", return_value=pr
             ):
                 with self.assertRaises(module.WorkflowError) as excinfo:
@@ -700,7 +973,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             result_path = Path(temp) / "result.json"
             result_path.write_text(json.dumps({"verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}))
-            with mock.patch.object(module, "repository_name", return_value="coghex/kanban"), mock.patch.object(
+            with mock.patch.object(module, "resolve_repository", return_value="coghex/kanban"), mock.patch.object(
                 module, "pr_view", return_value=pr
             ), mock.patch.object(module, "gate_status", return_value=gate):
                 with self.assertRaises(module.WorkflowError) as excinfo:
