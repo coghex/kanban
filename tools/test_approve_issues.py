@@ -144,6 +144,74 @@ class ParseRepoSlugTests(unittest.TestCase):
         self.assertFalse(any(args[:3] == ["git", "remote", "get-url"] for args in calls))
 
 
+class ResolveFetchSourceTests(unittest.TestCase):
+    """--repo changes ctx.repo_slug for GitHub reads/mutations, but the
+    review worktree's own git fetch must resolve a source that actually
+    matches repo_slug too — otherwise a fork checkout reviewing an
+    explicitly selected upstream repository would still fetch the fork's
+    default branch for the worktree it reviews from."""
+
+    def test_uses_the_named_remote_when_it_already_points_at_the_repo(self):
+        with mock.patch.object(
+            approve_issues,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout="git@github.com:coghex/kanban.git\n", stderr=""
+            ),
+        ):
+            source = approve_issues.resolve_fetch_source(Path("/fake"), "origin", "coghex/kanban")
+        self.assertEqual(source, "origin")
+
+    def test_falls_back_to_an_explicit_url_when_the_remote_points_elsewhere(self):
+        with mock.patch.object(
+            approve_issues,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout="git@github.com:fork-owner/kanban.git\n", stderr=""
+            ),
+        ):
+            source = approve_issues.resolve_fetch_source(Path("/fake"), "origin", "upstream-owner/kanban")
+        self.assertEqual(source, "https://github.com/upstream-owner/kanban.git")
+
+    def test_falls_back_to_an_explicit_url_when_the_remote_is_missing(self):
+        with mock.patch.object(
+            approve_issues,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="no such remote"),
+        ):
+            source = approve_issues.resolve_fetch_source(Path("/fake"), "origin", "coghex/kanban")
+        self.assertEqual(source, "https://github.com/coghex/kanban.git")
+
+    def test_make_review_worktree_fetches_from_the_resolved_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = make_ctx(Path(tmp), repo_slug="upstream-owner/kanban")
+            calls: list[list[str]] = []
+
+            def fake_run(args, *, cwd, **kwargs):
+                calls.append(args)
+                if args[:3] == ["git", "remote", "get-url"]:
+                    return subprocess.CompletedProcess(
+                        args, 0, stdout="git@github.com:fork-owner/kanban.git\n", stderr=""
+                    )
+                if args[:2] == ["git", "fetch"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                if args[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n", stderr="")
+                if args[:2] == ["git", "worktree"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                raise AssertionError(f"unexpected command: {args}")
+
+            with mock.patch.object(approve_issues, "run", side_effect=fake_run):
+                approve_issues.make_review_worktree(ctx, 89)
+        fetch_call = next(args for args in calls if args[:2] == ["git", "fetch"])
+        self.assertEqual(
+            fetch_call,
+            ["git", "fetch", "--quiet", "https://github.com/upstream-owner/kanban.git", "main"],
+        )
+        rev_parse_call = next(args for args in calls if args[:2] == ["git", "rev-parse"])
+        self.assertEqual(rev_parse_call, ["git", "rev-parse", "FETCH_HEAD"])
+
+
 def make_ctx(root: Path, repo_slug: str = "acme/example") -> "approve_issues.RepoContext":
     return approve_issues.RepoContext(path=root, repo_slug=repo_slug, default_branch="main")
 

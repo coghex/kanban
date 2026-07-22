@@ -842,11 +842,28 @@ def select_candidate(
     return None
 
 
+def resolve_fetch_source(path: Path, remote_name: str, repo_slug: str) -> str:
+    """A git fetch source (a registered remote name, or a direct HTTPS URL)
+    that actually points at repo_slug. --repo changes repo_slug for GitHub
+    reads/mutations, but a checkout's configured remote can still point
+    elsewhere (e.g. a fork checkout reviewing an explicitly selected
+    upstream/repo); fetching by that remote's name in that case would
+    silently pull the wrong repository's branch, so fall back to fetching
+    directly from repo_slug's URL instead."""
+    proc = run(["git", "remote", "get-url", remote_name], cwd=path, check=False)
+    if proc.returncode == 0:
+        try:
+            if parse_repo_slug(proc.stdout) == repo_slug:
+                return remote_name
+        except ApproveError:
+            pass
+    return f"https://github.com/{repo_slug}.git"
+
+
 def make_review_worktree(ctx: RepoContext, number: int) -> tuple[Path, str]:
-    run(["git", "fetch", "--quiet", ctx.remote_name, ctx.default_branch], cwd=ctx.path)
-    base_sha = run(
-        ["git", "rev-parse", f"{ctx.remote_name}/{ctx.default_branch}"], cwd=ctx.path
-    ).stdout.strip()
+    fetch_source = resolve_fetch_source(ctx.path, ctx.remote_name, ctx.repo_slug)
+    run(["git", "fetch", "--quiet", fetch_source, ctx.default_branch], cwd=ctx.path)
+    base_sha = run(["git", "rev-parse", "FETCH_HEAD"], cwd=ctx.path).stdout.strip()
     path = Path(tempfile.mkdtemp(prefix=f"approve-issues-{number}-", dir="/private/tmp"))
     try:
         run(

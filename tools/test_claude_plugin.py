@@ -329,15 +329,17 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
         with mock.patch.object(
             module, "approver_path", return_value=Path("/fake-approve-issues.py")
         ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
-            module.check_issue(Path("/fake-repo"), 34, "/tmp/custom-config.toml")
+            module.check_issue(Path("/fake-repo"), "coghex/kanban", 34, "/tmp/custom-config.toml")
         called_args = run_mock.call_args.args[0]
         self.assertIn("--config", called_args)
         self.assertEqual(called_args[called_args.index("--config") + 1], "/tmp/custom-config.toml")
+        self.assertIn("--repo", called_args)
+        self.assertEqual(called_args[called_args.index("--repo") + 1], "coghex/kanban")
 
         with mock.patch.object(
             module, "approver_path", return_value=Path("/fake-approve-issues.py")
         ), mock.patch.object(module, "run", return_value=fake_result) as run_mock:
-            module.check_issue(Path("/fake-repo"), 34)
+            module.check_issue(Path("/fake-repo"), "coghex/kanban", 34)
         self.assertNotIn("--config", run_mock.call_args.args[0])
 
     def test_verify_publication_forwards_config_path_to_its_gate_recheck(self):
@@ -396,13 +398,22 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
     def test_ensure_commit_and_extract_source_fetch_from_the_configured_remote(self):
         # A dashboard configured with a non-origin remote_name (and no
         # "origin" remote at all) must still be able to fetch a missing PR
-        # head for review extraction.
+        # head for review extraction, when that remote already points at
+        # the effective repo.
         module = load_review_pr_module()
+
+        def fake_subprocess_run(args, **kwargs):
+            if args[:3] == ["git", "cat-file", "-e"]:
+                return mock.Mock(returncode=1)
+            if args[:3] == ["git", "remote", "get-url"]:
+                return mock.Mock(returncode=0, stdout="git@github.com:coghex/kanban.git\n")
+            raise AssertionError(f"unexpected subprocess.run call: {args}")
+
         with mock.patch.object(module, "subprocess") as subprocess_mock, mock.patch.object(
             module, "run"
         ) as run_mock:
-            subprocess_mock.run.return_value = mock.Mock(returncode=1)
-            module.ensure_commit(Path("/fake-repo"), 89, "a" * 40, "upstream")
+            subprocess_mock.run.side_effect = fake_subprocess_run
+            module.ensure_commit(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, "upstream")
         fetch_call = run_mock.call_args_list[0]
         self.assertEqual(
             fetch_call.args[0], ["git", "fetch", "--no-tags", "upstream", "pull/89/head"]
@@ -417,8 +428,32 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
         ):
             subprocess_mock.run.return_value = mock.Mock(returncode=0, stdout=b"")
             with mock.patch.object(module.tarfile, "open"):
-                module.extract_source(Path("/fake-repo"), 89, "a" * 40, Path("/fake-dest"), "upstream")
-        ensure_commit_mock.assert_called_once_with(Path("/fake-repo"), 89, "a" * 40, "upstream")
+                module.extract_source(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, Path("/fake-dest"), "upstream")
+        ensure_commit_mock.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89, "a" * 40, "upstream")
+
+    def test_ensure_commit_fetches_directly_from_the_explicit_repo_when_the_remote_points_elsewhere(self):
+        # A fork checkout reviewing an explicit --repo upstream/repo whose
+        # local "origin" remote still points at the fork must fetch the PR
+        # ref from upstream directly, not silently pull the fork's #89.
+        module = load_review_pr_module()
+
+        def fake_subprocess_run(args, **kwargs):
+            if args[:3] == ["git", "cat-file", "-e"]:
+                return mock.Mock(returncode=1)
+            if args[:3] == ["git", "remote", "get-url"]:
+                return mock.Mock(returncode=0, stdout="git@github.com:fork-owner/kanban.git\n")
+            raise AssertionError(f"unexpected subprocess.run call: {args}")
+
+        with mock.patch.object(module, "subprocess") as subprocess_mock, mock.patch.object(
+            module, "run"
+        ) as run_mock:
+            subprocess_mock.run.side_effect = fake_subprocess_run
+            module.ensure_commit(Path("/fake-repo"), "upstream-owner/kanban", 89, "a" * 40, "origin")
+        fetch_call = run_mock.call_args_list[0]
+        self.assertEqual(
+            fetch_call.args[0],
+            ["git", "fetch", "--no-tags", "https://github.com/upstream-owner/kanban.git", "pull/89/head"],
+        )
 
     def test_parse_repository_name_handles_ssh_https_and_bare_forms(self):
         module = load_review_pr_module()

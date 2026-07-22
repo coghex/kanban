@@ -346,13 +346,15 @@ def approver_path() -> Path:
     return path
 
 
-def check_issue(root: Path, number: int, config_path: str | None = None) -> dict[str, Any]:
+def check_issue(root: Path, repo: str, number: int, config_path: str | None = None) -> dict[str, Any]:
     proc = run(
         [
             sys.executable,
             str(approver_path()),
             "--path",
             str(root),
+            "--repo",
+            repo,
             "--check",
             str(number),
             "--legacy-policy",
@@ -426,7 +428,7 @@ def gate_status(
     config_path: str | None = None,
 ) -> dict[str, Any]:
     numbers, invalid = linked_issue_numbers(pr, repo)
-    checks = [check_issue(root, number, config_path) for number in numbers]
+    checks = [check_issue(root, repo, number, config_path) for number in numbers]
     approved = gate_approved(numbers, invalid, checks, allow_no_issue=allow_no_issue)
     return {
         "approved": approved,
@@ -524,7 +526,26 @@ def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: li
     }
 
 
-def ensure_commit(root: Path, number: int, head: str, remote_name: str = "origin") -> None:
+def resolve_fetch_source(root: Path, remote_name: str, repo: str) -> str:
+    """A git fetch source (a registered remote name, or a direct HTTPS URL)
+    that actually points at repo. If the configured/default remote resolves
+    to a different repository than the effective repo (e.g. --repo selected
+    upstream/repo from a fork checkout whose remote still points at the
+    fork), fetching by that remote's name would silently pull the wrong
+    repository's ref; fetch directly from repo's URL instead."""
+    proc = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0 and parse_repository_name(proc.stdout) == repo:
+        return remote_name
+    return f"https://github.com/{repo}.git"
+
+
+def ensure_commit(root: Path, repo: str, number: int, head: str, remote_name: str = "origin") -> None:
     present = subprocess.run(
         ["git", "cat-file", "-e", f"{head}^{{commit}}"],
         cwd=root,
@@ -532,7 +553,8 @@ def ensure_commit(root: Path, number: int, head: str, remote_name: str = "origin
         check=False,
     ).returncode == 0
     if not present:
-        run(["git", "fetch", "--no-tags", remote_name, f"pull/{number}/head"], cwd=root, timeout=600)
+        fetch_source = resolve_fetch_source(root, remote_name, repo)
+        run(["git", "fetch", "--no-tags", fetch_source, f"pull/{number}/head"], cwd=root, timeout=600)
     run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=root)
 
 
@@ -563,8 +585,8 @@ def make_tree_writable(path: Path) -> None:
             entry.chmod(entry.stat().st_mode | 0o200)
 
 
-def extract_source(root: Path, number: int, head: str, destination: Path, remote_name: str = "origin") -> None:
-    ensure_commit(root, number, head, remote_name)
+def extract_source(root: Path, repo: str, number: int, head: str, destination: Path, remote_name: str = "origin") -> None:
+    ensure_commit(root, repo, number, head, remote_name)
     proc = subprocess.run(
         ["git", "archive", "--format=tar", head],
         cwd=root,
@@ -1085,7 +1107,7 @@ def workflow(
         # reviews, and tears this down before starting the next reviewer, so
         # at most one such directory ever exists on disk at a time.
         source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
-        extract_source(root, number, pr["headRefOid"], source, remote_name)
+        extract_source(root, repo, number, pr["headRefOid"], source, remote_name)
         return source
 
     results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)
