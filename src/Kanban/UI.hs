@@ -2688,7 +2688,7 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     . liftIO
     . forkIO
     $ do
-      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig
+      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
       case launched of
         Left message -> do
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))

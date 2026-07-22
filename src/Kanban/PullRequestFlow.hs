@@ -173,14 +173,14 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
 pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
 pullRequestArguments number origin action CodexSolver configPath config existingSession provenance userMessage = case existingSession of
   Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath config CodexSolver)]
-  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt action provenance userMessage)]
+  Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt config action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
     codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
 pullRequestArguments number origin action ClaudeSolver configPath config existingSession provenance userMessage =
   ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath config ClaudeSolver else resumePrompt action provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath config ClaudeSolver else resumePrompt config action provenance userMessage)]
 
 codexModel :: PullRequestAction -> String
 codexModel PullRequestRevision = "gpt-5.4"
@@ -238,8 +238,8 @@ initialPrompt number _origin action configPath config brand = Text.unlines (acti
       ]
     numberText = Text.pack (show number)
 
-resumePrompt :: PullRequestAction -> ResumeProvenance -> Text -> Text
-resumePrompt action provenance answer = Text.unlines [resumeProvenanceHeader provenance, Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
+resumePrompt :: WorkflowConfig -> PullRequestAction -> ResumeProvenance -> Text -> Text
+resumePrompt config action provenance answer = Text.unlines [resumeProvenanceHeader config provenance, Text.strip answer, "Continue the same " <> actionName action <> " workflow. Stop with KANBAN_NEEDS_INPUT: <question> if another decision is required."]
 
 actionName :: PullRequestAction -> Text
 actionName PullRequestReview = "review"

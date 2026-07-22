@@ -273,8 +273,8 @@ data WorkerDescriptor = WorkerDescriptor
   }
   deriving stock (Eq, Show)
 
-launchSolveWorker :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> IO (Either Text WorkerDescriptor)
-launchSolveWorker repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath = do
+launchSolveWorker :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
+launchSolveWorker repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
@@ -290,9 +290,7 @@ launchSolveWorker repository issueNumber workflow brand existingSession existing
         workerCreatedAt = now,
         workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
         workerConfigPath = configPath,
-        -- Solve's own prompt never names a workflow label, so the durable
-        -- spec's placeholder here is inert; see 'workerWorkflowConfig'.
-        workerWorkflowConfig = defaultWorkflowConfig
+        workerWorkflowConfig = workflowConfig
       }
 
 launchPullRequestWorker :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerDescriptor)
@@ -533,7 +531,7 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 defaultRunTask :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
 defaultRunTask spec rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
-    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerConfigPath spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+    runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       (translateSolveEvent rememberProvider emit)
   PullRequestWorkerTaskKind task ->
     runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage

@@ -143,35 +143,13 @@ def validate_symlink_destination(destination: Path) -> None:
         )
 
 
-def write_notification_config(install_dir: Path, ntfy_url: str) -> Path:
+def merge_installed_config_json(install_dir: Path, updates: dict[str, Any]) -> Path:
+    """Merge `updates` into the shared config.json (ntfy_url, config_path)
+    rather than overwriting it, so a later installer run that sets one key
+    does not delete a different key persisted by an earlier run."""
     path = install_dir / "config.json"
     if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
         raise InstallError(f"Refusing unsafe notification config path: {path}")
-    install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    install_dir.chmod(0o700)
-    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"ntfy_url": ntfy_url}, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            temporary.unlink()
-    return path
-
-
-def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
-    """Persist the kanban config.toml path for drain_prs_service.py's runner
-    to forward to drain_prs.py. Merges into the same config.json used for
-    ntfy_url rather than overwriting it."""
-    path = install_dir / "config.json"
-    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
-        raise InstallError(f"Refusing unsafe drainer config path: {path}")
     install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     install_dir.chmod(0o700)
     existing: dict[str, Any] = {}
@@ -182,7 +160,7 @@ def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
             loaded = None
         if isinstance(loaded, dict):
             existing = loaded
-    existing["config_path"] = config_path
+    existing.update(updates)
     fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
     temporary = Path(temporary_name)
     try:
@@ -197,6 +175,17 @@ def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
         if os.path.lexists(temporary):
             temporary.unlink()
     return path
+
+
+def write_notification_config(install_dir: Path, ntfy_url: str) -> Path:
+    return merge_installed_config_json(install_dir, {"ntfy_url": ntfy_url})
+
+
+def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
+    """Persist the kanban config.toml path for drain_prs_service.py's runner
+    to forward to drain_prs.py. Merges into the same config.json used for
+    ntfy_url rather than overwriting it."""
+    return merge_installed_config_json(install_dir, {"config_path": config_path})
 
 
 def install(

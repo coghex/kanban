@@ -2307,8 +2307,8 @@ main = hspec $ do
       claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing Nothing ResumeAnswer ""
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer ""
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
@@ -2316,10 +2316,10 @@ main = hspec $ do
       claudeArguments `shouldContain` ["--effort", "high"]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing Nothing ResumeAnswer "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing Nothing ResumeAnswer "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing Nothing ResumeAnswer "")
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -2330,13 +2330,13 @@ main = hspec $ do
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
     it "passes a configured --config path through to the read-only gate-check instruction" $ do
-      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") Nothing ResumeAnswer "")
-          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
+      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") defaultWorkflowConfig Nothing ResumeAnswer "")
+          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
       promptWithoutConfig `shouldNotContain` "Pass --config"
 
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "existing worktree for issue #782"
       solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
       solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
@@ -2344,17 +2344,23 @@ main = hspec $ do
       solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Just "session-1") ResumeAnswer "pick option B")
-          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
-          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
-      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
       interruptPrompt `shouldNotContain` "The user answered"
       interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      automatedPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAutomatedChangesRequested)
+      automatedPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAutomatedChangesRequested)
       automatedPrompt `shouldNotContain` "The user answered"
       automatedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+
+    it "names the configured changes-requested label in the automated resume header instead of the literal default" $ do
+      let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
+          customAutomatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      customAutomatedPrompt `shouldContain` "the PR received needs-work"
+      customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
     it "extracts Codex session ids and readable agent output" $ do
       parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
@@ -2465,11 +2471,17 @@ main = hspec $ do
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
       let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
           interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
-      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
+      answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
-      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
+      interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
       interruptPrompt `shouldNotContain` "The user answered"
       interruptPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+
+    it "names the configured changes-requested label in a resumed PR revision's automated-handoff header" $ do
+      let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
+          customAutomatedPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      customAutomatedPrompt `shouldContain` "the PR received needs-work"
+      customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
     it "derives a pure post-revision verdict from current labels instead of waiting on a reviewed:revised handoff" $ do
       pullRequestVerdictForLabels defaultWorkflowConfig [] `shouldBe` PullRequestVerdictPending
@@ -3118,6 +3130,43 @@ main = hspec $ do
           pullRequest = basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]
       pullRequestStatus config pullRequest `shouldBe` StatusPending "blocked"
       isProblem config (PullRequestItem pullRequest) `shouldBe` False
+
+    it "reorders standalone board entries when amber blocking severity drops a blocked PR out of the problem bucket" $ do
+      let blocked = (basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]) {pullRequestCreatedAt = addUTCTime 3600 epoch}
+          neutral = basePullRequest 11 [] False []
+          snapshot = RepoSnapshot [] [blocked, neutral] epoch False False
+          Board redColumns = deriveBoard defaultWorkflowConfig snapshot
+          amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          Board amberColumns = deriveBoard amberConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [10, 11]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
+
+    it "reorders tracker groups when amber blocking severity drops a blocked child PR out of the problem bucket" $ do
+      let blockedTracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #1 — A1: Child",
+                issueCreatedAt = addUTCTime 3600 epoch
+              }
+          neutralTracker =
+            (baseIssue 200 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #2 — A1: Child",
+                issueCreatedAt = epoch
+              }
+          blockedPr = basePullRequest 10 [1] False [Label "reviewed:changes" "ff0000"]
+          neutralPr = basePullRequest 11 [2] False []
+          snapshot = RepoSnapshot [blockedTracker, neutralTracker, baseIssue 1 [], baseIssue 2 []] [blockedPr, neutralPr] epoch False False
+          Board redColumns = deriveBoard defaultWorkflowConfig snapshot
+          amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
+          Board amberColumns = deriveBoard amberConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [10, 11]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
+
+    it "leaves an unapproved PR with pending checks neutral rather than showing checks-pending" $ do
+      let pullRequest = (basePullRequest 10 [] False []) {pullRequestChecks = ChecksPending 1 2}
+      pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusNeutral
+
     it "confines configurable blocking severity to pull requests, leaving blocked-issue treatment unchanged" $ do
       let issue = (baseIssue 10 []) {issueLabels = [Label "blocked" "d73a4a"]}
       isProblem defaultWorkflowConfig (IssueItem issue) `shouldBe` True
