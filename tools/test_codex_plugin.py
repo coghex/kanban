@@ -424,6 +424,43 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
             Path("/fake-repo"), pr, "coghex/kanban", allow_no_issue=False, config_path="/tmp/custom-config.toml",
         )
 
+    def test_resolve_remote_name_defaults_and_reads_a_configured_global_value(self):
+        module = load_review_pr_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "does-not-exist.toml")
+            self.assertEqual(module.resolve_remote_name(missing), "origin")
+
+            configured = Path(tmp) / "config.toml"
+            configured.write_text('remote_name = "upstream"\n', encoding="utf-8")
+            self.assertEqual(module.resolve_remote_name(str(configured)), "upstream")
+
+    def test_ensure_commit_and_extract_source_fetch_from_the_configured_remote(self):
+        # A dashboard configured with a non-origin remote_name (and no
+        # "origin" remote at all) must still be able to fetch a missing PR
+        # head for review extraction.
+        module = load_review_pr_module()
+        with mock.patch.object(module, "subprocess") as subprocess_mock, mock.patch.object(
+            module, "run"
+        ) as run_mock:
+            subprocess_mock.run.return_value = mock.Mock(returncode=1)
+            module.ensure_commit(Path("/fake-repo"), 89, "a" * 40, "upstream")
+        fetch_call = run_mock.call_args_list[0]
+        self.assertEqual(
+            fetch_call.args[0], ["git", "fetch", "--no-tags", "upstream", "pull/89/head"]
+        )
+
+        with mock.patch.object(
+            module, "ensure_commit"
+        ) as ensure_commit_mock, mock.patch.object(
+            module, "subprocess"
+        ) as subprocess_mock, mock.patch.object(
+            module, "make_tree_read_only"
+        ):
+            subprocess_mock.run.return_value = mock.Mock(returncode=0, stdout=b"")
+            with mock.patch.object(module.tarfile, "open"):
+                module.extract_source(Path("/fake-repo"), 89, "a" * 40, Path("/fake-dest"), "upstream")
+        ensure_commit_mock.assert_called_once_with(Path("/fake-repo"), 89, "a" * 40, "upstream")
+
 
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own

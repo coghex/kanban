@@ -323,7 +323,45 @@ decodeConfigText input =
     Left syntaxError -> Left (Text.pack ("is invalid: " <> syntaxError))
     Right table -> case runMatcher (parseTable rawConfigParser startPos table) of
       Failure errors -> Left (Text.pack ("is invalid: " <> intercalate "; " (map prettyMatchMessage errors)))
-      Success warnings config -> Right (config, map (Text.pack . prettyMatchMessage) warnings)
+      Success warnings config -> case validateRawConfig config of
+        Left message -> Left ("is invalid: " <> message)
+        Right () -> Right (config, map (Text.pack . prettyMatchMessage) warnings)
+
+-- | The resolved approval and changes-requested labels must be distinct
+-- from each other and from the fixed 'reviewed:revised' protocol label,
+-- for every selectable repository, not merely the global table: a
+-- repository override that only sets one of the two labels can still
+-- collide once merged with the global value of the other.
+validateRawConfig :: RawConfig -> Either Text ()
+validateRawConfig raw = do
+  validateWorkflowLabelDistinctness "workflow" raw.rawWorkflow
+  mapM_
+    ( \(name, override) ->
+        validateWorkflowLabelDistinctness
+          ("repositories.\"" <> name <> "\".workflow")
+          (applyWorkflowOverride raw.rawWorkflow override.repositoryOverrideWorkflow)
+    )
+    (Map.toList raw.rawRepositories)
+
+validateWorkflowLabelDistinctness :: Text -> WorkflowConfig -> Either Text ()
+validateWorkflowLabelDistinctness context config
+  | foldedApproval == foldedChanges =
+      Left
+        ( context
+            <> ".approval_label and "
+            <> context
+            <> ".changes_requested_label must not resolve to the same label ("
+            <> config.approvalLabel
+            <> ")"
+        )
+  | foldedApproval == "reviewed:revised" =
+      Left (context <> ".approval_label must not resolve to the reserved reviewed:revised label")
+  | foldedChanges == "reviewed:revised" =
+      Left (context <> ".changes_requested_label must not resolve to the reserved reviewed:revised label")
+  | otherwise = Right ()
+  where
+    foldedApproval = Text.toCaseFold config.approvalLabel
+    foldedChanges = Text.toCaseFold config.changesRequestedLabel
 
 rawConfigParser :: ParseTable Position RawConfig
 rawConfigParser = do

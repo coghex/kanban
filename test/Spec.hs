@@ -3256,6 +3256,25 @@ main = hspec $ do
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
 
+    it "rejects a global approval_label and changes_requested_label that resolve to the same label" $
+      decodeConfigText "[workflow]\napproval_label = \"lgtm\"\nchanges_requested_label = \"LGTM\"\n"
+        `shouldSatisfy` errorContains ["workflow.approval_label", "workflow.changes_requested_label"]
+
+    it "rejects a configured label that collides with the reserved reviewed:revised protocol label" $ do
+      decodeConfigText "[workflow]\napproval_label = \"reviewed:revised\"\n"
+        `shouldSatisfy` errorContains ["approval_label", "reviewed:revised"]
+      decodeConfigText "[workflow]\nchanges_requested_label = \"Reviewed:Revised\"\n"
+        `shouldSatisfy` errorContains ["changes_requested_label", "reviewed:revised"]
+
+    it "rejects a repository override whose merged labels collide, even though neither table alone does" $ do
+      let toml =
+            "[workflow]\n"
+              <> "approval_label = \"lgtm\"\n"
+              <> "changes_requested_label = \"needs-work\"\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "changes_requested_label = \"lgtm\"\n"
+      decodeConfigText toml `shouldSatisfy` errorContains ["repositories.\"acme/widgets\".workflow"]
+
   describe "global remote resolution" $
     it "resolves the repository through a configured non-origin remote" $
       withTemporaryCacheRoot $ \projectRoot -> do

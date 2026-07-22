@@ -171,6 +171,15 @@ def _pop_str_list(table: dict, key: str, path: str) -> list[str] | None:
     return result
 
 
+# A 64-bit Int's range. Python's arbitrary-precision ints don't overflow
+# themselves, but the Haskell dashboard decodes every one of these fields as
+# a bounded `Int`, so this loader rejects the same out-of-range values to
+# keep both sides' validation semantics identical.
+_MAX_INT64 = 2**63 - 1
+_MICROSECONDS_PER_SECOND = 1_000_000
+_MAX_TIMEOUT_SECONDS = _MAX_INT64 // _MICROSECONDS_PER_SECOND
+
+
 def _pop_positive_int(table: dict, key: str, path: str) -> int | None:
     if key not in table:
         return None
@@ -180,17 +189,9 @@ def _pop_positive_int(table: dict, key: str, path: str) -> int | None:
         raise KanbanConfigError(f"{full} must be an integer")
     if value <= 0:
         raise KanbanConfigError(f"{full} must be a positive integer")
+    if value > _MAX_INT64:
+        raise KanbanConfigError(f"{full} must not exceed {_MAX_INT64}")
     return value
-
-
-# A 64-bit Int's range, matching Kanban.Config.parsePositiveTimeoutSeconds:
-# Python's arbitrary-precision ints don't overflow themselves, but the
-# Haskell dashboard's `Int` timeout (seconds * 1,000,000 microseconds) does,
-# so this loader rejects the same values to keep both sides' validation
-# semantics identical.
-_MAX_INT64 = 2**63 - 1
-_MICROSECONDS_PER_SECOND = 1_000_000
-_MAX_TIMEOUT_SECONDS = _MAX_INT64 // _MICROSECONDS_PER_SECOND
 
 
 def _pop_positive_timeout_seconds(table: dict, key: str, path: str) -> int | None:
@@ -397,7 +398,39 @@ def _decode(data: dict) -> tuple[RawConfig, list[str]]:
         usage=usage,
         repositories=repositories,
     )
+    _validate_raw_config(raw)
     return raw, warnings
+
+
+def _validate_workflow_label_distinctness(context: str, workflow: WorkflowConfig) -> None:
+    # The resolved approval and changes-requested labels must be distinct
+    # from each other and from the fixed "reviewed:revised" protocol label,
+    # for every selectable repository, not merely the global table: a
+    # repository override that only sets one of the two labels can still
+    # collide once merged with the global value of the other.
+    approval = workflow.approval_label.casefold()
+    changes = workflow.changes_requested_label.casefold()
+    if approval == changes:
+        raise KanbanConfigError(
+            f"{context}.approval_label and {context}.changes_requested_label must not "
+            f"resolve to the same label ({workflow.approval_label})"
+        )
+    if approval == "reviewed:revised":
+        raise KanbanConfigError(
+            f"{context}.approval_label must not resolve to the reserved reviewed:revised label"
+        )
+    if changes == "reviewed:revised":
+        raise KanbanConfigError(
+            f"{context}.changes_requested_label must not resolve to the reserved reviewed:revised label"
+        )
+
+
+def _validate_raw_config(raw: RawConfig) -> None:
+    _validate_workflow_label_distinctness("workflow", raw.workflow)
+    for name, override in raw.repositories.items():
+        _validate_workflow_label_distinctness(
+            f'repositories."{name}".workflow', _merge(raw.workflow, override.workflow)
+        )
 
 
 def load_raw_config(explicit_path: str | None) -> tuple[RawConfig, list[str]]:

@@ -193,6 +193,22 @@ def resolve_workflow_labels(config_path: str | None, repo: str) -> tuple[str, st
     return approval_label, changes_requested_label
 
 
+def resolve_remote_name(config_path: str | None) -> str:
+    """Minimal mirror of Kanban.Config's global-only remote_name resolution
+    (see resolve_workflow_labels for why this doesn't import
+    tools/kanban_config.py)."""
+    path = Path(config_path).expanduser() if config_path else default_kanban_config_path()
+    if not path.is_file():
+        return "origin"
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, OSError):
+        return "origin"
+    remote_name = data.get("remote_name")
+    return remote_name if isinstance(remote_name, str) and remote_name else "origin"
+
+
 def pr_view(root: Path, number: int) -> dict[str, Any]:
     fields = ",".join(
         [
@@ -462,7 +478,7 @@ def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: li
     }
 
 
-def ensure_commit(root: Path, number: int, head: str) -> None:
+def ensure_commit(root: Path, number: int, head: str, remote_name: str = "origin") -> None:
     present = subprocess.run(
         ["git", "cat-file", "-e", f"{head}^{{commit}}"],
         cwd=root,
@@ -470,7 +486,7 @@ def ensure_commit(root: Path, number: int, head: str) -> None:
         check=False,
     ).returncode == 0
     if not present:
-        run(["git", "fetch", "--no-tags", "origin", f"pull/{number}/head"], cwd=root, timeout=600)
+        run(["git", "fetch", "--no-tags", remote_name, f"pull/{number}/head"], cwd=root, timeout=600)
     run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=root)
 
 
@@ -501,8 +517,8 @@ def make_tree_writable(path: Path) -> None:
             entry.chmod(entry.stat().st_mode | 0o200)
 
 
-def extract_source(root: Path, number: int, head: str, destination: Path) -> None:
-    ensure_commit(root, number, head)
+def extract_source(root: Path, number: int, head: str, destination: Path, remote_name: str = "origin") -> None:
+    ensure_commit(root, number, head, remote_name)
     proc = subprocess.run(
         ["git", "archive", "--format=tar", head],
         cwd=root,
@@ -1011,6 +1027,8 @@ def workflow(
             "instructions": self_review_prompt(context, reviewer, rereview, number),
         }
 
+    remote_name = resolve_remote_name(config_path)
+
     def extract_for_next_reviewer() -> Path:
         # An independently-rooted temp directory with no reviewer-identifying
         # prefix (tempfile.mkdtemp, not a subdirectory of one shared parent
@@ -1018,7 +1036,7 @@ def workflow(
         # reviews, and tears this down before starting the next reviewer, so
         # at most one such directory ever exists on disk at a time.
         source = Path(tempfile.mkdtemp(prefix=f"pr-{number}-review-source-"))
-        extract_source(root, number, pr["headRefOid"], source)
+        extract_source(root, number, pr["headRefOid"], source, remote_name)
         return source
 
     results = run_reviews(reviewers, context, extract_for_next_reviewer, rereview)

@@ -249,6 +249,45 @@ class SemanticValidationErrorTests(unittest.TestCase):
             '[usage.codex]\ncommand = [""]\n', "usage.codex.command"
         )
 
+    def test_limit_exceeding_the_bounded_int_raises_but_the_boundary_is_accepted(self):
+        overflowing = kc._MAX_INT64 + 1
+        self._expect_error(
+            f"[limits]\nmax_open_issues = {overflowing}\n", "limits.max_open_issues"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), f"[limits]\nmax_open_issues = {kc._MAX_INT64}\n")
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(warnings, [])
+        self.assertEqual(raw.limits.max_open_issues, kc._MAX_INT64)
+
+    def test_global_approval_and_changes_requested_labels_colliding_raises(self):
+        self._expect_error(
+            '[workflow]\napproval_label = "lgtm"\nchanges_requested_label = "LGTM"\n',
+            "workflow.approval_label",
+        )
+
+    def test_label_colliding_with_the_reserved_reviewed_revised_label_raises(self):
+        self._expect_error(
+            '[workflow]\napproval_label = "reviewed:revised"\n', "reviewed:revised"
+        )
+        self._expect_error(
+            '[workflow]\nchanges_requested_label = "Reviewed:Revised"\n', "reviewed:revised"
+        )
+
+    def test_repository_override_that_collides_only_once_merged_with_global_raises(self):
+        self._expect_error(
+            "\n".join(
+                [
+                    '[workflow]',
+                    'approval_label = "lgtm"',
+                    'changes_requested_label = "needs-work"',
+                    '[repositories."acme/widgets".workflow]',
+                    'changes_requested_label = "lgtm"',
+                ]
+            ),
+            'repositories."acme/widgets".workflow',
+        )
+
 
 class RepositoryGlobalOnlyKeyTests(unittest.TestCase):
     def _expect_error(self, text: str, expected_fragment: str):
