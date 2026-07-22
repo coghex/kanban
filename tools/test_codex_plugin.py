@@ -89,9 +89,23 @@ def load_review_pr_module():
 
 
 def iter_tracked_plugin_files():
-    for path in CODEX_PLUGIN_ROOT.rglob("*"):
-        if path.is_file():
-            yield path
+    # Queries git directly (not a filesystem walk): running the wider test
+    # suite via `unittest discover` (no PYTHONDONTWRITEBYTECODE) imports
+    # review_pr.py and writes a real __pycache__/*.pyc beside it as a side
+    # effect of that very same test run. A directory walk would then flag
+    # that freshly-written, never-committed cache file as a stray tracked
+    # asset; only git's own view of what is actually committed can tell
+    # the two apart.
+    proc = subprocess.run(
+        ["git", "ls-files", "--", "codex-plugin"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for relative_path in proc.stdout.splitlines():
+        if relative_path:
+            yield REPO_ROOT / relative_path
 
 
 def find_forbidden_keys(value: Any, path: str = "") -> list[str]:
