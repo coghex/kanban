@@ -81,6 +81,8 @@ class HappyPathDrainCycleTest(unittest.TestCase):
         # commit on the bare remote's master ahead of what `self.main` has
         # locally -- so fast-forwarding is a real, observable effect.
         run_git(["clone", "-q", str(self.bare), str(self.upstream_sim)], cwd=self.root)
+        run_git(["config", "user.email", "test@example.com"], cwd=self.upstream_sim)
+        run_git(["config", "user.name", "Test"], cwd=self.upstream_sim)
         run_git(["checkout", "-q", "master"], cwd=self.upstream_sim)
         run_git(
             ["merge", "-q", "--no-ff", "origin/issue-99-demo", "-m", "Merge pull request #42"],

@@ -1077,7 +1077,7 @@ def prepare_review_worktree(
         return existing, False
 
     tmpdir = Path(
-        tempfile.mkdtemp(prefix=f"drain-prs-rereview-{pr['number']}-", dir="/private/tmp")
+        tempfile.mkdtemp(prefix=f"drain-prs-rereview-{pr['number']}-")
     )
     run(["git", "fetch", "--quiet", ctx.remote_name, pr["headRefName"]], cwd=ctx.path)
     run(
@@ -1128,7 +1128,7 @@ def rereview_pr_with_codex(
         return pr
 
     review_path, temporary = prepare_review_worktree(ctx, pr)
-    output_file = Path(f"/private/tmp/drain-prs-rereview-{number}.out")
+    output_file = Path(tempfile.gettempdir()) / f"drain-prs-rereview-{number}.out"
     prompt = drain_rereview_prompt(ctx, number, expected_head)
 
     try:
@@ -1607,7 +1607,7 @@ def inspect_conflict_files(
     pr: dict[str, Any],
 ) -> tuple[Path, str, list[str]]:
     tmpdir = Path(
-        tempfile.mkdtemp(prefix=f"drain-prs-conflict-{pr['number']}-", dir="/private/tmp")
+        tempfile.mkdtemp(prefix=f"drain-prs-conflict-{pr['number']}-")
     )
     repair_branch = f"drain-prs-repair-{pr['number']}-{int(time.time())}"
     run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
@@ -1795,8 +1795,8 @@ def run_claude_conflict_reviewer(
         round_number=round_number,
         expected_head=expected_head,
     )
-    output_file = Path(
-        f"/private/tmp/drain-prs-conflict-review-{pr['number']}-r{round_number}.out"
+    output_file = Path(tempfile.gettempdir()) / (
+        f"drain-prs-conflict-review-{pr['number']}-r{round_number}.out"
     )
     local_head = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
     local_status = run(
@@ -1966,7 +1966,9 @@ def repair_conflict_with_codex(
         approval_invalidated = True
         remove_approval_label(ctx, pr["number"])
         previous_head = pr["headRefOid"]
-        output_file = Path(f"/private/tmp/drain-prs-conflict-{pr['number']}.out")
+        output_file = Path(tempfile.gettempdir()) / (
+            f"drain-prs-conflict-{pr['number']}.out"
+        )
         run_codex_conflict_agent(
             ctx,
             pr,
@@ -2010,8 +2012,8 @@ def repair_conflict_with_codex(
                 )
                 return False
 
-            fix_output = Path(
-                f"/private/tmp/drain-prs-conflict-fix-{pr['number']}-r{round_number}.out"
+            fix_output = Path(tempfile.gettempdir()) / (
+                f"drain-prs-conflict-fix-{pr['number']}-r{round_number}.out"
             )
             run_codex_conflict_agent(
                 ctx,

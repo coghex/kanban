@@ -864,7 +864,7 @@ def make_review_worktree(ctx: RepoContext, number: int) -> tuple[Path, str]:
     fetch_source = resolve_fetch_source(ctx.path, ctx.remote_name, ctx.repo_slug)
     run(["git", "fetch", "--quiet", fetch_source, ctx.default_branch], cwd=ctx.path)
     base_sha = run(["git", "rev-parse", "FETCH_HEAD"], cwd=ctx.path).stdout.strip()
-    path = Path(tempfile.mkdtemp(prefix=f"approve-issues-{number}-", dir="/private/tmp"))
+    path = Path(tempfile.mkdtemp(prefix=f"approve-issues-{number}-"))
     try:
         run(
             ["git", "worktree", "add", "--detach", str(path), base_sha],
