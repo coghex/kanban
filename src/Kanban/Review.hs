@@ -28,6 +28,10 @@ module Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    githubIssueCommentArguments,
+    githubIssueEditArguments,
+    githubIssueViewArguments,
+    githubLabelCreateArguments,
     interruptReview,
     killReviewTools,
     renderCanonicalIssueReviewResult,
@@ -215,6 +219,11 @@ data ReviewClient = ReviewClient
     reviewToolProcesses :: MVar (Map Text ManagedProcess),
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
+    -- | The dashboard's resolved OWNER/NAME (which may come from an
+    -- explicit --repo override, e.g. reviewing upstream from a fork
+    -- checkout). Passed explicitly to every GitHub tool call below so it
+    -- never re-derives identity from the checkout's own remote.
+    reviewRepositorySlug :: Text,
     reviewWorkflowConfig :: WorkflowConfig,
     reviewSessionLog :: Maybe SessionLog,
     reviewOutputDone :: MVar (),
@@ -486,6 +495,7 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewToolProcesses = toolProcesses,
                 reviewEventSink = eventSink,
                 reviewRepositoryRoot = repositoryRoot,
+                reviewRepositorySlug = repository.repositoryOwner <> "/" <> repository.repositoryName,
                 reviewWorkflowConfig = workflowConfig,
                 reviewSessionLog = sessionLog,
                 reviewOutputDone = outputDone,
@@ -883,7 +893,7 @@ runClaudeToolCall client threadId requestId request = do
 runGitHubToolCall :: ReviewClient -> Text -> ReviewRequestId -> GitHubIssueToolRequest -> IO ()
 runGitHubToolCall client threadId requestId request = do
   client.reviewEventSink (ReviewGitHubStarted threadId (githubActionSummary request))
-  result <- runGitHubIssueTool client.reviewRepositoryRoot request
+  result <- runGitHubIssueTool client.reviewRepositoryRoot client.reviewRepositorySlug request
   sent <- case result of
     Left message -> sendDynamicToolFailure client requestId message
     Right output -> sendDynamicToolSuccess client requestId output
@@ -905,82 +915,87 @@ githubActionSummary request = case request.githubToolOperation of
       | request.githubToolComment /= Nothing = " comment and review labels…"
       | otherwise = " review labels…"
 
-runGitHubIssueTool :: FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueTool repositoryRoot request = do
+runGitHubIssueTool :: FilePath -> Text -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueTool repositoryRoot repo request = do
   executable <- findExecutable "gh"
   case executable of
     Nothing -> pure (Left "GitHub CLI was not found on PATH")
     Just ghPath -> case request.githubToolOperation of
-      GitHubIssueRead ->
-        runGitHubCommand
-          repositoryRoot
-          ghPath
-          [ "issue",
-            "view",
-            show request.githubToolIssue,
-            "--json",
-            "number,title,body,url,state,labels,comments"
-          ]
-          ""
-      GitHubIssueUpdate -> runGitHubIssueUpdate repositoryRoot ghPath request
+      GitHubIssueRead -> runGitHubCommand repositoryRoot ghPath (githubIssueViewArguments repo request.githubToolIssue) ""
+      GitHubIssueUpdate -> runGitHubIssueUpdate repositoryRoot repo ghPath request
 
-runGitHubIssueUpdate :: FilePath -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueUpdate repositoryRoot ghPath request = do
-  commentResult <- case request.githubToolComment of
-    Nothing -> pure (Right Nothing)
-    Just comment ->
-      fmap (fmap (Just . Text.strip))
-        ( runGitHubCommand
-            repositoryRoot
-            ghPath
-            ["issue", "comment", show request.githubToolIssue, "--body-file", "-"]
-            comment
-        )
-  case commentResult of
-    Left message -> pure (Left message)
-    Right commentUrl -> do
-      labelResult <- ensureRevisedLabel repositoryRoot ghPath request.githubToolAddLabels
-      case labelResult of
-        Left message -> pure (Left (partialUpdateMessage commentUrl message))
-        Right () -> do
-          edited <- applyReviewLabels repositoryRoot ghPath request
-          pure $ case edited of
-            Left message -> Left (partialUpdateMessage commentUrl message)
-            Right _ -> Right (githubUpdateResult commentUrl request)
+-- | Explicit --repo on every GitHub CLI invocation below, so the dashboard's
+-- resolved repository identity (which may come from an explicit --repo
+-- override, e.g. reviewing upstream from a fork checkout) is never silently
+-- re-derived by `gh` from the checkout's own remote.
+githubIssueViewArguments :: Text -> Int -> [String]
+githubIssueViewArguments repo issueNumber =
+  [ "issue",
+    "view",
+    show issueNumber,
+    "--repo",
+    Text.unpack repo,
+    "--json",
+    "number,title,body,url,state,labels,comments"
+  ]
 
-ensureRevisedLabel :: FilePath -> FilePath -> [Text] -> IO (Either Text ())
-ensureRevisedLabel repositoryRoot ghPath labels
-  | "reviewed:revised" `notElem` labels = pure (Right ())
-  | otherwise =
-      fmap (fmap (const ()))
-        ( runGitHubCommand
-            repositoryRoot
-            ghPath
-            [ "label",
-              "create",
-              "reviewed:revised",
-              "--color",
-              "8250DF",
-              "--description",
-              "Specification amended and awaiting opposite-brand rereview",
-              "--force"
-            ]
-            ""
-        )
+githubIssueCommentArguments :: Text -> Int -> [String]
+githubIssueCommentArguments repo issueNumber =
+  ["issue", "comment", show issueNumber, "--repo", Text.unpack repo, "--body-file", "-"]
 
-applyReviewLabels :: FilePath -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-applyReviewLabels repositoryRoot ghPath request
-  | null request.githubToolAddLabels && null request.githubToolRemoveLabels = pure (Right "")
-  | otherwise =
-      runGitHubCommand repositoryRoot ghPath (baseArguments <> addArguments <> removeArguments) ""
+githubLabelCreateArguments :: Text -> [String]
+githubLabelCreateArguments repo =
+  [ "label",
+    "create",
+    "reviewed:revised",
+    "--repo",
+    Text.unpack repo,
+    "--color",
+    "8250DF",
+    "--description",
+    "Specification amended and awaiting opposite-brand rereview",
+    "--force"
+  ]
+
+githubIssueEditArguments :: Text -> GitHubIssueToolRequest -> [String]
+githubIssueEditArguments repo request = baseArguments <> addArguments <> removeArguments
   where
-    baseArguments = ["issue", "edit", show request.githubToolIssue]
+    baseArguments = ["issue", "edit", show request.githubToolIssue, "--repo", Text.unpack repo]
     addArguments
       | null request.githubToolAddLabels = []
       | otherwise = ["--add-label", Text.unpack (Text.intercalate "," request.githubToolAddLabels)]
     removeArguments
       | null request.githubToolRemoveLabels = []
       | otherwise = ["--remove-label", Text.unpack (Text.intercalate "," request.githubToolRemoveLabels)]
+
+runGitHubIssueUpdate :: FilePath -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueUpdate repositoryRoot repo ghPath request = do
+  commentResult <- case request.githubToolComment of
+    Nothing -> pure (Right Nothing)
+    Just comment ->
+      fmap (fmap (Just . Text.strip))
+        (runGitHubCommand repositoryRoot ghPath (githubIssueCommentArguments repo request.githubToolIssue) comment)
+  case commentResult of
+    Left message -> pure (Left message)
+    Right commentUrl -> do
+      labelResult <- ensureRevisedLabel repositoryRoot repo ghPath request.githubToolAddLabels
+      case labelResult of
+        Left message -> pure (Left (partialUpdateMessage commentUrl message))
+        Right () -> do
+          edited <- applyReviewLabels repositoryRoot repo ghPath request
+          pure $ case edited of
+            Left message -> Left (partialUpdateMessage commentUrl message)
+            Right _ -> Right (githubUpdateResult commentUrl request)
+
+ensureRevisedLabel :: FilePath -> Text -> FilePath -> [Text] -> IO (Either Text ())
+ensureRevisedLabel repositoryRoot repo ghPath labels
+  | "reviewed:revised" `notElem` labels = pure (Right ())
+  | otherwise = fmap (fmap (const ())) (runGitHubCommand repositoryRoot ghPath (githubLabelCreateArguments repo) "")
+
+applyReviewLabels :: FilePath -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+applyReviewLabels repositoryRoot repo ghPath request
+  | null request.githubToolAddLabels && null request.githubToolRemoveLabels = pure (Right "")
+  | otherwise = runGitHubCommand repositoryRoot ghPath (githubIssueEditArguments repo request) ""
 
 githubUpdateResult :: Maybe Text -> GitHubIssueToolRequest -> Text
 githubUpdateResult commentUrl request =

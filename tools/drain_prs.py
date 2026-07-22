@@ -1094,17 +1094,19 @@ def prepare_review_worktree(
     return tmpdir, True
 
 
-def drain_rereview_prompt(number: int, expected_head: str) -> str:
-    return f"""You are GPT-5.6-Terra, the final drain-queue reviewer for PR #{number}.
+def drain_rereview_prompt(ctx: RepoContext, number: int, expected_head: str) -> str:
+    return f"""You are GPT-5.6-Terra, the final drain-queue reviewer for PR #{number} in {ctx.repo_slug}.
 
 The queue detected an unexpected push after approval. Review only: do not edit files, commit, push, merge, close issues, or remove worktrees.
+
+Pass `--repo {ctx.repo_slug}` to every `gh` command below. Never rely on gh's own default-repository inference, which can target a different repository than {ctx.repo_slug} in a checkout with more than one remote.
 
 1. Fetch `headRefOid` and require it to equal {expected_head}; otherwise report a stale request and do not comment or label.
 2. Read the linked issue and authoritative comments, PR body, checks, latest prior `<!-- pr-review:v1 ... -->` comment (or legacy `<!-- codex-review ... -->` comment), new commits, and full merge-base diff.
 3. For every prior blocking concern, state Resolved, Partially resolved, or Unresolved with file/line evidence. Review the complete current diff for regressions and unmet issue requirements. Nits never block.
 4. Re-fetch the head before publishing. If it changed, do not comment or label.
-5. Post APPROVE or CHANGES REQUESTED as a PR comment ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
-6. Re-fetch the head, then switch `{APPROVE_LABEL}` / `{CHANGES_LABEL}` to match the verdict. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
+5. Post APPROVE or CHANGES REQUESTED as a PR comment (`gh pr comment {number} --repo {ctx.repo_slug}`) ending with exactly `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=APPROVE -->` or `<!-- pr-review:v1 reviewer=codex head=<reviewed_head> verdict=CHANGES_REQUESTED -->`.
+6. Re-fetch the head, then switch `{APPROVE_LABEL}` / `{CHANGES_LABEL}` to match the verdict using `gh pr edit {number} --repo {ctx.repo_slug}`. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
 
 Report the verdict, concern statuses, new findings, reviewed head, and comment/label status.
 """
@@ -1127,7 +1129,7 @@ def rereview_pr_with_codex(
 
     review_path, temporary = prepare_review_worktree(ctx, pr)
     output_file = Path(f"/private/tmp/drain-prs-rereview-{number}.out")
-    prompt = drain_rereview_prompt(number, expected_head)
+    prompt = drain_rereview_prompt(ctx, number, expected_head)
 
     try:
         try:

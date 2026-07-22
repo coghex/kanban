@@ -67,6 +67,12 @@ class ConflictReviewPromptRepoScopingTests(unittest.TestCase):
         )
         self.assertIn("--repo upstream-owner/kanban", prompt)
 
+    def test_drain_rereview_prompt_requires_repo_on_every_gh_command(self):
+        prompt = drain_prs.drain_rereview_prompt(make_ctx(), 89, "a" * 40)
+        self.assertIn("--repo upstream-owner/kanban", prompt)
+        self.assertIn("gh pr comment 89 --repo upstream-owner/kanban", prompt)
+        self.assertIn("gh pr edit 89 --repo upstream-owner/kanban", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -82,6 +82,10 @@ import Kanban.Review
     decodeReviewWireMessage,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    githubIssueCommentArguments,
+    githubIssueEditArguments,
+    githubIssueViewArguments,
+    githubLabelCreateArguments,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     renderCanonicalIssueReviewResult,
@@ -2325,6 +2329,21 @@ main = hspec $ do
         (defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"})
         (object ["operation" .= ("update" :: Text), "issue" .= (844 :: Int), "addLabels" .= (["lgtm"] :: [Text])])
         `shouldSatisfy` isRight
+
+    it "passes an explicit --repo, matching Kanban's own resolved repository, to every embedded GitHub tool command" $ do
+      let repo = "upstream-owner/upstream-repo"
+          request =
+            GitHubIssueToolRequest
+              { githubToolOperation = GitHubIssueUpdate,
+                githubToolIssue = 844,
+                githubToolComment = Just "## Review result\nApproved.",
+                githubToolAddLabels = ["reviewed:approve"],
+                githubToolRemoveLabels = ["reviewed:changes", "reviewed:revised"]
+              }
+      githubIssueViewArguments repo 844 `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubIssueCommentArguments repo 844 `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubLabelCreateArguments repo `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      githubIssueEditArguments repo request `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
 
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
