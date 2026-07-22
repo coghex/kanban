@@ -121,8 +121,8 @@ solverLabel :: SolverBrand -> Text
 solverLabel CodexSolver = "codex · " <> codexSolverModel
 solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
-runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
-runSolve repository issueNumber workflow brand existingSession existingLogPath provenance userMessage eventSink = do
+runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
+runSolve repository issueNumber workflow brand configPath existingSession existingLogPath provenance userMessage eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -188,7 +188,7 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath p
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
-      (proc executablePath (solveArguments issueNumber workflow brand existingSession provenance userMessage))
+      (proc executablePath (solveArguments issueNumber workflow brand configPath existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_out = CreatePipe,
           std_err = CreatePipe,
@@ -196,8 +196,8 @@ runSolve repository issueNumber workflow brand existingSession existingLogPath p
           create_group = True
         }
 
-solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> [String]
-solveArguments issueNumber workflow CodexSolver existingSession provenance userMessage =
+solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Maybe Text -> ResumeProvenance -> Text -> [String]
+solveArguments issueNumber workflow CodexSolver configPath existingSession provenance userMessage =
   case existingSession of
     Nothing ->
       [ "exec",
@@ -209,7 +209,7 @@ solveArguments issueNumber workflow CodexSolver existingSession provenance userM
         "model_reasoning_summary=\"detailed\"",
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
-        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver)
+        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver configPath)
       ]
     Just sessionId ->
       [ "exec",
@@ -227,7 +227,7 @@ solveArguments issueNumber workflow CodexSolver existingSession provenance userM
         Text.unpack sessionId,
         Text.unpack (resumeSolvePrompt workflow CodexSolver provenance userMessage)
       ]
-solveArguments issueNumber workflow ClaudeSolver existingSession provenance userMessage =
+solveArguments issueNumber workflow ClaudeSolver configPath existingSession provenance userMessage =
   [ "--print",
     "--model",
     "claude-sonnet-5",
@@ -240,20 +240,28 @@ solveArguments issueNumber workflow ClaudeSolver existingSession provenance user
     "--verbose"
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver else resumeSolvePrompt workflow ClaudeSolver provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath else resumeSolvePrompt workflow ClaudeSolver provenance userMessage)]
 
-initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Text
-initialSolvePrompt issueNumber workflow brand =
+initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Text
+initialSolvePrompt issueNumber workflow brand configPath =
   Text.unlines
-    [ "Run the " <> workflowName workflow brand <> " workflow for GitHub issue #" <> Text.pack (show issueNumber) <> " in this repository.",
-      "You are the canonical " <> solverLabel brand <> " solver selected explicitly by the user.",
-      workflowContract,
-      interruptedWorktreeRecovery,
-      "Do not run issue-review, issue-rereview, or --review/--rereview against approve-issues.py, its legacy ~/work/approve-issues.py symlink, or the installed tools/approve_issues.py backend, from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.",
-      "Interaction contract: if a product choice, ambiguity, credentials problem, or other user decision blocks safe progress, do not guess and do not continue. End your response with exactly one line in the form KANBAN_NEEDS_INPUT: <one concrete question>. Kanban will resume this same session with the answer.",
-      completionContract
-    ]
+    ( [ "Run the " <> workflowName workflow brand <> " workflow for GitHub issue #" <> Text.pack (show issueNumber) <> " in this repository.",
+        "You are the canonical " <> solverLabel brand <> " solver selected explicitly by the user.",
+        workflowContract,
+        interruptedWorktreeRecovery,
+        "Do not run issue-review, issue-rereview, or --review/--rereview against approve-issues.py, its legacy ~/work/approve-issues.py symlink, or the installed tools/approve_issues.py backend, from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."
+      ]
+        <> configLines
+        <> [ "Interaction contract: if a product choice, ambiguity, credentials problem, or other user decision blocks safe progress, do not guess and do not continue. End your response with exactly one line in the form KANBAN_NEEDS_INPUT: <one concrete question>. Kanban will resume this same session with the answer.",
+             completionContract
+           ]
+    )
   where
+    configLines = case configPath of
+      Nothing -> []
+      Just path ->
+        [ "Pass --config " <> Text.pack path <> " to the read-only v2 gate check so it resolves the same configured workflow labels and remote as this dashboard."
+        ]
     workflowContract = case workflow of
       SolveOnly -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop after opening the PR; do not review or merge it."
       AutoSolve -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop immediately after opening the PR; do not start a reviewer, revise the PR, or merge it. Kanban owns the bounded review/fix loop."

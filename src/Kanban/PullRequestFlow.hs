@@ -103,8 +103,8 @@ agentForAction PullRequestClaude PullRequestRevision = ClaudeSolver
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlow repository pullRequestNumber origin action configPath existingSession existingLogPath provenance userMessage eventSink = do
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlow repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
@@ -162,7 +162,7 @@ runPullRequestFlow repository pullRequestNumber origin action configPath existin
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath existingSession provenance userMessage))
+      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath config existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,
           std_out = CreatePipe,
@@ -170,17 +170,17 @@ runPullRequestFlow repository pullRequestNumber origin action configPath existin
           create_group = True
         }
 
-pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Maybe Text -> ResumeProvenance -> Text -> [String]
-pullRequestArguments number origin action CodexSolver configPath existingSession provenance userMessage = case existingSession of
-  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath CodexSolver)]
+pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
+pullRequestArguments number origin action CodexSolver configPath config existingSession provenance userMessage = case existingSession of
+  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath config CodexSolver)]
   Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
     codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-pullRequestArguments number origin action ClaudeSolver configPath existingSession provenance userMessage =
+pullRequestArguments number origin action ClaudeSolver configPath config existingSession provenance userMessage =
   ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath ClaudeSolver else resumePrompt action provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath config ClaudeSolver else resumePrompt action provenance userMessage)]
 
 codexModel :: PullRequestAction -> String
 codexModel PullRequestRevision = "gpt-5.4"
@@ -197,8 +197,8 @@ claudeModel _ = "claude-opus-4-8"
 claudeEffort :: PullRequestAction -> String
 claudeEffort _ = "xhigh"
 
-initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> SolverBrand -> Text
-initialPrompt number _origin action configPath brand = Text.unlines (actionLines <> configLines <> interactionLines)
+initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> SolverBrand -> Text
+initialPrompt number _origin action configPath config brand = Text.unlines (actionLines <> configLines <> interactionLines)
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
     configLines = case configPath of
@@ -226,7 +226,11 @@ initialPrompt number _origin action configPath brand = Text.unlines (actionLines
       PullRequestRevision ->
         [ "Run " <> commandName "pr-revise" <> " for PR #" <> numberText <> ".",
           "Use the canonical revise-and-rereview workflow: act only on a current canonical CHANGES_REQUESTED verdict for this head, rerouting stale feedback through canonical rereview before editing; work only in a clean isolated worktree and never overwrite a concurrently updated head; after pushing, wait for required CI on the pushed head, then invoke exactly one canonical PR rereview.",
-          "Never merge, and leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator."
+          "Never merge, and leave "
+            <> config.approvalLabel
+            <> ", "
+            <> config.changesRequestedLabel
+            <> ", and reviewed:revised to the canonical review coordinator."
         ]
     interactionLines =
       [ "If ambiguity, credentials, or a product decision blocks safe progress, stop with exactly KANBAN_NEEDS_INPUT: <one concrete question>. Do not guess.",

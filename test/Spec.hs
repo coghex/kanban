@@ -257,7 +257,8 @@ main = hspec $ do
                 workerParent = Just parent,
                 workerCreatedAt = epoch,
                 workerMaxRuntimeSeconds = 14400,
-                workerConfigPath = Nothing
+                workerConfigPath = Nothing,
+                workerWorkflowConfig = defaultWorkflowConfig
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       eitherDecode (encode (WorkerFinished (SolveNeedsInput "choose a branch")))
@@ -522,7 +523,8 @@ main = hspec $ do
                   workerParent = Nothing,
                   workerCreatedAt = now,
                   workerMaxRuntimeSeconds = 60,
-                  workerConfigPath = Nothing
+                  workerConfigPath = Nothing,
+                  workerWorkflowConfig = defaultWorkflowConfig
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"
@@ -1596,7 +1598,8 @@ main = hspec $ do
                   workerParent = Nothing,
                   workerCreatedAt = longAgo,
                   workerMaxRuntimeSeconds = 60,
-                  workerConfigPath = Nothing
+                  workerConfigPath = Nothing,
+                  workerWorkflowConfig = defaultWorkflowConfig
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-818-overdue-spawn.spec.json"
@@ -2304,8 +2307,8 @@ main = hspec $ do
       claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer ""
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing Nothing ResumeAnswer ""
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
@@ -2313,10 +2316,10 @@ main = hspec $ do
       claudeArguments `shouldContain` ["--effort", "high"]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing ResumeAnswer "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing ResumeAnswer "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing ResumeAnswer "")
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -2326,8 +2329,14 @@ main = hspec $ do
       claudeAutoSolvePrompt `shouldNotContain` "/autosolve"
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
+    it "passes a configured --config path through to the read-only gate-check instruction" $ do
+      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") Nothing ResumeAnswer "")
+          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
+      promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
+      promptWithoutConfig `shouldNotContain` "Pass --config"
+
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing ResumeAnswer "")
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "existing worktree for issue #782"
       solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
       solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
@@ -2335,9 +2344,9 @@ main = hspec $ do
       solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeAnswer "pick option B")
-          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
-          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
@@ -2414,14 +2423,14 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing Nothing ResumeAnswer "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing Nothing ResumeAnswer "")
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
@@ -2429,9 +2438,15 @@ main = hspec $ do
       codexOriginRevisionPrompt `shouldNotContain` "create reviewed:revised"
       codexOriginRevisionPrompt `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
 
+    it "builds the revision prompt's coordinator-owned labels from the configured workflow labels, not literals" $ do
+      let customConfig = defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"}
+          customPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing customConfig Nothing ResumeAnswer "")
+      customPrompt `shouldContain` "leave lgtm, needs-work, and reviewed:revised to the canonical review coordinator"
+      customPrompt `shouldNotContain` "reviewed:approve, reviewed:changes"
+
     it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
-      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") Nothing ResumeAnswer "")
-          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "")
+      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") defaultWorkflowConfig Nothing ResumeAnswer "")
+          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
       defaultPrompt `shouldNotContain` "--config"
 
@@ -2442,14 +2457,14 @@ main = hspec $ do
       defaultPrompt `shouldNotContain` "--config"
 
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
-      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing Nothing ResumeAnswer "")
-          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing Nothing ResumeAnswer "")
+      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
       initialReviewPrompt `shouldNotContain` "reviewed:revised"
       rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
 
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Just "session-1") ResumeAnswer "looks good")
-          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader ResumeInterruptGuidance)
@@ -3563,7 +3578,8 @@ workerFixtureSpec repository identifier issueNumber =
       workerParent = Nothing,
       workerCreatedAt = epoch,
       workerMaxRuntimeSeconds = 60,
-      workerConfigPath = Nothing
+      workerConfigPath = Nothing,
+      workerWorkflowConfig = defaultWorkflowConfig
     }
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and

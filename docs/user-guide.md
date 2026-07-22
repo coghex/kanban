@@ -28,11 +28,14 @@ every key, its type, and its default.
 The file lets you rename the workflow labels Kanban looks for (approval,
 changes-requested, blocked, tracker), add extra tracker-section headings,
 choose how PR approval is determined, set the blocking-label severity, cap
-GitHub fetch sizes and the card excerpt height, tune provider timeouts, point
-usage refresh at an external command, and override the git remote used to
-resolve `owner/name`. Repository-specific overrides live under
-`[repositories."owner/name"]` and replace the matching global values for that
-repository only.
+GitHub fetch sizes and the card excerpt height, tune provider timeouts, and
+override the git remote used to resolve `owner/name`. Repository-specific
+overrides live under `[repositories."owner/name"]` and replace the matching
+global values for that repository only.
+
+The `[usage.codex]`/`[usage.claude]` `command` keys are parsed and validated
+today but not yet executed by Kanban — usage refresh still uses the built-in
+provider regardless of what `command` names.
 
 `tools/approve_issues.py` and `tools/drain_prs.py` read the same file (with
 the same `--config FILE` override) so the canonical issue reviewer and PR

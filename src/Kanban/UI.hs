@@ -2688,7 +2688,7 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     . liftIO
     . forkIO
     $ do
-      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent
+      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig
       case launched of
         Left message -> do
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
@@ -3483,7 +3483,7 @@ launchPullRequestFlow number origin action _brand existingSession provenance inp
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig
+    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
     case launched of
       Left message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
