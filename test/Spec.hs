@@ -2494,10 +2494,16 @@ main = hspec $ do
       forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
-      let configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") ClaudeSolver 42 1)
-          defaultPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing ClaudeSolver 42 1)
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") repository ClaudeSolver 42 1)
+          defaultPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing repository ClaudeSolver 42 1)
       configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
       defaultPrompt `shouldNotContain` "--config"
+
+    it "always tells a resumed autosolve pr-revise to pass Kanban's own resolved --repo, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig Nothing forkRepository ClaudeSolver 42 1)
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
       let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")

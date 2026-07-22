@@ -4210,7 +4210,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
         if Map.member issueNumber state.appSolveProcesses
           then pure ()
           else do
-            let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow state.appOptions.optionConfig session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
+            let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow state.appOptions.optionConfig state.appRepository session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
             modifySolveSession issueNumber
               ( \current ->
                   current
@@ -4262,8 +4262,8 @@ failAutoSolve issueNumber reason = do
     )
   setNotice ("Autosolve #" <> showText issueNumber <> " failed: " <> sanitizeText reason)
 
-autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> SolverBrand -> Int -> Int -> Text
-autoSolveRevisionPrompt config configPath brand pullRequestNumber reviewRound =
+autoSolveRevisionPrompt :: WorkflowConfig -> Maybe FilePath -> Repository -> SolverBrand -> Int -> Int -> Text
+autoSolveRevisionPrompt config configPath repository brand pullRequestNumber reviewRound =
   Text.unlines
     ( [ "Kanban received CHANGES_REQUESTED for PR #" <> showText pullRequestNumber <> " in review round " <> showText reviewRound <> ".",
         "Resume the existing solve context and run " <> commandName "pr-revise" <> " for PR #" <> showText pullRequestNumber <> ".",
@@ -4278,9 +4278,17 @@ autoSolveRevisionPrompt config configPath brand pullRequestNumber reviewRound =
     )
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
-    configLines = case configPath of
-      Nothing -> []
-      Just path -> ["Pass --config " <> Text.pack path <> " to " <> commandName "pr-revise" <> " so it resolves this dashboard's configured workflow labels."]
+    -- Explicit --repo always accompanies pr-revise, not only when a custom
+    -- --config is set: Kanban's own resolved repository (which may come
+    -- from an explicit --repo override, e.g. reviewing upstream from a fork
+    -- checkout) must never be silently re-derived by pr-revise from the
+    -- checkout's configured remote instead.
+    configLines =
+      [ "Pass --repo " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> " to " <> commandName "pr-revise" <> " so it resolves the same repository as this dashboard."
+      ]
+        <> case configPath of
+          Nothing -> []
+          Just path -> ["Pass --config " <> Text.pack path <> " to " <> commandName "pr-revise" <> " so it resolves this dashboard's configured workflow labels."]
 
 autoSolveReviewLimit :: Int
 autoSolveReviewLimit = 5
