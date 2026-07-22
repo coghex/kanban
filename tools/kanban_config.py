@@ -126,6 +126,30 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "kanban" / "config.toml"
 
 
+def parse_repository_name(raw_value: str) -> str:
+    """Derives OWNER/NAME from a git remote URL. Mirrors
+    Kanban.Repository.parseRepositoryName: accepts https://, http://,
+    ssh://, and git:// schemes, git@host:owner/name SCP-shorthand, and an
+    already-bare owner/name, not just git@github.com:/https://github.com/
+    (the narrower forms approve_issues.py's and drain_prs.py's own
+    parse_repo_slug used to accept before delegating here)."""
+    stripped = raw_value.strip()
+    for prefix in ("https://", "http://", "ssh://", "git://"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    normalized = stripped.replace("git@github.com", "github.com").replace(":", "/").rstrip("/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    if len(segments) < 2:
+        raise KanbanConfigError(f"cannot derive OWNER/NAME from repository value: {raw_value}")
+    owner, name = segments[-2], segments[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not owner or not name:
+        raise KanbanConfigError(f"cannot derive OWNER/NAME from repository value: {raw_value}")
+    return f"{owner}/{name}"
+
+
 def _join(path: str, key: str) -> str:
     return f"{path}.{key}" if path else key
 

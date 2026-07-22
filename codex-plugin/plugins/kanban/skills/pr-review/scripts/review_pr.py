@@ -155,12 +155,20 @@ def parse_repository_name(raw_value: str) -> str | None:
     return f"{owner}/{name}"
 
 
-def resolve_repository(root: Path, config_path: str | None) -> str:
-    """Resolves OWNER/NAME from the dashboard-configured remote (mirrors
+def resolve_repository(root: Path, config_path: str | None, explicit_repo: str | None = None) -> str:
+    """Resolves OWNER/NAME. An explicit --repo (matching Kanban's own
+    --repo option) always wins and is never re-derived from the checkout's
+    remote — this is how a fork checkout launched with, say, --repo
+    upstream/repo reviews upstream's PR rather than gh's own default-repo
+    inference (or even the configured remote) silently targeting the fork.
+    Otherwise resolves from the dashboard-configured remote (mirrors
     Kanban.Repository.resolveRepository), not gh's own default-repo
-    inference: a checkout whose `origin` points at a fork while
-    remote_name=upstream is configured would otherwise let every gh call
-    below silently target the fork instead of the configured repository."""
+    inference."""
+    if explicit_repo:
+        parsed = parse_repository_name(explicit_repo)
+        if parsed is None:
+            raise WorkflowError(f"cannot derive OWNER/NAME from --repo: {explicit_repo}")
+        return parsed
     remote_name = resolve_remote_name(config_path)
     proc = subprocess.run(
         ["git", "remote", "get-url", remote_name],
@@ -1011,8 +1019,9 @@ def workflow(
     allow_no_issue: bool,
     self_review: bool = False,
     config_path: str | None = None,
+    explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    repo = resolve_repository(root, config_path)
+    repo = resolve_repository(root, config_path, explicit_repo)
     pr = pr_view(root, repo, number)
     gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
     origin = pr_origin(pr)
@@ -1095,6 +1104,7 @@ def publish_verdict(
     *,
     allow_no_issue: bool,
     config_path: str | None = None,
+    explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Publish a verdict the calling agent already computed itself (the
     self-review path from workflow()'s awaiting_self_review response).
@@ -1103,7 +1113,7 @@ def publish_verdict(
     whatever the caller provides, it is the same safe-publish machinery
     the nested-reviewer path uses, just fed an externally-supplied result
     instead of one from a spawned subprocess."""
-    repo = resolve_repository(root, config_path)
+    repo = resolve_repository(root, config_path, explicit_repo)
     pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError(
@@ -1230,6 +1240,16 @@ def parse_args() -> argparse.Namespace:
         metavar="FILE",
         help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
     )
+    parser.add_argument(
+        "--repo",
+        metavar="OWNER/NAME",
+        help=(
+            "Explicit repository identity, overriding the one derived from "
+            "the configured git remote (matches Kanban's own --repo option, "
+            "so a fork checkout reviews the same repository the dashboard "
+            "displays)."
+        ),
+    )
     args = parser.parse_args()
     if not args.self_test and args.review is None and args.rereview is None and args.publish_verdict is None:
         parser.error("one of --review, --rereview, --publish-verdict, or --self-test is required")
@@ -1260,6 +1280,7 @@ def main() -> None:
                 args.result,
                 allow_no_issue=args.allow_no_issue,
                 config_path=args.config,
+                explicit_repo=args.repo,
             )
         else:
             code, result = workflow(
@@ -1270,6 +1291,7 @@ def main() -> None:
                 allow_no_issue=args.allow_no_issue,
                 self_review=args.self_review,
                 config_path=args.config,
+                explicit_repo=args.repo,
             )
     except WorkflowError as exc:
         result = {"pr": number, "status": "error", "error": str(exc)}

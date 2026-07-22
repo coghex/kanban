@@ -253,20 +253,21 @@ def run_json(args: list[str], *, cwd: Path) -> Any:
 
 
 def parse_repo_slug(remote_url: str) -> str:
-    value = remote_url.strip()
-    ssh = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", value)
-    if ssh:
-        return f"{ssh.group(1)}/{ssh.group(2)}"
-    https = re.match(r"https://github\.com/([^/]+)/(.+?)(?:\.git)?$", value)
-    if https:
-        return f"{https.group(1)}/{https.group(2)}"
-    raise ApproveError(f"Unsupported remote URL: {remote_url}")
+    try:
+        return kanban_config.parse_repository_name(remote_url)
+    except kanban_config.KanbanConfigError as exc:
+        raise ApproveError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
+def get_repo_context(
+    path: Path, remote_name: str = "origin", explicit_repo: str | None = None
+) -> RepoContext:
     root = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=path).stdout.strip())
-    remote = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
-    slug = parse_repo_slug(remote)
+    if explicit_repo:
+        slug = parse_repo_slug(explicit_repo)
+    else:
+        remote = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
+        slug = parse_repo_slug(remote)
     data = run_json(
         ["gh", "repo", "view", slug, "--json", "defaultBranchRef"],
         cwd=root,
@@ -1973,6 +1974,17 @@ def parse_args() -> argparse.Namespace:
             "(default: ~/.config/kanban/config.toml)."
         ),
     )
+    parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="OWNER/NAME",
+        help=(
+            "Explicit repository identity, overriding the one derived from "
+            "the configured git remote (matches Kanban's own --repo option, "
+            "so a fork checkout gates and mutates the same repository the "
+            "dashboard displays)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2001,7 +2013,7 @@ def main() -> None:
         for warning in config_warnings:
             print(f"approve-issues.py warning: {warning}", file=sys.stderr, flush=True)
         ctx = get_repo_context(
-            Path(args.path).expanduser().resolve(), raw_config.remote_name
+            Path(args.path).expanduser().resolve(), raw_config.remote_name, args.repo
         )
         resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
         APPROVE_LABEL = resolved_config.workflow.approval_label

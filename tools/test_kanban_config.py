@@ -343,5 +343,30 @@ class UnknownKeyWarningTests(unittest.TestCase):
         self.assertIn('repositories."acme/widgets".workflow.not_real', warnings[0])
 
 
+class RepositoryNameParsingTests(unittest.TestCase):
+    """parse_repository_name is the single source of truth approve_issues.py
+    and drain_prs.py's own parse_repo_slug now delegate to, and mirrors
+    Kanban.Repository.parseRepositoryName's supported forms exactly."""
+
+    def test_accepts_ssh_shorthand(self):
+        self.assertEqual(kc.parse_repository_name("git@github.com:coghex/kanban.git"), "coghex/kanban")
+
+    def test_accepts_https(self):
+        self.assertEqual(kc.parse_repository_name("https://github.com/coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(kc.parse_repository_name("https://github.com/coghex/kanban"), "coghex/kanban")
+
+    def test_accepts_http_ssh_scheme_and_git_scheme(self):
+        self.assertEqual(kc.parse_repository_name("http://github.com/coghex/kanban"), "coghex/kanban")
+        self.assertEqual(kc.parse_repository_name("ssh://git@github.com/coghex/kanban.git"), "coghex/kanban")
+        self.assertEqual(kc.parse_repository_name("git://github.com/coghex/kanban.git"), "coghex/kanban")
+
+    def test_accepts_a_bare_owner_name(self):
+        self.assertEqual(kc.parse_repository_name("coghex/kanban"), "coghex/kanban")
+
+    def test_raises_on_an_unparseable_value(self):
+        with self.assertRaises(kc.KanbanConfigError):
+            kc.parse_repository_name("not-a-repo")
+
+
 if __name__ == "__main__":
     unittest.main()

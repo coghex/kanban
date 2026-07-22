@@ -20,6 +20,7 @@ module Kanban.Review
     answerReviewQuestion,
     approveReviewAction,
     beginIssueReview,
+    canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
@@ -414,26 +415,33 @@ runCanonicalIssueReview configPath repository issueNumber stage processStarted
                   repository
                   issueNumber
                   pythonPath
-                  ( [ scriptPath,
-                      "--path",
-                      repositoryRoot,
-                      stageFlag,
-                      show issueNumber,
-                      "--legacy-policy",
-                      "dual",
-                      "--json"
-                    ]
-                      <> configArguments
-                  )
+                  (canonicalIssueReviewArguments scriptPath repository issueNumber stage configPath)
                   processStarted
               pure (output >>= decodeCanonicalIssueReviewResult)
+
+-- | Explicit --repo, so the canonical reviewer always gates and mutates the
+-- same repository Kanban resolved (including any --repo override), rather
+-- than independently re-deriving identity from the configured remote —
+-- which could diverge in a fork checkout.
+canonicalIssueReviewArguments :: FilePath -> Repository -> Int -> ReviewStage -> Maybe FilePath -> [String]
+canonicalIssueReviewArguments scriptPath repository issueNumber stage configPath =
+  [ scriptPath,
+    "--path",
+    repository.repositoryRoot,
+    "--repo",
+    Text.unpack (repository.repositoryOwner <> "/" <> repository.repositoryName),
+    stageFlag,
+    show issueNumber,
+    "--legacy-policy",
+    "dual",
+    "--json"
+  ]
+    <> maybe [] (\path -> ["--config", path]) configPath
   where
-    repositoryRoot = repository.repositoryRoot
     stageFlag = case stage of
       InitialReview -> "--review"
       IssueRereview -> "--rereview"
       IssueRevision -> "--review"
-    configArguments = maybe [] (\path -> ["--config", path]) configPath
 
 parseWireValue :: Value -> Either Text ReviewWireMessage
 parseWireValue (Object value) = case (KeyMap.lookup "id" value, KeyMap.lookup "method" value) of

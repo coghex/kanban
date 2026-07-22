@@ -188,7 +188,7 @@ runSolve repository issueNumber workflow brand configPath config existingSession
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
-      (proc executablePath (solveArguments issueNumber workflow brand configPath config existingSession provenance userMessage))
+      (proc executablePath (solveArguments issueNumber workflow brand configPath repository config existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_out = CreatePipe,
           std_err = CreatePipe,
@@ -196,8 +196,8 @@ runSolve repository issueNumber workflow brand configPath config existingSession
           create_group = True
         }
 
-solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
-solveArguments issueNumber workflow CodexSolver configPath config existingSession provenance userMessage =
+solveArguments :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
+solveArguments issueNumber workflow CodexSolver configPath repository config existingSession provenance userMessage =
   case existingSession of
     Nothing ->
       [ "exec",
@@ -209,7 +209,7 @@ solveArguments issueNumber workflow CodexSolver configPath config existingSessio
         "model_reasoning_summary=\"detailed\"",
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
-        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver configPath)
+        Text.unpack (initialSolvePrompt issueNumber workflow CodexSolver configPath repository)
       ]
     Just sessionId ->
       [ "exec",
@@ -227,7 +227,7 @@ solveArguments issueNumber workflow CodexSolver configPath config existingSessio
         Text.unpack sessionId,
         Text.unpack (resumeSolvePrompt config workflow CodexSolver provenance userMessage)
       ]
-solveArguments issueNumber workflow ClaudeSolver configPath config existingSession provenance userMessage =
+solveArguments issueNumber workflow ClaudeSolver configPath repository config existingSession provenance userMessage =
   [ "--print",
     "--model",
     "claude-sonnet-5",
@@ -240,10 +240,10 @@ solveArguments issueNumber workflow ClaudeSolver configPath config existingSessi
     "--verbose"
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath else resumeSolvePrompt config workflow ClaudeSolver provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath repository else resumeSolvePrompt config workflow ClaudeSolver provenance userMessage)]
 
-initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Text
-initialSolvePrompt issueNumber workflow brand configPath =
+initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> Text
+initialSolvePrompt issueNumber workflow brand configPath repository =
   Text.unlines
     ( [ "Run the " <> workflowName workflow brand <> " workflow for GitHub issue #" <> Text.pack (show issueNumber) <> " in this repository.",
         "You are the canonical " <> solverLabel brand <> " solver selected explicitly by the user.",
@@ -257,11 +257,19 @@ initialSolvePrompt issueNumber workflow brand configPath =
            ]
     )
   where
-    configLines = case configPath of
-      Nothing -> []
-      Just path ->
-        [ "Pass --config " <> Text.pack path <> " to the read-only v2 gate check so it resolves the same configured workflow labels and remote as this dashboard."
-        ]
+    -- Explicit --repo always accompanies the gate check, not only when a
+    -- custom --config is set: Kanban's own resolved repository (which may
+    -- come from an explicit --repo override, e.g. reviewing upstream from a
+    -- fork checkout) must never be silently re-derived by the gate check
+    -- from the checkout's configured remote instead.
+    configLines =
+      [ "Pass --repo " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> " to the read-only v2 gate check so it resolves the same repository as this dashboard."
+      ]
+        <> case configPath of
+          Nothing -> []
+          Just path ->
+            [ "Pass --config " <> Text.pack path <> " to the read-only v2 gate check so it resolves the same configured workflow labels and remote as this dashboard."
+            ]
     workflowContract = case workflow of
       SolveOnly -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop after opening the PR; do not review or merge it."
       AutoSolve -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop immediately after opening the PR; do not start a reviewer, revise the PR, or merge it. Kanban owns the bounded review/fix loop."

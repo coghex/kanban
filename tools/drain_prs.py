@@ -246,17 +246,10 @@ def require_clean_worktree(root: Path) -> None:
 
 
 def parse_repo_slug(remote_url: str) -> str:
-    remote_url = remote_url.strip()
-    ssh_match = re.match(r"git@github\.com:([^/]+)/(.+?)(?:\.git)?$", remote_url)
-    if ssh_match:
-        return f"{ssh_match.group(1)}/{ssh_match.group(2)}"
-    https_match = re.match(
-        r"https://github\.com/([^/]+)/(.+?)(?:\.git)?$",
-        remote_url,
-    )
-    if https_match:
-        return f"{https_match.group(1)}/{https_match.group(2)}"
-    raise DrainError(f"Unsupported remote URL: {remote_url}")
+    try:
+        return kanban_config.parse_repository_name(remote_url)
+    except kanban_config.KanbanConfigError as exc:
+        raise DrainError(f"Unsupported remote URL: {remote_url}") from exc
 
 
 def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:

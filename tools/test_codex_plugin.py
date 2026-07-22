@@ -500,6 +500,21 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
             with self.assertRaises(module.WorkflowError):
                 module.resolve_repository(Path("/fake-repo"), None)
 
+    def test_resolve_repository_lets_an_explicit_repo_override_win_without_touching_git(self):
+        # Mirrors Kanban's own --repo option: a fork checkout must be able to
+        # review upstream's PR explicitly, without resolve_repository ever
+        # falling back to (or even consulting) the checkout's own remote.
+        module = load_review_pr_module()
+        with mock.patch.object(module, "subprocess") as subprocess_mock:
+            repo = module.resolve_repository(Path("/fake-repo"), None, "upstream-owner/upstream-repo")
+        self.assertEqual(repo, "upstream-owner/upstream-repo")
+        subprocess_mock.run.assert_not_called()
+
+    def test_resolve_repository_raises_on_an_unparseable_explicit_repo(self):
+        module = load_review_pr_module()
+        with self.assertRaises(module.WorkflowError):
+            module.resolve_repository(Path("/fake-repo"), None, "not-a-repo")
+
 
 class SolveGateEscalationTests(unittest.TestCase):
     """solve must escalate with the exact terminal line Kanban's own

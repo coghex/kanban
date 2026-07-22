@@ -104,6 +104,46 @@ class InstalledConfigReferenceTests(unittest.TestCase):
                 )
 
 
+class ParseRepoSlugTests(unittest.TestCase):
+    """parse_repo_slug delegates to kanban_config.parse_repository_name, so
+    it accepts the same broader remote forms the dashboard's own
+    parseRepositoryName does (ssh://, http://, git://, bare owner/name),
+    not only git@github.com:/https://github.com/."""
+
+    def test_accepts_the_broader_remote_forms(self):
+        self.assertEqual(
+            approve_issues.parse_repo_slug("ssh://git@github.com/coghex/kanban.git"),
+            "coghex/kanban",
+        )
+        self.assertEqual(
+            approve_issues.parse_repo_slug("coghex/kanban"), "coghex/kanban"
+        )
+
+    def test_raises_approve_error_on_an_unparseable_value(self):
+        with self.assertRaises(approve_issues.ApproveError):
+            approve_issues.parse_repo_slug("not-a-repo")
+
+    def test_get_repo_context_honors_an_explicit_repo_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+
+            def fake_run(args, *, cwd, **kwargs):
+                calls.append(args)
+                if args[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=f"{root}\n", stderr="")
+                if args[:2] == ["gh", "repo"]:
+                    return subprocess.CompletedProcess(
+                        args, 0, stdout=json.dumps({"defaultBranchRef": {"name": "main"}}), stderr=""
+                    )
+                raise AssertionError(f"unexpected command: {args}")
+
+            with mock.patch.object(approve_issues, "run", side_effect=fake_run):
+                ctx = approve_issues.get_repo_context(root, "origin", "upstream-owner/upstream-repo")
+        self.assertEqual(ctx.repo_slug, "upstream-owner/upstream-repo")
+        self.assertFalse(any(args[:3] == ["git", "remote", "get-url"] for args in calls))
+
+
 def make_ctx(root: Path, repo_slug: str = "acme/example") -> "approve_issues.RepoContext":
     return approve_issues.RepoContext(path=root, repo_slug=repo_slug, default_branch="main")
 

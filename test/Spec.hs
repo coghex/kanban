@@ -80,6 +80,7 @@ import Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
@@ -2254,6 +2255,24 @@ main = hspec $ do
             "    • latest current review verdict is CHANGES_REQUESTED"
           ]
 
+    it "passes an explicit --repo, matching Kanban's own resolved repository, to the canonical issue reviewer" $ do
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          arguments = canonicalIssueReviewArguments "/opt/approve_issues.py" repository 844 InitialReview Nothing
+      arguments `shouldContain` ["--repo", "coghex/kanban"]
+      arguments `shouldContain` ["--path", "/tmp/repo"]
+
+    it "resolves a --repo override the same way regardless of the checkout's own remote, mirroring a fork checkout" $ do
+      -- The dashboard's own --repo option can point at a different
+      -- repository than the checkout's configured remote (e.g. reviewing
+      -- upstream from a fork checkout); the canonical reviewer must be told
+      -- the same explicit identity Kanban resolved, not left to re-derive
+      -- one from the remote itself.
+      let forkCheckout = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          arguments = canonicalIssueReviewArguments "/opt/approve_issues.py" forkCheckout 844 IssueRereview (Just "/tmp/custom.toml")
+      arguments `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
+      arguments `shouldContain` ["--rereview", "844"]
+      arguments `shouldContain` ["--config", "/tmp/custom.toml"]
+
     it "resolves the bundled canonical issue reviewer from its Kanban-managed install directory" $ do
       temporaryRoot <- createTemporaryDirectory
       let installDir = temporaryRoot </> "issue-review"
@@ -2315,8 +2334,8 @@ main = hspec $ do
       claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
-      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer ""
-          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer ""
+      let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
@@ -2324,10 +2343,10 @@ main = hspec $ do
       claudeArguments `shouldContain` ["--effort", "high"]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
-      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
-          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          codexAutoSolvePrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeSolvePrompt = last (solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeAutoSolvePrompt = last (solveArguments 844 AutoSolve ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldContain` "$solve"
       codexAutoSolvePrompt `shouldNotContain` "$autosolve"
@@ -2338,13 +2357,18 @@ main = hspec $ do
       codexSolvePrompt `shouldContain` "Do not run issue-review"
 
     it "passes a configured --config path through to the read-only gate-check instruction" $ do
-      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") defaultWorkflowConfig Nothing ResumeAnswer "")
-          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let promptWithConfig = last (solveArguments 844 SolveOnly CodexSolver (Just "/tmp/kanban/custom.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          promptWithoutConfig = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
       promptWithoutConfig `shouldNotContain` "Pass --config"
 
+    it "always passes Kanban's own resolved --repo to the read-only gate-check instruction, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to the read-only v2 gate check"
+
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
-      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       solvePrompt `shouldContain` "existing worktree for issue #782"
       solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
       solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
@@ -2352,9 +2376,9 @@ main = hspec $ do
       solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
-          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
-          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+      let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          interruptPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "focus on the other file instead")
+          automatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
@@ -2366,7 +2390,7 @@ main = hspec $ do
 
     it "names the configured changes-requested label in the automated resume header instead of the literal default" $ do
       let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
-          customAutomatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+          customAutomatedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       customAutomatedPrompt `shouldContain` "the PR received needs-work"
       customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 
@@ -2437,14 +2461,14 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
-      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
-      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
-      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
-          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          claudeOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       codexOriginRevisionPrompt `shouldContain` "$pr-revise"
       claudeOriginRevisionPrompt `shouldContain` "/pr-revise"
       codexOriginRevisionPrompt `shouldNotContain` "pr-review:v1"
@@ -2454,15 +2478,20 @@ main = hspec $ do
 
     it "builds the revision prompt's coordinator-owned labels from the configured workflow labels, not literals" $ do
       let customConfig = defaultWorkflowConfig {approvalLabel = "lgtm", changesRequestedLabel = "needs-work"}
-          customPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing customConfig Nothing ResumeAnswer "")
+          customPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig Nothing ResumeAnswer "")
       customPrompt `shouldContain` "leave lgtm, needs-work, and reviewed:revised to the canonical review coordinator"
       customPrompt `shouldNotContain` "reviewed:approve, reviewed:changes"
 
     it "tells a spawned reviewer to pass the dashboard's selected --config to the canonical coordinator, but only when one is configured" $ do
-      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") defaultWorkflowConfig Nothing ResumeAnswer "")
-          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let configuredPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver (Just "/tmp/custom-config.toml") (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          defaultPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       configuredPrompt `shouldContain` "--config /tmp/custom-config.toml"
       defaultPrompt `shouldNotContain` "--config"
+
+    it "always tells a spawned reviewer to pass Kanban's own resolved --repo to the canonical coordinator, even without a fork override" $ do
+      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          forkPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
+      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to"
 
     it "tells a resumed autosolve pr-revise to pass the dashboard's selected --config, but only when one is configured" $ do
       let configuredPrompt = Data.Text.unpack (autoSolveRevisionPrompt defaultWorkflowConfig (Just "/tmp/custom-config.toml") ClaudeSolver 42 1)
@@ -2471,14 +2500,14 @@ main = hspec $ do
       defaultPrompt `shouldNotContain` "--config"
 
     it "never asks the initial review prompt to remove a label only rereview can see, but keeps that instruction in rereview" $ do
-      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
-          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing defaultWorkflowConfig Nothing ResumeAnswer "")
+      let initialReviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
+          rereviewPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRereview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
       initialReviewPrompt `shouldNotContain` "reviewed:revised"
       rereviewPrompt `shouldContain` "Remove reviewed:revised after successfully publishing the verdict"
 
     it "frames a resumed PR prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
-      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
-          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
+      let answerPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "looks good")
+          interruptPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeInterruptGuidance "check the other file too")
       answerPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeAnswer)
       answerPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
       interruptPrompt `shouldContain` Data.Text.unpack (resumeProvenanceHeader defaultWorkflowConfig ResumeInterruptGuidance)
@@ -2487,7 +2516,7 @@ main = hspec $ do
 
     it "names the configured changes-requested label in a resumed PR revision's automated-handoff header" $ do
       let customConfig = defaultWorkflowConfig {changesRequestedLabel = "needs-work"}
-          customAutomatedPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
+          customAutomatedPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") customConfig (Just "session-1") ResumeAutomatedChangesRequested "Kanban received CHANGES_REQUESTED for PR #900")
       customAutomatedPrompt `shouldContain` "the PR received needs-work"
       customAutomatedPrompt `shouldNotContain` "the PR received reviewed:changes"
 

@@ -162,7 +162,7 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
-      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath config existingSession provenance userMessage))
+      (proc executablePath (pullRequestArguments pullRequestNumber origin action brand configPath repository config existingSession provenance userMessage))
         { cwd = Just repositoryRoot,
           std_in = NoStream,
           std_out = CreatePipe,
@@ -170,17 +170,17 @@ runPullRequestFlow repository pullRequestNumber origin action configPath config 
           create_group = True
         }
 
-pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
-pullRequestArguments number origin action CodexSolver configPath config existingSession provenance userMessage = case existingSession of
-  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath config CodexSolver)]
+pullRequestArguments :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe FilePath -> Repository -> WorkflowConfig -> Maybe Text -> ResumeProvenance -> Text -> [String]
+pullRequestArguments number origin action CodexSolver configPath repository config existingSession provenance userMessage = case existingSession of
+  Nothing -> codexBase <> [Text.unpack (initialPrompt number origin action configPath repository config CodexSolver)]
   Just sessionId -> ["exec", "resume"] <> codexOptions <> [Text.unpack sessionId, Text.unpack (resumePrompt config action provenance userMessage)]
   where
     codexBase = ["exec"] <> codexOptions
     codexOptions = ["--model", codexModel action, "--config", "model_reasoning_effort=\"" <> codexEffort action <> "\"", "--config", "model_reasoning_summary=\"detailed\"", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-pullRequestArguments number origin action ClaudeSolver configPath config existingSession provenance userMessage =
+pullRequestArguments number origin action ClaudeSolver configPath repository config existingSession provenance userMessage =
   ["--print", "--model", claudeModel action, "--effort", claudeEffort action, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose"]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath config ClaudeSolver else resumePrompt config action provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath repository config ClaudeSolver else resumePrompt config action provenance userMessage)]
 
 codexModel :: PullRequestAction -> String
 codexModel PullRequestRevision = "gpt-5.4"
@@ -197,23 +197,41 @@ claudeModel _ = "claude-opus-4-8"
 claudeEffort :: PullRequestAction -> String
 claudeEffort _ = "xhigh"
 
-initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> SolverBrand -> Text
-initialPrompt number _origin action configPath config brand = Text.unlines (actionLines <> configLines <> interactionLines)
+initialPrompt :: Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> Repository -> WorkflowConfig -> SolverBrand -> Text
+initialPrompt number _origin action configPath repository config brand = Text.unlines (actionLines <> configLines <> interactionLines)
   where
     commandName name = if brand == CodexSolver then "$" <> name else "/" <> name
-    configLines = case configPath of
-      Nothing -> []
-      Just path ->
-        [ "Pass --config "
-            <> Text.pack path
-            <> " to "
-            <> commandName "pr-review"
-            <> ", "
-            <> commandName "pr-rereview"
-            <> ", or "
-            <> commandName "pr-revise"
-            <> " (whichever applies) so it resolves the same configured workflow labels as this dashboard."
-        ]
+    -- Explicit --repo always accompanies these commands, not only when a
+    -- custom --config is set: Kanban's own resolved repository (which may
+    -- come from an explicit --repo override, e.g. reviewing upstream from a
+    -- fork checkout) must never be silently re-derived by the canonical
+    -- coordinator from the checkout's configured remote instead.
+    configLines =
+      [ "Pass --repo "
+          <> repository.repositoryOwner
+          <> "/"
+          <> repository.repositoryName
+          <> " to "
+          <> commandName "pr-review"
+          <> ", "
+          <> commandName "pr-rereview"
+          <> ", or "
+          <> commandName "pr-revise"
+          <> " (whichever applies) so it resolves the same repository as this dashboard."
+      ]
+        <> case configPath of
+          Nothing -> []
+          Just path ->
+            [ "Pass --config "
+                <> Text.pack path
+                <> " to "
+                <> commandName "pr-review"
+                <> ", "
+                <> commandName "pr-rereview"
+                <> ", or "
+                <> commandName "pr-revise"
+                <> " (whichever applies) so it resolves the same configured workflow labels as this dashboard."
+            ]
     actionLines = case action of
       PullRequestReview ->
         [ "Run " <> commandName "pr-review" <> " for PR #" <> numberText <> ".",
