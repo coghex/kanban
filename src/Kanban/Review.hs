@@ -49,7 +49,7 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, withMVar)
 import Control.Exception (Exception, IOException, displayException, try)
 import Control.Monad (forever, void, when)
 import Data.Aeson
@@ -229,13 +229,15 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
 -- 'createProcess' or 'managedProcess's own @ps@-based check (both of which
 -- take real, measurable time) have even run, closing the window where a
 -- cancelled thread could otherwise still spawn and run a fresh tool. Once
--- attached, the paired action is 'watchManagedProcessCensus's stop-and-
--- collect action for that process: whichever caller ends up killing this
--- entry must run it exactly once, to both stop the background census
--- watcher and retrieve what it recorded for 'killCensusVerified'.
+-- attached, the paired actions are 'watchManagedProcessCensus's peek and
+-- stop-and-collect actions for that process: whichever caller ends up
+-- killing this entry re-peeks on every retry (see
+-- 'confirmToolProcessTerminated') and runs stop-and-collect exactly once,
+-- only once actually confirmed terminated, to release the background
+-- census watcher.
 data ToolEntry = ToolEntry
   { toolEntryThread :: Text,
-    toolEntryProcess :: Maybe (ManagedProcess, IO [ProcessIdentity]),
+    toolEntryProcess :: Maybe (ManagedProcess, IO [ProcessIdentity], IO [ProcessIdentity]),
     toolEntryDraining :: Bool
   }
 
@@ -276,11 +278,13 @@ data ReviewClient = ReviewClient
     -- the leader itself has exited and been reaped -- e.g. an unexpected
     -- app-server crash that leaves a spawned child alive.
     reviewProcessManaged :: ManagedProcess,
-    -- | 'watchManagedProcessCensus's stop-and-collect action for the
-    -- app-server, run once at shutdown so 'confirmToolProcessTerminated'
-    -- has a provenance-backed witness for the app-server's own descendants
-    -- too, not just its own pgid.
-    reviewProcessCensus :: IO [ProcessIdentity],
+    -- | 'watchManagedProcessCensus's peek and stop-and-collect actions for
+    -- the app-server, consulted (and, once terminated is confirmed,
+    -- stopped) at shutdown so 'confirmToolProcessTerminated' has a
+    -- provenance-backed witness for the app-server's own descendants too,
+    -- not just its own pgid.
+    reviewProcessCensusPeek :: IO [ProcessIdentity],
+    reviewProcessCensusStop :: IO [ProcessIdentity],
     reviewWriteLock :: MVar (),
     reviewNextRequestId :: IORef Int,
     reviewNextToolInvocationId :: IORef Int,
@@ -549,7 +553,7 @@ startReviewClient workflowConfig repository eventSink = do
       hSetBuffering outputHandle LineBuffering
       (processManaged, groupLeaderProblem) <- managedProcess processHandle
       mapM_ (\problem -> eventSink (ReviewProtocolWarning ("app-server process group leadership: " <> problem))) groupLeaderProblem
-      processCensus <- watchManagedProcessCensus processManaged
+      (processCensusPeek, processCensusStop) <- watchManagedProcessCensus processManaged
       writeLock <- newMVar ()
       requestCounter <- newIORef 2
       toolInvocationCounter <- newIORef 1
@@ -563,7 +567,8 @@ startReviewClient workflowConfig repository eventSink = do
               { reviewInput = inputHandle,
                 reviewProcess = processHandle,
                 reviewProcessManaged = processManaged,
-                reviewProcessCensus = processCensus,
+                reviewProcessCensusPeek = processCensusPeek,
+                reviewProcessCensusStop = processCensusStop,
                 reviewWriteLock = writeLock,
                 reviewNextRequestId = requestCounter,
                 reviewNextToolInvocationId = toolInvocationCounter,
@@ -619,7 +624,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
   void (forkIO (drainHandle outputHandle))
   void (forkIO (drainHandle errorHandle))
   (processManaged, _) <- managedProcess processHandle
-  processCensus <- watchManagedProcessCensus processManaged
+  (processCensusPeek, processCensusStop) <- watchManagedProcessCensus processManaged
   writeLock <- newMVar ()
   requestCounter <- newIORef 2
   toolInvocationCounter <- newIORef 1
@@ -633,7 +638,8 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
       { reviewInput = inputHandle,
         reviewProcess = processHandle,
         reviewProcessManaged = processManaged,
-        reviewProcessCensus = processCensus,
+        reviewProcessCensusPeek = processCensusPeek,
+        reviewProcessCensusStop = processCensusStop,
         reviewWriteLock = writeLock,
         reviewNextRequestId = requestCounter,
         reviewNextToolInvocationId = toolInvocationCounter,
@@ -788,19 +794,19 @@ reserveToolInvocation client threadId = do
       else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId Nothing False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
 
--- | Attaches a now-spawned process (and its census watcher's stop-and-
--- collect action -- see 'watchManagedProcessCensus') to a reservation made
--- by 'reserveToolInvocation'. Returns 'False' if that reservation is gone
--- or already claimed by a concurrent drain (cancelled while still
--- unspawned): the caller must then stop the census watcher and terminate
--- the process it just spawned itself, since the registry no longer -- or
--- does not yet safely -- own that slot.
-attachToolProcess :: ReviewClient -> Int -> ManagedProcess -> IO [ProcessIdentity] -> IO Bool
-attachToolProcess client invocationId managed collectCensus =
+-- | Attaches a now-spawned process (and its census watcher's peek and
+-- stop-and-collect actions -- see 'watchManagedProcessCensus') to a
+-- reservation made by 'reserveToolInvocation'. Returns 'False' if that
+-- reservation is gone or already claimed by a concurrent drain (cancelled
+-- while still unspawned): the caller must then stop the census watcher and
+-- terminate the process it just spawned itself, since the registry no
+-- longer -- or does not yet safely -- own that slot.
+attachToolProcess :: ReviewClient -> Int -> ManagedProcess -> IO [ProcessIdentity] -> IO [ProcessIdentity] -> IO Bool
+attachToolProcess client invocationId managed peekCensus stopCensus =
   modifyMVar client.reviewToolProcesses $ \registry ->
     case Map.lookup invocationId registry.toolRegistryEntries of
       Just entry | not entry.toolEntryDraining ->
-        pure (registry {toolRegistryEntries = Map.insert invocationId (entry {toolEntryProcess = Just (managed, collectCensus)}) registry.toolRegistryEntries}, True)
+        pure (registry {toolRegistryEntries = Map.insert invocationId (entry {toolEntryProcess = Just (managed, peekCensus, stopCensus)}) registry.toolRegistryEntries}, True)
       _ -> pure (registry, False)
 
 -- | Removes exactly the entry a single invocation created, once that
@@ -885,9 +891,8 @@ drainMatchingToolProcesses client options matches = do
         }
   where
     confirmEntry _ Nothing = pure True
-    confirmEntry theClient (Just (managed, collectCensus)) = do
-      census <- collectCensus
-      confirmToolProcessTerminated theClient managed census
+    confirmEntry theClient (Just (managed, peekCensus, stopCensus)) =
+      confirmToolProcessTerminated theClient managed peekCensus stopCensus
 
 -- | Atomically closes the registry to new registrations and drains every
 -- currently registered process (see 'drainMatchingToolProcesses'). Safe to
@@ -900,25 +905,31 @@ drainToolProcesses client =
 
 -- | Kills `managed` and confirms, via 'killCensusVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
--- bounded number of times if a fresh check still shows survivors or a
--- snapshot itself fails. `census` (see 'watchManagedProcessCensus') gives
--- this a provenance-backed set of identities to verify continuity against,
--- rather than trusting whichever processes a single fresh snapshot happens
--- to find sharing the recorded pgid *right now*: once every member of the
--- originally-owned group has exited, that pgid becomes available for the
--- kernel to hand to a completely unrelated new process group, and the
--- census -- recorded via genuine parent-chain evidence while the leader
--- was still alive -- is what keeps that later signal correctly scoped to
--- this spawn instead of a coincidental foreign one.
+-- bounded number of times if a fresh check still shows survivors, no
+-- continuity can yet be established, or a snapshot itself fails.
+-- `peekCensus` (see 'watchManagedProcessCensus') is re-read on every
+-- attempt, not collected once up front: the watcher keeps ticking between
+-- retries, so a survivor it had not yet witnessed on the first attempt can
+-- still be picked up and trusted by a later one, rather than this being
+-- permanently stuck with whatever the census happened to contain at the
+-- very first call. A retry pauses for 'confirmRetryDelayMicros' first --
+-- long enough for at least one more watcher tick to land -- since without
+-- that pause every attempt would just re-peek the exact same
+-- not-yet-updated census and never actually gain anything from retrying at
+-- all.
 --
 -- Reports the outcome rather than discarding it: callers must not
 -- deregister/remove an invocation whose termination could not be
 -- confirmed, since that would drop registry ownership of a group that may
--- still hold a live member. A problem serious enough to exhaust every
--- retry is also surfaced as a protocol warning, so it is at least visible
--- rather than silently swallowed.
-confirmToolProcessTerminated :: ReviewClient -> ManagedProcess -> [ProcessIdentity] -> IO Bool
-confirmToolProcessTerminated client managed census = go confirmAttempts
+-- still hold a live member. `stopCensus` is only ever run once termination
+-- is actually confirmed, releasing the background watcher at that point;
+-- on give-up, the watcher is deliberately left running so a later retry of
+-- the very same entry still has live, continuously-recorded evidence to
+-- consult rather than a frozen, stale reading. A problem serious enough to
+-- exhaust every retry is also surfaced as a protocol warning, so it is at
+-- least visible rather than silently swallowed.
+confirmToolProcessTerminated :: ReviewClient -> ManagedProcess -> IO [ProcessIdentity] -> IO [ProcessIdentity] -> IO Bool
+confirmToolProcessTerminated client managed peekCensus stopCensus = go confirmAttempts
   where
     confirmAttempts = 3 :: Int
     go attemptsLeft
@@ -926,8 +937,12 @@ confirmToolProcessTerminated client managed census = go confirmAttempts
           client.reviewEventSink (ReviewProtocolWarning "could not confirm a review tool process group fully terminated after repeated attempts")
           pure False
       | otherwise = do
-          confirmed <- killCensusVerified managed census
-          if confirmed then pure True else go (attemptsLeft - 1)
+          confirmed <- killCensusVerified managed peekCensus
+          if confirmed
+            then void stopCensus >> pure True
+            else do
+              threadDelay confirmRetryDelayMicros
+              go (attemptsLeft - 1)
 
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
 -- every registered tool process first, then the app-server itself, both via
@@ -937,8 +952,7 @@ confirmToolProcessTerminated client managed census = go confirmAttempts
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  appServerCensus <- client.reviewProcessCensus
-  void (confirmToolProcessTerminated client client.reviewProcessManaged appServerCensus)
+  void (confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop)
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -1031,8 +1045,7 @@ watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  appServerCensus <- client.reviewProcessCensus
-  void (confirmToolProcessTerminated client client.reviewProcessManaged appServerCensus)
+  void (confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop)
   takeMVar client.reviewOutputDone
   takeMVar client.reviewErrorDone
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
@@ -1323,12 +1336,11 @@ runGitHubCommand client threadId ghPath arguments input = do
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
           (managed, groupLeaderProblem) <- managedProcess processHandle
           mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-          collectCensus <- watchManagedProcessCensus managed
-          attached <- attachToolProcess client invocationId managed collectCensus
+          (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+          attached <- attachToolProcess client invocationId managed peekCensus stopCensus
           if not attached
             then do
-              census <- collectCensus
-              void (confirmToolProcessTerminated client managed census)
+              void (confirmToolProcessTerminated client managed peekCensus stopCensus)
               pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
             else do
               outputResult <- newEmptyMVar
@@ -1354,8 +1366,7 @@ runGitHubCommand client threadId ghPath arguments input = do
               -- is the only registry entry ever pointing at. Deregistering only
               -- once confirmed leaves an unconfirmed entry registered for a
               -- later drain to retry, rather than dropping ownership of it here.
-              census <- collectCensus
-              confirmed <- confirmToolProcessTerminated client managed census
+              confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
               when confirmed (deregisterToolProcess client invocationId)
               pure result
         Right _ -> do
@@ -1465,12 +1476,11 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
             Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
               (managed, groupLeaderProblem) <- managedProcess processHandle
               mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-              collectCensus <- watchManagedProcessCensus managed
-              attached <- attachToolProcess client invocationId managed collectCensus
+              (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+              attached <- attachToolProcess client invocationId managed peekCensus stopCensus
               if not attached
                 then do
-                  census <- collectCensus
-                  void (confirmToolProcessTerminated client managed census)
+                  void (confirmToolProcessTerminated client managed peekCensus stopCensus)
                   pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
                 else do
                   outputResult <- newEmptyMVar
@@ -1497,8 +1507,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
                   -- entry ever pointing at. Deregistering only once confirmed
                   -- leaves an unconfirmed entry registered for a later drain to
                   -- retry, rather than dropping ownership of it here.
-                  census <- collectCensus
-                  confirmed <- confirmToolProcessTerminated client managed census
+                  confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
                   when confirmed (deregisterToolProcess client invocationId)
                   pure result
             Right _ -> do
@@ -1861,6 +1870,15 @@ claudeDiagnosticLimit = 4000
 
 githubCommandTimeoutMicros :: Int
 githubCommandTimeoutMicros = 30 * 1000 * 1000
+
+-- | Paced to comfortably exceed the census watcher's own tick interval (see
+-- 'watchManagedProcessCensus' in "Kanban.Process"), so a retry in
+-- 'confirmToolProcessTerminated' genuinely gives the still-running watcher
+-- a chance to record an intervening tick -- not an immediate, still-stale
+-- re-peek of exactly the same reading that just failed to establish
+-- continuity.
+confirmRetryDelayMicros :: Int
+confirmRetryDelayMicros = 600 * 1000
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000

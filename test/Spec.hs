@@ -42,6 +42,7 @@ import Kanban.Process
     identityForPid,
     interruptManagedProcess,
     killCensusVerified,
+    killCensusVerifiedWith,
     killManagedProcess,
     killVerifiedGroupWith,
     liveProcesses,
@@ -288,34 +289,35 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        collectCensus <- watchManagedProcessCensus managed
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
         threadDelay 1200000
         timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
-        census <- collectCensus
+        census <- peekCensus
         census `shouldSatisfy` (not . null)
         let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
         beforeKill <- readProcessSnapshot
         case beforeKill of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
-        confirmed <- killCensusVerified managed census
+        confirmed <- killCensusVerified managed peekCensus
         confirmed `shouldBe` True
         finalSnapshot <- readProcessSnapshot
         case finalSnapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldBe` []
+        void stopCensus
 
-    it "killCensusVerified still kills a same-group child forked after the census was already collected, rather than confirming empty because only the leader was ever witnessed" $ do
-      -- The leader forks its child only after a 1s delay; collecting the
-      -- census immediately (before that fork) captures *only* the leader's
-      -- own identity, and stopping the watcher there means nothing further
-      -- is ever recorded -- the exact "recorded the leader at one tick,
-      -- then missed a child forked after that tick" scenario, made
-      -- deterministic instead of racing a background timer. A version of
-      -- killCensusVerified that (incorrectly) treated "no census identity
-      -- persists" as "group confirmed empty" would report this group
-      -- terminated the instant the leader exits, despite the never-recorded
-      -- child still running.
+    it "killCensusVerified refuses a same-group child on a one-off stale peek that missed it, then succeeds once the still-running watcher's later ticks catch up" $ do
+      -- The leader forks its child only after a 1s delay; a one-off peek
+      -- taken immediately captures *only* the leader's own identity. A
+      -- version of killCensusVerified that trusted a broad, unrestricted
+      -- current-group snapshot on the strength of that stale, non-
+      -- overlapping census alone would wrongly confirm-or-kill whatever it
+      -- finds occupying the pgid *right now* -- exactly the unsound
+      -- shortcut a reused pgid could exploit. The watcher itself is never
+      -- stopped, though: its own later ticks broadly record the child once
+      -- it exists, so a *fresh* peek (not the stale one) legitimately
+      -- establishes continuity and the kill proceeds.
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "sleep 1; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 3"]) {create_group = True}
       (managed, groupLeaderProblem) <- managedProcess process
@@ -323,8 +325,8 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        collectCensus <- watchManagedProcessCensus managed
-        staleCensus <- collectCensus
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        staleCensus <- peekCensus
         staleCensus `shouldSatisfy` (not . null)
         let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
             -- Identifies the detached, TERM-resistant child specifically by
@@ -350,12 +352,69 @@ main = hspec $ do
         waitForChild 50
         staleCensus `shouldSatisfy` (not . any isDetachedChild)
         timeout 5000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
-        confirmed <- killCensusVerified managed staleCensus
+        -- Once the leader has exited and been reaped, the one-off stale
+        -- reading (leader only) shares no witnessed identity with a fresh
+        -- snapshot at all -- the leader is gone from it, and the child was
+        -- never recorded in it -- so a kill attempt pinned to that stale
+        -- reading alone must not proceed.
+        staleConfirmed <- killCensusVerified managed (pure staleCensus)
+        staleConfirmed `shouldBe` False
+        let waitForCaughtUpCensus attempts = do
+              current <- peekCensus
+              if any isDetachedChild current
+                then pure ()
+                else
+                  if attempts <= (0 :: Int)
+                    then expectationFailure "still-running watcher never caught up to the detached child"
+                    else threadDelay 100000 >> waitForCaughtUpCensus (attempts - 1)
+        waitForCaughtUpCensus 50
+        confirmed <- killCensusVerified managed peekCensus
         confirmed `shouldBe` True
         finalSnapshot <- readProcessSnapshot
         case finalSnapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldBe` []
+        void stopCensus
+
+    it "killCensusVerifiedWith refuses to signal a live process group the census never observed, rather than trusting a pgid that could have been reused" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        let waitForRealIdentity attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot
+                  | Just identity <- identityForPid (fromIntegral leaderPid) snapshot -> pure identity
+                _
+                  | attempts <= (0 :: Int) -> do
+                      expectationFailure "leader never appeared in a process snapshot"
+                      error "unreachable"
+                  | otherwise -> threadDelay 100000 >> waitForRealIdentity (attempts - 1)
+        realIdentity <- waitForRealIdentity 50
+        -- A census that only ever observed a completely different identity
+        -- -- as if this pgid had been handed to an unrelated spawn before
+        -- the watcher ever got a chance to see the real leader -- shares no
+        -- witnessed pid/start-time pair with what a fresh snapshot now
+        -- shows occupying the group.
+        let foreignCensus =
+              [ realIdentity
+                  { processIdentityPid = realIdentity.processIdentityPid + 999999,
+                    processIdentityStartedAt = "a long time ago"
+                  }
+              ]
+            fakeSnapshot = pure (Right [realIdentity])
+        confirmed <- killCensusVerifiedWith fakeSnapshot managed (pure foreignCensus)
+        confirmed `shouldBe` False
+        -- Refused without ever signalling: the real, still-owned leader is
+        -- untouched.
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> any ((== realIdentity.processIdentityPid) . processIdentityPid) snapshot `shouldBe` True
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do

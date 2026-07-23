@@ -15,6 +15,7 @@ module Kanban.Process
     interruptManagedProcess,
     interruptThenKillManagedProcess,
     killCensusVerified,
+    killCensusVerifiedWith,
     killManagedProcess,
     killManagedProcessVerified,
     killVerifiedGroup,
@@ -36,7 +37,7 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (IOException, try)
 import Control.Monad (forever, void)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -314,9 +315,25 @@ parseProcessLine line = case Text.words line of
 isZombieStat :: Text -> Bool
 isZombieStat = Text.isInfixOf "Z"
 
+-- | Unlike 'killManagedProcess' (which must still reach a group after its
+-- leader has died, to clean up orphaned members left behind), SIGINT is
+-- only ever meaningful to a genuinely live, listening leader -- so there is
+-- nothing to lose by refusing to signal at all once that can no longer be
+-- freshly verified. Before signalling a captured pgid, this takes a fresh
+-- snapshot and requires the pid to still be present *and* still its own
+-- group leader (pid == its own group pid); if the leader has since exited
+-- and the kernel has already reassigned that same numeric pgid to an
+-- unrelated later process group, this silently no-ops rather than
+-- delivering an interrupt to a stranger.
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle Nothing) = signalOwnedGroup sigINT processHandle
-interruptManagedProcess (LocalManagedProcess _ (Just pid)) = ignoreIOException (signalProcessGroup sigINT pid)
+interruptManagedProcess (LocalManagedProcess _ (Just pid)) = do
+  snapshot <- defaultProcessSnapshot
+  case snapshot of
+    Left _ -> pure ()
+    Right processes -> case identityForPid (fromIntegral pid) processes of
+      Just identity | identity.processIdentityGroupPid == fromIntegral pid -> ignoreIOException (signalProcessGroup sigINT pid)
+      _ -> pure ()
 interruptManagedProcess (PersistentManagedProcess processId) = ignoreIOException (signalProcessGroup sigINT processId)
 
 -- | Ctrl-C's escalation for a still-owned process: SIGINT first, then fall
@@ -428,84 +445,115 @@ killIdentitiesVerified pid expected = do
   where
     groupPidInt = fromIntegral pid
 
--- | Spawns a background watcher that, every 'censusIntervalMicros', records
--- the managed leader's own identity (while it is still found in a fresh
--- snapshot) and every one of its live descendants (via 'descendantProcesses'
--- -- genuine parent-chain evidence, not a pgid guess) into an accumulating
--- census, *starting with one synchronous tick taken before this even
--- returns* (see below). Returns an action that stops the watcher and
--- yields everything recorded so far; the caller must run this action
--- itself, exactly once, when the invocation completes, to both release the
--- watcher thread and retrieve the census for 'killCensusVerified'.
+-- | Spawns a background watcher that, every 'censusIntervalMicros' (with
+-- one synchronous tick taken before this even returns -- see below),
+-- records every current member of the managed leader's process group into
+-- an accumulating census -- *unless* a tick finds the group completely
+-- empty, in which case the census is reset, not merely left unchanged (see
+-- below for why). Returns two actions: `peek` reads everything recorded so
+-- far *without* stopping the watcher, so a caller can re-check partway
+-- through a multi-attempt kill sequence and see what a tick recorded in
+-- the meantime; `stop` kills the watcher thread and returns its final
+-- reading. The caller must run `stop` itself, exactly once, when the
+-- invocation is fully done (confirmed terminated or given up), to release
+-- the watcher thread.
 --
 -- This exists because a descendant discovered only *after* the leader has
 -- already exited can no longer be found by parent-chain descent at all --
 -- once reparented (to init/launchd), its `ppid` no longer names the
--- now-gone leader -- and a snapshot taken only at that point has nothing
--- but the numeric pgid left to go on, which a since-vacated pgid can share
--- with a completely unrelated later process group. Recording descendants
--- *while the leader is still alive* captures real identities (pid and
--- start time) that remain a trustworthy ownership witness regardless of
--- what happens to the leader or that pgid afterward.
+-- now-gone leader. A snapshot taken only at that point has nothing but the
+-- numeric pgid left to go on, and a bare pgid match alone cannot
+-- distinguish a legitimate, unwitnessed member of *this* spawn from a
+-- fully unrelated process group the kernel later assigned the exact same,
+-- since-vacated pgid. Recording the group's membership continuously, with
+-- no gap, from a verified spawn onward is what closes that: at every tick,
+-- whatever currently shares this pgid is treated as a further-confirmed
+-- member of the *same*, continuously-observed spawn -- unless a tick ever
+-- finds the group *empty*. A verified leader (see 'managedProcess') is
+-- always itself a member of its own group for as long as it lives, so the
+-- group can only ever be observed empty once the leader has truly exited
+-- -- at that exact point, this spawn is genuinely, fully gone, and
+-- anything appearing afterward cannot be a legitimate continuation of it;
+-- resetting the census there is what stops a later, coincidentally-reused
+-- pgid from silently inheriting this spawn's accumulated trust.
 --
 -- The very first tick runs synchronously, before the background loop ever
 -- starts waiting out 'censusIntervalMicros', so the census is essentially
--- never empty for a verified leader -- deferring it to the first delayed
--- tick would leave a real, non-trivial window (up to the whole interval)
--- where a short-lived tool could need killing before anything had ever
--- been recorded, forcing 'killCensusVerified' to fall back to
--- 'killManagedProcessVerified's weaker, unwitnessed guarantee far more
--- often than necessary.
-watchManagedProcessCensus :: ManagedProcess -> IO (IO [ProcessIdentity])
+-- never empty for a verified leader from the very start.
+watchManagedProcessCensus :: ManagedProcess -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 watchManagedProcessCensus (LocalManagedProcess _ (Just pid)) = do
   knownRef <- newIORef Set.empty
   recordCensusTick pid knownRef
   watcherId <- forkIO (forever (threadDelay censusIntervalMicros >> recordCensusTick pid knownRef))
-  pure (stopAndCollect watcherId knownRef)
+  pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
+    peek :: IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
+    peek knownRef = Set.toList <$> readIORef knownRef
     stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
     stopAndCollect watcherId knownRef = do
       killThread watcherId
       Set.toList <$> readIORef knownRef
-watchManagedProcessCensus _ = pure (pure [])
+watchManagedProcessCensus _ = pure (pure [], pure [])
 
 recordCensusTick :: CPid -> IORef (Set ProcessIdentity) -> IO ()
 recordCensusTick pid knownRef = do
   snapshot <- defaultProcessSnapshot
   case snapshot of
     Left _ -> pure ()
-    Right processes -> do
-      let leader = maybe [] (: []) (identityForPid (fromIntegral pid) processes)
-          descendants = descendantProcesses [fromIntegral pid] processes
-      atomicModifyIORef' knownRef (\known -> (foldr Set.insert known (leader <> descendants), ()))
+    Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
+      [] -> writeIORef knownRef Set.empty
+      groupMembers -> atomicModifyIORef' knownRef (\known -> (foldr Set.insert known groupMembers, ()))
+  where
+    groupPidInt = fromIntegral pid
 
--- | Confirms `managed`'s recorded group terminated, the same way
--- 'killManagedProcessVerified' does -- via a *fresh* snapshot's complete,
--- unrestricted membership of the pgid, both to decide whether SIGKILL is
--- needed and to decide whether "confirmed" can be reported at all. This
--- must never be narrowed to "do any previously-recorded `census` (see
--- 'watchManagedProcessCensus') identities still persist": the leader
--- itself is expected to be gone by the time this runs (that is normally
--- *why* it runs), so a check restricted to matching prior identities would
--- report "confirmed empty" the instant the leader's own entry drops out of
--- a fresh snapshot -- even while a same-group child the watcher never
--- happened to catch (forked in the gap between its last tick and the
--- leader's exit) is still very much alive.
+-- | Confirms `managed`'s recorded group terminated. `peekCensus` (see
+-- 'watchManagedProcessCensus') is consulted *before* ever sending a
+-- signal: if the group's current, complete membership shares no identity
+-- at all with anything the census has ever continuously observed, this
+-- reports unresolved without touching it, rather than guessing whether an
+-- entirely unwitnessed occupant is a legitimate, if-uncaught member of
+-- this spawn or an unrelated group that happened to reuse its pgid. Once
+-- at least one census-recorded identity is confirmed still present, the
+-- group's full current membership -- not just the matched identity -- is
+-- what actually gets signalled and re-checked (TERM, verify, escalate to
+-- KILL if needed), so a legitimate sibling the census also caught is
+-- reached even though only one witness was strictly required to trust the
+-- group at all. "Confirmed empty" is always a fresh, complete pgid check,
+-- never restricted to prior identities matching -- see
+-- 'killManagedProcessVerified', which this delegates the actual
+-- signal/verify sequence to once continuity is established.
 --
--- `census` instead gates whether this is reachable at all: a non-empty
--- census means the watcher (see 'watchManagedProcessCensus', which now
--- seeds synchronously at spawn) genuinely observed this pgid belonging to
--- this spawn at least once, so it is that observation -- not a live match
--- against it -- that justifies treating whatever a later snapshot finds
--- occupying the group as still this spawn's to clean up. An empty census
--- (the watcher's very first, synchronous tick still found nothing -- an
--- extremely narrow race, since 'managedProcess' itself only just verified
--- this same pid moments earlier) falls back to the exact same
--- 'killManagedProcessVerified' behavior, accepting the same freshly-spawned
--- trust it already relies on: there is no stronger evidence available to
--- fall back to.
-killCensusVerified :: ManagedProcess -> [ProcessIdentity] -> IO Bool
-killCensusVerified managed _census = killManagedProcessVerified managed
+-- An empty census (the very first, synchronous tick still found nothing --
+-- an extremely narrow race, since 'managedProcess' itself only just
+-- verified this same pid moments earlier) falls back to
+-- 'killManagedProcessVerified' directly: there is no stronger evidence
+-- available yet, so this accepts the same freshly-spawned trust it already
+-- relies on rather than refusing to ever clean up a tool whose first tick
+-- simply hasn't run.
+killCensusVerified :: ManagedProcess -> IO [ProcessIdentity] -> IO Bool
+killCensusVerified = killCensusVerifiedWith defaultProcessSnapshot
+
+-- | As 'killCensusVerified', but with the initial continuity-gating
+-- snapshot injectable -- e.g. to deterministically simulate a pgid that
+-- has been reused by an unrelated process group the census never
+-- witnessed, without needing to race real OS pid reuse in a test.
+killCensusVerifiedWith :: IO (Either Text [ProcessIdentity]) -> ManagedProcess -> IO [ProcessIdentity] -> IO Bool
+killCensusVerifiedWith takeSnapshot managed@(LocalManagedProcess _ (Just pid)) peekCensus = do
+  census <- peekCensus
+  case census of
+    [] -> killManagedProcessVerified managed
+    _ -> do
+      snapshot <- takeSnapshot
+      case snapshot of
+        Left _ -> ignoreIOException (signalProcessGroup sigTERM pid) >> pure False
+        Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
+          [] -> pure True
+          currentMembers
+            | null (membersStillInGroup groupPidInt processes census) -> pure False
+            | otherwise -> killIdentitiesVerified pid currentMembers
+  where
+    groupPidInt = fromIntegral pid
+killCensusVerifiedWith _ managed _peekCensus = killManagedProcessVerified managed
 
 signalOwnedGroup :: Signal -> ProcessHandle -> IO ()
 signalOwnedGroup signal processHandle = do
