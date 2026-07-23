@@ -18,6 +18,7 @@ module Kanban.Process
     killCensusVerifiedWith,
     killManagedProcess,
     killManagedProcessVerified,
+    killManagedProcessVerifiedWith,
     killVerifiedGroup,
     killVerifiedGroupWith,
     liveProcesses,
@@ -385,45 +386,63 @@ killManagedProcess (PersistentManagedProcess processId) = do
 -- know for sure.
 --
 -- For a verified-or-presumed local leader, "who is in the group" is
--- re-derived from a *fresh* snapshot taken right now, at the start of this
--- call, rather than trusted from whatever was true back when the pgid was
--- captured (which could have been anywhere from moments to minutes ago,
--- for a long-running tool). Escalation from TERM to KILL then verifies
--- specifically that *those* re-derived members persist (the same
+-- re-derived from *two* fresh snapshots, 'continuityWitnessMicros' apart,
+-- taken right now at the start of this call -- rather than trusted from
+-- whatever was true back when the pgid was captured (which could have been
+-- anywhere from moments to minutes ago, for a long-running tool), and
+-- rather than trusted from a *single* snapshot's instantaneous contents.
+-- Only identities present, with matching pid and start time, in *both*
+-- readings become `expected`: a foreign group that happened to reuse this
+-- pgid sometime before this call, but is caught by only one of the two
+-- snapshots (e.g. it exits, or a member of it does, in between), does not
+-- get treated as a survivor of this spawn, and a pgid a fresh unrelated
+-- spawn takes ownership of only after the first reading is likewise not
+-- retroactively trusted. Escalation from TERM to KILL then verifies
+-- specifically that *those* twice-witnessed members persist (the same
 -- identity-and-group continuity check 'killVerifiedGroupWith' already
--- uses), not merely that the numeric pgid is non-empty: once every member
--- of the originally-owned group has exited, that pgid number is free for
--- the kernel to hand to a completely unrelated new process group, and a
--- bare "is this pgid non-empty" check would then TERM/KILL that foreign
--- group. Deriving `expected` fresh at the start of *this* call narrows the
--- reuse window to this call's own sub-two-second grace periods, and a
--- truly empty group right now is confirmed with no signal sent at all.
--- Prefer 'killCensusVerified' over this when a longer-lived caller can
--- maintain one (see 'watchManagedProcessCensus'): a census recorded via
--- genuine parent-chain evidence while the leader was still alive is a
--- stronger, non-reusable ownership witness than whatever a single fresh
--- snapshot happens to find sharing this pgid *right now*.
+-- uses), not merely that the numeric pgid is non-empty. A truly empty
+-- group on the first reading is confirmed immediately, with no signal sent
+-- and no need for a second reading. Prefer 'killCensusVerified' over this
+-- when a longer-lived caller can maintain one (see
+-- 'watchManagedProcessCensus'): a census recorded continuously from spawn
+-- onward is a stronger, non-reusable ownership witness than two readings
+-- taken back-to-back only at kill time.
 --
 -- An unverified local process (no pid or a confirmed non-leader) falls
 -- back to the historical handle-driven behavior, always reporting 'True':
 -- signalling its recorded group in that case could reach an unrelated,
 -- foreign-owned group, so it is never treated as verified either way. A
--- snapshot failure -- for a verified/presumed leader -- still attempts a
--- best-effort signal (the captured pid remains reasonable to trust), but
--- is never reported as confirmed: collapsing "could not check" into "must
--- be empty" would let a caller drop ownership of a group it never actually
--- verified was gone.
+-- failure of *either* snapshot -- for a verified/presumed leader -- sends
+-- no signal at all and is never reported as confirmed: a blind signal on a
+-- snapshot failure could just as easily reach a foreign group this
+-- function could not actually verify anything about, and collapsing
+-- "could not check" into "must be empty" would let a caller drop ownership
+-- of a group it never actually verified was gone.
 killManagedProcessVerified :: ManagedProcess -> IO Bool
-killManagedProcessVerified (LocalManagedProcess _ (Just pid)) = do
-  snapshot <- defaultProcessSnapshot
-  case snapshot of
-    Left _ -> ignoreIOException (signalProcessGroup sigTERM pid) >> pure False
-    Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
+killManagedProcessVerified = killManagedProcessVerifiedWith defaultProcessSnapshot
+
+-- | As 'killManagedProcessVerified', but with the two continuity-witness
+-- snapshots injectable -- e.g. to deterministically simulate a pgid whose
+-- occupants differ between the two readings, without needing to race real
+-- OS pid reuse in a test.
+killManagedProcessVerifiedWith :: IO (Either Text [ProcessIdentity]) -> ManagedProcess -> IO Bool
+killManagedProcessVerifiedWith takeSnapshot (LocalManagedProcess _ (Just pid)) = do
+  firstSnapshot <- takeSnapshot
+  case firstSnapshot of
+    Left _ -> pure False
+    Right firstProcesses -> case filter ((== groupPidInt) . processIdentityGroupPid) firstProcesses of
       [] -> pure True
-      expected -> killIdentitiesVerified pid expected
+      firstMembers -> do
+        threadDelay continuityWitnessMicros
+        secondSnapshot <- takeSnapshot
+        case secondSnapshot of
+          Left _ -> pure False
+          Right secondProcesses -> case membersStillInGroup groupPidInt secondProcesses firstMembers of
+            [] -> pure False
+            expected -> killIdentitiesVerified pid expected
   where
     groupPidInt = fromIntegral pid
-killManagedProcessVerified managed = killManagedProcess managed >> pure True
+killManagedProcessVerifiedWith _ managed = killManagedProcess managed >> pure True
 
 -- | TERM, wait, verify via 'checkGroupMembership', escalate to KILL and
 -- verify again if needed -- shared by 'killManagedProcessVerified' (using
@@ -541,11 +560,16 @@ killCensusVerifiedWith :: IO (Either Text [ProcessIdentity]) -> ManagedProcess -
 killCensusVerifiedWith takeSnapshot managed@(LocalManagedProcess _ (Just pid)) peekCensus = do
   census <- peekCensus
   case census of
-    [] -> killManagedProcessVerified managed
+    [] -> killManagedProcessVerifiedWith takeSnapshot managed
     _ -> do
       snapshot <- takeSnapshot
       case snapshot of
-        Left _ -> ignoreIOException (signalProcessGroup sigTERM pid) >> pure False
+        -- A snapshot failure here must not fall through to a blind signal:
+        -- an unreadable snapshot means the census's continuity gate below
+        -- can never actually run, so there is no verified basis for
+        -- reaching this pgid at all -- an unrelated group could easily be
+        -- what a signal sent here actually reaches.
+        Left _ -> pure False
         Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
           [] -> pure True
           currentMembers
@@ -582,6 +606,13 @@ ignoreIOException action = void (try action :: IO (Either IOException ()))
 
 terminationGraceMicros :: Int
 terminationGraceMicros = 750 * 1000
+
+-- | The gap between 'killManagedProcessVerified's two continuity-witness
+-- snapshots -- long enough that a reading taken this far apart is a
+-- genuine, if narrow, corroboration of continued occupancy, not just two
+-- calls close enough together to be functionally the same instant.
+continuityWitnessMicros :: Int
+continuityWitnessMicros = 200 * 1000
 
 -- | How often 'watchManagedProcessCensus' takes a fresh snapshot to record
 -- new descendants. Short enough that even a tool living only a couple of

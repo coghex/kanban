@@ -51,7 +51,7 @@ where
 
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, withMVar)
 import Control.Exception (Exception, IOException, displayException, try)
-import Control.Monad (forever, void, when)
+import Control.Monad (forever, unless, void, when)
 import Data.Aeson
   ( FromJSON (..),
     Result (..),
@@ -809,6 +809,28 @@ attachToolProcess client invocationId managed peekCensus stopCensus =
         pure (registry {toolRegistryEntries = Map.insert invocationId (entry {toolEntryProcess = Just (managed, peekCensus, stopCensus)}) registry.toolRegistryEntries}, True)
       _ -> pure (registry, False)
 
+-- | Registers an already-running process directly as a claimed (draining)
+-- entry, bypassing the normal reserve/attach handshake -- used when
+-- 'attachToolProcess' above fails (the reservation was already claimed by
+-- a concurrent drain, which -- correctly, at the time -- found nothing yet
+-- to kill for it and dropped it as trivially confirmed) *and* this
+-- caller's own best-effort 'confirmToolProcessTerminated' attempt could
+-- not confirm the process it just spawned is gone. Without this, that
+-- process (and its census watcher) would have no registry entry left
+-- anywhere: the concurrent drain that would otherwise have owned it has
+-- already finished, so nothing would ever retry killing it. Registering it
+-- here, still marked draining, leaves it for the next whole-registry drain
+-- (see 'drainToolProcesses', run at client shutdown) to retry and confirm.
+registerOrphanedToolProcess :: ReviewClient -> Text -> ManagedProcess -> IO [ProcessIdentity] -> IO [ProcessIdentity] -> IO ()
+registerOrphanedToolProcess client threadId managed peekCensus stopCensus = do
+  invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
+  modifyMVar_ client.reviewToolProcesses $ \registry ->
+    pure
+      registry
+        { toolRegistryEntries =
+            Map.insert invocationId (ToolEntry threadId (Just (managed, peekCensus, stopCensus)) True) registry.toolRegistryEntries
+        }
+
 -- | Removes exactly the entry a single invocation created, once that
 -- invocation has confirmed its own process terminated (see
 -- 'confirmToolProcessTerminated'), or once it releases a reservation that
@@ -1340,7 +1362,8 @@ runGitHubCommand client threadId ghPath arguments input = do
           attached <- attachToolProcess client invocationId managed peekCensus stopCensus
           if not attached
             then do
-              void (confirmToolProcessTerminated client managed peekCensus stopCensus)
+              confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
+              unless confirmed (registerOrphanedToolProcess client threadId managed peekCensus stopCensus)
               pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
             else do
               outputResult <- newEmptyMVar
@@ -1480,7 +1503,8 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
               attached <- attachToolProcess client invocationId managed peekCensus stopCensus
               if not attached
                 then do
-                  void (confirmToolProcessTerminated client managed peekCensus stopCensus)
+                  confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
+                  unless confirmed (registerOrphanedToolProcess client threadId managed peekCensus stopCensus)
                   pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
                 else do
                   outputResult <- newEmptyMVar

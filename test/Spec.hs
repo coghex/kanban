@@ -44,6 +44,7 @@ import Kanban.Process
     killCensusVerified,
     killCensusVerifiedWith,
     killManagedProcess,
+    killManagedProcessVerifiedWith,
     killVerifiedGroupWith,
     liveProcesses,
     managedProcess,
@@ -415,6 +416,68 @@ main = hspec $ do
         case afterAttempt of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> any ((== realIdentity.processIdentityPid) . processIdentityPid) snapshot `shouldBe` True
+
+    it "killManagedProcessVerifiedWith refuses to signal a pgid whose two continuity-witness readings share no identity, rather than trusting whichever occupant a single snapshot happens to find" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        let groupPidInt = fromIntegral leaderPid
+            firstOccupant =
+              ProcessIdentity
+                { processIdentityPid = groupPidInt + 500001,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = groupPidInt,
+                  processIdentityStartedAt = "reading one",
+                  processIdentityCommand = "unrelated-first-occupant"
+                }
+            secondOccupant =
+              firstOccupant
+                { processIdentityPid = groupPidInt + 500002,
+                  processIdentityStartedAt = "reading two"
+                }
+        callCount <- newIORef (0 :: Int)
+        -- Simulates a pgid whose two continuity-witness readings ('killManagedProcessVerified'
+        -- takes two, 'continuityWitnessMicros' apart) each find a *different*
+        -- occupant sharing no identity with the other -- neither a real
+        -- survivor of one continuous spawn nor even the same foreign spawn
+        -- across both reads, just two unrelated snapshots of a pgid in flux.
+        let stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              pure (Right [if even count then firstOccupant else secondOccupant])
+        confirmed <- killManagedProcessVerifiedWith stubSnapshot managed
+        confirmed `shouldBe` False
+        -- Refused without ever signalling: the real, still-owned leader is
+        -- untouched.
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+
+    it "killCensusVerifiedWith refuses to signal when its continuity snapshot fails, rather than blindly TERMing the group" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        census <- peekCensus
+        census `shouldSatisfy` (not . null)
+        let failingSnapshot = pure (Left "simulated ps failure")
+        confirmed <- killCensusVerifiedWith failingSnapshot managed (pure census)
+        confirmed `shouldBe` False
+        -- Refused without ever signalling: the real, still-owned leader is
+        -- untouched.
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+        void stopCensus
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
