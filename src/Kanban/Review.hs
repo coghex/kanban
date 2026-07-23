@@ -79,7 +79,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, killManagedProcess, killManagedProcessVerified, managedProcess)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -211,6 +211,19 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
   }
   deriving stock (Eq, Show)
 
+-- | A single registered tool process: its owning thread, the process
+-- itself, and whether a drain (see 'drainMatchingToolProcesses') has
+-- already claimed responsibility for removing it. Once claimed, the
+-- invocation's own natural completion must leave the entry in place for
+-- the drain to remove -- otherwise a self-deregistration racing a
+-- concurrent drain could make the registry look empty before that drain's
+-- own kill-and-verify sequence for this same entry has actually finished.
+data ToolEntry = ToolEntry
+  { toolEntryThread :: Text,
+    toolEntryProcess :: ManagedProcess,
+    toolEntryDraining :: Bool
+  }
+
 -- | Every review-owned tool process (@kanban_run_claude@, @kanban_github_issue@'s
 -- @gh@, and any future dynamic tool) registered under a key unique per
 -- invocation rather than per thread, so overlapping invocations on one
@@ -223,7 +236,7 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
 -- process it just spawned itself, rather than let it run on unregistered
 -- and outlive the drain.
 data ToolRegistry = ToolRegistry
-  { toolRegistryEntries :: Map Int (Text, ManagedProcess),
+  { toolRegistryEntries :: Map Int ToolEntry,
     toolRegistryClosed :: Bool
   }
 
@@ -735,56 +748,90 @@ registerToolProcess client threadId managed = do
   accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
     if registry.toolRegistryClosed
       then pure (registry, False)
-      else pure (registry {toolRegistryEntries = Map.insert invocationId (threadId, managed) registry.toolRegistryEntries}, True)
+      else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId managed False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
 
 -- | Removes exactly the entry a single invocation created, once that
--- invocation has completed on its own (a cancelled or drained invocation is
--- instead removed by 'killReviewTools'/'drainToolProcesses', after its kill
--- has run, not before).
+-- invocation has confirmed its own process terminated (see
+-- 'confirmToolProcessTerminated'). If a concurrent drain has already
+-- claimed this entry (marked it draining -- see 'drainMatchingToolProcesses'),
+-- this leaves it in place instead: only the owning drain may remove an
+-- entry it has claimed, once its own kill-and-verify sequence for that
+-- entry has finished, so the registry never looks empty while a drain's
+-- termination of it is still in flight.
 deregisterToolProcess :: ReviewClient -> Int -> IO ()
 deregisterToolProcess client invocationId =
   modifyMVar_ client.reviewToolProcesses $ \registry ->
-    pure registry {toolRegistryEntries = Map.delete invocationId registry.toolRegistryEntries}
+    pure registry {toolRegistryEntries = Map.update dropUnlessDraining invocationId registry.toolRegistryEntries}
+  where
+    dropUnlessDraining entry
+      | entry.toolEntryDraining = Just entry
+      | otherwise = Nothing
 
 killReviewTools :: ReviewClient -> Text -> IO ()
-killReviewTools client threadId = drainMatchingToolProcesses client ((== threadId) . fst)
+killReviewTools client threadId = drainMatchingToolProcesses client False ((== threadId) . toolEntryThread)
 
--- | Kills every currently registered process matching `matches`, retaining
--- each entry in the registry for the whole of its termination sequence and
--- removing it only once 'killManagedProcess' has returned -- so a
+-- | Kills every currently registered process matching `matches`, claiming
+-- each matched entry (marking it draining, so a concurrent
+-- 'deregisterToolProcess' from the invocation's own natural completion
+-- leaves it for this drain to remove) in the same atomic step that reads
+-- it -- and, when `closeRegistry` is set, also closes the registry to new
+-- registrations in that exact same step, so a 'registerToolProcess' racing
+-- this call either lands its entry here (and gets killed below) or is
+-- rejected outright by the now-closed registry: no spawn can escape
+-- unregistered and unkilled in the gap between reading and closing. Each
+-- claimed entry is retained for the whole of its termination sequence and
+-- removed only once 'confirmToolProcessTerminated' has returned, so a
 -- concurrent shutdown or probe never observes the registry as empty while
--- the OS process it described is still being terminated.
-drainMatchingToolProcesses :: ReviewClient -> ((Text, ManagedProcess) -> Bool) -> IO ()
-drainMatchingToolProcesses client matches = do
-  owned <- withMVar client.reviewToolProcesses (pure . Map.filter matches . toolRegistryEntries)
-  mapM_ (killManagedProcess . snd) (Map.elems owned)
+-- the OS process it described is still being terminated or unconfirmed.
+drainMatchingToolProcesses :: ReviewClient -> Bool -> (ToolEntry -> Bool) -> IO ()
+drainMatchingToolProcesses client closeRegistry matches = do
+  owned <- modifyMVar client.reviewToolProcesses $ \registry ->
+    let matching = Map.filter matches registry.toolRegistryEntries
+        claimed = Map.map (\entry -> entry {toolEntryDraining = True}) matching
+     in pure
+          ( registry
+              { toolRegistryEntries = Map.union claimed registry.toolRegistryEntries,
+                toolRegistryClosed = registry.toolRegistryClosed || closeRegistry
+              },
+            matching
+          )
+  mapM_ (confirmToolProcessTerminated . toolEntryProcess) (Map.elems owned)
   modifyMVar_ client.reviewToolProcesses $ \registry ->
     pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries owned}
 
--- | Atomically closes the registry to new registrations and takes every
--- currently registered process, so a 'registerToolProcess' racing this call
--- either lands its entry here (and gets killed below) or is rejected
--- outright by the now-closed registry -- no spawn can escape unregistered
--- and unkilled. Safe to call more than once (e.g. once from
--- 'stopReviewClient' and again from 'watchServerProcess'): closing an
--- already-closed, already-empty registry is a no-op.
+-- | Atomically closes the registry to new registrations and drains every
+-- currently registered process (see 'drainMatchingToolProcesses'). Safe to
+-- call more than once (e.g. once from 'stopReviewClient' and again from
+-- 'watchServerProcess'): closing an already-closed, already-empty registry
+-- is a no-op.
 drainToolProcesses :: ReviewClient -> IO ()
-drainToolProcesses client = do
-  owned <- modifyMVar client.reviewToolProcesses $ \registry ->
-    pure (registry {toolRegistryClosed = True}, registry.toolRegistryEntries)
-  mapM_ (killManagedProcess . snd) (Map.elems owned)
-  modifyMVar_ client.reviewToolProcesses $ \registry ->
-    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries owned}
+drainToolProcesses client = drainMatchingToolProcesses client True (const True)
+
+-- | Kills `managed` and confirms, via 'killManagedProcessVerified', that its
+-- recorded process group is now empty -- retrying the kill escalation a
+-- bounded number of times if a fresh snapshot still shows survivors or the
+-- snapshot itself fails, so a caller relying on this before deregistering
+-- an invocation never treats an unconfirmed group as terminated.
+confirmToolProcessTerminated :: ManagedProcess -> IO ()
+confirmToolProcessTerminated managed = go confirmAttempts
+  where
+    confirmAttempts = 3 :: Int
+    go attemptsLeft
+      | attemptsLeft <= 1 = void (killManagedProcessVerified managed)
+      | otherwise = do
+          confirmed <- killManagedProcessVerified managed
+          if confirmed then pure () else go (attemptsLeft - 1)
 
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
 -- every registered tool process first, then the app-server itself, both via
--- 'killManagedProcess' so a leader already exited and reaped still has its
--- recorded process group signalled rather than silently skipped.
+-- 'confirmToolProcessTerminated' so a leader already exited and reaped
+-- still has its recorded process group signalled and confirmed rather than
+-- silently skipped.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  killManagedProcess client.reviewProcessManaged
+  confirmToolProcessTerminated client.reviewProcessManaged
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -877,7 +924,7 @@ watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  killManagedProcess client.reviewProcessManaged
+  confirmToolProcessTerminated client.reviewProcessManaged
   takeMVar client.reviewOutputDone
   takeMVar client.reviewErrorDone
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
@@ -1174,9 +1221,7 @@ runGitHubCommand client threadId ghPath arguments input = do
           void . forkIO $ captureHandle errorHandle errorResult
           written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
           result <- case written of
-            Left exception -> do
-              killManagedProcess managed
-              pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
+            Left exception -> pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
             Right () -> do
               completed <-
                 timeout githubCommandTimeoutMicros $ do
@@ -1185,10 +1230,13 @@ runGitHubCommand client threadId ghPath arguments input = do
                   errors <- takeMVar errorResult
                   pure (exitCode, output, errors)
               case completed of
-                Nothing -> do
-                  killManagedProcess managed
-                  pure (Left "GitHub operation timed out after 30 seconds")
+                Nothing -> pure (Left "GitHub operation timed out after 30 seconds")
                 Just captured -> pure (renderGitHubCommandResult captured)
+          -- Confirmed here regardless of outcome, not only on failure/timeout:
+          -- `gh` itself could fork a same-group child, close its inherited
+          -- stdio, and exit successfully, leaving a survivor this invocation
+          -- is the only registry entry ever pointing at.
+          confirmToolProcessTerminated managed
           deregisterToolProcess client invocationId
           pure result
     Right _ -> pure (Left "GitHub CLI did not provide all three standard streams")
@@ -1288,9 +1336,7 @@ runAuthenticatedClaude client threadId prompt = do
               void . forkIO $ captureHandle errorHandle errorResult
               written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
               result <- case written of
-                Left exception -> do
-                  killManagedProcess managed
-                  pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
+                Left exception -> pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
                 Right () -> do
                   completed <-
                     timeout claudeReviewerTimeoutMicros $ do
@@ -1299,10 +1345,14 @@ runAuthenticatedClaude client threadId prompt = do
                       errors <- takeMVar errorResult
                       pure (exitCode, output, errors)
                   case completed of
-                    Nothing -> do
-                      killManagedProcess managed
-                      pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
+                    Nothing -> pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
                     Just captured -> pure (renderClaudeResult captured)
+              -- Confirmed here regardless of outcome, not only on
+              -- failure/timeout: Claude itself could fork a same-group
+              -- child, close its inherited stdio, and exit successfully,
+              -- leaving a survivor this invocation is the only registry
+              -- entry ever pointing at.
+              confirmToolProcessTerminated managed
               deregisterToolProcess client invocationId
               pure result
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")

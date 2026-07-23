@@ -15,6 +15,7 @@ module Kanban.Process
     interruptManagedProcess,
     interruptThenKillManagedProcess,
     killManagedProcess,
+    killManagedProcessVerified,
     killVerifiedGroup,
     killVerifiedGroupWith,
     liveProcesses,
@@ -103,9 +104,15 @@ verifyGroupLeader processHandle = do
 managedProcessGroup :: CPid -> ManagedProcess
 managedProcessGroup = PersistentManagedProcess
 
+-- | The *currently live* pid of a managed process, or 'Nothing' once it has
+-- exited and this handle has been reaped -- callers (e.g.
+-- 'Kanban.Worker's cancellation path) rely on that transition to 'Nothing'
+-- as a liveness signal. This intentionally ignores any identity captured at
+-- spawn time: 'killManagedProcess' uses that captured identity directly,
+-- internally, to still reach a surviving group member after the leader
+-- itself is gone, without changing what this accessor reports.
 managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
-managedProcessPid (LocalManagedProcess processHandle Nothing) = getPid processHandle
-managedProcessPid (LocalManagedProcess _ (Just identity)) = pure (Just (fromIntegral identity.processIdentityPid))
+managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
 
 managedProcessStopsWithDashboard :: ManagedProcess -> Bool
@@ -344,13 +351,21 @@ killManagedProcess (LocalManagedProcess processHandle Nothing) = do
         Just _ -> pure ()
         Nothing -> signalOwnedGroup sigKILL processHandle
 killManagedProcess (LocalManagedProcess _ (Just identity)) = do
-  ignoreIOException (signalProcessGroup sigTERM groupPid)
-  threadDelay terminationGraceMicros
-  hasMembers <- groupHasLiveMembers identity.processIdentityGroupPid
-  case hasMembers of
+  -- Cheap up-front check: a leader whose group is already fully empty (the
+  -- common case for a tool that has already exited cleanly on its own)
+  -- costs nothing beyond one snapshot, rather than an unconditional
+  -- TERM-and-750ms-grace on every call regardless of whether anything is
+  -- still there.
+  initiallyEmpty <- groupHasLiveMembers identity.processIdentityGroupPid
+  case initiallyEmpty of
     Right False -> pure ()
-    Right True -> escalateToKill
-    Left _ -> escalateToKill
+    _ -> do
+      ignoreIOException (signalProcessGroup sigTERM groupPid)
+      threadDelay terminationGraceMicros
+      hasMembers <- groupHasLiveMembers identity.processIdentityGroupPid
+      case hasMembers of
+        Right False -> pure ()
+        _ -> escalateToKill
   where
     groupPid = fromIntegral identity.processIdentityGroupPid
     -- SIGKILL cannot be blocked, but a caller returning immediately after
@@ -367,6 +382,22 @@ killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
   ignoreIOException (signalProcessGroup sigKILL processId)
+
+-- | Like 'killManagedProcess', but reports whether a fresh snapshot,
+-- taken immediately afterward, confirms the recorded group is now empty --
+-- rather than discarding that final check -- for callers (namely
+-- 'Kanban.Review's tool registry) that must not treat an invocation as
+-- terminated, and safe to remove from their own bookkeeping, until they
+-- know for sure. An unverified local process (no captured identity) always
+-- reports 'True': 'killManagedProcess' already did its best-effort,
+-- handle-driven termination for that case, and there is no recorded group
+-- left to verify.
+killManagedProcessVerified :: ManagedProcess -> IO Bool
+killManagedProcessVerified managed@(LocalManagedProcess _ (Just identity)) = do
+  killManagedProcess managed
+  confirmed <- groupHasLiveMembers identity.processIdentityGroupPid
+  pure (confirmed == Right False)
+killManagedProcessVerified managed = killManagedProcess managed >> pure True
 
 signalOwnedGroup :: Signal -> ProcessHandle -> IO ()
 signalOwnedGroup signal processHandle = do
