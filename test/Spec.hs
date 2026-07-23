@@ -71,6 +71,7 @@ import Kanban.Review
     GitHubIssueToolRequest (..),
     ReviewApproval (..),
     ReviewChoice (..),
+    ReviewEvent (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewRequestId (..),
@@ -95,6 +96,7 @@ import Kanban.Review
     reviewStageForLabels,
     runAuthenticatedClaude,
     runGitHubIssueTool,
+    startReviewClient,
     stopReviewClient,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
@@ -2628,6 +2630,61 @@ main = hspec $ do
             Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "exited with status"
             other -> expectationFailure ("expected the in-flight gh invocation to be terminated by shutdown, got " <> show other)
 
+    it "refuses and immediately kills a fresh invocation that tries to register once shutdown has already begun" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        stopReviewClient client
+        -- The fake claude sleeps 30s once spawned; a deterministic 5s bound
+        -- proves the rejected invocation is killed by its own caller
+        -- immediately, rather than left to run unregistered for the full
+        -- sleep because the already-closed registry could no longer see it.
+        result <- timeout 5000000 (runAuthenticatedClaude client "thread-a" "LONG")
+        case result of
+          Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "shutting down"
+          other -> expectationFailure ("expected a post-shutdown invocation to be refused and killed, got " <> show other)
+
+    it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository temporaryRoot "test" "test"
+        createDirectory binaryRoot
+        -- Responds to the app-server initialize handshake, then forks a
+        -- TERM-resistant detached child *without* redirecting its
+        -- stdout/stderr away, so it inherits the same pipes
+        -- 'readServerOutput'/'readServerErrors' are reading, before this
+        -- (the app-server leader) exits -- the exact "leader gone, group
+        -- survivor holds the pipe open" scenario that must not deadlock
+        -- 'watchServerProcess' waiting on those readers to see EOF.
+        ByteString.writeFile
+          fakeCodex
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "IFS= read -r line",
+                "printf '%s\\n' '{\"id\":1,\"result\":{}}'",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &",
+                "exit 0"
+              ]
+          )
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            started <- startReviewClient defaultWorkflowConfig repository (\event -> modifyIORef events (event :))
+            case started of
+              Left message -> expectationFailure ("expected the fake app-server to start, got: " <> Data.Text.unpack message)
+              Right _client -> do
+                let waitForStopped attempts = do
+                      current <- readIORef events
+                      if any isReviewClientStopped current
+                        then pure ()
+                        else
+                          if attempts <= (0 :: Int)
+                            then expectationFailure "watchServerProcess deadlocked instead of reporting ReviewClientStopped"
+                            else threadDelay 100000 >> waitForStopped (attempts - 1)
+                timeout 8000000 (waitForStopped 70) `shouldReturn` Just ()
+
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
       cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
@@ -4253,6 +4310,10 @@ fullFixtureToml =
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
+
+isReviewClientStopped :: ReviewEvent -> Bool
+isReviewClientStopped (ReviewClientStopped _) = True
+isReviewClientStopped _ = False
 
 -- | Installs fake @claude@ and @gh@ executables on a temporary PATH so
 -- 'runAuthenticatedClaude'/'runGitHubIssueTool' spawn real, killable

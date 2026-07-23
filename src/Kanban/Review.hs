@@ -867,14 +867,19 @@ readServerErrors client errorHandle = do
 -- crashed and was reaped before this ran) are cleaned up as soon as the
 -- process is confirmed gone -- not only when 'stopReviewClient' later runs,
 -- which an unexpected crash means may never happen (the UI drops its
--- 'ReviewClient' reference once it observes 'ReviewClientStopped').
+-- 'ReviewClient' reference once it observes 'ReviewClientStopped'). This
+-- must run *before* awaiting the output/error readers: a surviving group
+-- member normally inherits the app-server's stdout/stderr pipes, so the
+-- readers only see EOF once every holder of those pipes -- including that
+-- survivor -- is gone. Waiting on the readers first would deadlock exactly
+-- the crash this cleanup exists to catch.
 watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
-  takeMVar client.reviewOutputDone
-  takeMVar client.reviewErrorDone
   drainToolProcesses client
   killManagedProcess client.reviewProcessManaged
+  takeMVar client.reviewOutputDone
+  takeMVar client.reviewErrorDone
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
   closeReviewLog client.reviewSessionLog
   client.reviewEventSink (ReviewClientStopped (renderExitCode exitCode))

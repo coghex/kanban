@@ -349,10 +349,20 @@ killManagedProcess (LocalManagedProcess _ (Just identity)) = do
   hasMembers <- groupHasLiveMembers identity.processIdentityGroupPid
   case hasMembers of
     Right False -> pure ()
-    Right True -> ignoreIOException (signalProcessGroup sigKILL groupPid)
-    Left _ -> ignoreIOException (signalProcessGroup sigKILL groupPid)
+    Right True -> escalateToKill
+    Left _ -> escalateToKill
   where
     groupPid = fromIntegral identity.processIdentityGroupPid
+    -- SIGKILL cannot be blocked, but a caller returning immediately after
+    -- sending it (e.g. to satisfy a pgid probe run right after
+    -- 'stopReviewClient' returns) could still observe the group before the
+    -- kernel has finished tearing it down. Wait out the same grace window
+    -- and take one more snapshot so a fresh probe, taken after this
+    -- returns, reliably finds the group gone.
+    escalateToKill = do
+      ignoreIOException (signalProcessGroup sigKILL groupPid)
+      threadDelay terminationGraceMicros
+      void (groupHasLiveMembers identity.processIdentityGroupPid)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
