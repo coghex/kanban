@@ -305,6 +305,58 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
+    it "killCensusVerified still kills a same-group child forked after the census was already collected, rather than confirming empty because only the leader was ever witnessed" $ do
+      -- The leader forks its child only after a 1s delay; collecting the
+      -- census immediately (before that fork) captures *only* the leader's
+      -- own identity, and stopping the watcher there means nothing further
+      -- is ever recorded -- the exact "recorded the leader at one tick,
+      -- then missed a child forked after that tick" scenario, made
+      -- deterministic instead of racing a background timer. A version of
+      -- killCensusVerified that (incorrectly) treated "no census identity
+      -- persists" as "group confirmed empty" would report this group
+      -- terminated the instant the leader exits, despite the never-recorded
+      -- child still running.
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sleep 1; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 3"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        collectCensus <- watchManagedProcessCensus managed
+        staleCensus <- collectCensus
+        staleCensus `shouldSatisfy` (not . null)
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            -- Identifies the detached, TERM-resistant child specifically by
+            -- its distinctive command text, rather than merely "not the
+            -- leader's own pid" -- the outer script's own "sleep 1" step is
+            -- also, briefly, a legitimate transient descendant, and its
+            -- presence or absence in the stale census is irrelevant to what
+            -- this test is checking. The leader's own command also contains
+            -- the literal text "trap" (its argument embeds the child's
+            -- script verbatim), so excluding anything that also contains
+            -- its own distinguishing "sleep 3" tail is what actually
+            -- narrows this down to the child alone.
+            isDetachedChild identity =
+              Data.Text.isInfixOf "trap" identity.processIdentityCommand
+                && not (Data.Text.isInfixOf "sleep 3" identity.processIdentityCommand)
+            waitForChild attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | any isDetachedChild (membersOfGroup snapshot) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached child never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForChild (attempts - 1)
+        waitForChild 50
+        staleCensus `shouldSatisfy` (not . any isDetachedChild)
+        timeout 5000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        confirmed <- killCensusVerified managed staleCensus
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
