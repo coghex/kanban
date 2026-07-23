@@ -14,6 +14,7 @@ module Kanban.Process
     identityForPid,
     interruptManagedProcess,
     interruptThenKillManagedProcess,
+    killCensusVerified,
     killManagedProcess,
     killManagedProcessVerified,
     killVerifiedGroup,
@@ -27,15 +28,18 @@ module Kanban.Process
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
+    watchManagedProcessCensus,
   )
 where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (IOException, try)
-import Control.Monad (void)
+import Control.Monad (forever, void)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -377,34 +381,116 @@ killManagedProcess (PersistentManagedProcess processId) = do
 -- group. Deriving `expected` fresh at the start of *this* call narrows the
 -- reuse window to this call's own sub-two-second grace periods, and a
 -- truly empty group right now is confirmed with no signal sent at all.
+-- Prefer 'killCensusVerified' over this when a longer-lived caller can
+-- maintain one (see 'watchManagedProcessCensus'): a census recorded via
+-- genuine parent-chain evidence while the leader was still alive is a
+-- stronger, non-reusable ownership witness than whatever a single fresh
+-- snapshot happens to find sharing this pgid *right now*.
 --
--- An unverified local process (no pid, a snapshot failure, or a confirmed
--- non-leader) falls back to the historical handle-driven behavior, always
--- reporting 'True': signalling its recorded group in that case could reach
--- an unrelated, foreign-owned group, so it is never treated as verified
--- either way.
+-- An unverified local process (no pid or a confirmed non-leader) falls
+-- back to the historical handle-driven behavior, always reporting 'True':
+-- signalling its recorded group in that case could reach an unrelated,
+-- foreign-owned group, so it is never treated as verified either way. A
+-- snapshot failure -- for a verified/presumed leader -- still attempts a
+-- best-effort signal (the captured pid remains reasonable to trust), but
+-- is never reported as confirmed: collapsing "could not check" into "must
+-- be empty" would let a caller drop ownership of a group it never actually
+-- verified was gone.
 killManagedProcessVerified :: ManagedProcess -> IO Bool
 killManagedProcessVerified (LocalManagedProcess _ (Just pid)) = do
-  expected <- groupMembersNow
-  case expected of
-    [] -> pure True
-    _ -> do
-      ignoreIOException (signalProcessGroup sigTERM pid)
-      threadDelay terminationGraceMicros
-      afterTerm <- checkGroupMembership groupPidInt expected
-      case afterTerm of
-        IdentityAbsent -> pure True
-        _ -> do
-          ignoreIOException (signalProcessGroup sigKILL pid)
-          threadDelay terminationGraceMicros
-          afterKill <- checkGroupMembership groupPidInt expected
-          pure (afterKill == IdentityAbsent)
+  snapshot <- defaultProcessSnapshot
+  case snapshot of
+    Left _ -> ignoreIOException (signalProcessGroup sigTERM pid) >> pure False
+    Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
+      [] -> pure True
+      expected -> killIdentitiesVerified pid expected
   where
     groupPidInt = fromIntegral pid
-    groupMembersNow = do
-      snapshot <- defaultProcessSnapshot
-      pure (either (const []) (filter ((== groupPidInt) . processIdentityGroupPid)) snapshot)
 killManagedProcessVerified managed = killManagedProcess managed >> pure True
+
+-- | TERM, wait, verify via 'checkGroupMembership', escalate to KILL and
+-- verify again if needed -- shared by 'killManagedProcessVerified' (using
+-- whoever a single fresh snapshot finds sharing the pgid) and
+-- 'killCensusVerified' (using a previously-recorded, provenance-backed
+-- census instead).
+killIdentitiesVerified :: CPid -> [ProcessIdentity] -> IO Bool
+killIdentitiesVerified pid expected = do
+  ignoreIOException (signalProcessGroup sigTERM pid)
+  threadDelay terminationGraceMicros
+  afterTerm <- checkGroupMembership groupPidInt expected
+  case afterTerm of
+    IdentityAbsent -> pure True
+    _ -> do
+      ignoreIOException (signalProcessGroup sigKILL pid)
+      threadDelay terminationGraceMicros
+      afterKill <- checkGroupMembership groupPidInt expected
+      pure (afterKill == IdentityAbsent)
+  where
+    groupPidInt = fromIntegral pid
+
+-- | Spawns a background watcher that, every 'censusIntervalMicros', records
+-- the managed leader's own identity (while it is still found in a fresh
+-- snapshot) and every one of its live descendants (via 'descendantProcesses'
+-- -- genuine parent-chain evidence, not a pgid guess) into an accumulating
+-- census. Returns an action that stops the watcher and yields everything
+-- recorded so far; the caller must run this action itself, exactly once,
+-- when the invocation completes, to both release the watcher thread and
+-- retrieve the census for 'killCensusVerified'.
+--
+-- This exists because a descendant discovered only *after* the leader has
+-- already exited can no longer be found by parent-chain descent at all --
+-- once reparented (to init/launchd), its `ppid` no longer names the
+-- now-gone leader -- and a snapshot taken only at that point has nothing
+-- but the numeric pgid left to go on, which a since-vacated pgid can share
+-- with a completely unrelated later process group. Recording descendants
+-- *while the leader is still alive* captures real identities (pid and
+-- start time) that remain a trustworthy ownership witness regardless of
+-- what happens to the leader or that pgid afterward.
+watchManagedProcessCensus :: ManagedProcess -> IO (IO [ProcessIdentity])
+watchManagedProcessCensus (LocalManagedProcess _ (Just pid)) = do
+  knownRef <- newIORef Set.empty
+  watcherId <- forkIO (censusLoop pid knownRef)
+  pure (stopAndCollect watcherId knownRef)
+  where
+    stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
+    stopAndCollect watcherId knownRef = do
+      killThread watcherId
+      Set.toList <$> readIORef knownRef
+watchManagedProcessCensus _ = pure (pure [])
+
+censusLoop :: CPid -> IORef (Set ProcessIdentity) -> IO ()
+censusLoop pid knownRef = forever $ do
+  threadDelay censusIntervalMicros
+  snapshot <- defaultProcessSnapshot
+  case snapshot of
+    Left _ -> pure ()
+    Right processes -> do
+      let leader = maybe [] (: []) (identityForPid (fromIntegral pid) processes)
+          descendants = descendantProcesses [fromIntegral pid] processes
+      atomicModifyIORef' knownRef (\known -> (foldr Set.insert known (leader <> descendants), ()))
+
+-- | Like 'killManagedProcessVerified', but checks continuity against a
+-- previously-recorded `census` (see 'watchManagedProcessCensus') instead of
+-- re-deriving "whoever currently shares this pgid" from a single fresh
+-- snapshot: every census member was discovered via genuine parent-chain
+-- evidence while the leader was still alive, so a foreign group that has
+-- since reused the leader's pgid is never mistaken for a survivor of this
+-- spawn. Falls back to 'killManagedProcessVerified' when the census is
+-- empty (nothing was ever recorded to check continuity against -- e.g. an
+-- unverified process, or a tool so short-lived the first census tick never
+-- ran before it needed killing).
+killCensusVerified :: ManagedProcess -> [ProcessIdentity] -> IO Bool
+killCensusVerified managed [] = killManagedProcessVerified managed
+killCensusVerified (LocalManagedProcess _ (Just pid)) census = do
+  snapshot <- defaultProcessSnapshot
+  case snapshot of
+    Left _ -> ignoreIOException (signalProcessGroup sigTERM pid) >> pure False
+    Right processes
+      | null (membersStillInGroup groupPidInt processes census) -> pure True
+      | otherwise -> killIdentitiesVerified pid census
+  where
+    groupPidInt = fromIntegral pid
+killCensusVerified managed _ = killManagedProcessVerified managed
 
 signalOwnedGroup :: Signal -> ProcessHandle -> IO ()
 signalOwnedGroup signal processHandle = do
@@ -433,6 +519,12 @@ ignoreIOException action = void (try action :: IO (Either IOException ()))
 
 terminationGraceMicros :: Int
 terminationGraceMicros = 750 * 1000
+
+-- | How often 'watchManagedProcessCensus' takes a fresh snapshot to record
+-- new descendants. Short enough that even a tool living only a couple of
+-- seconds gets at least one real tick before it can need killing.
+censusIntervalMicros :: Int
+censusIntervalMicros = 500 * 1000
 
 snapshotRetryAttempts :: Int
 snapshotRetryAttempts = 3

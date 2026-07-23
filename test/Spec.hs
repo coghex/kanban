@@ -41,6 +41,7 @@ import Kanban.Process
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
+    killCensusVerified,
     killManagedProcess,
     killVerifiedGroupWith,
     liveProcesses,
@@ -50,6 +51,7 @@ import Kanban.Process
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
+    watchManagedProcessCensus,
   )
 import Kanban.Repository (parseRepositoryName, resolveRepository)
 import Kanban.PullRequestFlow
@@ -267,6 +269,37 @@ main = hspec $ do
         waitForMember 50
         killManagedProcess managed
         threadDelay 500000
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+
+    it "watchManagedProcessCensus records a live descendant via parent-chain evidence, and killCensusVerified uses it to kill the group after the leader exits" $ do
+      -- The leader stays alive for 2s (long enough for several census
+      -- ticks, given the ~500ms interval) after backgrounding a
+      -- TERM-resistant, same-group child, then exits on its own -- exactly
+      -- the window during which a descendant can still be discovered by
+      -- genuine parent-chain evidence, before the leader's exit reparents
+      -- it and severs that link.
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 2"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        collectCensus <- watchManagedProcessCensus managed
+        threadDelay 1200000
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        census <- collectCensus
+        census `shouldSatisfy` (not . null)
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+        beforeKill <- readProcessSnapshot
+        case beforeKill of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
+        confirmed <- killCensusVerified managed census
+        confirmed `shouldBe` True
         finalSnapshot <- readProcessSnapshot
         case finalSnapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
@@ -2644,23 +2677,23 @@ main = hspec $ do
           Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
           other -> expectationFailure ("expected a post-shutdown invocation to be refused and killed, got " <> show other)
 
-    it "deterministically resolves an invocation held open exactly at registration while shutdown closes and drains concurrently" $
+    it "deterministically resolves an invocation held open exactly at reservation while shutdown closes and drains concurrently" $
       withReviewToolFixtures $ \temporaryRoot -> do
         client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
         reachedBarrier <- newEmptyMVar
         releaseBarrier <- newEmptyMVar
         done <- newEmptyMVar
-        -- 'runAuthenticatedClaudeWith's hook pauses the invocation after it
-        -- has spawned its process but *before* it calls
-        -- 'registerToolProcess' -- signalling the main thread it has
-        -- reached that exact point, then blocking until released. This pins
-        -- down the precise race the round-2 review flagged as untested (a
-        -- burst of ordinary concurrent registrations can pass whether every
-        -- one lands before or after closure, without ever proving the
-        -- boundary itself is handled): here 'stopReviewClient' is given a
-        -- full grace window to close and drain the (still-empty) registry
-        -- *while* this invocation is held open right at the registration
-        -- call, before it is ever released to attempt it.
+        -- 'runAuthenticatedClaudeWith's hook pauses the invocation right
+        -- after it reserves its registry slot but *before* it ever calls
+        -- 'createProcess' -- signalling the main thread it has reached that
+        -- exact point, then blocking until released. This pins down the
+        -- precise race the round-2 review flagged as untested (a burst of
+        -- ordinary concurrent registrations can pass whether every one
+        -- lands before or after closure, without ever proving the boundary
+        -- itself is handled): here 'stopReviewClient' is given a full grace
+        -- window to close and drain the registry -- which already contains
+        -- this reservation -- *while* this invocation is held open right at
+        -- the reservation, before it is ever released to spawn anything.
         let barrierHook = putMVar reachedBarrier () >> takeMVar releaseBarrier
         void . forkIO $ runAuthenticatedClaudeWith barrierHook client "thread-a" "LONG" >>= putMVar done
         timeout 5000000 (takeMVar reachedBarrier) `shouldReturn` Just ()
@@ -2673,25 +2706,16 @@ main = hspec $ do
             message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
           other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
 
-    it "deterministically resolves an invocation held open exactly at registration while a same-thread cancellation fences and drains concurrently" $
+    it "deterministically resolves an invocation held open exactly at reservation while a same-thread cancellation fences and drains concurrently, with nothing else registered" $
       withReviewToolFixtures $ \temporaryRoot -> do
         client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
         flip finally (stopReviewClient client) $ do
-          -- A decoy invocation gives 'killReviewTools' real work to do (TERM,
-          -- grace wait, verify) so its fence window is wide enough to
-          -- reliably release the barrier-held invocation into -- with
-          -- nothing to kill, the drain step would return near-instantly,
-          -- leaving no real window to land in. Its own hook signals (without
-          -- pausing) exactly when it reaches the register call, so the test
-          -- knows it is genuinely registered before triggering the cancel,
-          -- rather than guessing a delay long enough to outlast
-          -- 'managedProcess's own ps round trip under system load.
-          decoyAtRegister <- newEmptyMVar
-          decoyDone <- newEmptyMVar
-          let decoyHook = putMVar decoyAtRegister ()
-          void . forkIO $ runAuthenticatedClaudeWith decoyHook client "thread-a" "LONG" >>= putMVar decoyDone
-          timeout 5000000 (takeMVar decoyAtRegister) `shouldReturn` Just ()
-          threadDelay 100000
+          -- No decoy invocation is needed here: because the hook now pauses
+          -- the invocation *before* it ever spawns a process, the
+          -- reservation itself is already sitting in the registry for
+          -- 'killReviewTools' to find and claim -- there is no separate
+          -- spawn-time gap left to paper over with a second, already-running
+          -- tool to keep the drain busy.
           reachedBarrier <- newEmptyMVar
           releaseBarrier <- newEmptyMVar
           done <- newEmptyMVar
@@ -2703,13 +2727,8 @@ main = hspec $ do
           putMVar releaseBarrier ()
           result <- timeout 5000000 (takeMVar done)
           case result of
-            Just (Left message) ->
-              message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
-            other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
-          decoyResult <- timeout 5000000 (takeMVar decoyDone)
-          case decoyResult of
-            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "exited with status"
-            other -> expectationFailure ("expected the decoy invocation to be killed by the cancel, got " <> show other)
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
+            other -> expectationFailure ("expected the held-open invocation to be refused once its reservation was cancelled, got " <> show other)
 
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

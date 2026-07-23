@@ -82,7 +82,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, killManagedProcess, killManagedProcessVerified, managedProcess)
+import Kanban.Process (ManagedProcess, ProcessIdentity, killCensusVerified, managedProcess, watchManagedProcessCensus)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -221,9 +221,21 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
 -- the drain to remove -- otherwise a self-deregistration racing a
 -- concurrent drain could make the registry look empty before that drain's
 -- own kill-and-verify sequence for this same entry has actually finished.
+--
+-- 'toolEntryProcess' is 'Nothing' from the moment an invocation is
+-- reserved (see 'reserveToolInvocation') until the process it will run has
+-- actually been spawned and attached (see 'attachToolProcess') -- so a
+-- concurrent drain can see and claim the *reservation* itself, before
+-- 'createProcess' or 'managedProcess's own @ps@-based check (both of which
+-- take real, measurable time) have even run, closing the window where a
+-- cancelled thread could otherwise still spawn and run a fresh tool. Once
+-- attached, the paired action is 'watchManagedProcessCensus's stop-and-
+-- collect action for that process: whichever caller ends up killing this
+-- entry must run it exactly once, to both stop the background census
+-- watcher and retrieve what it recorded for 'killCensusVerified'.
 data ToolEntry = ToolEntry
   { toolEntryThread :: Text,
-    toolEntryProcess :: ManagedProcess,
+    toolEntryProcess :: Maybe (ManagedProcess, IO [ProcessIdentity]),
     toolEntryDraining :: Bool
   }
 
@@ -264,6 +276,11 @@ data ReviewClient = ReviewClient
     -- the leader itself has exited and been reaped -- e.g. an unexpected
     -- app-server crash that leaves a spawned child alive.
     reviewProcessManaged :: ManagedProcess,
+    -- | 'watchManagedProcessCensus's stop-and-collect action for the
+    -- app-server, run once at shutdown so 'confirmToolProcessTerminated'
+    -- has a provenance-backed witness for the app-server's own descendants
+    -- too, not just its own pgid.
+    reviewProcessCensus :: IO [ProcessIdentity],
     reviewWriteLock :: MVar (),
     reviewNextRequestId :: IORef Int,
     reviewNextToolInvocationId :: IORef Int,
@@ -532,6 +549,7 @@ startReviewClient workflowConfig repository eventSink = do
       hSetBuffering outputHandle LineBuffering
       (processManaged, groupLeaderProblem) <- managedProcess processHandle
       mapM_ (\problem -> eventSink (ReviewProtocolWarning ("app-server process group leadership: " <> problem))) groupLeaderProblem
+      processCensus <- watchManagedProcessCensus processManaged
       writeLock <- newMVar ()
       requestCounter <- newIORef 2
       toolInvocationCounter <- newIORef 1
@@ -545,6 +563,7 @@ startReviewClient workflowConfig repository eventSink = do
               { reviewInput = inputHandle,
                 reviewProcess = processHandle,
                 reviewProcessManaged = processManaged,
+                reviewProcessCensus = processCensus,
                 reviewWriteLock = writeLock,
                 reviewNextRequestId = requestCounter,
                 reviewNextToolInvocationId = toolInvocationCounter,
@@ -600,6 +619,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
   void (forkIO (drainHandle outputHandle))
   void (forkIO (drainHandle errorHandle))
   (processManaged, _) <- managedProcess processHandle
+  processCensus <- watchManagedProcessCensus processManaged
   writeLock <- newMVar ()
   requestCounter <- newIORef 2
   toolInvocationCounter <- newIORef 1
@@ -613,6 +633,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
       { reviewInput = inputHandle,
         reviewProcess = processHandle,
         reviewProcessManaged = processManaged,
+        reviewProcessCensus = processCensus,
         reviewWriteLock = writeLock,
         reviewNextRequestId = requestCounter,
         reviewNextToolInvocationId = toolInvocationCounter,
@@ -750,30 +771,48 @@ interruptReview client threadId turnId =
     "turn/interrupt"
     (object ["threadId" .= threadId, "turnId" .= turnId])
 
--- | Registers a just-spawned tool process under a key unique to this
--- invocation, tagged with its owning thread. Returns 'Nothing' once the
--- registry has been closed by 'drainToolProcesses' (full-client shutdown
--- already underway) or while this thread is being cancelled by
+-- | Reserves a slot for a tool invocation about to be spawned, *before* any
+-- process exists -- so a concurrent drain (below) can see and cancel it
+-- even before 'createProcess' or 'managedProcess's own @ps@-based check
+-- (both of which take real, measurable time) have run. Returns 'Nothing'
+-- once the registry has been closed by 'drainToolProcesses' (full-client
+-- shutdown already underway) or while this thread is being cancelled by
 -- 'killReviewTools' (its cancellation is still in flight): the caller must
--- terminate the process it just spawned itself, since nothing else will
--- ever see or drain it.
-registerToolProcess :: ReviewClient -> Text -> ManagedProcess -> IO (Maybe Int)
-registerToolProcess client threadId managed = do
+-- not spawn a process at all in that case.
+reserveToolInvocation :: ReviewClient -> Text -> IO (Maybe Int)
+reserveToolInvocation client threadId = do
   invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
   accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
     if registry.toolRegistryClosed || Set.member threadId registry.toolRegistryCancellingThreads
       then pure (registry, False)
-      else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId managed False) registry.toolRegistryEntries}, True)
+      else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId Nothing False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
+
+-- | Attaches a now-spawned process (and its census watcher's stop-and-
+-- collect action -- see 'watchManagedProcessCensus') to a reservation made
+-- by 'reserveToolInvocation'. Returns 'False' if that reservation is gone
+-- or already claimed by a concurrent drain (cancelled while still
+-- unspawned): the caller must then stop the census watcher and terminate
+-- the process it just spawned itself, since the registry no longer -- or
+-- does not yet safely -- own that slot.
+attachToolProcess :: ReviewClient -> Int -> ManagedProcess -> IO [ProcessIdentity] -> IO Bool
+attachToolProcess client invocationId managed collectCensus =
+  modifyMVar client.reviewToolProcesses $ \registry ->
+    case Map.lookup invocationId registry.toolRegistryEntries of
+      Just entry | not entry.toolEntryDraining ->
+        pure (registry {toolRegistryEntries = Map.insert invocationId (entry {toolEntryProcess = Just (managed, collectCensus)}) registry.toolRegistryEntries}, True)
+      _ -> pure (registry, False)
 
 -- | Removes exactly the entry a single invocation created, once that
 -- invocation has confirmed its own process terminated (see
--- 'confirmToolProcessTerminated'). If a concurrent drain has already
--- claimed this entry (marked it draining -- see 'drainMatchingToolProcesses'),
--- this leaves it in place instead: only the owning drain may remove an
--- entry it has claimed, once its own kill-and-verify sequence for that
--- entry has finished, so the registry never looks empty while a drain's
--- termination of it is still in flight.
+-- 'confirmToolProcessTerminated'), or once it releases a reservation that
+-- never made it as far as spawning a process (the executable could not be
+-- found, or 'createProcess' itself failed). If a concurrent drain has
+-- already claimed this entry (marked it draining -- see
+-- 'drainMatchingToolProcesses'), this leaves it in place instead: only the
+-- owning drain may remove an entry it has claimed, once its own
+-- kill-and-verify sequence for that entry has finished, so the registry
+-- never looks empty while a drain's termination of it is still in flight.
 deregisterToolProcess :: ReviewClient -> Int -> IO ()
 deregisterToolProcess client invocationId =
   modifyMVar_ client.reviewToolProcesses $ \registry ->
@@ -789,7 +828,7 @@ deregisterToolProcess client invocationId =
 -- 'toolRegistryCancellingThreads'), so a @kanban_run_claude@/
 -- @kanban_github_issue@ call the app-server issues for this exact thread at
 -- essentially the same instant is refused and self-killed by
--- 'registerToolProcess' rather than slipping through unregistered and
+-- 'reserveToolInvocation' rather than slipping through unregistered and
 -- outliving the cancel. The fence is cleared once this call finishes,
 -- whether or not anything actually needed killing, so the thread accepts
 -- registrations normally again for its next turn.
@@ -808,18 +847,21 @@ data DrainOptions = DrainOptions
 -- leaves it for this drain to remove) in the same atomic step that reads
 -- it -- and, in that exact same step, closes the registry
 -- ('drainCloseRegistry') and/or fences a specific thread
--- ('drainFenceThread') against new registrations, so a 'registerToolProcess'
--- racing this call either lands its entry here (and gets killed below) or
--- is rejected outright: no spawn can escape unregistered and unkilled in
--- the gap between reading and fencing/closing. Each claimed entry is
--- retained until 'confirmToolProcessTerminated' actually confirms it
--- terminated -- an entry it cannot confirm is left registered (still
--- draining) rather than dropped, so a later drain still owns and retries
--- it, instead of a concurrent shutdown or probe ever observing the
--- registry as empty while a described OS process remains unconfirmed. A
--- fenced thread is always unfenced again before returning, regardless of
--- outcome, so a per-thread cancel never permanently blocks that thread's
--- future turns.
+-- ('drainFenceThread') against new registrations, so a 'reserveToolInvocation'
+-- racing this call either lands its entry here (and gets killed below, or
+-- trivially confirmed if still unspawned -- see below) or is rejected
+-- outright: no spawn can escape unregistered and unkilled in the gap
+-- between reading and fencing/closing. Each claimed entry is retained
+-- until 'confirmToolProcessTerminated' actually confirms it terminated --
+-- an entry it cannot confirm is left registered (still draining) rather
+-- than dropped, so a later drain still owns and retries it, instead of a
+-- concurrent shutdown or probe ever observing the registry as empty while
+-- a described OS process remains unconfirmed. A still-unspawned
+-- (reserved) entry has nothing to kill yet: it is trivially treated as
+-- confirmed and removed here, so 'attachToolProcess' later finds it gone
+-- and self-kills whatever it just spawned instead. A fenced thread is
+-- always unfenced again before returning, regardless of outcome, so a
+-- per-thread cancel never permanently blocks that thread's future turns.
 drainMatchingToolProcesses :: ReviewClient -> DrainOptions -> (ToolEntry -> Bool) -> IO ()
 drainMatchingToolProcesses client options matches = do
   owned <- modifyMVar client.reviewToolProcesses $ \registry ->
@@ -834,13 +876,18 @@ drainMatchingToolProcesses client options matches = do
               },
             matching
           )
-  confirmed <- mapM (confirmToolProcessTerminated client . toolEntryProcess) owned
+  confirmed <- mapM (confirmEntry client . toolEntryProcess) owned
   modifyMVar_ client.reviewToolProcesses $ \registry ->
     pure
       registry
         { toolRegistryEntries = Map.difference registry.toolRegistryEntries (Map.filter id confirmed),
           toolRegistryCancellingThreads = maybe registry.toolRegistryCancellingThreads (`Set.delete` registry.toolRegistryCancellingThreads) options.drainFenceThread
         }
+  where
+    confirmEntry _ Nothing = pure True
+    confirmEntry theClient (Just (managed, collectCensus)) = do
+      census <- collectCensus
+      confirmToolProcessTerminated theClient managed census
 
 -- | Atomically closes the registry to new registrations and drains every
 -- currently registered process (see 'drainMatchingToolProcesses'). Safe to
@@ -851,17 +898,27 @@ drainToolProcesses :: ReviewClient -> IO ()
 drainToolProcesses client =
   drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = True, drainFenceThread = Nothing}) (const True)
 
--- | Kills `managed` and confirms, via 'killManagedProcessVerified', that its
+-- | Kills `managed` and confirms, via 'killCensusVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
--- bounded number of times if a fresh snapshot still shows survivors or the
--- snapshot itself fails. Reports the outcome rather than discarding it:
--- callers must not deregister/remove an invocation whose termination could
--- not be confirmed, since that would drop registry ownership of a group
--- that may still hold a live member. A snapshot problem serious enough to
--- exhaust every retry is also surfaced as a protocol warning, so it is at
--- least visible rather than silently swallowed.
-confirmToolProcessTerminated :: ReviewClient -> ManagedProcess -> IO Bool
-confirmToolProcessTerminated client managed = go confirmAttempts
+-- bounded number of times if a fresh check still shows survivors or a
+-- snapshot itself fails. `census` (see 'watchManagedProcessCensus') gives
+-- this a provenance-backed set of identities to verify continuity against,
+-- rather than trusting whichever processes a single fresh snapshot happens
+-- to find sharing the recorded pgid *right now*: once every member of the
+-- originally-owned group has exited, that pgid becomes available for the
+-- kernel to hand to a completely unrelated new process group, and the
+-- census -- recorded via genuine parent-chain evidence while the leader
+-- was still alive -- is what keeps that later signal correctly scoped to
+-- this spawn instead of a coincidental foreign one.
+--
+-- Reports the outcome rather than discarding it: callers must not
+-- deregister/remove an invocation whose termination could not be
+-- confirmed, since that would drop registry ownership of a group that may
+-- still hold a live member. A problem serious enough to exhaust every
+-- retry is also surfaced as a protocol warning, so it is at least visible
+-- rather than silently swallowed.
+confirmToolProcessTerminated :: ReviewClient -> ManagedProcess -> [ProcessIdentity] -> IO Bool
+confirmToolProcessTerminated client managed census = go confirmAttempts
   where
     confirmAttempts = 3 :: Int
     go attemptsLeft
@@ -869,7 +926,7 @@ confirmToolProcessTerminated client managed = go confirmAttempts
           client.reviewEventSink (ReviewProtocolWarning "could not confirm a review tool process group fully terminated after repeated attempts")
           pure False
       | otherwise = do
-          confirmed <- killManagedProcessVerified managed
+          confirmed <- killCensusVerified managed census
           if confirmed then pure True else go (attemptsLeft - 1)
 
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
@@ -880,7 +937,8 @@ confirmToolProcessTerminated client managed = go confirmAttempts
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  void (confirmToolProcessTerminated client client.reviewProcessManaged)
+  appServerCensus <- client.reviewProcessCensus
+  void (confirmToolProcessTerminated client client.reviewProcessManaged appServerCensus)
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -973,7 +1031,8 @@ watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  void (confirmToolProcessTerminated client client.reviewProcessManaged)
+  appServerCensus <- client.reviewProcessCensus
+  void (confirmToolProcessTerminated client client.reviewProcessManaged appServerCensus)
   takeMVar client.reviewOutputDone
   takeMVar client.reviewErrorDone
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
@@ -1252,45 +1311,56 @@ partialUpdateMessage (Just commentUrl) message =
 
 runGitHubCommand :: ReviewClient -> Text -> FilePath -> [String] -> Text -> IO (Either Text Text)
 runGitHubCommand client threadId ghPath arguments input = do
-  started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-  case started of
-    Left exception -> pure (Left ("Could not start GitHub CLI: " <> exceptionText exception))
-    Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-      (managed, groupLeaderProblem) <- managedProcess processHandle
-      mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-      registered <- registerToolProcess client threadId managed
-      case registered of
-        Nothing -> do
-          killManagedProcess managed
-          pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
-        Just invocationId -> do
-          outputResult <- newEmptyMVar
-          errorResult <- newEmptyMVar
-          void . forkIO $ captureHandle outputHandle outputResult
-          void . forkIO $ captureHandle errorHandle errorResult
-          written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
-          result <- case written of
-            Left exception -> pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
-            Right () -> do
-              completed <-
-                timeout githubCommandTimeoutMicros $ do
-                  exitCode <- waitForProcess processHandle
-                  output <- takeMVar outputResult
-                  errors <- takeMVar errorResult
-                  pure (exitCode, output, errors)
-              case completed of
-                Nothing -> pure (Left "GitHub operation timed out after 30 seconds")
-                Just captured -> pure (renderGitHubCommandResult captured)
-          -- Confirmed here regardless of outcome, not only on failure/timeout:
-          -- `gh` itself could fork a same-group child, close its inherited
-          -- stdio, and exit successfully, leaving a survivor this invocation
-          -- is the only registry entry ever pointing at. Deregistering only
-          -- once confirmed leaves an unconfirmed entry registered for a
-          -- later drain to retry, rather than dropping ownership of it here.
-          confirmed <- confirmToolProcessTerminated client managed
-          when confirmed (deregisterToolProcess client invocationId)
-          pure result
-    Right _ -> pure (Left "GitHub CLI did not provide all three standard streams")
+  reserved <- reserveToolInvocation client threadId
+  case reserved of
+    Nothing -> pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
+    Just invocationId -> do
+      started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+      case started of
+        Left exception -> do
+          deregisterToolProcess client invocationId
+          pure (Left ("Could not start GitHub CLI: " <> exceptionText exception))
+        Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
+          (managed, groupLeaderProblem) <- managedProcess processHandle
+          mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+          collectCensus <- watchManagedProcessCensus managed
+          attached <- attachToolProcess client invocationId managed collectCensus
+          if not attached
+            then do
+              census <- collectCensus
+              void (confirmToolProcessTerminated client managed census)
+              pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
+            else do
+              outputResult <- newEmptyMVar
+              errorResult <- newEmptyMVar
+              void . forkIO $ captureHandle outputHandle outputResult
+              void . forkIO $ captureHandle errorHandle errorResult
+              written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
+              result <- case written of
+                Left exception -> pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
+                Right () -> do
+                  completed <-
+                    timeout githubCommandTimeoutMicros $ do
+                      exitCode <- waitForProcess processHandle
+                      output <- takeMVar outputResult
+                      errors <- takeMVar errorResult
+                      pure (exitCode, output, errors)
+                  case completed of
+                    Nothing -> pure (Left "GitHub operation timed out after 30 seconds")
+                    Just captured -> pure (renderGitHubCommandResult captured)
+              -- Confirmed here regardless of outcome, not only on failure/timeout:
+              -- `gh` itself could fork a same-group child, close its inherited
+              -- stdio, and exit successfully, leaving a survivor this invocation
+              -- is the only registry entry ever pointing at. Deregistering only
+              -- once confirmed leaves an unconfirmed entry registered for a
+              -- later drain to retry, rather than dropping ownership of it here.
+              census <- collectCensus
+              confirmed <- confirmToolProcessTerminated client managed census
+              when confirmed (deregisterToolProcess client invocationId)
+              pure result
+        Right _ -> do
+          deregisterToolProcess client invocationId
+          pure (Left "GitHub CLI did not provide all three standard streams")
   where
     processSpec =
       (proc ghPath arguments)
@@ -1366,60 +1436,74 @@ renderGitHubCommandResult (exitCode, outputResult, errorResult) = case (exitCode
 runAuthenticatedClaude :: ReviewClient -> Text -> Text -> IO (Either Text Text)
 runAuthenticatedClaude = runAuthenticatedClaudeWith (pure ())
 
--- | As 'runAuthenticatedClaude', but runs `beforeRegister` after spawning
--- and just before attempting to register the process -- exposed so tests
--- can pause an invocation at exactly that point (see 'checkGroupMembershipWith'
--- for the same "...With" dependency-injection pattern used elsewhere in
--- this codebase) to deterministically hold it open across a concurrent
--- 'stopReviewClient', rather than relying on scheduler timing to land the
--- race. Production code always calls this with @pure ()@.
+-- | As 'runAuthenticatedClaude', but runs `beforeSpawn` right after the
+-- invocation is reserved and just before it spawns a process -- exposed so
+-- tests can pause an invocation at exactly that point (see
+-- 'checkGroupMembershipWith' for the same "...With" dependency-injection
+-- pattern used elsewhere in this codebase) to deterministically hold it
+-- open across a concurrent 'stopReviewClient'/'killReviewTools', rather
+-- than relying on scheduler timing to land the race. Production code
+-- always calls this with @pure ()@.
 runAuthenticatedClaudeWith :: IO () -> ReviewClient -> Text -> Text -> IO (Either Text Text)
-runAuthenticatedClaudeWith beforeRegister client threadId prompt = do
-  executable <- findExecutable "claude"
-  case executable of
-    Nothing -> pure (Left "Claude CLI was not found on PATH")
-    Just claudePath -> do
-      started <- try (createProcess (claudeProcess claudePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
-      case started of
-        Left exception -> pure (Left ("Could not start authenticated Claude CLI: " <> exceptionText exception))
-        Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-          (managed, groupLeaderProblem) <- managedProcess processHandle
-          mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-          beforeRegister
-          registered <- registerToolProcess client threadId managed
-          case registered of
-            Nothing -> do
-              killManagedProcess managed
-              pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
-            Just invocationId -> do
-              outputResult <- newEmptyMVar
-              errorResult <- newEmptyMVar
-              void . forkIO $ captureHandle outputHandle outputResult
-              void . forkIO $ captureHandle errorHandle errorResult
-              written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
-              result <- case written of
-                Left exception -> pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
-                Right () -> do
-                  completed <-
-                    timeout claudeReviewerTimeoutMicros $ do
-                      exitCode <- waitForProcess processHandle
-                      output <- takeMVar outputResult
-                      errors <- takeMVar errorResult
-                      pure (exitCode, output, errors)
-                  case completed of
-                    Nothing -> pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
-                    Just captured -> pure (renderClaudeResult captured)
-              -- Confirmed here regardless of outcome, not only on
-              -- failure/timeout: Claude itself could fork a same-group
-              -- child, close its inherited stdio, and exit successfully,
-              -- leaving a survivor this invocation is the only registry
-              -- entry ever pointing at. Deregistering only once confirmed
-              -- leaves an unconfirmed entry registered for a later drain to
-              -- retry, rather than dropping ownership of it here.
-              confirmed <- confirmToolProcessTerminated client managed
-              when confirmed (deregisterToolProcess client invocationId)
-              pure result
-        Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
+runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
+  reserved <- reserveToolInvocation client threadId
+  case reserved of
+    Nothing -> pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
+    Just invocationId -> do
+      beforeSpawn
+      executable <- findExecutable "claude"
+      case executable of
+        Nothing -> do
+          deregisterToolProcess client invocationId
+          pure (Left "Claude CLI was not found on PATH")
+        Just claudePath -> do
+          started <- try (createProcess (claudeProcess claudePath)) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
+          case started of
+            Left exception -> do
+              deregisterToolProcess client invocationId
+              pure (Left ("Could not start authenticated Claude CLI: " <> exceptionText exception))
+            Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
+              (managed, groupLeaderProblem) <- managedProcess processHandle
+              mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+              collectCensus <- watchManagedProcessCensus managed
+              attached <- attachToolProcess client invocationId managed collectCensus
+              if not attached
+                then do
+                  census <- collectCensus
+                  void (confirmToolProcessTerminated client managed census)
+                  pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
+                else do
+                  outputResult <- newEmptyMVar
+                  errorResult <- newEmptyMVar
+                  void . forkIO $ captureHandle outputHandle outputResult
+                  void . forkIO $ captureHandle errorHandle errorResult
+                  written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
+                  result <- case written of
+                    Left exception -> pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
+                    Right () -> do
+                      completed <-
+                        timeout claudeReviewerTimeoutMicros $ do
+                          exitCode <- waitForProcess processHandle
+                          output <- takeMVar outputResult
+                          errors <- takeMVar errorResult
+                          pure (exitCode, output, errors)
+                      case completed of
+                        Nothing -> pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
+                        Just captured -> pure (renderClaudeResult captured)
+                  -- Confirmed here regardless of outcome, not only on
+                  -- failure/timeout: Claude itself could fork a same-group
+                  -- child, close its inherited stdio, and exit successfully,
+                  -- leaving a survivor this invocation is the only registry
+                  -- entry ever pointing at. Deregistering only once confirmed
+                  -- leaves an unconfirmed entry registered for a later drain to
+                  -- retry, rather than dropping ownership of it here.
+                  census <- collectCensus
+                  confirmed <- confirmToolProcessTerminated client managed census
+                  when confirmed (deregisterToolProcess client invocationId)
+                  pure result
+            Right _ -> do
+              deregisterToolProcess client invocationId
+              pure (Left "Claude CLI did not provide all three standard streams")
   where
     claudeProcess claudePath =
       ( proc
