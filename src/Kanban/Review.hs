@@ -34,10 +34,13 @@ module Kanban.Review
     githubLabelCreateArguments,
     interruptReview,
     killReviewTools,
+    newReviewClientForTesting,
     renderCanonicalIssueReviewResult,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
+    runAuthenticatedClaude,
     runCanonicalIssueReview,
+    runGitHubIssueTool,
     sendReviewMessage,
     startReviewClient,
     stopReviewClient,
@@ -88,7 +91,6 @@ import System.Process
     StdStream (..),
     createProcess,
     getPid,
-    getProcessExitCode,
     proc,
     terminateProcess,
     waitForProcess,
@@ -209,14 +211,39 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
   }
   deriving stock (Eq, Show)
 
+-- | Every review-owned tool process (@kanban_run_claude@, @kanban_github_issue@'s
+-- @gh@, and any future dynamic tool) registered under a key unique per
+-- invocation rather than per thread, so overlapping invocations on one
+-- thread never collide -- retaining the owning thread id alongside each
+-- entry lets 'killReviewTools' still terminate every invocation for a
+-- thread without touching another thread's entries. Closing the registry
+-- (see 'drainToolProcesses') is what makes full-client shutdown atomic with
+-- respect to a concurrently spawning invocation: once closed, a
+-- registration attempt is rejected and its caller must terminate the
+-- process it just spawned itself, rather than let it run on unregistered
+-- and outlive the drain.
+data ToolRegistry = ToolRegistry
+  { toolRegistryEntries :: Map Int (Text, ManagedProcess),
+    toolRegistryClosed :: Bool
+  }
+
+emptyToolRegistry :: ToolRegistry
+emptyToolRegistry = ToolRegistry Map.empty False
+
 data ReviewClient = ReviewClient
   { reviewInput :: Handle,
     reviewProcess :: ProcessHandle,
+    -- | The app-server's own identity, captured at spawn time (see
+    -- 'managedProcess') so its process group can still be signalled after
+    -- the leader itself has exited and been reaped -- e.g. an unexpected
+    -- app-server crash that leaves a spawned child alive.
+    reviewProcessManaged :: ManagedProcess,
     reviewWriteLock :: MVar (),
     reviewNextRequestId :: IORef Int,
+    reviewNextToolInvocationId :: IORef Int,
     reviewPendingRequests :: MVar (Map Int PendingRequest),
     reviewThreadIssues :: MVar (Map Text Int),
-    reviewToolProcesses :: MVar (Map Text ManagedProcess),
+    reviewToolProcesses :: MVar ToolRegistry,
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
@@ -477,19 +504,24 @@ startReviewClient workflowConfig repository eventSink = do
     Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
       hSetBuffering inputHandle LineBuffering
       hSetBuffering outputHandle LineBuffering
+      (processManaged, groupLeaderProblem) <- managedProcess processHandle
+      mapM_ (\problem -> eventSink (ReviewProtocolWarning ("app-server process group leadership: " <> problem))) groupLeaderProblem
       writeLock <- newMVar ()
       requestCounter <- newIORef 2
+      toolInvocationCounter <- newIORef 1
       pendingRequests <- newMVar Map.empty
       threadIssues <- newMVar Map.empty
-      toolProcesses <- newMVar Map.empty
+      toolProcesses <- newMVar emptyToolRegistry
       outputDone <- newEmptyMVar
       errorDone <- newEmptyMVar
       let client =
             ReviewClient
               { reviewInput = inputHandle,
                 reviewProcess = processHandle,
+                reviewProcessManaged = processManaged,
                 reviewWriteLock = writeLock,
                 reviewNextRequestId = requestCounter,
+                reviewNextToolInvocationId = toolInvocationCounter,
                 reviewPendingRequests = pendingRequests,
                 reviewThreadIssues = threadIssues,
                 reviewToolProcesses = toolProcesses,
@@ -527,6 +559,60 @@ startReviewClient workflowConfig repository eventSink = do
           std_err = CreatePipe,
           create_group = True
         }
+
+-- | Builds a 'ReviewClient' for tests, exercising the same tool-process
+-- registry, spawn, and shutdown machinery as production without needing a
+-- live @codex app-server@ handshake -- which is exercised separately by the
+-- Codex app-server protocol tests. The app-server slot itself is filled by a
+-- trivial, real, group-leading placeholder process so 'stopReviewClient'
+-- and 'reviewProcessManaged' have a genuine process to operate on.
+newReviewClientForTesting :: WorkflowConfig -> FilePath -> (ReviewEvent -> IO ()) -> IO ReviewClient
+newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
+  (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) <-
+    createProcess placeholderSpec
+  hSetBuffering inputHandle LineBuffering
+  void (forkIO (drainHandle outputHandle))
+  void (forkIO (drainHandle errorHandle))
+  (processManaged, _) <- managedProcess processHandle
+  writeLock <- newMVar ()
+  requestCounter <- newIORef 2
+  toolInvocationCounter <- newIORef 1
+  pendingRequests <- newMVar Map.empty
+  threadIssues <- newMVar Map.empty
+  toolProcesses <- newMVar emptyToolRegistry
+  outputDone <- newEmptyMVar
+  errorDone <- newEmptyMVar
+  pure
+    ReviewClient
+      { reviewInput = inputHandle,
+        reviewProcess = processHandle,
+        reviewProcessManaged = processManaged,
+        reviewWriteLock = writeLock,
+        reviewNextRequestId = requestCounter,
+        reviewNextToolInvocationId = toolInvocationCounter,
+        reviewPendingRequests = pendingRequests,
+        reviewThreadIssues = threadIssues,
+        reviewToolProcesses = toolProcesses,
+        reviewEventSink = eventSink,
+        reviewRepositoryRoot = repositoryRoot,
+        reviewRepositorySlug = "test/test",
+        reviewWorkflowConfig = workflowConfig,
+        reviewSessionLog = Nothing,
+        reviewOutputDone = outputDone,
+        reviewErrorDone = errorDone
+      }
+  where
+    placeholderSpec =
+      (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"])
+        { cwd = Just repositoryRoot,
+          std_in = CreatePipe,
+          std_out = CreatePipe,
+          std_err = CreatePipe,
+          create_group = True
+        }
+    drainHandle handle = do
+      result <- try (ByteString.hGetContents handle) :: IO (Either IOException ByteString.ByteString)
+      either (const (pure ())) (const (pure ())) result
 
 initializeClient :: ReviewClient -> Handle -> IO (Either Text ())
 initializeClient client outputHandle = do
@@ -638,28 +724,67 @@ interruptReview client threadId turnId =
     "turn/interrupt"
     (object ["threadId" .= threadId, "turnId" .= turnId])
 
-killReviewTools :: ReviewClient -> Text -> IO ()
-killReviewTools client threadId = do
-  owned <- modifyMVar client.reviewToolProcesses $ \processes -> pure (Map.delete threadId processes, Map.lookup threadId processes)
-  maybe (pure ()) killManagedProcess owned
+-- | Registers a just-spawned tool process under a key unique to this
+-- invocation, tagged with its owning thread. Returns 'Nothing' once the
+-- registry has been closed by 'drainToolProcesses' (full-client shutdown
+-- already underway): the caller must terminate the process it just spawned
+-- itself, since nothing else will ever see or drain it.
+registerToolProcess :: ReviewClient -> Text -> ManagedProcess -> IO (Maybe Int)
+registerToolProcess client threadId managed = do
+  invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
+  accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
+    if registry.toolRegistryClosed
+      then pure (registry, False)
+      else pure (registry {toolRegistryEntries = Map.insert invocationId (threadId, managed) registry.toolRegistryEntries}, True)
+  pure (if accepted then Just invocationId else Nothing)
 
+-- | Removes exactly the entry a single invocation created, once that
+-- invocation has completed on its own (a cancelled or drained invocation is
+-- instead removed by 'killReviewTools'/'drainToolProcesses', after its kill
+-- has run, not before).
+deregisterToolProcess :: ReviewClient -> Int -> IO ()
+deregisterToolProcess client invocationId =
+  modifyMVar_ client.reviewToolProcesses $ \registry ->
+    pure registry {toolRegistryEntries = Map.delete invocationId registry.toolRegistryEntries}
+
+killReviewTools :: ReviewClient -> Text -> IO ()
+killReviewTools client threadId = drainMatchingToolProcesses client ((== threadId) . fst)
+
+-- | Kills every currently registered process matching `matches`, retaining
+-- each entry in the registry for the whole of its termination sequence and
+-- removing it only once 'killManagedProcess' has returned -- so a
+-- concurrent shutdown or probe never observes the registry as empty while
+-- the OS process it described is still being terminated.
+drainMatchingToolProcesses :: ReviewClient -> ((Text, ManagedProcess) -> Bool) -> IO ()
+drainMatchingToolProcesses client matches = do
+  owned <- withMVar client.reviewToolProcesses (pure . Map.filter matches . toolRegistryEntries)
+  mapM_ (killManagedProcess . snd) (Map.elems owned)
+  modifyMVar_ client.reviewToolProcesses $ \registry ->
+    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries owned}
+
+-- | Atomically closes the registry to new registrations and takes every
+-- currently registered process, so a 'registerToolProcess' racing this call
+-- either lands its entry here (and gets killed below) or is rejected
+-- outright by the now-closed registry -- no spawn can escape unregistered
+-- and unkilled. Safe to call more than once (e.g. once from
+-- 'stopReviewClient' and again from 'watchServerProcess'): closing an
+-- already-closed, already-empty registry is a no-op.
+drainToolProcesses :: ReviewClient -> IO ()
+drainToolProcesses client = do
+  owned <- modifyMVar client.reviewToolProcesses $ \registry ->
+    pure (registry {toolRegistryClosed = True}, registry.toolRegistryEntries)
+  mapM_ (killManagedProcess . snd) (Map.elems owned)
+  modifyMVar_ client.reviewToolProcesses $ \registry ->
+    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries owned}
+
+-- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
+-- every registered tool process first, then the app-server itself, both via
+-- 'killManagedProcess' so a leader already exited and reaped still has its
+-- recorded process group signalled rather than silently skipped.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
-  toolProcesses <- modifyMVar client.reviewToolProcesses (\processes -> pure (Map.empty, Map.elems processes))
-  mapM_ killManagedProcess toolProcesses
-  exitCode <- getProcessExitCode client.reviewProcess
-  case exitCode of
-    Just _ -> pure ()
-    Nothing -> do
-      processId <- getPid client.reviewProcess
-      case processId of
-        Just pid -> ignoreIOException (signalProcessGroup sigTERM pid)
-        Nothing -> terminateProcess client.reviewProcess
-      stopped <- timeout shutdownTimeoutMicros (waitForProcess client.reviewProcess)
-      case (stopped, processId) of
-        (Nothing, Just pid) -> ignoreIOException (signalProcessGroup sigKILL pid)
-        (Nothing, Nothing) -> terminateProcess client.reviewProcess
-        _ -> pure ()
+  drainToolProcesses client
+  killManagedProcess client.reviewProcessManaged
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -735,11 +860,21 @@ readServerErrors client errorHandle = do
       let line = LazyByteString.fromStrict strictLine
       client.reviewEventSink (ReviewOutput "" DiagnosticOutput (decodeLine line))
 
+-- | The app-server exiting, however it happened, is the same "no longer
+-- owned" event as a deliberate quit: 'drainToolProcesses' and
+-- 'killManagedProcess' here guarantee every review-owned tool process (and
+-- the app-server's own surviving group members, if the leader itself
+-- crashed and was reaped before this ran) are cleaned up as soon as the
+-- process is confirmed gone -- not only when 'stopReviewClient' later runs,
+-- which an unexpected crash means may never happen (the UI drops its
+-- 'ReviewClient' reference once it observes 'ReviewClientStopped').
 watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   takeMVar client.reviewOutputDone
   takeMVar client.reviewErrorDone
+  drainToolProcesses client
+  killManagedProcess client.reviewProcessManaged
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
   closeReviewLog client.reviewSessionLog
   client.reviewEventSink (ReviewClientStopped (renderExitCode exitCode))
@@ -893,7 +1028,7 @@ runClaudeToolCall client threadId requestId request = do
 runGitHubToolCall :: ReviewClient -> Text -> ReviewRequestId -> GitHubIssueToolRequest -> IO ()
 runGitHubToolCall client threadId requestId request = do
   client.reviewEventSink (ReviewGitHubStarted threadId (githubActionSummary request))
-  result <- runGitHubIssueTool client.reviewRepositoryRoot client.reviewRepositorySlug request
+  result <- runGitHubIssueTool client threadId request
   sent <- case result of
     Left message -> sendDynamicToolFailure client requestId message
     Right output -> sendDynamicToolSuccess client requestId output
@@ -915,14 +1050,14 @@ githubActionSummary request = case request.githubToolOperation of
       | request.githubToolComment /= Nothing = " comment and review labels…"
       | otherwise = " review labels…"
 
-runGitHubIssueTool :: FilePath -> Text -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueTool repositoryRoot repo request = do
+runGitHubIssueTool :: ReviewClient -> Text -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueTool client threadId request = do
   executable <- findExecutable "gh"
   case executable of
     Nothing -> pure (Left "GitHub CLI was not found on PATH")
     Just ghPath -> case request.githubToolOperation of
-      GitHubIssueRead -> runGitHubCommand repositoryRoot ghPath (githubIssueViewArguments repo request.githubToolIssue) ""
-      GitHubIssueUpdate -> runGitHubIssueUpdate repositoryRoot repo ghPath request
+      GitHubIssueRead -> runGitHubCommand client threadId ghPath (githubIssueViewArguments client.reviewRepositorySlug request.githubToolIssue) ""
+      GitHubIssueUpdate -> runGitHubIssueUpdate client threadId ghPath request
 
 -- | Explicit --repo on every GitHub CLI invocation below, so the dashboard's
 -- resolved repository identity (which may come from an explicit --repo
@@ -968,34 +1103,34 @@ githubIssueEditArguments repo request = baseArguments <> addArguments <> removeA
       | null request.githubToolRemoveLabels = []
       | otherwise = ["--remove-label", Text.unpack (Text.intercalate "," request.githubToolRemoveLabels)]
 
-runGitHubIssueUpdate :: FilePath -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueUpdate repositoryRoot repo ghPath request = do
+runGitHubIssueUpdate :: ReviewClient -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueUpdate client threadId ghPath request = do
   commentResult <- case request.githubToolComment of
     Nothing -> pure (Right Nothing)
     Just comment ->
       fmap (fmap (Just . Text.strip))
-        (runGitHubCommand repositoryRoot ghPath (githubIssueCommentArguments repo request.githubToolIssue) comment)
+        (runGitHubCommand client threadId ghPath (githubIssueCommentArguments client.reviewRepositorySlug request.githubToolIssue) comment)
   case commentResult of
     Left message -> pure (Left message)
     Right commentUrl -> do
-      labelResult <- ensureRevisedLabel repositoryRoot repo ghPath request.githubToolAddLabels
+      labelResult <- ensureRevisedLabel client threadId ghPath request.githubToolAddLabels
       case labelResult of
         Left message -> pure (Left (partialUpdateMessage commentUrl message))
         Right () -> do
-          edited <- applyReviewLabels repositoryRoot repo ghPath request
+          edited <- applyReviewLabels client threadId ghPath request
           pure $ case edited of
             Left message -> Left (partialUpdateMessage commentUrl message)
             Right _ -> Right (githubUpdateResult commentUrl request)
 
-ensureRevisedLabel :: FilePath -> Text -> FilePath -> [Text] -> IO (Either Text ())
-ensureRevisedLabel repositoryRoot repo ghPath labels
+ensureRevisedLabel :: ReviewClient -> Text -> FilePath -> [Text] -> IO (Either Text ())
+ensureRevisedLabel client threadId ghPath labels
   | "reviewed:revised" `notElem` labels = pure (Right ())
-  | otherwise = fmap (fmap (const ())) (runGitHubCommand repositoryRoot ghPath (githubLabelCreateArguments repo) "")
+  | otherwise = fmap (fmap (const ())) (runGitHubCommand client threadId ghPath (githubLabelCreateArguments client.reviewRepositorySlug) "")
 
-applyReviewLabels :: FilePath -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-applyReviewLabels repositoryRoot repo ghPath request
+applyReviewLabels :: ReviewClient -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+applyReviewLabels client threadId ghPath request
   | null request.githubToolAddLabels && null request.githubToolRemoveLabels = pure (Right "")
-  | otherwise = runGitHubCommand repositoryRoot ghPath (githubIssueEditArguments repo request) ""
+  | otherwise = runGitHubCommand client threadId ghPath (githubIssueEditArguments client.reviewRepositorySlug request) ""
 
 githubUpdateResult :: Maybe Text -> GitHubIssueToolRequest -> Text
 githubUpdateResult commentUrl request =
@@ -1014,38 +1149,48 @@ partialUpdateMessage Nothing message = message
 partialUpdateMessage (Just commentUrl) message =
   "The issue comment was posted at " <> commentUrl <> ", but the label update failed: " <> message
 
-runGitHubCommand :: FilePath -> FilePath -> [String] -> Text -> IO (Either Text Text)
-runGitHubCommand repositoryRoot ghPath arguments input = do
+runGitHubCommand :: ReviewClient -> Text -> FilePath -> [String] -> Text -> IO (Either Text Text)
+runGitHubCommand client threadId ghPath arguments input = do
   started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
   case started of
     Left exception -> pure (Left ("Could not start GitHub CLI: " <> exceptionText exception))
     Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
-      outputResult <- newEmptyMVar
-      errorResult <- newEmptyMVar
-      void . forkIO $ captureHandle outputHandle outputResult
-      void . forkIO $ captureHandle errorHandle errorResult
-      written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
-      case written of
-        Left exception -> do
-          stopOwnedProcess processHandle
-          pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
-        Right () -> do
-          completed <-
-            timeout githubCommandTimeoutMicros $ do
-              exitCode <- waitForProcess processHandle
-              output <- takeMVar outputResult
-              errors <- takeMVar errorResult
-              pure (exitCode, output, errors)
-          case completed of
-            Nothing -> do
-              stopOwnedProcess processHandle
-              pure (Left "GitHub operation timed out after 30 seconds")
-            Just captured -> pure (renderGitHubCommandResult captured)
+      (managed, groupLeaderProblem) <- managedProcess processHandle
+      mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+      registered <- registerToolProcess client threadId managed
+      case registered of
+        Nothing -> do
+          killManagedProcess managed
+          pure (Left "Kanban is shutting down the review client; the GitHub CLI invocation was refused")
+        Just invocationId -> do
+          outputResult <- newEmptyMVar
+          errorResult <- newEmptyMVar
+          void . forkIO $ captureHandle outputHandle outputResult
+          void . forkIO $ captureHandle errorHandle errorResult
+          written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
+          result <- case written of
+            Left exception -> do
+              killManagedProcess managed
+              pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
+            Right () -> do
+              completed <-
+                timeout githubCommandTimeoutMicros $ do
+                  exitCode <- waitForProcess processHandle
+                  output <- takeMVar outputResult
+                  errors <- takeMVar errorResult
+                  pure (exitCode, output, errors)
+              case completed of
+                Nothing -> do
+                  killManagedProcess managed
+                  pure (Left "GitHub operation timed out after 30 seconds")
+                Just captured -> pure (renderGitHubCommandResult captured)
+          deregisterToolProcess client invocationId
+          pure result
     Right _ -> pure (Left "GitHub CLI did not provide all three standard streams")
   where
     processSpec =
       (proc ghPath arguments)
-        { cwd = Just repositoryRoot,
+        { cwd = Just client.reviewRepositoryRoot,
           std_in = CreatePipe,
           std_out = CreatePipe,
           std_err = CreatePipe,
@@ -1126,30 +1271,35 @@ runAuthenticatedClaude client threadId prompt = do
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
           (managed, groupLeaderProblem) <- managedProcess processHandle
           mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-          modifyMVar_ client.reviewToolProcesses (pure . Map.insert threadId managed)
-          outputResult <- newEmptyMVar
-          errorResult <- newEmptyMVar
-          void . forkIO $ captureHandle outputHandle outputResult
-          void . forkIO $ captureHandle errorHandle errorResult
-          written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
-          result <- case written of
-            Left exception -> do
-              stopOwnedProcess processHandle
-              pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
-            Right () -> do
-              completed <-
-                timeout claudeReviewerTimeoutMicros $ do
-                  exitCode <- waitForProcess processHandle
-                  output <- takeMVar outputResult
-                  errors <- takeMVar errorResult
-                  pure (exitCode, output, errors)
-              case completed of
-                Nothing -> do
-                  stopOwnedProcess processHandle
-                  pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
-                Just captured -> pure (renderClaudeResult captured)
-          modifyMVar_ client.reviewToolProcesses (pure . Map.delete threadId)
-          pure result
+          registered <- registerToolProcess client threadId managed
+          case registered of
+            Nothing -> do
+              killManagedProcess managed
+              pure (Left "Kanban is shutting down the review client; the Claude invocation was refused")
+            Just invocationId -> do
+              outputResult <- newEmptyMVar
+              errorResult <- newEmptyMVar
+              void . forkIO $ captureHandle outputHandle outputResult
+              void . forkIO $ captureHandle errorHandle errorResult
+              written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
+              result <- case written of
+                Left exception -> do
+                  killManagedProcess managed
+                  pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
+                Right () -> do
+                  completed <-
+                    timeout claudeReviewerTimeoutMicros $ do
+                      exitCode <- waitForProcess processHandle
+                      output <- takeMVar outputResult
+                      errors <- takeMVar errorResult
+                      pure (exitCode, output, errors)
+                  case completed of
+                    Nothing -> do
+                      killManagedProcess managed
+                      pure (Left "Claude Sonnet 5 revision agent timed out after ten minutes")
+                    Just captured -> pure (renderClaudeResult captured)
+              deregisterToolProcess client invocationId
+              pure result
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
   where
     claudeProcess claudePath =

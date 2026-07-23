@@ -89,8 +89,13 @@ import Kanban.Review
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    killReviewTools,
+    newReviewClientForTesting,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
+    runAuthenticatedClaude,
+    runGitHubIssueTool,
+    stopReviewClient,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
   )
@@ -231,6 +236,38 @@ main = hspec $ do
         managed <- managedProcessFor process
         killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    it "kills a surviving group member even though its recorded leader already exited and was reaped" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & exit 0"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      -- A safety net independent of 'killManagedProcess' (the very function
+      -- under test): if an assertion below fails before it runs, this still
+      -- reclaims the detached, TERM-resistant child rather than leaking it.
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        -- Let the leader exit and be reaped on its own -- 'killManagedProcess'
+        -- must still be able to reach the detached child sharing its group,
+        -- using the pgid captured at spawn time rather than re-querying the
+        -- now-reaped handle.
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            waitForMember attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
+        waitForMember 50
+        killManagedProcess managed
+        threadDelay 500000
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
@@ -2546,6 +2583,51 @@ main = hspec $ do
       githubLabelCreateArguments repo `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
       githubIssueEditArguments repo request `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
 
+  describe "review tool process ownership" $ do
+    it "keeps two overlapping registrations on one thread independently killable, and completing one leaves the other registered" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        -- A safety net independent of the registry under test: if an
+        -- assertion below fails before 'killReviewTools' runs, this still
+        -- reclaims the fake claude invocations rather than leaking them.
+        flip finally (stopReviewClient client) $ do
+          shortDone <- newEmptyMVar
+          longDone <- newEmptyMVar
+          void . forkIO $ runAuthenticatedClaude client "thread-a" "SHORT" >>= putMVar shortDone
+          void . forkIO $ runAuthenticatedClaude client "thread-a" "LONG" >>= putMVar longDone
+          -- Wait for the short-lived invocation to complete and deregister on
+          -- its own; if the second registration had overwritten or the first's
+          -- completion had wrongly deleted the wrong entry (the bug this fixes),
+          -- the long invocation would no longer be reachable below.
+          timeout 5000000 (takeMVar shortDone) `shouldReturn` Just (Right "short-done")
+          threadDelay 200000
+          killReviewTools client "thread-a"
+          result <- timeout 5000000 (takeMVar longDone)
+          case result of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "exited with status"
+            other -> expectationFailure ("expected the still-registered long invocation to be killed, got " <> show other)
+
+    it "terminates a fake gh invocation still in flight when the client shuts down" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        flip finally (stopReviewClient client) $ do
+          ghDone <- newEmptyMVar
+          let request =
+                GitHubIssueToolRequest
+                  { githubToolOperation = GitHubIssueRead,
+                    githubToolIssue = 1,
+                    githubToolComment = Nothing,
+                    githubToolAddLabels = [],
+                    githubToolRemoveLabels = []
+                  }
+          void . forkIO $ runGitHubIssueTool client "thread-a" request >>= putMVar ghDone
+          threadDelay 500000
+          stopReviewClient client
+          result <- timeout 5000000 (takeMVar ghDone)
+          case result of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "exited with status"
+            other -> expectationFailure ("expected the in-flight gh invocation to be terminated by shutdown, got " <> show other)
+
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
       cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
@@ -4171,6 +4253,37 @@ fullFixtureToml =
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
+
+-- | Installs fake @claude@ and @gh@ executables on a temporary PATH so
+-- 'runAuthenticatedClaude'/'runGitHubIssueTool' spawn real, killable
+-- processes without needing the genuine tools. The fake @claude@ reads its
+-- prompt from stdin (matching the real client's own input channel): a
+-- prompt containing @SHORT@ exits immediately, anything else sleeps far
+-- longer than any test timeout so it can only ever end by being killed. The
+-- fake @gh@ ignores its arguments and does the same.
+withReviewToolFixtures :: (FilePath -> IO result) -> IO result
+withReviewToolFixtures action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let binaryRoot = temporaryRoot </> "bin"
+        fakeClaude = binaryRoot </> "claude"
+        fakeGh = binaryRoot </> "gh"
+    createDirectory binaryRoot
+    ByteString.writeFile
+      fakeClaude
+      ( ByteString.unlines
+          [ "#!/bin/sh",
+            "prompt=$(cat)",
+            "case \"$prompt\" in",
+            "  *SHORT*) printf 'short-done' ;;",
+            "  *) sleep 30 ;;",
+            "esac"
+          ]
+      )
+    setFileMode fakeClaude 0o700
+    ByteString.writeFile fakeGh (ByteString.unlines ["#!/bin/sh", "sleep 30"])
+    setFileMode fakeGh 0o700
+    originalPath <- maybe "" id <$> lookupEnv "PATH"
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) (action temporaryRoot)
 
 withTemporaryCacheRoot :: (FilePath -> IO result) -> IO result
 withTemporaryCacheRoot = bracket createTemporaryDirectory removePathForcibly
