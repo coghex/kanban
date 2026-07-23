@@ -50,7 +50,7 @@ module Kanban.Review
 where
 
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay, withMVar)
-import Control.Exception (Exception, IOException, bracket_, displayException, try)
+import Control.Exception (Exception, IOException, displayException, finally, try)
 import Control.Monad (forever, unless, void, when)
 import Data.Aeson
   ( FromJSON (..),
@@ -787,23 +787,19 @@ interruptReview client threadId turnId =
     "turn/interrupt"
     (object ["threadId" .= threadId, "turnId" .= turnId])
 
--- | Tracks a tool invocation as in-flight for the duration of `action` --
--- from just after a successful 'reserveToolInvocation' through to its own
--- final cleanup, whichever branch that ends up being (deregister,
--- 'registerOrphanedToolProcess', or an early-return failure path).
--- 'awaitNoInFlightInvocations' uses this so a whole-client shutdown does
--- not return while a straggler invocation -- one whose reservation a
--- concurrent drain already claimed and dropped as (at the time) trivially
--- confirmed, moments before this invocation's own spawn could attach --
--- still has its own best-effort cleanup left to run.
-withInFlightInvocation :: ReviewClient -> IO a -> IO a
-withInFlightInvocation client =
-  bracket_
-    (modifyMVar_ client.reviewInFlightInvocations (pure . (+ 1)))
-    (modifyMVar_ client.reviewInFlightInvocations (pure . subtract 1))
+-- | Marks an invocation 'reserveToolInvocation' has already counted as
+-- in-flight (see there for why the count is incremented atomically with
+-- the reservation itself, not here) as finished once `action` completes,
+-- however it completes -- covering every exit path (deregister,
+-- 'registerOrphanedToolProcess', or an early-return failure) with one
+-- wrapper around the whole invocation body.
+releaseInFlightInvocation :: ReviewClient -> IO a -> IO a
+releaseInFlightInvocation client action =
+  action `finally` modifyMVar_ client.reviewInFlightInvocations (pure . subtract 1)
 
--- | Blocks until every invocation 'withInFlightInvocation' is currently
--- tracking has finished its own cleanup, or until 'inFlightWaitAttempts' is
+-- | Blocks until every invocation 'reserveToolInvocation' counted as
+-- in-flight has finished its own cleanup (see 'releaseInFlightInvocation'),
+-- or until 'inFlightWaitAttempts' is
 -- exhausted (reported as a protocol warning rather than blocking forever).
 -- Must only be called once new registrations are already refused (i.e.
 -- after the registry has been closed), so the count can only ever count
@@ -832,13 +828,29 @@ awaitNoInFlightInvocations client = go inFlightWaitAttempts
 -- shutdown already underway) or while this thread is being cancelled by
 -- 'killReviewTools' (its cancellation is still in flight): the caller must
 -- not spawn a process at all in that case.
+--
+-- An accepted reservation increments 'reviewInFlightInvocations' in the
+-- very same 'reviewToolProcesses' transaction that inserts it into the
+-- registry, not as a separate step afterward: a gap between "reservation
+-- visible in the registry" and "counted as in-flight" would let a
+-- concurrent 'drainToolProcesses' claim and drop the reservation (correctly
+-- finding nothing to kill yet) and then observe an in-flight count of zero
+-- and return, before this invocation ever got a chance to increment it
+-- itself -- leaving a straggler that later registers an unresolved orphan
+-- with no shutdown drain left to ever reach it. Since both this and every
+-- concurrent drain's own close-and-claim step contend for the same
+-- 'reviewToolProcesses' lock, nesting the increment inside this
+-- transaction guarantees it is visible before any drain that could
+-- possibly claim this same reservation ever runs.
 reserveToolInvocation :: ReviewClient -> Text -> IO (Maybe Int)
 reserveToolInvocation client threadId = do
   invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
   accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
     if registry.toolRegistryClosed || Set.member threadId registry.toolRegistryCancellingThreads
       then pure (registry, False)
-      else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId Nothing False) registry.toolRegistryEntries}, True)
+      else do
+        modifyMVar_ client.reviewInFlightInvocations (pure . (+ 1))
+        pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId Nothing False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
 
 -- | Attaches a now-spawned process (and its census watcher's peek and
@@ -1415,7 +1427,7 @@ runGitHubCommand client threadId ghPath arguments input = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> withInFlightInvocation client $ do
+    Just invocationId -> releaseInFlightInvocation client $ do
       started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
       case started of
         Left exception -> do
@@ -1549,7 +1561,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> withInFlightInvocation client $ do
+    Just invocationId -> releaseInFlightInvocation client $ do
       beforeSpawn
       executable <- findExecutable "claude"
       case executable of

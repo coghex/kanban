@@ -37,7 +37,7 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -433,26 +433,44 @@ killManagedProcessVerified managed@(LocalManagedProcess _ (Just _) peekCensus _)
             else threadDelay killConfirmRetryDelayMicros >> go (attemptsLeft - 1)
 killManagedProcessVerified managed = killManagedProcess managed >> pure True
 
--- | TERM, wait, verify via 'checkGroupMembership', escalate to KILL and
--- verify again if needed -- shared by every kill path here once it has
--- already decided who `expected` is, whether from a provenance-backed
--- census ('killCensusVerified'/'killManagedProcessVerified') or, as a last
--- resort with no stronger evidence available, whoever a single fresh
--- snapshot finds sharing the pgid ('killGroupSingleSnapshotWith').
+-- | TERM, wait, verify via 'checkGroupEmpty', escalate to KILL and verify
+-- again if needed -- shared by every kill path here once it has already
+-- decided `pid`'s group is worth signalling at all, whether that decision
+-- came from a provenance-backed census
+-- ('killCensusVerified'/'killManagedProcessVerified') or, as a last resort
+-- with no stronger evidence available, whoever a single fresh snapshot
+-- finds sharing the pgid ('killGroupSingleSnapshotWith'). `_expected` is
+-- unused by the confirmation check itself: termination is confirmed only
+-- once the group's *complete* current membership is empty, not merely once
+-- the specific identities that justified signalling in the first place are
+-- gone -- a member that forks a fresh same-group child from its own TERM
+-- handler moments before dying would otherwise vanish from `_expected`'s
+-- perspective while its new, never-`_expected` child survives undetected.
 killIdentitiesVerified :: CPid -> [ProcessIdentity] -> IO Bool
-killIdentitiesVerified pid expected = do
+killIdentitiesVerified pid _expected = do
   ignoreIOException (signalProcessGroup sigTERM pid)
   threadDelay terminationGraceMicros
-  afterTerm <- checkGroupMembership groupPidInt expected
+  afterTerm <- checkGroupEmpty groupPidInt
   case afterTerm of
-    IdentityAbsent -> pure True
-    _ -> do
+    Right True -> pure True
+    Right False -> do
       ignoreIOException (signalProcessGroup sigKILL pid)
       threadDelay terminationGraceMicros
-      afterKill <- checkGroupMembership groupPidInt expected
-      pure (afterKill == IdentityAbsent)
+      afterKill <- checkGroupEmpty groupPidInt
+      pure (afterKill == Right True)
+    Left _ -> pure False
   where
     groupPidInt = fromIntegral pid
+
+-- | Whether the process group led by `groupPid` is, per a fresh snapshot,
+-- completely empty right now -- the actual definition of "confirmed
+-- terminated" (see 'killIdentitiesVerified'): restricted to whether
+-- specific previously-recorded identities survive would miss a fresh
+-- same-group child a dying member forked moments before exiting.
+checkGroupEmpty :: Int -> IO (Either Text Bool)
+checkGroupEmpty groupPid = do
+  snapshot <- defaultProcessSnapshot
+  pure (null . filter ((== groupPid) . processIdentityGroupPid) <$> snapshot)
 
 -- | As 'managedProcessCensus', but wrapped in 'IO' for source
 -- compatibility with existing callers written against the pre-embedded-
@@ -464,16 +482,16 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- | Spawns a background watcher that, every 'censusIntervalMicros' (with
 -- one synchronous tick taken before this even returns -- see below),
 -- records every current member of the managed leader's process group into
--- an accumulating census -- *unless* a tick finds the group completely
--- empty, in which case the census is reset, not merely left unchanged, and
--- the watcher stops *itself* (see below for why). Returns two actions:
--- `peek` reads everything recorded so far *without* stopping the watcher,
--- so a caller can re-check partway through a multi-attempt kill sequence
--- and see what a tick recorded in the meantime; `stop` kills the watcher
--- thread (a safe no-op if it has already stopped itself) and returns its
--- final reading. A caller that explicitly confirms termination should
--- still run `stop` once it does, to release the reference promptly, but
--- nothing leaks even if it never gets the chance to.
+-- an accumulating census, *never* clearing what has already been recorded
+-- -- a tick finding the group completely empty stops the watcher (see
+-- below for why) but leaves the census exactly as it last stood. Returns
+-- two actions: `peek` reads everything recorded so far *without* stopping
+-- the watcher, so a caller can re-check partway through a multi-attempt
+-- kill sequence and see what a tick recorded in the meantime; `stop` kills
+-- the watcher thread (a safe no-op if it has already stopped itself) and
+-- returns its final reading. A caller that explicitly confirms termination
+-- should still run `stop` once it does, to release the reference promptly,
+-- but nothing leaks even if it never gets the chance to.
 --
 -- This exists because a descendant discovered only *after* the leader has
 -- already exited can no longer be found by parent-chain descent at all --
@@ -485,17 +503,22 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- since-vacated pgid. Recording the group's membership continuously, with
 -- no gap, from a verified spawn onward is what closes that: at every tick,
 -- whatever currently shares this pgid is treated as a further-confirmed
--- member of the *same*, continuously-observed spawn -- unless a tick ever
--- finds the group *empty*. A verified leader (see 'managedProcess') is
--- always itself a member of its own group for as long as it lives, so the
--- group can only ever be observed empty once the leader has truly exited
--- -- at that exact point, this spawn is genuinely, fully gone, and
--- anything appearing afterward cannot be a legitimate continuation of it;
--- resetting the census there, *and stopping the watcher*, is what stops a
--- later, coincidentally-reused pgid from silently inheriting this spawn's
--- accumulated trust, and is also what guarantees a 'ManagedProcess' whose
--- process simply exits on its own, with no caller ever calling a kill
--- function on it at all, does not leak this thread forever.
+-- member of the *same*, continuously-observed spawn. A verified leader
+-- (see 'managedProcess') is always itself a member of its own group for as
+-- long as it lives, so the group can only ever be observed empty once the
+-- leader has truly exited -- at that exact point this spawn is genuinely,
+-- fully gone, and this stops watching (so a 'ManagedProcess' whose process
+-- simply exits on its own, with no caller ever calling a kill function on
+-- it at all, does not leak this thread forever). The census itself is
+-- deliberately *not* cleared at that point: 'killCensusVerified' treats a
+-- non-empty census as requiring every one of its recorded identities to
+-- overlap a *fresh* snapshot before trusting anything -- so once this spawn
+-- has genuinely gone empty, its now-stale census can never again overlap
+-- whatever a later, coincidentally-reused pgid's occupants look like, and
+-- correctly keeps refusing to vouch for them. Clearing it here instead
+-- would erase that evidence and let 'killCensusVerified' fall back to
+-- trusting a bare, unwitnessed snapshot of exactly the reused pgid this
+-- design exists to distrust.
 --
 -- The very first tick runs synchronously, before the background loop ever
 -- starts waiting out 'censusIntervalMicros', so the census is essentially
@@ -524,17 +547,21 @@ startEmbeddedCensus (Just pid) = do
 -- | Records one tick of a census (see 'startEmbeddedCensus'). Returns
 -- 'True' while the group still has any live members at all (the watcher
 -- should keep going), or 'False' the moment a tick finds it genuinely
--- empty (the watcher should stop itself). A snapshot failure is treated as
--- inconclusive, not as emptiness -- it neither adds nor resets anything,
--- and reports 'True' so the watcher keeps trying on its next tick rather
--- than prematurely giving up on a still-live group.
+-- empty (the watcher should stop itself) -- but never clears `knownRef`
+-- either way, so a census that once recorded real members and has since
+-- gone empty stays distinguishable from one that has never recorded
+-- anything at all (see 'startEmbeddedCensus' for why that distinction
+-- matters). A snapshot failure is treated as inconclusive, not as
+-- emptiness -- it neither adds nor clears anything, and reports 'True' so
+-- the watcher keeps trying on its next tick rather than prematurely giving
+-- up on a still-live group.
 recordCensusTick :: CPid -> IORef (Set ProcessIdentity) -> IO Bool
 recordCensusTick pid knownRef = do
   snapshot <- defaultProcessSnapshot
   case snapshot of
     Left _ -> pure True
     Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
-      [] -> writeIORef knownRef Set.empty >> pure False
+      [] -> pure False
       groupMembers -> atomicModifyIORef' knownRef (\known -> (foldr Set.insert known groupMembers, ())) >> pure True
   where
     groupPidInt = fromIntegral pid

@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Brick (BrickEvent (..), Location (..))
-import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay, tryTakeMVar)
 import Control.Exception (IOException, SomeException, bracket, finally, throwIO, throwTo, try, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
@@ -2875,6 +2875,35 @@ main = hspec $ do
           Just (Left message) ->
             message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
           other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
+
+    it "stopReviewClient does not return until an invocation held open exactly at reservation has finished its own cleanup" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        reachedBarrier <- newEmptyMVar
+        releaseBarrier <- newEmptyMVar
+        invocationDone <- newEmptyMVar
+        shutdownDone <- newEmptyMVar
+        -- reserveToolInvocation counts an accepted reservation as in-flight
+        -- in the very same transaction that inserts it into the registry
+        -- (see reviewInFlightInvocations), so stopReviewClient's first
+        -- drain -- which finds this reservation with no process yet
+        -- attached, and would otherwise have nothing left to wait for --
+        -- must still block on it via awaitNoInFlightInvocations rather than
+        -- returning while this invocation's own best-effort cleanup is
+        -- still ahead of it.
+        let barrierHook = putMVar reachedBarrier () >> takeMVar releaseBarrier
+        void . forkIO $ runAuthenticatedClaudeWith barrierHook client "thread-a" "LONG" >>= putMVar invocationDone
+        timeout 5000000 (takeMVar reachedBarrier) `shouldReturn` Just ()
+        void . forkIO $ (stopReviewClient client >> putMVar shutdownDone ())
+        threadDelay 1000000
+        tryTakeMVar shutdownDone `shouldReturn` Nothing
+        putMVar releaseBarrier ()
+        result <- timeout 5000000 (takeMVar invocationDone)
+        case result of
+          Just (Left message) ->
+            message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
+          other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
+        timeout 5000000 (takeMVar shutdownDone) `shouldReturn` Just ()
 
     it "deterministically resolves an invocation held open exactly at reservation while a same-thread cancellation fences and drains concurrently, with nothing else registered" $
       withReviewToolFixtures $ \temporaryRoot -> do
