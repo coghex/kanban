@@ -49,8 +49,8 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, withMVar)
-import Control.Exception (Exception, IOException, displayException, try)
+import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay, withMVar)
+import Control.Exception (Exception, IOException, bracket_, displayException, try)
 import Control.Monad (forever, unless, void, when)
 import Data.Aeson
   ( FromJSON (..),
@@ -291,6 +291,12 @@ data ReviewClient = ReviewClient
     reviewPendingRequests :: MVar (Map Int PendingRequest),
     reviewThreadIssues :: MVar (Map Text Int),
     reviewToolProcesses :: MVar ToolRegistry,
+    -- | Counts tool invocations currently between a successful
+    -- 'reserveToolInvocation' and their own final cleanup (deregister or
+    -- 'registerOrphanedToolProcess'), so 'drainToolProcesses' can wait for
+    -- every in-flight straggler to finish its own best-effort cleanup
+    -- before a whole-client shutdown returns -- see 'awaitNoInFlightInvocations'.
+    reviewInFlightInvocations :: MVar Int,
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
@@ -560,6 +566,7 @@ startReviewClient workflowConfig repository eventSink = do
       pendingRequests <- newMVar Map.empty
       threadIssues <- newMVar Map.empty
       toolProcesses <- newMVar emptyToolRegistry
+      inFlightInvocations <- newMVar 0
       outputDone <- newEmptyMVar
       errorDone <- newEmptyMVar
       let client =
@@ -575,6 +582,7 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewPendingRequests = pendingRequests,
                 reviewThreadIssues = threadIssues,
                 reviewToolProcesses = toolProcesses,
+                reviewInFlightInvocations = inFlightInvocations,
                 reviewEventSink = eventSink,
                 reviewRepositoryRoot = repositoryRoot,
                 reviewRepositorySlug = repository.repositoryOwner <> "/" <> repository.repositoryName,
@@ -631,6 +639,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
   pendingRequests <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolProcesses <- newMVar emptyToolRegistry
+  inFlightInvocations <- newMVar 0
   outputDone <- newEmptyMVar
   errorDone <- newEmptyMVar
   pure
@@ -646,6 +655,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
         reviewPendingRequests = pendingRequests,
         reviewThreadIssues = threadIssues,
         reviewToolProcesses = toolProcesses,
+        reviewInFlightInvocations = inFlightInvocations,
         reviewEventSink = eventSink,
         reviewRepositoryRoot = repositoryRoot,
         reviewRepositorySlug = "test/test",
@@ -776,6 +786,43 @@ interruptReview client threadId turnId =
     PendingOther
     "turn/interrupt"
     (object ["threadId" .= threadId, "turnId" .= turnId])
+
+-- | Tracks a tool invocation as in-flight for the duration of `action` --
+-- from just after a successful 'reserveToolInvocation' through to its own
+-- final cleanup, whichever branch that ends up being (deregister,
+-- 'registerOrphanedToolProcess', or an early-return failure path).
+-- 'awaitNoInFlightInvocations' uses this so a whole-client shutdown does
+-- not return while a straggler invocation -- one whose reservation a
+-- concurrent drain already claimed and dropped as (at the time) trivially
+-- confirmed, moments before this invocation's own spawn could attach --
+-- still has its own best-effort cleanup left to run.
+withInFlightInvocation :: ReviewClient -> IO a -> IO a
+withInFlightInvocation client =
+  bracket_
+    (modifyMVar_ client.reviewInFlightInvocations (pure . (+ 1)))
+    (modifyMVar_ client.reviewInFlightInvocations (pure . subtract 1))
+
+-- | Blocks until every invocation 'withInFlightInvocation' is currently
+-- tracking has finished its own cleanup, or until 'inFlightWaitAttempts' is
+-- exhausted (reported as a protocol warning rather than blocking forever).
+-- Must only be called once new registrations are already refused (i.e.
+-- after the registry has been closed), so the count can only ever count
+-- down to zero, never be replenished by a fresh invocation racing in
+-- underneath.
+awaitNoInFlightInvocations :: ReviewClient -> IO ()
+awaitNoInFlightInvocations client = go inFlightWaitAttempts
+  where
+    go attemptsLeft
+      | attemptsLeft <= (0 :: Int) = do
+          count <- readMVar client.reviewInFlightInvocations
+          when
+            (count > 0)
+            (client.reviewEventSink (ReviewProtocolWarning "gave up waiting for in-flight tool invocations to finish before shutdown"))
+      | otherwise = do
+          count <- readMVar client.reviewInFlightInvocations
+          if count <= 0
+            then pure ()
+            else threadDelay inFlightPollMicros >> go (attemptsLeft - 1)
 
 -- | Reserves a slot for a tool invocation about to be spawned, *before* any
 -- process exists -- so a concurrent drain (below) can see and cancel it
@@ -921,9 +968,28 @@ drainMatchingToolProcesses client options matches = do
 -- call more than once (e.g. once from 'stopReviewClient' and again from
 -- 'watchServerProcess'): closing an already-closed, already-empty registry
 -- is a no-op.
+--
+-- Two-phase: the first drain only ever sees invocations that had already
+-- reached 'attachToolProcess' (or a reservation that never got that far).
+-- A straggler still between 'reserveToolInvocation' and its own spawn
+-- completing is invisible to it -- its reservation is claimed and dropped
+-- here as (at the time) trivially confirmed, since 'toolEntryProcess' is
+-- still 'Nothing' -- and only surfaces, if its own best-effort
+-- 'confirmToolProcessTerminated' attempt fails, via
+-- 'registerOrphanedToolProcess' sometime *after* this first drain has
+-- already returned. Waiting for every such straggler to finish (see
+-- 'awaitNoInFlightInvocations', called only once the registry is already
+-- closed so the in-flight count can only fall) and draining a second time
+-- is what actually reaches any orphan-registered entry those stragglers
+-- left behind, rather than leaving it, and the process and census watcher
+-- it names, unowned once this returns.
 drainToolProcesses :: ReviewClient -> IO ()
-drainToolProcesses client =
-  drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = True, drainFenceThread = Nothing}) (const True)
+drainToolProcesses client = do
+  close
+  awaitNoInFlightInvocations client
+  close
+  where
+    close = drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = True, drainFenceThread = Nothing}) (const True)
 
 -- | Kills `managed` and confirms, via 'killCensusVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
@@ -1349,7 +1415,7 @@ runGitHubCommand client threadId ghPath arguments input = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> do
+    Just invocationId -> withInFlightInvocation client $ do
       started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
       case started of
         Left exception -> do
@@ -1483,7 +1549,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> do
+    Just invocationId -> withInFlightInvocation client $ do
       beforeSpawn
       executable <- findExecutable "claude"
       case executable of
@@ -1903,6 +1969,18 @@ githubCommandTimeoutMicros = 30 * 1000 * 1000
 -- continuity.
 confirmRetryDelayMicros :: Int
 confirmRetryDelayMicros = 600 * 1000
+
+-- | How often 'awaitNoInFlightInvocations' re-checks the in-flight count.
+inFlightPollMicros :: Int
+inFlightPollMicros = 200 * 1000
+
+-- | Bounds 'awaitNoInFlightInvocations's total wait -- generous enough to
+-- cover a straggler's own worst-case cleanup (several
+-- 'confirmRetryDelayMicros'-paced retries, each potentially escalating
+-- through a full TERM/KILL grace cycle) without blocking shutdown
+-- indefinitely if something is genuinely stuck.
+inFlightWaitAttempts :: Int
+inFlightWaitAttempts = 100
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000

@@ -44,7 +44,7 @@ import Kanban.Process
     killCensusVerified,
     killCensusVerifiedWith,
     killManagedProcess,
-    killManagedProcessVerifiedWith,
+    killManagedProcessVerified,
     killVerifiedGroupWith,
     liveProcesses,
     managedProcess,
@@ -417,45 +417,41 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> any ((== realIdentity.processIdentityPid) . processIdentityPid) snapshot `shouldBe` True
 
-    it "killManagedProcessVerifiedWith refuses to signal a pgid whose two continuity-witness readings share no identity, rather than trusting whichever occupant a single snapshot happens to find" $ do
+    it "killManagedProcessVerified retries through its embedded census, still reaching a same-group child even when the leader is reaped before the census's next tick could witness it" $ do
+      -- The leader forks its detached child and exits essentially
+      -- instantly (no delay at all), so the embedded census's own
+      -- synchronous first tick -- taken the moment 'managedProcess'
+      -- verifies the leader, before this script has even started running
+      -- -- almost certainly records only the leader itself. By the time
+      -- this test can even observe the child in a real snapshot and call
+      -- killManagedProcessVerified, well under 'censusIntervalMicros' has
+      -- typically elapsed: without a retry that pauses for the watcher's
+      -- next tick to land, this would report unresolved (correctly
+      -- refusing to trust an as-yet-unwitnessed occupant) and never
+      -- actually reach the child at all.
       (_, _, _, process) <-
-        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & exit 0"]) {create_group = True}
       (managed, groupLeaderProblem) <- managedProcess process
       Just leaderPid <- managedProcessPid managed
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        let groupPidInt = fromIntegral leaderPid
-            firstOccupant =
-              ProcessIdentity
-                { processIdentityPid = groupPidInt + 500001,
-                  processIdentityParentPid = 1,
-                  processIdentityGroupPid = groupPidInt,
-                  processIdentityStartedAt = "reading one",
-                  processIdentityCommand = "unrelated-first-occupant"
-                }
-            secondOccupant =
-              firstOccupant
-                { processIdentityPid = groupPidInt + 500002,
-                  processIdentityStartedAt = "reading two"
-                }
-        callCount <- newIORef (0 :: Int)
-        -- Simulates a pgid whose two continuity-witness readings ('killManagedProcessVerified'
-        -- takes two, 'continuityWitnessMicros' apart) each find a *different*
-        -- occupant sharing no identity with the other -- neither a real
-        -- survivor of one continuous spawn nor even the same foreign spawn
-        -- across both reads, just two unrelated snapshots of a pgid in flux.
-        let stubSnapshot = do
-              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
-              pure (Right [if even count then firstOccupant else secondOccupant])
-        confirmed <- killManagedProcessVerifiedWith stubSnapshot managed
-        confirmed `shouldBe` False
-        -- Refused without ever signalling: the real, still-owned leader is
-        -- untouched.
-        afterAttempt <- readProcessSnapshot
-        case afterAttempt of
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            waitForMember attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
+        waitForMember 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
-          Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
     it "killCensusVerifiedWith refuses to signal when its continuity snapshot fails, rather than blindly TERMing the group" $ do
       (_, _, _, process) <-
