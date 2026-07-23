@@ -2641,7 +2641,7 @@ main = hspec $ do
         -- sleep because the already-closed registry could no longer see it.
         result <- timeout 5000000 (runAuthenticatedClaude client "thread-a" "LONG")
         case result of
-          Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "shutting down"
+          Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
           other -> expectationFailure ("expected a post-shutdown invocation to be refused and killed, got " <> show other)
 
     it "deterministically resolves an invocation held open exactly at registration while shutdown closes and drains concurrently" $
@@ -2670,8 +2670,46 @@ main = hspec $ do
         result <- timeout 5000000 (takeMVar done)
         case result of
           Just (Left message) ->
-            message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "shutting down" rendered)
+            message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
           other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
+
+    it "deterministically resolves an invocation held open exactly at registration while a same-thread cancellation fences and drains concurrently" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        flip finally (stopReviewClient client) $ do
+          -- A decoy invocation gives 'killReviewTools' real work to do (TERM,
+          -- grace wait, verify) so its fence window is wide enough to
+          -- reliably release the barrier-held invocation into -- with
+          -- nothing to kill, the drain step would return near-instantly,
+          -- leaving no real window to land in. Its own hook signals (without
+          -- pausing) exactly when it reaches the register call, so the test
+          -- knows it is genuinely registered before triggering the cancel,
+          -- rather than guessing a delay long enough to outlast
+          -- 'managedProcess's own ps round trip under system load.
+          decoyAtRegister <- newEmptyMVar
+          decoyDone <- newEmptyMVar
+          let decoyHook = putMVar decoyAtRegister ()
+          void . forkIO $ runAuthenticatedClaudeWith decoyHook client "thread-a" "LONG" >>= putMVar decoyDone
+          timeout 5000000 (takeMVar decoyAtRegister) `shouldReturn` Just ()
+          threadDelay 100000
+          reachedBarrier <- newEmptyMVar
+          releaseBarrier <- newEmptyMVar
+          done <- newEmptyMVar
+          let barrierHook = putMVar reachedBarrier () >> takeMVar releaseBarrier
+          void . forkIO $ runAuthenticatedClaudeWith barrierHook client "thread-a" "LONG" >>= putMVar done
+          timeout 5000000 (takeMVar reachedBarrier) `shouldReturn` Just ()
+          void . forkIO $ killReviewTools client "thread-a"
+          threadDelay 300000
+          putMVar releaseBarrier ()
+          result <- timeout 5000000 (takeMVar done)
+          case result of
+            Just (Left message) ->
+              message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "not currently accepting" rendered)
+            other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
+          decoyResult <- timeout 5000000 (takeMVar decoyDone)
+          case decoyResult of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "exited with status"
+            other -> expectationFailure ("expected the decoy invocation to be killed by the cancel, got " <> show other)
 
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

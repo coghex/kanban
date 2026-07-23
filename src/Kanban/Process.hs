@@ -58,7 +58,7 @@ data ProcessIdentity = ProcessIdentity
   deriving anyclass (FromJSON, ToJSON)
 
 data ManagedProcess
-  = LocalManagedProcess ProcessHandle (Maybe ProcessIdentity)
+  = LocalManagedProcess ProcessHandle (Maybe CPid)
   | PersistentManagedProcess CPid
 
 -- | Wraps a freshly spawned local process handle as a 'ManagedProcess'.
@@ -71,22 +71,35 @@ data ManagedProcess
 -- all — but leadership is checked against a fresh process snapshot first,
 -- so a violated precondition is surfaced immediately via the 'Just' case
 -- rather than only showing up later as an inexplicably unkillable process
--- tree. A confirmed leader's identity is captured here, while the handle is
--- still guaranteed alive, and carried inside the 'ManagedProcess' value —
+-- tree. A confirmed (or presumed -- see 'verifyGroupLeader') leader's own
+-- pid is captured here, while the handle is still guaranteed alive, and
+-- carried inside the 'ManagedProcess' value as its process group id --
 -- 'getPid' returns 'Nothing' once the handle has since been reaped, which
 -- would otherwise leave a later 'killManagedProcess' call unable to signal
--- the group at all, orphaning any surviving member.
+-- the group at all, orphaning any surviving member. Only the bare pgid is
+-- kept, not a full snapshot-time identity: 'killManagedProcessVerified'
+-- re-derives who is actually in that group from a fresh snapshot taken at
+-- kill time, so a pgid that has since been fully vacated and reused by an
+-- unrelated process is never mistaken for a survivor of this spawn.
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcess processHandle = do
-  (verifiedIdentity, problem) <- verifyGroupLeader processHandle
-  pure (LocalManagedProcess processHandle verifiedIdentity, problem)
+  (verifiedPid, problem) <- verifyGroupLeader processHandle
+  pure (LocalManagedProcess processHandle verifiedPid, problem)
 
--- | Confirms, via a fresh process snapshot taken while the leader is still
--- alive, that a freshly spawned local process leads its own process group,
--- returning its captured identity for that case alone: a non-leader's own
--- pid must never be signalled as if it were its (shared, foreign-owned)
--- process group, so only a verified leader's identity is worth retaining.
-verifyGroupLeader :: ProcessHandle -> IO (Maybe ProcessIdentity, Maybe Text)
+-- | Confirms, via a fresh process snapshot taken while the leader should
+-- still be alive, that a freshly spawned local process leads its own
+-- process group. A non-leader's own pid must never be signalled as if it
+-- were its (shared, foreign-owned) process group, so a *confirmed*
+-- non-leader yields 'Nothing'. But a leader so fast to exit that even this
+-- snapshot's own external @ps@ invocation loses the race -- landing after
+-- the process has already exited and been zombie-filtered out of the
+-- snapshot entirely -- is not the same as a confirmed non-leader: POSIX
+-- setpgid for @create_group = True@ runs synchronously before exec, so a
+-- captured pid this fresh is still trustworthy as its own presumed group
+-- id even though this particular check could not verify it. Discarding it
+-- in that case would recreate the reaped-leader orphan bug for exactly the
+-- fast-exiting tools this is meant to fix.
+verifyGroupLeader :: ProcessHandle -> IO (Maybe CPid, Maybe Text)
 verifyGroupLeader processHandle = do
   maybePid <- getPid processHandle
   case maybePid of
@@ -94,11 +107,11 @@ verifyGroupLeader processHandle = do
     Just pid -> do
       snapshot <- defaultProcessSnapshot
       pure $ case snapshot of
-        Left message -> (Nothing, Just ("could not take a process snapshot to verify group leadership: " <> message))
+        Left message -> (Just pid, Just ("could not take a process snapshot to verify group leadership: " <> message))
         Right processes -> case identityForPid (fromIntegral pid) processes of
-          Nothing -> (Nothing, Just "process was not found in a fresh process snapshot")
+          Nothing -> (Just pid, Just "process was not found in a fresh process snapshot")
           Just identity
-            | identity.processIdentityGroupPid == identity.processIdentityPid -> (Just identity, Nothing)
+            | identity.processIdentityGroupPid == identity.processIdentityPid -> (Just pid, Nothing)
             | otherwise -> (Nothing, Just "process is not the leader of its own process group")
 
 managedProcessGroup :: CPid -> ManagedProcess
@@ -107,10 +120,10 @@ managedProcessGroup = PersistentManagedProcess
 -- | The *currently live* pid of a managed process, or 'Nothing' once it has
 -- exited and this handle has been reaped -- callers (e.g.
 -- 'Kanban.Worker's cancellation path) rely on that transition to 'Nothing'
--- as a liveness signal. This intentionally ignores any identity captured at
--- spawn time: 'killManagedProcess' uses that captured identity directly,
--- internally, to still reach a surviving group member after the leader
--- itself is gone, without changing what this accessor reports.
+-- as a liveness signal. This intentionally ignores any pgid captured at
+-- spawn time: 'killManagedProcessVerified' uses that captured pgid
+-- directly, internally, to still reach a surviving group member after the
+-- leader itself is gone, without changing what this accessor reports.
 managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
 managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
@@ -224,17 +237,6 @@ checkGroupMembershipWith takeSnapshot groupPid expected = do
       | null (membersStillInGroup groupPid snapshot expected) -> IdentityAbsent
       | otherwise -> IdentityPresent
 
--- | Whether *any* process currently belongs to group `groupPid`, as of a
--- fresh snapshot. Unlike 'checkGroupMembership', this asks nothing about a
--- specific expected identity: a recorded leader that has since exited and
--- been reaped is expected to be gone by the time this runs, but that must
--- never be read as "the group is empty" when a different member (one the
--- caller never separately recorded) is still alive in it.
-groupHasLiveMembers :: Int -> IO (Either Text Bool)
-groupHasLiveMembers groupPid = do
-  result <- defaultProcessSnapshot
-  pure (fmap (any ((== groupPid) . processIdentityGroupPid)) result)
-
 -- | TERM, wait out the grace window, then KILL a persisted process group —
 -- but only ever signal it while a fresh snapshot shows an identity-matching
 -- member still present *in that group*, so a member that kept its PID and
@@ -310,8 +312,7 @@ isZombieStat = Text.isInfixOf "Z"
 
 interruptManagedProcess :: ManagedProcess -> IO ()
 interruptManagedProcess (LocalManagedProcess processHandle Nothing) = signalOwnedGroup sigINT processHandle
-interruptManagedProcess (LocalManagedProcess _ (Just identity)) =
-  ignoreIOException (signalProcessGroup sigINT (fromIntegral identity.processIdentityGroupPid))
+interruptManagedProcess (LocalManagedProcess _ (Just pid)) = ignoreIOException (signalProcessGroup sigINT pid)
 interruptManagedProcess (PersistentManagedProcess processId) = ignoreIOException (signalProcessGroup sigINT processId)
 
 -- | Ctrl-C's escalation for a still-owned process: SIGINT first, then fall
@@ -350,53 +351,59 @@ killManagedProcess (LocalManagedProcess processHandle Nothing) = do
       case stopped of
         Just _ -> pure ()
         Nothing -> signalOwnedGroup sigKILL processHandle
-killManagedProcess (LocalManagedProcess _ (Just identity)) = do
-  -- Cheap up-front check: a leader whose group is already fully empty (the
-  -- common case for a tool that has already exited cleanly on its own)
-  -- costs nothing beyond one snapshot, rather than an unconditional
-  -- TERM-and-750ms-grace on every call regardless of whether anything is
-  -- still there.
-  initiallyEmpty <- groupHasLiveMembers identity.processIdentityGroupPid
-  case initiallyEmpty of
-    Right False -> pure ()
-    _ -> do
-      ignoreIOException (signalProcessGroup sigTERM groupPid)
-      threadDelay terminationGraceMicros
-      hasMembers <- groupHasLiveMembers identity.processIdentityGroupPid
-      case hasMembers of
-        Right False -> pure ()
-        _ -> escalateToKill
-  where
-    groupPid = fromIntegral identity.processIdentityGroupPid
-    -- SIGKILL cannot be blocked, but a caller returning immediately after
-    -- sending it (e.g. to satisfy a pgid probe run right after
-    -- 'stopReviewClient' returns) could still observe the group before the
-    -- kernel has finished tearing it down. Wait out the same grace window
-    -- and take one more snapshot so a fresh probe, taken after this
-    -- returns, reliably finds the group gone.
-    escalateToKill = do
-      ignoreIOException (signalProcessGroup sigKILL groupPid)
-      threadDelay terminationGraceMicros
-      void (groupHasLiveMembers identity.processIdentityGroupPid)
+killManagedProcess managed@(LocalManagedProcess _ (Just _)) = void (killManagedProcessVerified managed)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
   ignoreIOException (signalProcessGroup sigKILL processId)
 
--- | Like 'killManagedProcess', but reports whether a fresh snapshot,
--- taken immediately afterward, confirms the recorded group is now empty --
--- rather than discarding that final check -- for callers (namely
--- 'Kanban.Review's tool registry) that must not treat an invocation as
--- terminated, and safe to remove from their own bookkeeping, until they
--- know for sure. An unverified local process (no captured identity) always
--- reports 'True': 'killManagedProcess' already did its best-effort,
--- handle-driven termination for that case, and there is no recorded group
--- left to verify.
+-- | Like 'killManagedProcess', but reports whether the group is confirmed
+-- empty afterward, rather than discarding that final check -- for callers
+-- (namely 'Kanban.Review's tool registry) that must not treat an invocation
+-- as terminated, and safe to remove from their own bookkeeping, until they
+-- know for sure.
+--
+-- For a verified-or-presumed local leader, "who is in the group" is
+-- re-derived from a *fresh* snapshot taken right now, at the start of this
+-- call, rather than trusted from whatever was true back when the pgid was
+-- captured (which could have been anywhere from moments to minutes ago,
+-- for a long-running tool). Escalation from TERM to KILL then verifies
+-- specifically that *those* re-derived members persist (the same
+-- identity-and-group continuity check 'killVerifiedGroupWith' already
+-- uses), not merely that the numeric pgid is non-empty: once every member
+-- of the originally-owned group has exited, that pgid number is free for
+-- the kernel to hand to a completely unrelated new process group, and a
+-- bare "is this pgid non-empty" check would then TERM/KILL that foreign
+-- group. Deriving `expected` fresh at the start of *this* call narrows the
+-- reuse window to this call's own sub-two-second grace periods, and a
+-- truly empty group right now is confirmed with no signal sent at all.
+--
+-- An unverified local process (no pid, a snapshot failure, or a confirmed
+-- non-leader) falls back to the historical handle-driven behavior, always
+-- reporting 'True': signalling its recorded group in that case could reach
+-- an unrelated, foreign-owned group, so it is never treated as verified
+-- either way.
 killManagedProcessVerified :: ManagedProcess -> IO Bool
-killManagedProcessVerified managed@(LocalManagedProcess _ (Just identity)) = do
-  killManagedProcess managed
-  confirmed <- groupHasLiveMembers identity.processIdentityGroupPid
-  pure (confirmed == Right False)
+killManagedProcessVerified (LocalManagedProcess _ (Just pid)) = do
+  expected <- groupMembersNow
+  case expected of
+    [] -> pure True
+    _ -> do
+      ignoreIOException (signalProcessGroup sigTERM pid)
+      threadDelay terminationGraceMicros
+      afterTerm <- checkGroupMembership groupPidInt expected
+      case afterTerm of
+        IdentityAbsent -> pure True
+        _ -> do
+          ignoreIOException (signalProcessGroup sigKILL pid)
+          threadDelay terminationGraceMicros
+          afterKill <- checkGroupMembership groupPidInt expected
+          pure (afterKill == IdentityAbsent)
+  where
+    groupPidInt = fromIntegral pid
+    groupMembersNow = do
+      snapshot <- defaultProcessSnapshot
+      pure (either (const []) (filter ((== groupPidInt) . processIdentityGroupPid)) snapshot)
 killManagedProcessVerified managed = killManagedProcess managed >> pure True
 
 signalOwnedGroup :: Signal -> ProcessHandle -> IO ()

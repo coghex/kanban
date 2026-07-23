@@ -74,6 +74,8 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -235,14 +237,24 @@ data ToolEntry = ToolEntry
 -- respect to a concurrently spawning invocation: once closed, a
 -- registration attempt is rejected and its caller must terminate the
 -- process it just spawned itself, rather than let it run on unregistered
--- and outlive the drain.
+-- and outlive the drain. 'toolRegistryCancellingThreads' is the same
+-- fencing idea scoped to a single thread's cancellation
+-- ('killReviewTools') rather than the whole client's shutdown: while a
+-- thread id is a member, a fresh invocation on that thread is refused the
+-- same way, so a @kanban_run_claude@/@kanban_github_issue@ call the
+-- app-server issues for a thread at the exact moment its turn is cancelled
+-- cannot slip through unregistered and outlive the cancel. Unlike the
+-- permanent close, membership is temporary -- cleared once that specific
+-- 'killReviewTools' call finishes -- so the thread can register normally
+-- again for its next turn.
 data ToolRegistry = ToolRegistry
   { toolRegistryEntries :: Map Int ToolEntry,
-    toolRegistryClosed :: Bool
+    toolRegistryClosed :: Bool,
+    toolRegistryCancellingThreads :: Set Text
   }
 
 emptyToolRegistry :: ToolRegistry
-emptyToolRegistry = ToolRegistry Map.empty False
+emptyToolRegistry = ToolRegistry Map.empty False Set.empty
 
 data ReviewClient = ReviewClient
   { reviewInput :: Handle,
@@ -741,13 +753,15 @@ interruptReview client threadId turnId =
 -- | Registers a just-spawned tool process under a key unique to this
 -- invocation, tagged with its owning thread. Returns 'Nothing' once the
 -- registry has been closed by 'drainToolProcesses' (full-client shutdown
--- already underway): the caller must terminate the process it just spawned
--- itself, since nothing else will ever see or drain it.
+-- already underway) or while this thread is being cancelled by
+-- 'killReviewTools' (its cancellation is still in flight): the caller must
+-- terminate the process it just spawned itself, since nothing else will
+-- ever see or drain it.
 registerToolProcess :: ReviewClient -> Text -> ManagedProcess -> IO (Maybe Int)
 registerToolProcess client threadId managed = do
   invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
   accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
-    if registry.toolRegistryClosed
+    if registry.toolRegistryClosed || Set.member threadId registry.toolRegistryCancellingThreads
       then pure (registry, False)
       else pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId managed False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
@@ -769,38 +783,64 @@ deregisterToolProcess client invocationId =
       | entry.toolEntryDraining = Just entry
       | otherwise = Nothing
 
+-- | Cancels every currently registered invocation for `threadId` -- e.g. the
+-- user interrupting a review turn, or a steered turn superseding a running
+-- one. Fences that thread for the duration of this call (see
+-- 'toolRegistryCancellingThreads'), so a @kanban_run_claude@/
+-- @kanban_github_issue@ call the app-server issues for this exact thread at
+-- essentially the same instant is refused and self-killed by
+-- 'registerToolProcess' rather than slipping through unregistered and
+-- outliving the cancel. The fence is cleared once this call finishes,
+-- whether or not anything actually needed killing, so the thread accepts
+-- registrations normally again for its next turn.
 killReviewTools :: ReviewClient -> Text -> IO ()
-killReviewTools client threadId = drainMatchingToolProcesses client False ((== threadId) . toolEntryThread)
+killReviewTools client threadId =
+  drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Just threadId}) ((== threadId) . toolEntryThread)
+
+data DrainOptions = DrainOptions
+  { drainCloseRegistry :: Bool,
+    drainFenceThread :: Maybe Text
+  }
 
 -- | Kills every currently registered process matching `matches`, claiming
 -- each matched entry (marking it draining, so a concurrent
 -- 'deregisterToolProcess' from the invocation's own natural completion
 -- leaves it for this drain to remove) in the same atomic step that reads
--- it -- and, when `closeRegistry` is set, also closes the registry to new
--- registrations in that exact same step, so a 'registerToolProcess' racing
--- this call either lands its entry here (and gets killed below) or is
--- rejected outright by the now-closed registry: no spawn can escape
--- unregistered and unkilled in the gap between reading and closing. Each
--- claimed entry is retained until 'confirmToolProcessTerminated' actually
--- confirms it terminated -- an entry it cannot confirm is left registered
--- (still draining) rather than dropped, so a later drain still owns and
--- retries it, instead of a concurrent shutdown or probe ever observing the
--- registry as empty while a described OS process remains unconfirmed.
-drainMatchingToolProcesses :: ReviewClient -> Bool -> (ToolEntry -> Bool) -> IO ()
-drainMatchingToolProcesses client closeRegistry matches = do
+-- it -- and, in that exact same step, closes the registry
+-- ('drainCloseRegistry') and/or fences a specific thread
+-- ('drainFenceThread') against new registrations, so a 'registerToolProcess'
+-- racing this call either lands its entry here (and gets killed below) or
+-- is rejected outright: no spawn can escape unregistered and unkilled in
+-- the gap between reading and fencing/closing. Each claimed entry is
+-- retained until 'confirmToolProcessTerminated' actually confirms it
+-- terminated -- an entry it cannot confirm is left registered (still
+-- draining) rather than dropped, so a later drain still owns and retries
+-- it, instead of a concurrent shutdown or probe ever observing the
+-- registry as empty while a described OS process remains unconfirmed. A
+-- fenced thread is always unfenced again before returning, regardless of
+-- outcome, so a per-thread cancel never permanently blocks that thread's
+-- future turns.
+drainMatchingToolProcesses :: ReviewClient -> DrainOptions -> (ToolEntry -> Bool) -> IO ()
+drainMatchingToolProcesses client options matches = do
   owned <- modifyMVar client.reviewToolProcesses $ \registry ->
     let matching = Map.filter matches registry.toolRegistryEntries
         claimed = Map.map (\entry -> entry {toolEntryDraining = True}) matching
+        cancelling = maybe registry.toolRegistryCancellingThreads (`Set.insert` registry.toolRegistryCancellingThreads) options.drainFenceThread
      in pure
           ( registry
               { toolRegistryEntries = Map.union claimed registry.toolRegistryEntries,
-                toolRegistryClosed = registry.toolRegistryClosed || closeRegistry
+                toolRegistryClosed = registry.toolRegistryClosed || options.drainCloseRegistry,
+                toolRegistryCancellingThreads = cancelling
               },
             matching
           )
   confirmed <- mapM (confirmToolProcessTerminated client . toolEntryProcess) owned
   modifyMVar_ client.reviewToolProcesses $ \registry ->
-    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries (Map.filter id confirmed)}
+    pure
+      registry
+        { toolRegistryEntries = Map.difference registry.toolRegistryEntries (Map.filter id confirmed),
+          toolRegistryCancellingThreads = maybe registry.toolRegistryCancellingThreads (`Set.delete` registry.toolRegistryCancellingThreads) options.drainFenceThread
+        }
 
 -- | Atomically closes the registry to new registrations and drains every
 -- currently registered process (see 'drainMatchingToolProcesses'). Safe to
@@ -808,7 +848,8 @@ drainMatchingToolProcesses client closeRegistry matches = do
 -- 'watchServerProcess'): closing an already-closed, already-empty registry
 -- is a no-op.
 drainToolProcesses :: ReviewClient -> IO ()
-drainToolProcesses client = drainMatchingToolProcesses client True (const True)
+drainToolProcesses client =
+  drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = True, drainFenceThread = Nothing}) (const True)
 
 -- | Kills `managed` and confirms, via 'killManagedProcessVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
@@ -1221,7 +1262,7 @@ runGitHubCommand client threadId ghPath arguments input = do
       case registered of
         Nothing -> do
           killManagedProcess managed
-          pure (Left "Kanban is shutting down the review client; the GitHub CLI invocation was refused")
+          pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
         Just invocationId -> do
           outputResult <- newEmptyMVar
           errorResult <- newEmptyMVar
@@ -1349,7 +1390,7 @@ runAuthenticatedClaudeWith beforeRegister client threadId prompt = do
           case registered of
             Nothing -> do
               killManagedProcess managed
-              pure (Left "Kanban is shutting down the review client; the Claude invocation was refused")
+              pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
             Just invocationId -> do
               outputResult <- newEmptyMVar
               errorResult <- newEmptyMVar
