@@ -41,6 +41,7 @@ import Kanban.Process
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
+    interruptManagedProcessWith,
     killCensusVerified,
     killCensusVerifiedWith,
     killManagedProcess,
@@ -236,6 +237,31 @@ main = hspec $ do
         managed <- managedProcessFor process
         interruptManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure 42)
+
+    it "interruptManagedProcessWith refuses to signal a live group leader the census never witnessed, rather than trusting a pgid that could have been reused" $
+      withManagedShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
+        threadDelay 100000
+        managed <- managedProcessFor process
+        Just leaderPid <- managedProcessPid managed
+        -- Simulates a fresh, unrelated process now leading its own group
+        -- under this exact reused pid -- one the real spawn's embedded
+        -- census (a genuine witness of this test's actual leader) never
+        -- observed.
+        let foreignIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "a much later moment",
+                  processIdentityCommand = "unrelated-foreign-leader"
+                }
+            fakeSnapshot = pure (Right [foreignIdentity])
+        interruptManagedProcessWith fakeSnapshot managed
+        -- Refused without ever signalling: the real, still-owned leader
+        -- never received SIGINT, so it never ran its INT handler's exit
+        -- and is still running its ordinary loop.
+        threadDelay 300000
+        getProcessExitCode process `shouldReturn` Nothing
 
     it "escalates a TERM-resistant worker tree to SIGKILL" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
@@ -2941,7 +2967,15 @@ main = hspec $ do
         -- 'readServerOutput'/'readServerErrors' are reading, before this
         -- (the app-server leader) exits -- the exact "leader gone, group
         -- survivor holds the pipe open" scenario that must not deadlock
-        -- 'watchServerProcess' waiting on those readers to see EOF.
+        -- 'watchServerProcess' waiting on those readers to see EOF. Lingers
+        -- past one census tick interval before exiting -- rather than
+        -- exiting the instant it forks -- so the embedded census (see
+        -- 'startEmbeddedCensus' in "Kanban.Process") gets a real,
+        -- unhurried chance to observe leader and child coexisting at least
+        -- once, establishing the child as a legitimate, continuity-proven
+        -- sibling before the leader disappears, exactly as an ordinary
+        -- crash (not an adversarial sub-tick-interval PID-reuse race)
+        -- would actually unfold.
         ByteString.writeFile
           fakeCodex
           ( ByteString.unlines
@@ -2949,6 +2983,7 @@ main = hspec $ do
                 "IFS= read -r line",
                 "printf '%s\\n' '{\"id\":1,\"result\":{}}'",
                 "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &",
+                "sleep 0.8",
                 "exit 0"
               ]
           )

@@ -797,28 +797,30 @@ releaseInFlightInvocation :: ReviewClient -> IO a -> IO a
 releaseInFlightInvocation client action =
   action `finally` modifyMVar_ client.reviewInFlightInvocations (pure . subtract 1)
 
--- | Blocks until every invocation 'reserveToolInvocation' counted as
--- in-flight has finished its own cleanup (see 'releaseInFlightInvocation'),
--- or until 'inFlightWaitAttempts' is
--- exhausted (reported as a protocol warning rather than blocking forever).
--- Must only be called once new registrations are already refused (i.e.
--- after the registry has been closed), so the count can only ever count
--- down to zero, never be replenished by a fresh invocation racing in
--- underneath.
+-- | Blocks, with no attempt limit, until every invocation
+-- 'reserveToolInvocation' counted as in-flight has finished its own cleanup
+-- (see 'releaseInFlightInvocation'). Shutdown must retain ownership of a
+-- straggler until it is genuinely done, not merely until some fixed budget
+-- elapses: giving up early and returning would let 'stopReviewClient'
+-- report itself finished while a spawned process (and its census watcher)
+-- is still only reachable through that straggler's own in-progress
+-- best-effort cleanup, with no other drain ever coming back for it. This
+-- is safe to block on unboundedly because every code path that increments
+-- the count is paired, via 'releaseInFlightInvocation's 'finally', with
+-- exactly one decrement -- the count is therefore guaranteed to reach zero
+-- once every already-bounded cleanup path (createProcess, the tool's own
+-- capped timeout, 'killManagedProcessVerified's bounded retries,
+-- 'Kanban.Review.confirmToolProcessTerminated's bounded retries) finishes,
+-- however long that takes. Must only be called once new registrations are
+-- already refused (i.e. after the registry has been closed), so the count
+-- can only ever count down to zero, never be replenished by a fresh
+-- invocation racing in underneath.
 awaitNoInFlightInvocations :: ReviewClient -> IO ()
-awaitNoInFlightInvocations client = go inFlightWaitAttempts
+awaitNoInFlightInvocations client = go
   where
-    go attemptsLeft
-      | attemptsLeft <= (0 :: Int) = do
-          count <- readMVar client.reviewInFlightInvocations
-          when
-            (count > 0)
-            (client.reviewEventSink (ReviewProtocolWarning "gave up waiting for in-flight tool invocations to finish before shutdown"))
-      | otherwise = do
-          count <- readMVar client.reviewInFlightInvocations
-          if count <= 0
-            then pure ()
-            else threadDelay inFlightPollMicros >> go (attemptsLeft - 1)
+    go = do
+      count <- readMVar client.reviewInFlightInvocations
+      when (count > 0) (threadDelay inFlightPollMicros >> go)
 
 -- | Reserves a slot for a tool invocation about to be spawned, *before* any
 -- process exists -- so a concurrent drain (below) can see and cancel it
@@ -1985,14 +1987,6 @@ confirmRetryDelayMicros = 600 * 1000
 -- | How often 'awaitNoInFlightInvocations' re-checks the in-flight count.
 inFlightPollMicros :: Int
 inFlightPollMicros = 200 * 1000
-
--- | Bounds 'awaitNoInFlightInvocations's total wait -- generous enough to
--- cover a straggler's own worst-case cleanup (several
--- 'confirmRetryDelayMicros'-paced retries, each potentially escalating
--- through a full TERM/KILL grace cycle) without blocking shutdown
--- indefinitely if something is genuinely stuck.
-inFlightWaitAttempts :: Int
-inFlightWaitAttempts = 100
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000
