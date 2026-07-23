@@ -39,6 +39,7 @@ module Kanban.Review
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     runAuthenticatedClaude,
+    runAuthenticatedClaudeWith,
     runCanonicalIssueReview,
     runGitHubIssueTool,
     sendReviewMessage,
@@ -50,7 +51,7 @@ where
 
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Exception (Exception, IOException, displayException, try)
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import Data.Aeson
   ( FromJSON (..),
     Result (..),
@@ -780,10 +781,11 @@ killReviewTools client threadId = drainMatchingToolProcesses client False ((== t
 -- this call either lands its entry here (and gets killed below) or is
 -- rejected outright by the now-closed registry: no spawn can escape
 -- unregistered and unkilled in the gap between reading and closing. Each
--- claimed entry is retained for the whole of its termination sequence and
--- removed only once 'confirmToolProcessTerminated' has returned, so a
--- concurrent shutdown or probe never observes the registry as empty while
--- the OS process it described is still being terminated or unconfirmed.
+-- claimed entry is retained until 'confirmToolProcessTerminated' actually
+-- confirms it terminated -- an entry it cannot confirm is left registered
+-- (still draining) rather than dropped, so a later drain still owns and
+-- retries it, instead of a concurrent shutdown or probe ever observing the
+-- registry as empty while a described OS process remains unconfirmed.
 drainMatchingToolProcesses :: ReviewClient -> Bool -> (ToolEntry -> Bool) -> IO ()
 drainMatchingToolProcesses client closeRegistry matches = do
   owned <- modifyMVar client.reviewToolProcesses $ \registry ->
@@ -796,9 +798,9 @@ drainMatchingToolProcesses client closeRegistry matches = do
               },
             matching
           )
-  mapM_ (confirmToolProcessTerminated . toolEntryProcess) (Map.elems owned)
+  confirmed <- mapM (confirmToolProcessTerminated client . toolEntryProcess) owned
   modifyMVar_ client.reviewToolProcesses $ \registry ->
-    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries owned}
+    pure registry {toolRegistryEntries = Map.difference registry.toolRegistryEntries (Map.filter id confirmed)}
 
 -- | Atomically closes the registry to new registrations and drains every
 -- currently registered process (see 'drainMatchingToolProcesses'). Safe to
@@ -811,17 +813,23 @@ drainToolProcesses client = drainMatchingToolProcesses client True (const True)
 -- | Kills `managed` and confirms, via 'killManagedProcessVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
 -- bounded number of times if a fresh snapshot still shows survivors or the
--- snapshot itself fails, so a caller relying on this before deregistering
--- an invocation never treats an unconfirmed group as terminated.
-confirmToolProcessTerminated :: ManagedProcess -> IO ()
-confirmToolProcessTerminated managed = go confirmAttempts
+-- snapshot itself fails. Reports the outcome rather than discarding it:
+-- callers must not deregister/remove an invocation whose termination could
+-- not be confirmed, since that would drop registry ownership of a group
+-- that may still hold a live member. A snapshot problem serious enough to
+-- exhaust every retry is also surfaced as a protocol warning, so it is at
+-- least visible rather than silently swallowed.
+confirmToolProcessTerminated :: ReviewClient -> ManagedProcess -> IO Bool
+confirmToolProcessTerminated client managed = go confirmAttempts
   where
     confirmAttempts = 3 :: Int
     go attemptsLeft
-      | attemptsLeft <= 1 = void (killManagedProcessVerified managed)
+      | attemptsLeft <= 0 = do
+          client.reviewEventSink (ReviewProtocolWarning "could not confirm a review tool process group fully terminated after repeated attempts")
+          pure False
       | otherwise = do
           confirmed <- killManagedProcessVerified managed
-          if confirmed then pure () else go (attemptsLeft - 1)
+          if confirmed then pure True else go (attemptsLeft - 1)
 
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
 -- every registered tool process first, then the app-server itself, both via
@@ -831,7 +839,7 @@ confirmToolProcessTerminated managed = go confirmAttempts
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  confirmToolProcessTerminated client.reviewProcessManaged
+  void (confirmToolProcessTerminated client client.reviewProcessManaged)
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -924,7 +932,7 @@ watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  confirmToolProcessTerminated client.reviewProcessManaged
+  void (confirmToolProcessTerminated client client.reviewProcessManaged)
   takeMVar client.reviewOutputDone
   takeMVar client.reviewErrorDone
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
@@ -1235,9 +1243,11 @@ runGitHubCommand client threadId ghPath arguments input = do
           -- Confirmed here regardless of outcome, not only on failure/timeout:
           -- `gh` itself could fork a same-group child, close its inherited
           -- stdio, and exit successfully, leaving a survivor this invocation
-          -- is the only registry entry ever pointing at.
-          confirmToolProcessTerminated managed
-          deregisterToolProcess client invocationId
+          -- is the only registry entry ever pointing at. Deregistering only
+          -- once confirmed leaves an unconfirmed entry registered for a
+          -- later drain to retry, rather than dropping ownership of it here.
+          confirmed <- confirmToolProcessTerminated client managed
+          when confirmed (deregisterToolProcess client invocationId)
           pure result
     Right _ -> pure (Left "GitHub CLI did not provide all three standard streams")
   where
@@ -1313,7 +1323,17 @@ renderGitHubCommandResult (exitCode, outputResult, errorResult) = case (exitCode
       )
 
 runAuthenticatedClaude :: ReviewClient -> Text -> Text -> IO (Either Text Text)
-runAuthenticatedClaude client threadId prompt = do
+runAuthenticatedClaude = runAuthenticatedClaudeWith (pure ())
+
+-- | As 'runAuthenticatedClaude', but runs `beforeRegister` after spawning
+-- and just before attempting to register the process -- exposed so tests
+-- can pause an invocation at exactly that point (see 'checkGroupMembershipWith'
+-- for the same "...With" dependency-injection pattern used elsewhere in
+-- this codebase) to deterministically hold it open across a concurrent
+-- 'stopReviewClient', rather than relying on scheduler timing to land the
+-- race. Production code always calls this with @pure ()@.
+runAuthenticatedClaudeWith :: IO () -> ReviewClient -> Text -> Text -> IO (Either Text Text)
+runAuthenticatedClaudeWith beforeRegister client threadId prompt = do
   executable <- findExecutable "claude"
   case executable of
     Nothing -> pure (Left "Claude CLI was not found on PATH")
@@ -1324,6 +1344,7 @@ runAuthenticatedClaude client threadId prompt = do
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
           (managed, groupLeaderProblem) <- managedProcess processHandle
           mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
+          beforeRegister
           registered <- registerToolProcess client threadId managed
           case registered of
             Nothing -> do
@@ -1351,9 +1372,11 @@ runAuthenticatedClaude client threadId prompt = do
               -- failure/timeout: Claude itself could fork a same-group
               -- child, close its inherited stdio, and exit successfully,
               -- leaving a survivor this invocation is the only registry
-              -- entry ever pointing at.
-              confirmToolProcessTerminated managed
-              deregisterToolProcess client invocationId
+              -- entry ever pointing at. Deregistering only once confirmed
+              -- leaves an unconfirmed entry registered for a later drain to
+              -- retry, rather than dropping ownership of it here.
+              confirmed <- confirmToolProcessTerminated client managed
+              when confirmed (deregisterToolProcess client invocationId)
               pure result
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
   where

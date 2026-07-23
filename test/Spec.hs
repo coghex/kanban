@@ -95,6 +95,7 @@ import Kanban.Review
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
     runAuthenticatedClaude,
+    runAuthenticatedClaudeWith,
     runGitHubIssueTool,
     startReviewClient,
     stopReviewClient,
@@ -2643,32 +2644,34 @@ main = hspec $ do
           Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "shutting down"
           other -> expectationFailure ("expected a post-shutdown invocation to be refused and killed, got " <> show other)
 
-    it "keeps every invocation racing a concurrent shutdown either drained or refused and self-killed, never left running unregistered" $
+    it "deterministically resolves an invocation held open exactly at registration while shutdown closes and drains concurrently" $
       withReviewToolFixtures $ \temporaryRoot -> do
-        -- Fires a burst of registrations and 'stopReviewClient' at
-        -- essentially the same instant, over several fresh clients, so the
-        -- actual race between 'registerToolProcess' and 'drainToolProcesses'
-        -- closing the registry is exercised in both orders across trials
-        -- rather than relying on one lucky interleaving. A bug that let a
-        -- raced invocation slip through unregistered and unrefused would
-        -- show up here as it running its full 30s sleep, timing out the
-        -- bound below instead of resolving to either outcome.
-        let raceWidth = 4 :: Int
-            trialCount = 6 :: Int
-            trial = do
-              client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
-              done <- mapM (const newEmptyMVar) [1 .. raceWidth]
-              mapM_ (\doneVar -> void . forkIO $ runAuthenticatedClaude client "thread-a" "LONG" >>= putMVar doneVar) done
-              void . forkIO $ stopReviewClient client
-              mapM (timeout 5000000 . takeMVar) done
-        outcomes <- concat <$> mapM (const trial) [1 .. trialCount]
-        mapM_
-          ( \outcome -> case outcome of
-              Just (Left message) ->
-                message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "shutting down" rendered)
-              other -> expectationFailure ("expected every raced invocation to be drained or refused, got " <> show other)
-          )
-          outcomes
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        reachedBarrier <- newEmptyMVar
+        releaseBarrier <- newEmptyMVar
+        done <- newEmptyMVar
+        -- 'runAuthenticatedClaudeWith's hook pauses the invocation after it
+        -- has spawned its process but *before* it calls
+        -- 'registerToolProcess' -- signalling the main thread it has
+        -- reached that exact point, then blocking until released. This pins
+        -- down the precise race the round-2 review flagged as untested (a
+        -- burst of ordinary concurrent registrations can pass whether every
+        -- one lands before or after closure, without ever proving the
+        -- boundary itself is handled): here 'stopReviewClient' is given a
+        -- full grace window to close and drain the (still-empty) registry
+        -- *while* this invocation is held open right at the registration
+        -- call, before it is ever released to attempt it.
+        let barrierHook = putMVar reachedBarrier () >> takeMVar releaseBarrier
+        void . forkIO $ runAuthenticatedClaudeWith barrierHook client "thread-a" "LONG" >>= putMVar done
+        timeout 5000000 (takeMVar reachedBarrier) `shouldReturn` Just ()
+        void . forkIO $ stopReviewClient client
+        threadDelay 500000
+        putMVar releaseBarrier ()
+        result <- timeout 5000000 (takeMVar done)
+        case result of
+          Just (Left message) ->
+            message `shouldSatisfy` (\rendered -> Data.Text.isInfixOf "exited with status" rendered || Data.Text.isInfixOf "shutting down" rendered)
+          other -> expectationFailure ("expected the held-open invocation to resolve to drained or refused, got " <> show other)
 
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
