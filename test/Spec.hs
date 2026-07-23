@@ -177,6 +177,7 @@ import Kanban.Worker
   ( ProviderSlot (..),
     PullRequestWorkerTask (..),
     SolveWorkerTask (..),
+    WorkerEnvelope (..),
     WorkerEvent (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -186,6 +187,7 @@ import Kanban.Worker
     WorkerStatus (..),
     WorkerTask (..),
     acquireWorkerLease,
+    consumeJournalLines,
     discoverWorkerHistory,
     monitorWorker,
     recordLaunchedSupervisorIdentity,
@@ -820,7 +822,7 @@ main = hspec $ do
                   void (timeout 3000000 (waitForProcess descendantProcess))
                   collected <- newIORef []
                   let collect _ _ event = modifyIORef collected (event :)
-                  completed <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                  completed <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
                   completed `shouldBe` True
                   finalState <- waitForWorkerState statePath isTerminal 30
                   finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "killed by user")
@@ -862,7 +864,7 @@ main = hspec $ do
                       if even count then readProcessSnapshot else pure (Left "simulated ps outage")
                 collected <- newIORef []
                 let collect _ _ event = modifyIORef collected (event :)
-                recovered1 <- recoverIfWorkerStoppedWith flaky descriptor collect
+                recovered1 <- recoverIfWorkerStoppedWith flaky descriptor collect 0
                 recovered1 `shouldBe` False
                 pendingState <- waitForWorkerState statePath isOrphaned 30
                 case pendingState.workerStateStatus of
@@ -870,18 +872,203 @@ main = hspec $ do
                   other -> expectationFailure ("expected a pending stale-recovery orphan status, got " <> show other)
                 leaseHeld <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseHeld `shouldBe` True
-                recovered2 <- recoverIfWorkerStoppedWith flaky descriptor collect
+                recovered2 <- recoverIfWorkerStoppedWith flaky descriptor collect 0
                 recovered2 `shouldBe` False
                 diagnosticsSoFar <- reverse <$> readIORef collected
                 length (filter isDiagnosticEvent diagnosticsSoFar) `shouldBe` 1
                 managedProcessFor descendantProcess >>= killManagedProcess
                 void (timeout 3000000 (waitForProcess descendantProcess))
-                recovered3 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                recovered3 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
                 recovered3 `shouldBe` True
                 finalState <- waitForWorkerState statePath isTerminal 30
                 finalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed "persistent worker stopped unexpectedly; its provider process group was terminated")
                 leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseReleased `shouldBe` False
+
+    it "does not consume an unterminated trailing journal line, and consumes it once the newline arrives" $ do
+      let partialLine = "{\"a\":1}"
+          (unseenPartial, offsetPartial) = consumeJournalLines 0 partialLine
+      unseenPartial `shouldBe` []
+      offsetPartial `shouldBe` 0
+      let completed = partialLine <> "\n"
+          (unseenCompleted, offsetCompleted) = consumeJournalLines offsetPartial completed
+      unseenCompleted `shouldBe` [partialLine]
+      offsetCompleted `shouldBe` ByteString.length completed
+
+    it "neither replays nor skips a line when consumption resumes at an unchanged offset after a failed read" $ do
+      let journal = "{\"a\":1}\n{\"a\":2}\n"
+          (firstBatch, afterFirst) = consumeJournalLines 0 journal
+      firstBatch `shouldBe` ["{\"a\":1}", "{\"a\":2}"]
+      -- A transient read failure must leave the offset unchanged; re-running
+      -- consumption against the same unchanged content from that offset
+      -- must not repeat anything already consumed.
+      let (retryBatch, retryOffset) = consumeJournalLines afterFirst journal
+      retryBatch `shouldBe` []
+      retryOffset `shouldBe` afterFirst
+
+    it "yields each complete journal line exactly once, in order, for any way of splitting its growth into read chunks" $ do
+      let fullJournal = ByteString.concat ["{\"a\":1}\n", "{\"a\":2}\n", "{\"a\":3}\n", "{\"a\":4}\n"]
+          expectedLines = ["{\"a\":1}", "{\"a\":2}", "{\"a\":3}", "{\"a\":4}"]
+          totalLength = ByteString.length fullJournal
+          -- Models re-reading the journal's full contents at successive
+          -- points in its growth, exactly as 'monitorWorker' re-reads the
+          -- whole file on every poll: each "chunk" is the file's full
+          -- prefix at that point in time, not an incremental delta.
+          consumeAcrossGrowth points = go 0 points []
+            where
+              go _ [] acc = acc
+              go consumed (point : rest) acc =
+                let (unseen, newConsumed) = consumeJournalLines consumed (ByteString.take point fullJournal)
+                 in go newConsumed rest (acc <> unseen)
+          growthPatterns =
+            [ [totalLength],
+              [8, totalLength],
+              [1, 9, 16, totalLength],
+              [4, 8, 8, 15, 24, totalLength],
+              [0 .. totalLength]
+            ]
+      mapM_ (\points -> consumeAcrossGrowth points `shouldBe` expectedLines) growthPatterns
+
+    it "delivers every journal event exactly once across a transient, non-ENOENT read failure between polls" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec repository (WorkerId "solve-8001-transient-read-failure") 8001
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-8001-transient-read-failure.state.json"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile (workerRoot </> "solve-8001-transient-read-failure.spec.json") (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> do
+              -- A fresh heartbeat keeps every recovery pass on the
+              -- quick-return "pending termination? no" path for the
+              -- duration of this test, so only the journal read itself is
+              -- under test.
+              now <- getCurrentTime
+              LazyByteString.writeFile statePath (encode (runningWorkerState spec.workerId 999999 Nothing) {workerStateHeartbeatAt = now})
+              LazyByteString.writeFile descriptor.workerDescriptorEventPath (encode (WorkerEnvelope now (WorkerDiagnostic "one")) <> "\n")
+              collected <- newIORef []
+              let collect _ _ event = modifyIORef collected (event :)
+                  waitUntil predicate attempts
+                    | attempts <= (0 :: Int) = expectationFailure "condition was not met in time"
+                    | otherwise = do
+                        value <- reverse <$> readIORef collected
+                        if predicate value then pure () else threadDelay 50000 >> waitUntil predicate (attempts - 1)
+              finished <- newEmptyMVar
+              void . forkIO $ monitorWorker descriptor collect >> putMVar finished ()
+              waitUntil (== [WorkerDiagnostic "one"]) 60
+              -- Blacking out read (and write) permission on the journal
+              -- forces 'ByteString.readFile' to fail with a permission
+              -- error rather than "does not exist", simulating the
+              -- transient EINTR/EMFILE races issue #8 describes. Several
+              -- ~200ms poll intervals elapse while it stays unreadable.
+              setFileMode descriptor.workerDescriptorEventPath 0o000
+              threadDelay 700000
+              setFileMode descriptor.workerDescriptorEventPath 0o600
+              eventsAfterOutage <- reverse <$> readIORef collected
+              eventsAfterOutage `shouldBe` [WorkerDiagnostic "one"]
+              later <- getCurrentTime
+              LazyByteString.appendFile descriptor.workerDescriptorEventPath (encode (WorkerEnvelope later (WorkerDiagnostic "two")) <> "\n")
+              finishedAt <- getCurrentTime
+              LazyByteString.appendFile descriptor.workerDescriptorEventPath (encode (WorkerEnvelope finishedAt (WorkerFinished SolveCompleted)) <> "\n")
+              timeout 5000000 (takeMVar finished) `shouldReturn` Just ()
+              finalEvents <- reverse <$> readIORef collected
+              finalEvents `shouldBe` [WorkerDiagnostic "one", WorkerDiagnostic "two", WorkerFinished SolveCompleted]
+
+    it "drains journal events appended after the last poll before finalizing recovery, delivering exactly one WorkerFinished" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \descendantProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = workerFixtureSpec repository (WorkerId "solve-8002-recovery-drain") 8002
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              statePath = workerRoot </> "solve-8002-recovery-drain.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-8002-recovery-drain.spec.json") (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> do
+                acquireWorkerLease descriptor `shouldReturn` Right ()
+                descendantIdentity <- identityForProcess descendantProcess
+                let liveTerminalState =
+                      (runningWorkerState spec.workerId 999999 Nothing)
+                        { workerStateStatus = WorkerTerminal SolveCompleted,
+                          workerStateKnownProcesses = [descendantIdentity]
+                        }
+                LazyByteString.writeFile statePath (encode liveTerminalState)
+                collected <- newIORef []
+                let collect _ _ event = modifyIORef collected (event :)
+                -- The descendant is still live, so this pass must not
+                -- finalize -- mirroring a monitor poll that ran before the
+                -- tail event below was ever appended.
+                recovered1 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
+                recovered1 `shouldBe` False
+                -- Simulates the real terminal envelope landing in the
+                -- journal (e.g. written by the worker itself) in the crash
+                -- window between the monitor's last read and this recovery
+                -- pass finalizing.
+                tailAt <- getCurrentTime
+                LazyByteString.appendFile descriptor.workerDescriptorEventPath (encode (WorkerEnvelope tailAt (WorkerFinished SolveCompleted)) <> "\n")
+                managedProcessFor descendantProcess >>= killManagedProcess
+                void (timeout 3000000 (waitForProcess descendantProcess))
+                recovered2 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
+                recovered2 `shouldBe` True
+                leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
+                leaseReleased `shouldBe` False
+                -- Exactly the drained real 'WorkerFinished' is delivered;
+                -- the branch's own synthetic one must be suppressed rather
+                -- than appended as a duplicate.
+                finalEvents <- reverse <$> readIORef collected
+                finalEvents `shouldBe` [WorkerFinished SolveCompleted]
+
+    it "aborts a recovery finalize (no lease release, no events) when its final journal drain read fails, then finalizes once the read succeeds" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \descendantProcess -> do
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = workerFixtureSpec repository (WorkerId "solve-8003-recovery-drain-failure") 8003
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              statePath = workerRoot </> "solve-8003-recovery-drain-failure.state.json"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile (workerRoot </> "solve-8003-recovery-drain-failure.spec.json") (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> do
+                acquireWorkerLease descriptor `shouldReturn` Right ()
+                descendantIdentity <- identityForProcess descendantProcess
+                let liveTerminalState =
+                      (runningWorkerState spec.workerId 999999 Nothing)
+                        { workerStateStatus = WorkerTerminal SolveCompleted,
+                          workerStateKnownProcesses = [descendantIdentity]
+                        }
+                LazyByteString.writeFile statePath (encode liveTerminalState)
+                earlier <- getCurrentTime
+                LazyByteString.writeFile descriptor.workerDescriptorEventPath (encode (WorkerEnvelope earlier (WorkerDiagnostic "before-kill")) <> "\n")
+                managedProcessFor descendantProcess >>= killManagedProcess
+                void (timeout 3000000 (waitForProcess descendantProcess))
+                collected <- newIORef []
+                let collect _ _ event = modifyIORef collected (event :)
+                setFileMode descriptor.workerDescriptorEventPath 0o000
+                recoveredDuringOutage <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
+                recoveredDuringOutage `shouldBe` False
+                eventsDuringOutage <- readIORef collected
+                eventsDuringOutage `shouldBe` []
+                leaseHeldDuringOutage <- doesDirectoryExist descriptor.workerDescriptorLeasePath
+                leaseHeldDuringOutage `shouldBe` True
+                setFileMode descriptor.workerDescriptorEventPath 0o600
+                recoveredAfterOutage <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
+                recoveredAfterOutage `shouldBe` True
+                leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
+                leaseReleased `shouldBe` False
+                finalEvents <- reverse <$> readIORef collected
+                finalEvents `shouldBe` [WorkerDiagnostic "before-kill", WorkerFinished SolveCompleted]
 
     it "keeps a stalled launch's lease held until its timed-out supervisor is confirmed dead, then allows a fresh launch" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -1201,7 +1388,7 @@ main = hspec $ do
                 -- never finalize this launch on elapsed time alone.
                 collected <- newIORef []
                 let collect _ _ event = modifyIORef collected (event :)
-                resolved <- recoverIfWorkerStoppedWith readProcessSnapshot first collect
+                resolved <- recoverIfWorkerStoppedWith readProcessSnapshot first collect 0
                 resolved `shouldBe` False
                 events <- readIORef collected
                 events `shouldBe` []
@@ -1273,7 +1460,7 @@ main = hspec $ do
                 LazyByteString.writeFile statePath (encode liveTerminalState)
                 collected <- newIORef []
                 let collect _ _ event = modifyIORef collected (event :)
-                recovered1 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                recovered1 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
                 recovered1 `shouldBe` False
                 leaseHeld <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseHeld `shouldBe` True
@@ -1281,7 +1468,7 @@ main = hspec $ do
                 pendingEvents `shouldBe` []
                 managedProcessFor descendantProcess >>= killManagedProcess
                 void (timeout 3000000 (waitForProcess descendantProcess))
-                recovered2 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect
+                recovered2 <- recoverIfWorkerStoppedWith readProcessSnapshot descriptor collect 0
                 recovered2 `shouldBe` True
                 leaseReleased <- doesDirectoryExist descriptor.workerDescriptorLeasePath
                 leaseReleased `shouldBe` False

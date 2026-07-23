@@ -3,6 +3,7 @@
 
 module Kanban.Worker
   ( WorkerDescriptor (..),
+    WorkerEnvelope (..),
     WorkerEvent (..),
     WorkerId (..),
     WorkerParent (..),
@@ -17,6 +18,7 @@ module Kanban.Worker
     acquireWorkerLease,
     acknowledgeWorker,
     acknowledgeSupersededWorkers,
+    consumeJournalLines,
     discoverWorkers,
     discoverWorkerHistory,
     launchPullRequestWorker,
@@ -51,7 +53,7 @@ import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -940,35 +942,102 @@ translatePullRequestEvent rememberProvider emit flowEvent = case flowEvent of
 monitorWorker :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> IO ()
 monitorWorker descriptor eventSink = loop 0
   where
-    spec = descriptor.workerDescriptorSpec
     loop consumed = do
-      contentResult <- try @IOException (ByteString.readFile descriptor.workerDescriptorEventPath)
-      let linesNow = case contentResult of
-            Left _ -> []
-            Right content -> filter (not . ByteString.null) (ByteString.split 10 content)
-          unseen = drop consumed linesNow
-      mapM_ emitLine unseen
-      terminal <- anyM isTerminalEnvelope unseen
-      unless terminal $ do
-        recovered <- recoverIfWorkerStopped descriptor eventSink
-        unless recovered $ threadDelay workerMonitorIntervalMicros >> loop (length linesNow)
-    emitLine line = case (eitherDecodeStrict' line :: Either String WorkerEnvelope) of
-      Left _ -> pure ()
-      Right envelope -> eventSink spec.workerId spec envelope.workerEnvelopeEvent
-    isTerminalEnvelope line = pure $ case (eitherDecodeStrict' line :: Either String WorkerEnvelope) of
-      Right envelope -> case envelope.workerEnvelopeEvent of
-        WorkerFinished _ -> True
-        _ -> False
-      Left _ -> False
+      readResult <- readJournalSince descriptor consumed
+      case readResult of
+        -- A read failure must not move the consumption position: retrying
+        -- with the same offset is what makes a transient failure (EINTR,
+        -- EMFILE, a race with a concurrent append) neither replay nor skip
+        -- any journal line (see issue #8).
+        Left _ -> threadDelay workerMonitorIntervalMicros >> loop consumed
+        Right (unseen, newConsumed) -> do
+          let envelopes = mapMaybe decodeJournalLine unseen
+          mapM_ (emitEnvelope descriptor eventSink) envelopes
+          if any isTerminalEnvelope envelopes
+            then pure ()
+            else do
+              recovered <- recoverIfWorkerStopped descriptor eventSink newConsumed
+              unless recovered $ threadDelay workerMonitorIntervalMicros >> loop newConsumed
+
+-- | Splits the unconsumed suffix of a journal's full current contents into
+-- complete (newline-terminated) lines and the new consumed-byte offset. An
+-- unterminated trailing fragment — a write observed mid-append — is left
+-- unconsumed so a later call sees it whole once the append completes,
+-- fixing the permanently-dropped-event defect in issue #8. Tracking
+-- consumption by byte offset rather than line count also means a caller
+-- that keeps the offset unchanged across a failed read neither replays nor
+-- skips a line: for any way of splitting a journal's growth into chunks,
+-- repeated calls threading the offset through yield exactly its complete
+-- lines, once each, in order.
+consumeJournalLines :: Int -> ByteString.ByteString -> ([ByteString.ByteString], Int)
+consumeJournalLines consumedBytes content = case ByteString.elemIndexEnd newline unseen of
+  Nothing -> ([], consumedBytes)
+  Just lastNewlineIndex ->
+    let consumedThisRound = lastNewlineIndex + 1
+        completeLines = ByteString.split newline (ByteString.take consumedThisRound unseen)
+     in (filter (not . ByteString.null) completeLines, consumedBytes + consumedThisRound)
+  where
+    unseen = ByteString.drop consumedBytes content
+    newline = 10
+
+-- | Reads the journal's full current contents and applies
+-- 'consumeJournalLines' from the given offset. A read failure caused by the
+-- journal not existing yet (no event has ever been appended) is reported as
+-- an empty read rather than a failure, since that is the normal state
+-- before a worker's first write; any other 'IOException' is surfaced so the
+-- caller can retry without moving the consumption position.
+readJournalSince :: WorkerDescriptor -> Int -> IO (Either IOException ([ByteString.ByteString], Int))
+readJournalSince descriptor consumedBytes = do
+  contentResult <- try @IOException (ByteString.readFile descriptor.workerDescriptorEventPath)
+  pure $ case contentResult of
+    Left err
+      | isDoesNotExistError err -> Right ([], consumedBytes)
+      | otherwise -> Left err
+    Right content -> Right (consumeJournalLines consumedBytes content)
+
+decodeJournalLine :: ByteString.ByteString -> Maybe WorkerEnvelope
+decodeJournalLine line = case eitherDecodeStrict' line :: Either String WorkerEnvelope of
+  Left _ -> Nothing
+  Right envelope -> Just envelope
+
+isTerminalEnvelope :: WorkerEnvelope -> Bool
+isTerminalEnvelope envelope = case envelope.workerEnvelopeEvent of
+  WorkerFinished _ -> True
+  _ -> False
+
+emitEnvelope :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> WorkerEnvelope -> IO ()
+emitEnvelope descriptor eventSink envelope = eventSink spec.workerId spec envelope.workerEnvelopeEvent
+  where
+    spec = descriptor.workerDescriptorSpec
+
+-- | Delivers any journal lines appended since the monitor loop's last read,
+-- for a recovery pass that is about to finalize and have 'monitorWorker'
+-- exit. Without this, events written in the crash window between the
+-- monitor's last poll and this state check — final output, diagnostics, the
+-- real terminal envelope — are never delivered (see issue #8). A read
+-- failure here must not finalize: the caller aborts this recovery attempt
+-- (by returning 'Nothing') and lets the monitor retry on its next poll
+-- rather than guessing the drain was empty; 'Just sawFinished' reports
+-- whether a real 'WorkerFinished' was among the drained events, so the
+-- caller can skip emitting a duplicate synthetic one.
+drainJournalBeforeExit :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> Int -> IO (Maybe Bool)
+drainJournalBeforeExit descriptor eventSink consumedBytes = do
+  readResult <- readJournalSince descriptor consumedBytes
+  case readResult of
+    Left _ -> pure Nothing
+    Right (unseen, _) -> do
+      let envelopes = mapMaybe decodeJournalLine unseen
+      mapM_ (emitEnvelope descriptor eventSink) envelopes
+      pure (Just (any isTerminalEnvelope envelopes))
 
 -- A provider is deliberately subordinate to its persistent supervisor.  If
 -- that supervisor disappears, fail closed instead of leaving an invisible
 -- model process able to consume tokens indefinitely.
-recoverIfWorkerStopped :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> IO Bool
+recoverIfWorkerStopped :: WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> Int -> IO Bool
 recoverIfWorkerStopped = recoverIfWorkerStoppedWith defaultProcessSnapshot
 
-recoverIfWorkerStoppedWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> IO Bool
-recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
+recoverIfWorkerStoppedWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> (WorkerId -> WorkerSpec -> WorkerEvent -> IO ()) -> Int -> IO Bool
+recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalBytes = do
   stateResult <- readWorkerState descriptor
   case stateResult of
     Left _ -> do
@@ -1000,9 +1069,13 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
         presence <- if null identities then pure IdentityAbsent else checkIdentityPresenceWith takeSnapshot identities
         case presence of
           IdentityAbsent -> do
-            releaseWorkerLease descriptor
-            eventSink spec.workerId spec (WorkerFinished outcome)
-            pure True
+            drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+            case drained of
+              Nothing -> pure False
+              Just sawFinished -> do
+                releaseWorkerLease descriptor
+                unless sawFinished $ eventSink spec.workerId spec (WorkerFinished outcome)
+                pure True
           _ -> pure False
       _ -> do
         now <- getCurrentTime
@@ -1023,32 +1096,36 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
                   if not (providerOk && recordedOk)
                     then reportStaleRecoveryPending state
                     else do
-                      -- A pending user termination that outlived its supervisor
-                      -- (the kill request was recorded but never reached a
-                      -- supervisor that has since died on its own) still
-                      -- finalizes as "killed by user" rather than the generic
-                      -- unexpected-stop outcome.
-                      pendingTermination <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
-                      let diagnostic
-                            | pendingTermination = "stale-supervisor recovery: completing a pending user termination"
-                            | otherwise = "persistent worker stopped unexpectedly; its provider process group was terminated"
-                          outcome
-                            | pendingTermination = SolveFailed "killed by user"
-                            | otherwise = SolveFailed diagnostic
-                          terminalState =
-                            state
-                              { workerStateStatus = WorkerTerminal outcome,
-                                workerStateProviderPid = Nothing,
-                                workerStateProviderIdentity = Nothing,
-                                workerStateHeartbeatAt = now,
-                                workerStateLastActivity = "worker failed closed"
-                              }
-                      writeState descriptor terminalState
-                      ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
-                      releaseWorkerLease descriptor
-                      eventSink spec.workerId spec (WorkerDiagnostic diagnostic)
-                      eventSink spec.workerId spec (WorkerFinished outcome)
-                      pure True
+                      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+                      case drained of
+                        Nothing -> pure False
+                        Just sawFinished -> do
+                          -- A pending user termination that outlived its supervisor
+                          -- (the kill request was recorded but never reached a
+                          -- supervisor that has since died on its own) still
+                          -- finalizes as "killed by user" rather than the generic
+                          -- unexpected-stop outcome.
+                          pendingTermination <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+                          let diagnostic
+                                | pendingTermination = "stale-supervisor recovery: completing a pending user termination"
+                                | otherwise = "persistent worker stopped unexpectedly; its provider process group was terminated"
+                              outcome
+                                | pendingTermination = SolveFailed "killed by user"
+                                | otherwise = SolveFailed diagnostic
+                              terminalState =
+                                state
+                                  { workerStateStatus = WorkerTerminal outcome,
+                                    workerStateProviderPid = Nothing,
+                                    workerStateProviderIdentity = Nothing,
+                                    workerStateHeartbeatAt = now,
+                                    workerStateLastActivity = "worker failed closed"
+                                  }
+                          writeState descriptor terminalState
+                          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
+                          releaseWorkerLease descriptor
+                          eventSink spec.workerId spec (WorkerDiagnostic diagnostic)
+                          unless sawFinished $ eventSink spec.workerId spec (WorkerFinished outcome)
+                          pure True
   where
     spec = descriptor.workerDescriptorSpec
     -- Reached only once the supervisor is either confirmed absent by its
@@ -1056,11 +1133,15 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
     -- elapsed-time grace window: no state file ever appeared, so nothing
     -- was ever started to terminate beyond the lease itself.
     finalizeMissingState = do
-      let message = "persistent worker never published its initial state"
-      releaseWorkerLease descriptor
-      eventSink spec.workerId spec (WorkerDiagnostic message)
-      eventSink spec.workerId spec (WorkerFinished (SolveFailed message))
-      pure True
+      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+      case drained of
+        Nothing -> pure False
+        Just sawFinished -> do
+          let message = "persistent worker never published its initial state"
+          releaseWorkerLease descriptor
+          eventSink spec.workerId spec (WorkerDiagnostic message)
+          unless sawFinished $ eventSink spec.workerId spec (WorkerFinished (SolveFailed message))
+          pure True
     -- A pending user termination ('terminateWorkerWith' left it unverified)
     -- is retried here even while the supervisor's heartbeat is still fresh,
     -- since an unverified termination never signaled the supervisor and it
@@ -1071,12 +1152,16 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink = do
         then pure False
         else do
           completed <- finalizeUserTermination takeSnapshot descriptor state
-          if completed
-            then do
-              releaseWorkerLease descriptor
-              eventSink spec.workerId spec (WorkerFinished (SolveFailed "killed by user"))
-              pure True
-            else pure False
+          if not completed
+            then pure False
+            else do
+              drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+              case drained of
+                Nothing -> pure False
+                Just sawFinished -> do
+                  releaseWorkerLease descriptor
+                  unless sawFinished $ eventSink spec.workerId spec (WorkerFinished (SolveFailed "killed by user"))
+                  pure True
     -- Reports the stale-supervisor verification failure once, on the
     -- transition into this state, rather than on every ~200ms recovery poll;
     -- the unresolved state itself remains visible via 'WorkerOrphaned'.
@@ -1419,8 +1504,10 @@ appendWorkerEvent descriptor lock event = withMVar lock $ \() -> do
   now <- getCurrentTime
   handle <- openBinaryFile descriptor.workerDescriptorEventPath AppendMode
   hSetBuffering handle LineBuffering
-  LazyByteString.hPut handle (encode (WorkerEnvelope now event))
-  LazyByteString.hPut handle "\n"
+  -- A single write of the complete envelope-plus-newline, so a concurrent
+  -- reader of this file only ever observes a complete line or nothing of it
+  -- (see issue #8) rather than a partial record split across two hPuts.
+  LazyByteString.hPut handle (encode (WorkerEnvelope now event) <> "\n")
   -- The handle is intentionally short-lived so a TUI restart always sees a
   -- fully flushed record and the worker never retains a deleted log inode.
   hClose handle
@@ -2051,11 +2138,3 @@ workerTerminationAttempts = 20
 
 workerTerminationPollMicros :: Int
 workerTerminationPollMicros = 100 * 1000
-
-anyM :: Monad monad => (value -> monad Bool) -> [value] -> monad Bool
-anyM predicate = go
-  where
-    go [] = pure False
-    go (value : rest) = do
-      matches <- predicate value
-      if matches then pure True else go rest
