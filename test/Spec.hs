@@ -2495,14 +2495,16 @@ main = hspec $ do
 
   describe "review subprocess deadline and capture bounds" $ do
     let injectedBounds = CommandBounds {commandDeadlineMicros = 400000, commandCaptureGraceMicros = 400000}
-        -- The injected deadline plus the injected capture grace plus
-        -- 'killManagedProcess'' own 750 ms termination grace, with room for
-        -- scheduler jitter. Every call below runs under this bound, and it
-        -- sits far under the 30 s the pipe-holding children in these
-        -- fixtures live for -- so a runner that still waited on a capture
-        -- worker it cannot unblock trips the bound instead of quietly
-        -- passing once the child finally exits.
-        boundedCallMicros = 4000000
+        -- Every call below runs under this bound. It is generous next to
+        -- what these calls actually cost -- the injected deadline plus the
+        -- injected capture grace plus 'killManagedProcess'' own 750 ms
+        -- termination grace, twice over for the two-subprocess updates --
+        -- so a loaded CI runner cannot trip it. What matters is that it
+        -- stays far under the 30 s the pipe-holding children in these
+        -- fixtures live for: a runner that still waited on a capture worker
+        -- it cannot unblock would hang until then, and so trips this bound
+        -- instead of quietly passing once the child finally exits.
+        boundedCallMicros = 10000000
         commentUrl = "https://example.invalid/coghex/kanban/issues/15#issuecomment-7"
         postComment = "printf '%s\\n' '" <> ByteString.pack (Data.Text.unpack commentUrl) <> "'"
 
@@ -5499,7 +5501,13 @@ withFakeGitHubCli scriptLines bounds action =
         fakeGh = binaryRoot </> "gh"
     createDirectory repositoryRoot
     createDirectory binaryRoot
-    ByteString.writeFile fakeGh (ByteString.unlines ("#!/bin/sh" : scriptLines))
+    -- Drain stdin first, as the real `gh issue comment --body-file -` does.
+    -- 'runGitHubCommand' always writes the request body and closes its end,
+    -- so a fake that exited without reading would leave that write to fail
+    -- with EPIPE at the flush -- a fixture artifact that says nothing about
+    -- the capture bounds under test, and one whose timing differs by
+    -- platform.
+    ByteString.writeFile fakeGh (ByteString.unlines ("#!/bin/sh" : "cat >/dev/null" : scriptLines))
     setFileMode fakeGh 0o700
     originalPath <- maybe "" id <$> lookupEnv "PATH"
     withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
