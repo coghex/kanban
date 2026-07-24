@@ -43,7 +43,7 @@ import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
 import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, terminateProcess)
+import System.Process (ProcessHandle, getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import Text.Read (readMaybe)
 
 data ProcessIdentity = ProcessIdentity
@@ -309,14 +309,17 @@ interruptThenKillManagedProcess process = do
 -- never leaves a surviving group member unsignalled. This is deliberately
 -- unconditional: confirming the group is actually empty first would need a
 -- process-table census, which is out of scope for this best-effort
--- ownership mechanism (see issue #16). The handle is reaped last so this
--- process is never left an unwaited zombie.
+-- ownership mechanism (see issue #16). 'waitForProcess', not the
+-- non-blocking 'getProcessExitCode', reaps the handle last: SIGKILL cannot
+-- be caught or deferred, so the leader (if it was ever actually still
+-- running) dies essentially immediately, and this blocks only long enough
+-- to guarantee it is actually reaped rather than possibly left a zombie.
 killManagedProcess :: ManagedProcess -> IO ()
 killManagedProcess (LocalManagedProcess processHandle capturedPid) = do
   signalOwnedGroup sigTERM processHandle capturedPid
   threadDelay terminationGraceMicros
   signalOwnedGroup sigKILL processHandle capturedPid
-  void (getProcessExitCode processHandle)
+  void (waitForProcess processHandle)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros

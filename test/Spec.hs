@@ -102,6 +102,7 @@ import Kanban.Review
     stopReviewClient,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
+    withReservedToolSlot,
   )
 import Kanban.Solve
   ( AgentEvent (..),
@@ -2409,18 +2410,26 @@ main = hspec $ do
       withManagedShell "true" $ \firstProcess ->
         withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \secondProcess -> do
           registry <- newToolRegistry
-          -- Subprocess 1 (e.g. the issue comment) runs to completion normally.
-          keyOne <- requireJust "expected a reservation for the first gh subprocess" =<< reserveToolSlot registry "thread-1"
+          -- One reservation spans the *whole* multi-step GitHub update, the
+          -- same way 'withReservedToolSlot' holds a single key across every
+          -- subprocess of 'runGitHubIssueUpdate' (e.g. the issue comment,
+          -- then the label edit) -- not one reservation per subprocess.
+          key <- requireJust "expected a reservation for the whole update" =<< reserveToolSlot registry "thread-1"
+          -- Subprocess 1 (e.g. the issue comment) runs to completion
+          -- normally and its leader is swept, but the reservation itself is
+          -- not released yet, since more subprocesses may still follow.
           managedOne <- managedProcessFor firstProcess
-          attachToolProcess registry keyOne managedOne `shouldReturn` True
+          attachToolProcess registry key managedOne `shouldReturn` True
           timeout 3000000 (waitForProcess firstProcess) `shouldReturn` Just ExitSuccess
-          releaseToolSlot registry keyOne
-          -- Subprocess 2 (e.g. the label edit) has already reserved its slot
-          -- in the gap before a same-thread cancellation lands.
-          keyTwo <- requireJust "expected a reservation for the second gh subprocess" =<< reserveToolSlot registry "thread-1"
+          killManagedProcess managedOne
+          -- A same-thread cancellation lands in the gap before subprocess 2
+          -- (e.g. the label edit) ever spawns.
           killThreadToolProcesses registry "thread-1"
+          -- Subprocess 2 reuses that very same reservation key and finds it
+          -- already drained, so it must kill what it just spawned itself
+          -- instead of running as though the cancellation never happened.
           managedTwo <- managedProcessFor secondProcess
-          attachToolProcess registry keyTwo managedTwo `shouldReturn` False
+          attachToolProcess registry key managedTwo `shouldReturn` False
           killManagedProcess managedTwo
           timeout 3000000 (waitForProcess secondProcess) `shouldReturn` Just (ExitFailure (-9))
 
@@ -2448,7 +2457,7 @@ main = hspec $ do
             client <- newReviewClientForTesting repositoryRoot "coghex/kanban" (const (pure ()))
             finished <- newEmptyMVar
             let request = GitHubIssueToolRequest GitHubIssueRead 844 Nothing [] []
-            void . forkIO $ runGitHubIssueTool client "thread-1" request >>= putMVar finished
+            void . forkIO $ withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request) >>= putMVar finished
             waitForFileToExist markerPath 50
             stopReviewClient client
             result <- timeout 5000000 (takeMVar finished)
