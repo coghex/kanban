@@ -43,7 +43,6 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isNothing)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -52,7 +51,7 @@ import GHC.Generics (Generic)
 import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
-import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
+import System.Posix.Signals (Signal, nullSignal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, terminateProcess)
 import Text.Read (readMaybe)
 
@@ -135,7 +134,7 @@ managedProcess = managedProcessWith defaultProcessSnapshot
 managedProcessWith :: IO (Either Text [ProcessIdentity]) -> ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcessWith takeSnapshot processHandle = do
   (verifiedPid, seedMembers, problem) <- verifyGroupLeaderWith takeSnapshot processHandle
-  (peekCensus, stopCensus) <- startEmbeddedCensusWith takeSnapshot (getProcessExitCode processHandle) verifiedPid seedMembers
+  (peekCensus, stopCensus) <- startEmbeddedCensusWith takeSnapshot (maybe (pure False) stillOccupiesPid verifiedPid) verifiedPid seedMembers
   pure (LocalManagedProcess processHandle verifiedPid peekCensus stopCensus, problem)
 
 -- | Confirms, via a fresh process snapshot taken while the leader should
@@ -675,26 +674,31 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- Instead, `known` may be extended by either of two independently safe
 -- proofs: overlapping `known` itself (the original mechanism, still the
 -- only proof available once the leader is reaped -- see below), or the
--- leader simply not having been reaped *by anyone* yet (see
+-- leader's pid simply still being occupied -- by anyone, alive or a
+-- zombie -- at the time of this exact tick's snapshot (see
 -- 'recordCensusTick'). The latter is not a timing heuristic like the
--- rejected two-tick promotion -- it is an OS-level guarantee: `pid`
--- (equivalently `groupPid`, since a leader's pgid is its own pid) cannot
--- possibly have been reused by an unrelated process while the leader that
--- originally owned it remains unreaped, whether it is still running or
--- sitting as a zombie. The @process@ library only calls @waitpid@ -- the
--- one thing that can ever free this pid for reuse -- from inside
--- 'getProcessExitCode'/'waitForProcess' themselves, on demand, never
--- proactively in the background (verified against the library's own
--- source; there is no eager reaper thread racing ahead of caller code).
--- So as long as this module's own watcher is the only thing consulting
--- `checkReaped`, "not yet reaped" is airtight proof that *whatever* the
--- current snapshot shows sharing this pgid right now is still a genuine
--- descendant of the very same spawn -- not a coincidence needing a second
--- corroborating sample, and not a window that narrows only probabilistically
--- with faster polling. This closes exactly the gap the two-tick mechanism
--- tried and failed to close safely: a child forked and its leader reaped
--- (by us, elsewhere, once this invocation's own normal completion runs)
--- all before a single tick ever lands.
+-- rejected two-tick promotion -- it is an OS-level guarantee: a pid
+-- cannot be reassigned to an unrelated process while it remains occupied
+-- by whatever already holds it, so if it was still occupied bracketing
+-- this tick's snapshot, whatever the snapshot shows sharing this pgid
+-- right now is still a genuine descendant of the very same spawn -- not a
+-- coincidence needing a second corroborating sample, and not a window
+-- that narrows only probabilistically with faster polling. This check
+-- (see 'stillOccupiesPid') deliberately does *not* use
+-- 'getProcessExitCode'/'waitForProcess': those are destructive polls --
+-- the first call to ever observe a zombie leader's exit reaps it right
+-- then, on the spot, which would make this exact tick's own check of it
+-- report "reaped" even when the snapshot it is meant to vouch for was
+-- captured while genuinely still safe, silently defeating the very
+-- protection this mechanism exists to provide. A plain existence probe
+-- (POSIX's null signal, which checks whether a pid is still occupied
+-- without delivering anything or disturbing wait state) has no such
+-- side effect, and can safely be checked on both sides of the snapshot
+-- without ever being the reason a "not yet reaped" proof stops being
+-- true. This closes exactly the gap the two-tick mechanism tried and
+-- failed to close safely: a child forked and its leader reaped (by us,
+-- elsewhere, once this invocation's own normal completion runs) all
+-- before a single tick ever lands.
 --
 -- The very first tick runs synchronously, here, before this function ever
 -- returns a watcher to its caller -- not after the first
@@ -727,11 +731,11 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- already justifies trusting whatever that first tick finds sharing this
 -- pgid, including a child forked and its leader exited before
 -- verification's own snapshot ever ran.
-startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> IO (Maybe ExitCode) -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
+startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> IO Bool -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ _ Nothing _ = pure (pure [], pure [])
-startEmbeddedCensusWith takeSnapshot checkReaped (Just pid) seedMembers = do
+startEmbeddedCensusWith takeSnapshot checkStillOccupied (Just pid) seedMembers = do
   knownRef <- newIORef (Set.fromList seedMembers)
-  stillOpenAfterFirstTick <- recordCensusTick takeSnapshot checkReaped pid knownRef
+  stillOpenAfterFirstTick <- recordCensusTick takeSnapshot checkStillOccupied pid knownRef
   watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks stillOpenAfterFirstTick)
   pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
@@ -745,7 +749,7 @@ startEmbeddedCensusWith takeSnapshot checkReaped (Just pid) seedMembers = do
     watchLoop _ _ False = pure ()
     watchLoop knownRef burstTicksLeft True = do
       threadDelay (if burstTicksLeft > 0 then bootstrapBurstIntervalMicros else censusIntervalMicros)
-      stillOpen <- recordCensusTick takeSnapshot checkReaped pid knownRef
+      stillOpen <- recordCensusTick takeSnapshot checkStillOccupied pid knownRef
       watchLoop knownRef (max 0 (burstTicksLeft - 1)) stillOpen
 
 -- | Records one tick of a census (see 'startEmbeddedCensusWith'). Returns
@@ -771,19 +775,23 @@ startEmbeddedCensusWith takeSnapshot checkReaped (Just pid) seedMembers = do
 -- everywhere else) what the census already trusted -- proof that at least
 -- one already-trusted identity was *still alive* at this exact tick, so
 -- whatever else shares its pgid right now is a genuine sibling of that
--- continuing spawn -- or `checkReaped` still reports the leader unreaped,
--- which is proof this exact pgid could not possibly have been handed to an
--- unrelated process yet, regardless of whether anything in `known`
--- happens to still be visible. `checkReaped` is polled *after* the
--- snapshot, not before: a leader that was still unreaped as of a check
--- made after the snapshot was necessarily also still unreaped throughout
--- the snapshot itself, since only 'getProcessExitCode'/'waitForProcess'
--- can ever free this pid, and nothing else in this watcher's own thread
--- calls either between the two. A tick satisfying neither proof leaves the
--- census exactly as it was -- unresolved for this tick, not extended --
--- rather than risk folding in a reused foreign group.
-recordCensusTick :: IO (Either Text [ProcessIdentity]) -> IO (Maybe ExitCode) -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
-recordCensusTick takeSnapshot checkReaped pid knownRef = do
+-- continuing spawn -- or `checkStillOccupied` (see 'stillOccupiesPid')
+-- reports the leader's pid still occupied by *something* both immediately
+-- before and immediately after the snapshot, which is proof this exact
+-- pid could not possibly have been reassigned to an unrelated process
+-- anywhere in that bracket, regardless of whether anything in `known`
+-- happens to still be visible in the snapshot itself. Bracketing rather
+-- than checking only once matters here: `checkStillOccupied` is a plain
+-- existence probe with no side effect, so nothing is lost by calling it
+-- twice, and a single check on only one side would leave the *other*
+-- side of the snapshot -- where the pid could still have been freed and
+-- reassigned before or after the probe ran -- unwitnessed. A tick
+-- satisfying neither proof leaves the census exactly as it was --
+-- unresolved for this tick, not extended -- rather than risk folding in a
+-- reused foreign group.
+recordCensusTick :: IO (Either Text [ProcessIdentity]) -> IO Bool -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
+recordCensusTick takeSnapshot checkStillOccupied pid knownRef = do
+  occupiedBefore <- checkStillOccupied
   snapshot <- takeSnapshot
   case snapshot of
     Left _ -> pure True
@@ -791,13 +799,27 @@ recordCensusTick takeSnapshot checkReaped pid knownRef = do
       [] -> pure False
       groupMembers -> do
         known <- readIORef knownRef
-        notYetReaped <- isNothing <$> checkReaped
+        occupiedAfter <- checkStillOccupied
         let overlapsKnown = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
+            notYetReaped = occupiedBefore && occupiedAfter
             trustworthy = overlapsKnown || notYetReaped
         when trustworthy (atomicModifyIORef' knownRef (\current -> (foldr Set.insert current groupMembers, ())))
         pure True
   where
     groupPidInt = fromIntegral pid
+
+-- | A non-destructive existence probe for `pid`: 'True' if *something* --
+-- alive or a zombie awaiting reap -- still occupies it right now, 'False'
+-- once it has been fully reaped and is free for the kernel to reassign.
+-- Uses POSIX's null signal ('nullSignal'), which only checks whether a
+-- signal *could* be delivered without ever actually delivering one --
+-- unlike 'getProcessExitCode'/'waitForProcess', this never itself performs
+-- the reap that would end the very occupancy it is asked to report on (see
+-- 'recordCensusTick' for why that distinction matters).
+stillOccupiesPid :: CPid -> IO Bool
+stillOccupiesPid pid = do
+  result <- try (signalProcess nullSignal pid) :: IO (Either IOException ())
+  pure (either (const False) (const True) result)
 
 -- | Confirms `managed`'s recorded group terminated. `peekCensus` (see
 -- 'watchManagedProcessCensus') is consulted *before* ever sending a

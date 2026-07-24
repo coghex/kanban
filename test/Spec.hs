@@ -700,15 +700,14 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
 
-    it "recordCensusTick leaves `known` unresolved once the leader is already reaped and its seed shares no overlap with a fresh snapshot" $ do
-      -- Unlike the not-yet-reaped case (see the regression above), an
-      -- *already*-reaped leader forfeits the OS-level "this pid cannot
-      -- possibly have been reused yet" proof -- 'getProcessExitCode'
-      -- having already returned once means the kernel is now free to hand
-      -- this exact pid to an unrelated process at any moment. With that
-      -- proof gone, the only remaining path to trust a tick's reading is
-      -- overlapping `known` itself (the original mechanism), which a
-      -- deliberately wrong seed -- simulating a leader reaped before any
+    it "recordCensusTick leaves `known` unresolved once the leader's pid is already free for reuse and its seed shares no overlap with a fresh snapshot" $ do
+      -- Unlike the not-yet-reaped case (see the regression above), a pid
+      -- that no longer resolves to anything (fully reaped, free for the
+      -- kernel to reassign) forfeits the OS-level "this pid cannot
+      -- possibly have been reused yet" proof. With that proof gone, the
+      -- only remaining path to trust a tick's reading is overlapping
+      -- `known` itself (the original mechanism), which a deliberately
+      -- wrong seed -- simulating a leader reaped before any
       -- not-yet-reaped-covered tick ever ran -- can never do, no matter
       -- how stably a same-group child persists.
       let staleLeaderIdentity =
@@ -727,10 +726,10 @@ main = hspec $ do
                 processIdentityStartedAt = "synthetic-child-start",
                 processIdentityCommand = "synthetic-child"
               }
-          checkReaped = pure (Just ExitSuccess)
+          checkStillOccupied = pure False
           takeSnapshot = pure (Right [childIdentity])
       knownRef <- newIORef (Set.fromList [staleLeaderIdentity])
-      stillOpen <- recordCensusTick takeSnapshot checkReaped 4242 knownRef
+      stillOpen <- recordCensusTick takeSnapshot checkStillOccupied 4242 knownRef
       stillOpen `shouldBe` True
       known <- readIORef knownRef
       known `shouldBe` Set.fromList [staleLeaderIdentity]
@@ -819,6 +818,55 @@ main = hspec $ do
                 else
                   if attempts <= (0 :: Int)
                     then expectationFailure "census never recorded the child despite the leader remaining genuinely unreaped throughout"
+                    else threadDelay 100000 >> waitForRecordedChild (attempts - 1)
+        waitForRecordedChild 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
+
+    it "the not-yet-reaped proof still catches and kills a same-group child when the leader has genuinely already exited, a real unreaped zombie, before the census ever looks" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & exit 0"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        callCount <- newIORef (0 :: Int)
+        let isChildOfLeader identity =
+              identity.processIdentityGroupPid == fromIntegral leaderPid && identity.processIdentityPid /= fromIntegral leaderPid
+            -- Every snapshot -- verification's own and every tick -- is
+            -- filtered down to just the child, so the leader is never
+            -- once witnessed by anything this census ever consults, same
+            -- as the not-yet-reaped regression above. Unlike that one,
+            -- though, the leader here does not merely *appear* absent by
+            -- construction -- it genuinely exits, almost immediately,
+            -- and is left an unreaped zombie (nothing anywhere in this
+            -- test ever calls getProcessExitCode/waitForProcess on it).
+            -- This directly exercises the hazard a destructive
+            -- getProcessExitCode-based check would hit: the first call
+            -- to ever observe this zombie's exit would reap it right
+            -- then, on the spot, retroactively making the very tick that
+            -- observed the surviving child look "reaped" even though the
+            -- pid was genuinely still occupied, unreapable by anyone
+            -- else, throughout. The non-destructive existence probe this
+            -- module actually uses ('stillOccupiesPid') has no such
+            -- self-defeating side effect.
+            stubSnapshot = do
+              _ <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              real <- readProcessSnapshot
+              pure (fmap (filter isChildOfLeader) real)
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldSatisfy` isJust
+        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        let waitForRecordedChild attempts = do
+              census <- peekCensus
+              if any isChildOfLeader census
+                then pure ()
+                else
+                  if attempts <= (0 :: Int)
+                    then expectationFailure "census never recorded the child despite the leader remaining an unreaped zombie throughout"
                     else threadDelay 100000 >> waitForRecordedChild (attempts - 1)
         waitForRecordedChild 50
         confirmed <- killManagedProcessVerified managed
