@@ -2388,7 +2388,7 @@ killSolveAgent issueNumber = do
   case (solveWorkerFor state issueNumber, Map.lookup issueNumber state.appSolveProcesses) of
     (Nothing, Nothing) -> setNotice ("Solve #" <> showText issueNumber <> " has no live process to kill")
     (worker, process) -> do
-      modifySolveSession issueNumber
+      appendToSolveSession issueNumber
         ( \session ->
             session
               { solveSessionPhase = SolveKilledPhase,
@@ -2416,7 +2416,7 @@ killReviewAgent issueNumber = do
   case (canonicalProcess, activeTurn) of
     (Nothing, Nothing) -> setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
     _ -> do
-      modifyReviewSession issueNumber
+      appendToReviewSession issueNumber
         ( \session ->
             session
               { reviewSessionPhase = ReviewFailed,
@@ -2446,7 +2446,7 @@ killItemWorkingProcess (PullRequestItem pullRequest) = do
   case (pullRequestWorkerFor state number, Map.lookup number state.appPullRequestProcesses) of
     (Nothing, Nothing) -> setNotice ("PR #" <> showText number <> " has no live process to kill")
     (worker, process) -> do
-      modifyPullRequestSession number
+      appendToPullRequestSession number
         ( \session ->
             session
               { pullRequestSessionPhase = SolveKilledPhase,
@@ -2472,7 +2472,7 @@ killItemWorkingProcess (IssueItem issue) = do
       case (solveWorker, solveProcess) of
         (Nothing, Nothing) -> pure ()
         (worker, process) -> do
-          modifySolveSession issueNumber
+          appendToSolveSession issueNumber
             ( \session ->
                 session
                   { solveSessionPhase = SolveKilledPhase,
@@ -2486,7 +2486,7 @@ killItemWorkingProcess (IssueItem issue) = do
       case canonicalProcess of
         Nothing -> pure ()
         Just process -> do
-          modifyReviewSession issueNumber
+          appendToReviewSession issueNumber
             ( \session ->
                 session
                   { reviewSessionPhase = ReviewFailed,
@@ -2658,6 +2658,36 @@ presentTranscriptTail = do
       modify (setTranscriptFollowing session True)
       vScrollToEnd (viewportScroll (transcriptViewport session))
 
+-- | Update a session and move its transcript to the new tail under the
+-- same gate streamed output uses. A completion result, an interrupt
+-- notice, a killed marker, or an echoed answer grows the transcript
+-- exactly as an output delta does, so a following visible session must not
+-- be left sitting above it; routing every transcript-growing path through
+-- these keeps that from having to be remembered per call site.
+appendToSolveSession :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
+appendToSolveSession issueNumber update = do
+  modifySolveSession issueNumber update
+  tailTranscript (SolveTranscript issueNumber)
+
+appendToPullRequestSession :: Int -> (PullRequestReviewSession -> PullRequestReviewSession) -> EventM Name AppState ()
+appendToPullRequestSession number update = do
+  modifyPullRequestSession number update
+  tailTranscript (PullRequestTranscript number)
+
+appendToReviewSession :: Int -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
+appendToReviewSession issueNumber update = do
+  modifyReviewSession issueNumber update
+  tailTranscript (ReviewTranscript issueNumber)
+
+-- | Tail whichever transcript is on screen, for updates that grow many
+-- sessions at once -- a backend disconnect marks every live review session
+-- -- and so have no single session to key off. The displayed one is the
+-- only viewport that could need moving anyway.
+tailDisplayedTranscript :: EventM Name AppState ()
+tailDisplayedTranscript = do
+  overlay <- (.appOverlay) <$> get
+  mapM_ tailTranscript (displayedTranscript overlay)
+
 handlePullRequestOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
 handlePullRequestOverlayEvent number event = case event of
   VtyEvent vtyEvent
@@ -2767,7 +2797,7 @@ submitQuestionAnswer issueNumber requestId answer displayAnswer = do
       case result of
         Left message -> setNotice message
         Right () ->
-          modifyReviewSession issueNumber
+          appendToReviewSession issueNumber
             ( \session ->
                 session
                   { reviewSessionPhase = ReviewRunning,
@@ -2789,7 +2819,7 @@ submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer = d
       case result of
         Left message -> setNotice message
         Right () ->
-          modifyReviewSession issueNumber
+          appendToReviewSession issueNumber
             ( \session ->
                 session
                   { reviewSessionPhase = ReviewRunning,
@@ -2811,7 +2841,7 @@ sendReviewFeedback issueNumber session = do
       case result of
         Left errorMessage -> setNotice errorMessage
         Right () -> do
-          modifyReviewSession issueNumber
+          appendToReviewSession issueNumber
             ( \current ->
                 current
                   { reviewSessionInput = "",
@@ -2879,7 +2909,7 @@ cancelReviewSession issueNumber = do
 cancelCanonicalReviewProcess :: Int -> Maybe ManagedProcess -> EventM Name AppState ()
 cancelCanonicalReviewProcess issueNumber Nothing = setNotice ("Issue review #" <> showText issueNumber <> " is not running")
 cancelCanonicalReviewProcess issueNumber (Just process) = do
-  modifyReviewSession issueNumber
+  appendToReviewSession issueNumber
     ( \session ->
         session
           { reviewSessionPhase = ReviewInterrupted,
@@ -3197,7 +3227,7 @@ submitSolveInput issueNumber = do
           Nothing -> setNotice "The solver did not return a resumable session id"
           Just sessionId -> do
             let answer = Text.strip session.solveSessionInput
-            modifySolveSession issueNumber
+            appendToSolveSession issueNumber
               ( \current ->
                   current
                     { solveSessionPhase = SolveStarting,
@@ -3278,9 +3308,8 @@ applySolveEvent solveEvent = case solveEvent of
     modifySolveSession issueNumber (\session -> session {solveSessionId = Just sessionId})
   SolveOutput issueNumber output -> do
     now <- (.appNow) <$> get
-    modifySolveSession issueNumber
+    appendToSolveSession issueNumber
       (setSolveActivity now (agentActivity output) . (\session -> session {solveSessionTranscript = appendAgentTranscript output session.solveSessionTranscript}))
-    tailTranscript (SolveTranscript issueNumber)
   SolveDiagnostic issueNumber diagnostic -> do
     now <- (.appNow) <$> get
     -- This specific diagnostic means a user-requested kill could not be
@@ -3290,7 +3319,7 @@ applySolveEvent solveEvent = case solveEvent of
     -- session's current phase, so a TUI restart that replays this same
     -- event from a fresh session (which never ran the "killed by user" UI
     -- transition) still renders it correctly.
-    modifySolveSession issueNumber
+    appendToSolveSession issueNumber
       ( setSolveActivity now "diagnostic output"
           . ( \session ->
                 session
@@ -3299,7 +3328,6 @@ applySolveEvent solveEvent = case solveEvent of
                   }
             )
       )
-    tailTranscript (SolveTranscript issueNumber)
   SolveProcessFinished issueNumber outcome -> do
     state <- get
     let priorSession = Map.lookup issueNumber state.appSolveSessions
@@ -3311,6 +3339,7 @@ applySolveEvent solveEvent = case solveEvent of
               appSolveSessions = Map.adjust (finishSolveSession priorPhase outcome) issueNumber current.appSolveSessions
             }
       )
+    tailTranscript (SolveTranscript issueNumber)
     startBoardRefresh
     case priorPhase of
       Just SolveInterrupting -> setNotice ("Solve workflow for #" <> showText issueNumber <> " interrupted; type guidance and press Enter")
@@ -3371,7 +3400,7 @@ interruptSolveSession issueNumber = do
   case (Map.lookup issueNumber state.appSolveSessions, Map.lookup issueNumber state.appSolveProcesses) of
     (Just session, Just process)
       | session.solveSessionPhase `elem` [SolveStarting, SolveRunning], session.solveSessionId /= Nothing -> do
-          modifySolveSession issueNumber
+          appendToSolveSession issueNumber
             ( \current ->
                 current
                   { solveSessionPhase = SolveInterrupting,
@@ -3541,6 +3570,7 @@ applySolveOrphans issueNumber outcome processes = do
                 state.appSolveSessions
           }
     )
+  tailTranscript (SolveTranscript issueNumber)
   setNotice ("Solve #" <> showText issueNumber <> " is orphaned; press p to inspect it or x to kill it")
 
 applyPullRequestOrphans :: Int -> SolveOutcome -> [ProcessIdentity] -> EventM Name AppState ()
@@ -3566,6 +3596,7 @@ applyPullRequestOrphans number outcome processes = do
                 state.appPullRequestReviewSessions
           }
     )
+  tailTranscript (PullRequestTranscript number)
   modifyAutoSolveForPullRequest number (\session -> session {solveSessionActivity = "PR agent left orphaned subprocesses; press p"})
   setNotice ("PR workflow #" <> showText number <> " is orphaned; press p to inspect it or x to kill it")
 
@@ -3880,7 +3911,7 @@ applyCanonicalIssueReview issueNumber stage result = do
   state <- get
   let superseded = maybe False (canonicalReviewCompletionSuperseded . (.reviewSessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
   unless superseded $ do
-    modifyReviewSession issueNumber $ \session -> case result of
+    appendToReviewSession issueNumber $ \session -> case result of
       Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = "failed", reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
       Right canonicalResult ->
         session
@@ -4016,7 +4047,7 @@ submitPullRequestInput number = do
         Just sessionId <- session.pullRequestSessionId,
         not (Text.null (Text.strip session.pullRequestSessionInput)) -> do
           let answer = Text.strip session.pullRequestSessionInput
-          modifyPullRequestSession number (\current -> current {pullRequestSessionPhase = SolveStarting, pullRequestSessionActivity = "resuming", pullRequestSessionInput = "", pullRequestSessionTranscript = appendSolveTranscript current.pullRequestSessionTranscript ("\nYou: " <> answer <> "\n")})
+          appendToPullRequestSession number (\current -> current {pullRequestSessionPhase = SolveStarting, pullRequestSessionActivity = "resuming", pullRequestSessionInput = "", pullRequestSessionTranscript = appendSolveTranscript current.pullRequestSessionTranscript ("\nYou: " <> answer <> "\n")})
           modifyAutoSolveForPullRequest number
             (\current -> current {solveSessionPhase = SolveRunning, solveSessionActivity = "resuming PR review"})
           launchPullRequestFlow number session.pullRequestSessionOrigin session.pullRequestSessionAction session.pullRequestSessionBrand (Just sessionId) session.pullRequestSessionResumeProvenance answer
@@ -4046,9 +4077,8 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
   PullRequestSessionIdentified number sessionId -> modifyPullRequestSession number (\session -> session {pullRequestSessionId = Just sessionId})
   PullRequestFlowOutput number output -> do
     now <- (.appNow) <$> get
-    modifyPullRequestSession number
+    appendToPullRequestSession number
       (setPullRequestActivity now (agentActivity output) . (\session -> session {pullRequestSessionTranscript = appendAgentTranscript output session.pullRequestSessionTranscript}))
-    tailTranscript (PullRequestTranscript number)
   PullRequestFlowDiagnostic number output -> do
     now <- (.appNow) <$> get
     appendOutput number ("[agent] " <> sanitizeText output <> "\n")
@@ -4073,6 +4103,7 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
               appPullRequestReviewSessions = Map.adjust (finish priorPhase outcome) number current.appPullRequestReviewSessions
             }
       )
+    tailTranscript (PullRequestTranscript number)
     case outcome of
       SolveNeedsInput _ ->
         modifyAutoSolveForPullRequest number
@@ -4083,9 +4114,8 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
       SolveCompleted -> pure ()
     startBoardRefresh
   where
-    appendOutput number output = do
-      modifyPullRequestSession number (\session -> session {pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript output})
-      tailTranscript (PullRequestTranscript number)
+    appendOutput number output =
+      appendToPullRequestSession number (\session -> session {pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript output})
     finish (Just SolveInterrupting) _ session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for guidance", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n", pullRequestSessionResumeProvenance = ResumeInterruptGuidance}
     finish (Just SolveKilledPhase) _ session = session {pullRequestSessionActivity = "killed"}
     finish _ SolveCompleted session = session {pullRequestSessionPhase = SolveFinished, pullRequestSessionActivity = "completed"}
@@ -4116,7 +4146,7 @@ interruptPullRequestSession number = do
   case (Map.lookup number state.appPullRequestReviewSessions, Map.lookup number state.appPullRequestProcesses) of
     (Just session, Just process)
       | session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning], session.pullRequestSessionId /= Nothing -> do
-          modifyPullRequestSession number
+          appendToPullRequestSession number
             ( \current ->
                 current
                   { pullRequestSessionPhase = SolveInterrupting,
@@ -4169,7 +4199,7 @@ launchIssueReview client issueNumber = do
 
 applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
 applyReviewBackendStarted result = case result of
-  Left message ->
+  Left message -> do
     modify
       ( \state ->
           state
@@ -4178,6 +4208,7 @@ applyReviewBackendStarted result = case result of
               appNotice = Just message
             }
       )
+    tailDisplayedTranscript
   Right client -> do
     modify (\state -> state {appReviewBackend = ReviewBackendReady client})
     sessions <- Map.elems . (.appReviewSessions) <$> get
@@ -4201,7 +4232,7 @@ applyReviewBackendStarted result = case result of
 applyReviewEvent :: ReviewEvent -> EventM Name AppState ()
 applyReviewEvent reviewEvent = case reviewEvent of
   ReviewThreadCreated issueNumber threadId ->
-    modifyReviewSession issueNumber
+    appendToReviewSession issueNumber
       ( \session ->
           session
             { reviewSessionThreadId = Just threadId,
@@ -4311,11 +4342,12 @@ applyReviewEvent reviewEvent = case reviewEvent of
                       message
                 }
       )
+    tailReviewThread threadId
     case outcome of
       TurnSucceeded -> startBoardRefresh
       _ -> pure ()
   ReviewStartFailed issueNumber message ->
-    modifyReviewSession issueNumber
+    appendToReviewSession issueNumber
       ( \session ->
           session
             { reviewSessionPhase = ReviewFailed,
@@ -4323,7 +4355,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
               reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
             }
       )
-  ReviewClientStopped message ->
+  ReviewClientStopped message -> do
     modify
       ( \state ->
           state
@@ -4332,6 +4364,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
               appNotice = Just message
             }
       )
+    tailDisplayedTranscript
   ReviewProtocolWarning message -> setNotice ("Codex protocol warning: " <> message)
   where
     outcomePhase IssueRevision TurnSucceeded (Just result)
@@ -4704,7 +4737,7 @@ discoverAutoSolvePullRequest snapshot issueNumber session progress = case newLin
   [pullRequest] -> case originFromBody pullRequest.pullRequestBody of
     Right origin | origin == expectedPullRequestOrigin session.solveSessionBrand -> do
       let roundNumber = 1
-      modifySolveSession issueNumber
+      appendToSolveSession issueNumber
         ( \current ->
             current
               { solveSessionPhase = SolveRunning,
@@ -4784,7 +4817,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
           then pure ()
           else do
             let prompt = autoSolveRevisionPrompt state.appConfig.resolvedWorkflow state.appOptions.optionConfig state.appRepository session.solveSessionBrand pullRequest.pullRequestNumber progress.autoSolveReviewRound
-            modifySolveSession issueNumber
+            appendToSolveSession issueNumber
               ( \current ->
                   current
                     { solveSessionPhase = SolveStarting,
@@ -4798,7 +4831,7 @@ resumeAutoSolveRevision issueNumber pullRequest session progress
 
 completeAutoSolve :: Int -> Int -> EventM Name AppState ()
 completeAutoSolve issueNumber pullRequestNumber = do
-  modifySolveSession issueNumber
+  appendToSolveSession issueNumber
     ( \session ->
         session
           { solveSessionPhase = SolveFinished,
@@ -4811,7 +4844,7 @@ completeAutoSolve issueNumber pullRequestNumber = do
 
 stopAutoSolve :: Int -> Text -> EventM Name AppState ()
 stopAutoSolve issueNumber reason = do
-  modifySolveSession issueNumber
+  appendToSolveSession issueNumber
     ( \session ->
         session
           { solveSessionPhase = SolveAttention,
@@ -4824,7 +4857,7 @@ stopAutoSolve issueNumber reason = do
 
 failAutoSolve :: Int -> Text -> EventM Name AppState ()
 failAutoSolve issueNumber reason = do
-  modifySolveSession issueNumber
+  appendToSolveSession issueNumber
     ( \session ->
         session
           { solveSessionPhase = SolveFailedPhase,

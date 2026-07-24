@@ -3916,6 +3916,23 @@ main = hspec $ do
       followAfterScroll True atBottom (-3) `shouldBe` False
       followAfterScroll False scrolledUp 30 `shouldBe` True
 
+    it "puts terminal output under the same gate as streamed output" $ do
+      -- Round-1 review: the completion paths grow a transcript too --
+      -- 'SolveProcessFinished'/'PullRequestProcessFinished' append
+      -- interruption guidance, the resumable question, or the failure;
+      -- 'ReviewTurnCompleted' and 'applyCanonicalIssueReview' append the
+      -- verdict; the orphan and disconnect projections append their
+      -- markers. Those all now route through 'tailTranscript' rather than
+      -- ending silently above the tail, so they answer this same gate:
+      -- follow the tail when displayed and engaged, move nothing
+      -- otherwise.
+      transcriptShouldTail solveOverlay (SolveTranscript 39) True `shouldBe` True
+      transcriptShouldTail pullRequestOverlay (PullRequestTranscript 39) True `shouldBe` True
+      transcriptShouldTail reviewOverlay (ReviewTranscript 39) True `shouldBe` True
+      transcriptShouldTail solveOverlay (SolveTranscript 39) False `shouldBe` False
+      transcriptShouldTail Nothing (SolveTranscript 39) True `shouldBe` False
+      transcriptShouldTail reviewOverlay (ReviewTranscript 40) True `shouldBe` False
+
     it "re-engages follow when a genuinely new review turn starts" $ do
       followAfterTurnStarted False (Just "turn-1") "turn-2" `shouldBe` True
       followAfterTurnStarted False Nothing "turn-1" `shouldBe` True
