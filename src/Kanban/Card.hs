@@ -12,7 +12,6 @@ module Kanban.Card
     displayWidth,
     labelChipRows,
     overflowChipText,
-    truncateToWidth,
     wrappedLines,
   )
 where
@@ -57,14 +56,6 @@ boundedLines width maxLines value
       (kept, []) -> kept
   where
     allLines = wrappedLines width value
-
--- | Shorten to at most @width@ cells, marking dropped characters with an
--- ellipsis. Text that already fits is returned untouched.
-truncateToWidth :: Int -> Text -> Text
-truncateToWidth width value
-  | width <= 0 = ""
-  | displayWidth value <= width = value
-  | otherwise = elide width value
 
 -- | Replace the tail of a line with an ellipsis that still fits @width@.
 -- Only called with @width >= 1@, so the ellipsis itself always has room.

@@ -95,7 +95,6 @@ import Kanban.Card
     displayWidth,
     labelChipRows,
     overflowChipText,
-    truncateToWidth,
     wrappedLines,
   )
 import Kanban.Claude (fetchClaudeUsage)
@@ -959,29 +958,26 @@ drawTrackerHeader state column row tracker expanded =
         <> " complete"
         <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
 
--- | The tracker-context row, kept to a single line that always fits the card.
--- The multi-tracked warning claims its cells first so it survives a narrow
--- column; whatever is left goes to the tracker reference.
+-- | The tracker-context rows. They wrap rather than truncate, so a long
+-- implementation key or tracker reference stays fully visible and the frame
+-- grows to hold it. The multi-tracked warning shares the reference's last row
+-- while both fit, and otherwise keeps its own attribute on its own rows.
 drawTrackingLine :: Int -> TrackingContext -> [Widget Name]
 drawTrackingLine innerWidth context
   | innerWidth <= 0 = []
-  | otherwise = [withAttr trackerAttr (txt referenceText) <+> multiTracked]
+  | null context.trackingAdditional = referenceRows
+  | displayWidth (referenceText <> inlineWarning) <= innerWidth =
+      [withAttr trackerAttr (txt referenceText) <+> withAttr pendingAttr (txt inlineWarning)]
+  | otherwise = referenceRows <> map (withAttr pendingAttr . txt) (wrappedLines innerWidth "MULTI-TRACKED")
   where
     child = context.trackingPrimary.membershipChild
     childKey = case child.trackerChildImplementationKey of
       Just key -> key
       Nothing -> "step " <> showText (child.trackerChildChecklistOrder + 1)
     trackerNumber = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
-    multiTrackedText
-      | null context.trackingAdditional = ""
-      | otherwise = truncateToWidth innerWidth " · MULTI-TRACKED"
-    referenceText =
-      truncateToWidth
-        (innerWidth - displayWidth multiTrackedText)
-        (childKey <> " · tracker #" <> showText trackerNumber)
-    multiTracked
-      | Text.null multiTrackedText = emptyWidget
-      | otherwise = withAttr pendingAttr (txt multiTrackedText)
+    referenceText = childKey <> " · tracker #" <> showText trackerNumber
+    referenceRows = map (withAttr trackerAttr . txt) (wrappedLines innerWidth referenceText)
+    inlineWarning = " · MULTI-TRACKED"
 
 branchPrefix :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
 branchPrefix state column row entry = case entry of

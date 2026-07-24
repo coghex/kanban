@@ -4420,6 +4420,17 @@ main = hspec $ do
       map displayWidth rendered `shouldBe` replicate (length rendered) 46
       cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 9 "│" <> ["╰"], ["╮"] <> replicate 9 "│" <> ["╯"])
 
+    it "wraps a long tracker reference across rows rather than dropping its tail" $ do
+      let rendered = renderCard testOptions False cardFixtureLongKeyTrackedEntry 32
+      take 2 (map Data.Text.strip (cardInterior rendered))
+        `shouldBe` ["phase-two-renderer-contract", "· tracker #700"]
+      map displayWidth rendered `shouldBe` replicate (length rendered) 32
+
+    it "moves the multi-tracked warning to its own row when it no longer shares one" $ do
+      let rendered = renderCard testOptions False cardFixtureTrackedEntry 32
+      take 2 (map Data.Text.strip (cardInterior rendered)) `shouldBe` ["F2 · tracker #700", "MULTI-TRACKED"]
+      length rendered `shouldBe` length (renderCard testOptions False cardFixtureEntry 32) + 2
+
     it "keeps a pull request's CI and merge status row visible" $ do
       let rendered = renderCard testOptions False cardFixturePullRequestEntry 46
       map Data.Text.strip (cardInterior rendered)
@@ -4703,6 +4714,14 @@ cardFixtureTrackedEntry =
   Tracked
     (TrackingContext (TrackerMembership (fixtureTracker 700) (TrackerChild 812 (Just "F2") 1 False)) [fixtureMembership 701 812])
     (IssueItem cardFixtureIssue)
+
+-- | A tracked child whose implementation key alone outgrows a narrow card, so
+-- the tracker reference has to wrap rather than lose its tail.
+cardFixtureLongKeyTrackedEntry :: ColumnEntry
+cardFixtureLongKeyTrackedEntry =
+  Tracked
+    (TrackingContext (TrackerMembership (fixtureTracker 700) (TrackerChild 812 (Just "phase-two-renderer-contract") 1 False)) [])
+    (IssueItem (baseIssue 812 []))
 
 -- | A pull request, which carries the CI/merge status row cards must keep.
 cardFixturePullRequestEntry :: ColumnEntry
