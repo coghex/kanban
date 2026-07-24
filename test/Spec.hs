@@ -148,9 +148,13 @@ import Kanban.UI
     ReviewDigitAction (..),
     ReviewPhase (..),
     ReviewSession (..),
+    ReviewTickArmOutcome (..),
+    ReviewTickFireOutcome (..),
     SolvePhase (..),
     SolveSession (..),
     canonicalReviewCompletionSuperseded,
+    decideReviewTickArm,
+    decideReviewTickFire,
     failureActivity,
     orphanMessage,
     overlayMouseAction,
@@ -179,6 +183,7 @@ import Kanban.UI
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
     reviewSessionReusable,
+    reviewSessionsNeedingArm,
     revisedAttr,
     solveSessionAlreadyResolved,
   )
@@ -3468,6 +3473,157 @@ main = hspec $ do
     it "reuses an interrupted app-server revision when its stage is unchanged" $
       reviewSessionReusable ReviewInterrupted IssueRevision IssueRevision False `shouldBe` True
 
+  describe "review animation tick decisions" $ do
+    -- issue #30: answering a question/approval and the backend's matching
+    -- 'ReviewTurnStarted' notification each used to call the tick
+    -- scheduler unconditionally, arming two independent 10 Hz chains for
+    -- the same turn; canonical (thread-less) sessions had no tick path at
+    -- all. 'decideReviewTickArm'/'decideReviewTickFire' are the pure
+    -- decision core extracted from 'armReviewTick'/
+    -- 'applyReviewAnimationTick' so every transition is covered without an
+    -- 'EventM' harness.
+    it "arms a fresh chain only when eligible and not already armed" $ do
+      decideReviewTickArm ReviewRunning True False 0 `shouldBe` ArmReviewTick 1
+      decideReviewTickArm ReviewStarting True False 5 `shouldBe` ArmReviewTick 6
+
+    it "coalesces a repeated trigger onto the chain already in flight" $
+      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+
+    it "does not arm a chain outside the eligible phases, even if visible" $
+      mapM_
+        (\phase -> decideReviewTickArm phase True False 0 `shouldBe` ReviewTickNotEligible)
+        [ReviewWaiting, ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised, ReviewInterrupted]
+
+    it "does not arm a chain while the review overlay is hidden" $
+      decideReviewTickArm ReviewRunning False False 0 `shouldBe` ReviewTickNotEligible
+
+    it "drops a tick carrying a stale generation instead of rescheduling" $
+      decideReviewTickFire 2 1 ReviewRunning True `shouldBe` ReviewTickStale
+
+    it "reschedules a tick that matches the current generation while still eligible" $
+      decideReviewTickFire 1 1 ReviewRunning True `shouldBe` ReviewTickReschedule
+
+    it "expires a matching tick once the phase transitions to terminal, unarming the session" $
+      mapM_
+        (\phase -> decideReviewTickFire 1 1 phase True `shouldBe` ReviewTickExpire)
+        [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised, ReviewInterrupted, ReviewWaiting]
+
+    it "expires a matching tick once the review overlay is hidden" $
+      decideReviewTickFire 1 1 ReviewRunning False `shouldBe` ReviewTickExpire
+
+    it "answer-then-turn-started keeps exactly one live generation" $ do
+      -- A chain is already armed (generation 1) from the turn that produced
+      -- the question. The user answers before that tick fires: the answer
+      -- path's arm request coalesces rather than minting generation 2.
+      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      -- The backend's ReviewTurnStarted for the same turn arrives next and
+      -- also coalesces onto the same still-armed chain.
+      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+
+    it "resolves the verified fast-resume race onto a single chain" $ do
+      -- Generation 1 is armed while ReviewRunning, with its tick already
+      -- scheduled. A question arrives (ReviewWaiting); armed stays True,
+      -- only the phase changes -- the chain is still in flight.
+      -- The user answers before that tick fires: phase returns to
+      -- ReviewRunning and the answer's arm request coalesces, since
+      -- generation 1 is still armed.
+      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      -- The original in-flight tick for generation 1 then fires: it
+      -- matches the still-current generation and the phase is running
+      -- again, so it reschedules that same chain rather than a second one
+      -- having been spawned alongside it.
+      decideReviewTickFire 1 1 ReviewRunning True `shouldBe` ReviewTickReschedule
+
+    it "arms exactly one chain across a canonical session's lifecycle" $ do
+      -- CanonicalIssueReviewProcessStarted arms the first chain while the
+      -- session sits in ReviewStarting for the whole run (canonical stages
+      -- have no thread/turn, so this is their only tick trigger).
+      decideReviewTickArm ReviewStarting True False 0 `shouldBe` ArmReviewTick 1
+      -- Further ticks against generation 1 reschedule the same chain for
+      -- as long as the process keeps running.
+      decideReviewTickFire 1 1 ReviewStarting True `shouldBe` ReviewTickReschedule
+      -- The process finishes; the session's phase leaves ReviewStarting.
+      -- The next tick for generation 1 expires rather than rescheduling.
+      decideReviewTickFire 1 1 ReviewFinished True `shouldBe` ReviewTickExpire
+      -- No further chain arms once the session is terminal.
+      decideReviewTickArm ReviewFinished True False 1 `shouldBe` ReviewTickNotEligible
+
+    it "expires while hidden and arms exactly one fresh chain on reopen" $ do
+      -- The overlay closes while a turn is still running: the in-flight
+      -- tick for generation 1 expires (unarms) rather than rescheduling.
+      decideReviewTickFire 1 1 ReviewRunning False `shouldBe` ReviewTickExpire
+      -- Reopening the overlay re-checks eligibility with armed now False,
+      -- arming exactly one fresh chain (generation 2) for the session.
+      decideReviewTickArm ReviewRunning True False 1 `shouldBe` ArmReviewTick 2
+
+    -- issue #30 follow-up (round 1 review): reopening the review overlay,
+    -- or Tab-cycling within it, must resume every still-running session's
+    -- spinner, not only the one being explicitly opened or focused next --
+    -- a different session's chain can have expired while the overlay was
+    -- closed. 'reviewSessionsNeedingArm' is what 'armVisibleReviewTicks'
+    -- sweeps across all sessions to find and re-arm exactly those.
+    let tickSession phase armed =
+          ReviewSession
+            { reviewSessionIssue = baseIssue 1 [],
+              reviewSessionStage = InitialReview,
+              reviewSessionThreadId = Nothing,
+              reviewSessionTurnId = Nothing,
+              reviewSessionPhase = phase,
+              reviewSessionActivity = "",
+              reviewSessionTranscript = ChatTranscript "" "" "",
+              reviewSessionPending = Nothing,
+              reviewSessionInput = "",
+              reviewSessionSpinnerFrame = 0,
+              reviewSessionTickGeneration = 1,
+              reviewSessionTickArmed = armed
+            }
+
+    it "finds a still-running session left unarmed behind another tab" $ do
+      let sessions = Map.fromList [(1, tickSession ReviewRunning False), (2, tickSession ReviewRunning True)]
+      reviewSessionsNeedingArm True sessions `shouldBe` [1]
+      reviewSessionsNeedingArm False sessions `shouldBe` []
+
+    it "does not flag a terminal or an already-armed session for arming" $ do
+      reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewFinished False)) `shouldBe` []
+      reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewRunning True)) `shouldBe` []
+
+    -- issue #30 round-2/round-3 review: 'startIssueReview' discards a
+    -- non-reusable session (e.g. its recorded stage no longer matches
+    -- current labels) and replaces it with a genuinely fresh one for the
+    -- same issue number. A tick the *old* session already queued can
+    -- still be delivered, carrying whatever generation it last armed.
+    it "would collide with a replaced session's stale in-flight tick if the generation reset to 0" $ do
+      -- The old session reached generation 1 before being replaced, and
+      -- left a tick in flight still carrying that generation.
+      let staleTickGeneration = 1
+      -- A from-scratch replacement session resets to generation 0, so it
+      -- does not yet collide with the stale tick while unarmed...
+      decideReviewTickFire 0 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      -- ...but once that session's own first arm mints generation 1, the
+      -- stale tick matches it exactly and incorrectly reschedules.
+      decideReviewTickArm ReviewStarting True False 0 `shouldBe` ArmReviewTick 1
+      decideReviewTickFire 1 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+
+    it "carrying the prior generation forward without bumping it still collides before the replacement's first arm" $ do
+      -- Seeding the replacement at exactly the old session's last
+      -- generation (rather than resetting to 0) is not sufficient on its
+      -- own: a queued stale tick arriving *before* the replacement's own
+      -- first arm still matches it exactly.
+      let staleTickGeneration = 1
+          seededButNotYetArmed = staleTickGeneration
+      decideReviewTickFire seededButNotYetArmed staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+
+    it "bumps the generation at replacement time so a queued stale tick is dropped even before the replacement's first arm" $ do
+      let staleTickGeneration = 1 -- the old session's last-armed generation
+          replacementGeneration = staleTickGeneration + 1 -- newReviewSession's construction-time generation
+      -- The stale tick is dropped immediately, before the replacement
+      -- session has armed any chain of its own.
+      decideReviewTickFire replacementGeneration staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      -- Its own eventual first arm mints a generation still further past
+      -- the stale tick's, so the collision cannot resurface later either.
+      decideReviewTickArm ReviewStarting True False replacementGeneration `shouldBe` ArmReviewTick (replacementGeneration + 1)
+      decideReviewTickFire (replacementGeneration + 1) staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+
   describe "issue-revision refresh reconciliation" $ do
     -- issue #72: a completed issue-revision that posted its amendment and
     -- landed `reviewed:revised` was still shown as a failed revision after
@@ -3486,7 +3642,9 @@ main = hspec $ do
               reviewSessionTranscript = ChatTranscript "" "" "",
               reviewSessionPending = Nothing,
               reviewSessionInput = "",
-              reviewSessionSpinnerFrame = 0
+              reviewSessionSpinnerFrame = 0,
+              reviewSessionTickGeneration = 0,
+              reviewSessionTickArmed = False
             }
         reconciledPhaseFor issue session =
           (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
