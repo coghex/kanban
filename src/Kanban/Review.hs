@@ -1224,8 +1224,31 @@ confirmToolProcessTerminatedOrKeepTryingWith backgroundRetryDelay client managed
 -- is ever left permanently unowned once this function returns: a
 -- background thread keeps retrying every unconfirmed piece until it
 -- finally succeeds, for as long as this client is alive at all.
+--
+-- Confirming the app-server's process *group* empty (via
+-- 'confirmToolProcessTerminatedOrKeepTrying', which only ever signals and
+-- re-checks via @ps@) is not the same as this program having reaped
+-- 'reviewProcess' itself: a process that has genuinely exited but never
+-- been collected via a successful @waitpid@ is already invisible to
+-- every @ps@-based check in this codebase (see
+-- 'Kanban.Process.isZombieStat'), so the group can read confirmed-empty
+-- while 'reviewProcess' still sits as an unreaped zombie in the OS
+-- process table. Nothing else is guaranteed to ever reap it on this
+-- specific path: 'watchServerProcess' is the only thing that otherwise
+-- calls @waitForProcess@ on this exact handle, and it is only ever
+-- started once app-server initialization has already *succeeded@ -- a
+-- 'stopReviewClient' called on an initialization timeout or failure (see
+-- 'startReviewClient'), or on a test-only client from
+-- 'newReviewClientForTesting', runs with no such watcher ever having
+-- started at all. A detached background thread blocking on
+-- 'waitForProcess' here guarantees this program eventually reaps
+-- 'reviewProcess' regardless -- safe to run alongside a concurrently
+-- already-running 'watchServerProcess' on the normal quit path, since the
+-- @process@ library documents @waitForProcess@ as safe to call for the
+-- same process from multiple threads at once.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
+  void (forkIO (void (waitForProcess client.reviewProcess)))
   drainToolProcesses client
   confirmed <- confirmToolProcessTerminatedOrKeepTrying client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
   unless confirmed $ do

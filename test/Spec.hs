@@ -3482,6 +3482,54 @@ main = hspec $ do
                     | otherwise -> threadDelay 100000 >> waitForBackgroundConfirm (attempts - 1)
           waitForBackgroundConfirm 50
 
+    it "stopReviewClient reaps the app-server's own handle even on the pre-watcher shutdown path, where watchServerProcess never started" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let isPlaceholder identity =
+              Data.Text.isInfixOf "trap" identity.processIdentityCommand
+                && Data.Text.isInfixOf "while :" identity.processIdentityCommand
+        -- Other tests in this same describe block use the identical
+        -- placeholder command via their own 'newReviewClientForTesting'
+        -- clients, so a bare "find the one matching process" is not
+        -- reliable under a shared test machine or a still-draining prior
+        -- test's own placeholder -- this diffs against a snapshot taken
+        -- immediately before spawning this specific client to identify
+        -- only the pid that is genuinely new.
+        beforeClient <- readProcessSnapshot
+        pidsBeforeClient <- case beforeClient of
+          Left message -> expectationFailure (Data.Text.unpack message) >> error "unreachable"
+          Right snapshot -> pure (Set.fromList (map processIdentityPid (filter isPlaceholder snapshot)))
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        let waitForNewPlaceholder attempts = do
+              afterClient <- readProcessSnapshot
+              case afterClient of
+                Left message -> expectationFailure (Data.Text.unpack message) >> error "unreachable"
+                Right snapshot -> case filter (\identity -> isPlaceholder identity && not (Set.member identity.processIdentityPid pidsBeforeClient)) snapshot of
+                  [identity] -> pure identity.processIdentityPid
+                  [] | attempts > (0 :: Int) -> threadDelay 50000 >> waitForNewPlaceholder (attempts - 1)
+                  matches -> expectationFailure ("expected exactly one newly spawned app-server placeholder process, found " <> show (length matches)) >> error "unreachable"
+        placeholderPid <- waitForNewPlaceholder 50
+        -- newReviewClientForTesting never starts watchServerProcess --
+        -- the only other thing that ever calls waitForProcess on this
+        -- exact handle -- exactly matching startReviewClient's own
+        -- initialization-timeout/failure branches, which call
+        -- stopReviewClient before watchServerProcess is ever forked.
+        -- Confirming the process group empty (via ps) is not the same as
+        -- this program having reaped it: an exited-but-unreaped zombie
+        -- is already invisible to every ps-based check this codebase
+        -- otherwise uses, so this must check the raw, unfiltered stat
+        -- column specifically (see 'isZombiePid') to prove reaping, not
+        -- merely termination, actually happened.
+        stopReviewClient client
+        let waitForReaped attempts = do
+              stillZombie <- isZombiePid placeholderPid
+              if not stillZombie
+                then pure ()
+                else
+                  if attempts <= (0 :: Int)
+                    then expectationFailure "app-server placeholder process was left as an unreaped zombie after stopReviewClient"
+                    else threadDelay 100000 >> waitForReaped (attempts - 1)
+        waitForReaped 50
+
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
@@ -5259,6 +5307,24 @@ withEnvironmentValue name value action =
     (do previous <- lookupEnv name; setEnv name value; pure previous)
     (maybe (unsetEnv name) (setEnv name))
     (const action)
+
+-- | Whether `pid` currently shows up in a *raw*, unfiltered @ps@ listing
+-- with a zombie stat -- unlike everything 'Kanban.Process' exports
+-- (which all exclude zombie entries; see 'Kanban.Process.isZombieStat'),
+-- this exists specifically to prove a process has *not merely exited*
+-- but has actually been reaped: an exited-but-unreaped zombie is
+-- invisible to every filtered check in this codebase, so proving
+-- 'stopReviewClient' truly collects a process (rather than just
+-- terminating it and leaving a zombie behind) requires looking at what
+-- those filtered checks deliberately hide.
+isZombiePid :: Int -> IO Bool
+isZombiePid targetPid = do
+  (_, output, _) <- readProcessWithExitCode "ps" ["-axo", "pid=,stat="] ""
+  pure (any matchesZombieLine (lines output))
+  where
+    matchesZombieLine line = case words line of
+      (pidText : statText : _) -> reads pidText == [(targetPid, "")] && 'Z' `elem` statText
+      _ -> False
 
 withoutEnvironmentValue :: String -> IO result -> IO result
 withoutEnvironmentValue name action =
