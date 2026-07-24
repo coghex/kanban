@@ -27,6 +27,7 @@ import Kanban.Cache
     loadRepositoryCache,
     loadUsageCache,
     repositoryCachePath,
+    repositoryCacheSchemaVersion,
     writeRepositoryCache,
     writeUsageCache,
   )
@@ -4227,7 +4228,7 @@ main = hspec $ do
           invalid <- loadRepositoryCache repository
           invalid `shouldSatisfy` isInvalidCache
 
-    it "round-trips the retained per-check detail and rejects the previous schema version" $
+    it "round-trips the retained per-check detail" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
@@ -4239,12 +4240,27 @@ main = hspec $ do
               snapshot = RepoSnapshot [] [pullRequest] epoch False False
           writeRepositoryCache repository snapshot `shouldReturn` Right ()
           loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
-          -- A version 2 file predates the retained detail, so it is ignored
-          -- rather than reused as though its checks were merely aggregate.
+
+    -- A real version 2 file wrote its check summaries as two aggregate counts,
+    -- so its snapshot cannot decode under the current schema at all. The
+    -- version has to be read before the snapshot, or the user is told the file
+    -- is malformed JSON when the truthful answer is that it is simply old.
+    it "rejects a genuine version 2 file as unsupported rather than as malformed" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          -- Write a current cache first, so the old file lands where the
+          -- loader looks for it.
+          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
-          written <- ByteString.readFile cachePath
-          ByteString.writeFile cachePath (downgradeCacheSchema written)
+          ByteString.writeFile cachePath (versionTwoCacheFile 2)
           loadRepositoryCache repository `shouldReturn` CacheInvalid "cache ignored: unsupported schema version"
+          -- Proof the version gate is what rejected it: relabel that same
+          -- old-shaped file as current, and the snapshot decode fails instead.
+          ByteString.writeFile cachePath (versionTwoCacheFile repositoryCacheSchemaVersion)
+          relabeled <- loadRepositoryCache repository
+          relabeled `shouldSatisfy` isInvalidCache
+          relabeled `shouldNotBe` CacheInvalid "cache ignored: unsupported schema version"
 
     it "round-trips global usage snapshots" $
       withTemporaryCacheRoot $ \cacheRoot ->
@@ -5420,15 +5436,28 @@ runningCheckRunJson name startedAt =
     <> startedAt
     <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
 
--- | Rewrite a written cache file's schema version to the previous one, leaving
--- the rest byte-for-byte intact so the version gate is what rejects it.
-downgradeCacheSchema :: ByteString.ByteString -> ByteString.ByteString
-downgradeCacheSchema =
+-- | A cache file exactly as version 2 wrote one: the current envelope shape,
+-- but with a check summary carrying only its two aggregate counts. Everything
+-- else is the current encoder's own output, so the only thing that cannot
+-- decode under the current schema is the part version 3 actually changed.
+versionTwoCacheFile :: Int -> ByteString.ByteString
+versionTwoCacheFile version =
   ByteString.pack
-    . Data.Text.unpack
-    . Data.Text.replace "\"schemaVersion\":3" "\"schemaVersion\":2"
-    . Data.Text.pack
-    . ByteString.unpack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{"
+        <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\",\"snapshotIssues\":[],"
+        <> "\"snapshotIssuesTruncated\":false,\"snapshotPullRequestsTruncated\":false,"
+        <> "\"snapshotPullRequests\":[{"
+        <> "\"pullRequestAuthor\":\"agent\",\"pullRequestBase\":\"master\",\"pullRequestBody\":\"B\","
+        <> "\"pullRequestChecks\":{\"contents\":[1,2],\"tag\":\"ChecksFailed\"},"
+        <> "\"pullRequestCreatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestDraft\":false,"
+        <> "\"pullRequestHead\":\"branch\",\"pullRequestLabelOverflow\":0,\"pullRequestLabels\":[],"
+        <> "\"pullRequestLinkedIssueOverflow\":0,\"pullRequestLinkedIssues\":[36],"
+        <> "\"pullRequestMergeState\":\"MergeUnknown\",\"pullRequestNumber\":823,"
+        <> "\"pullRequestReviewDecision\":\"ReviewRequired\",\"pullRequestTitle\":\"T\","
+        <> "\"pullRequestUpdatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestUrl\":\"u\"}]}}"
+    )
 
 checkRunJson :: String -> String -> String -> String
 checkRunJson name conclusion startedAt =
