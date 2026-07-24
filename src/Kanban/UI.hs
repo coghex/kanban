@@ -3,6 +3,7 @@ module Kanban.UI
     AgentSessionRef (..),
     CardEnv (..),
     ChatTranscript (..),
+    DetailsEnv (..),
     Name (..),
     OverlayMouseAction (..),
     PendingReviewInteraction (..),
@@ -29,8 +30,11 @@ module Kanban.UI
     decideReviewTickArm,
     decideReviewTickFire,
     drawCardFrame,
+    drawDetails,
     failureActivity,
     githubRefreshTimeoutMicros,
+    mergeExplanation,
+    mergeText,
     neutralAttr,
     normalizeCollapsedRow,
     normalizeSelectedRowsAfterToggle,
@@ -70,7 +74,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Monad (forever, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Char (isPrint)
-import Data.List (find, findIndex, intersperse, sortOn)
+import Data.List (find, findIndex, intersperse, sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -1054,9 +1058,9 @@ itemStatusText (PullRequestItem pullRequest) =
 
 checkText :: CheckSummary -> Text
 checkText ChecksNone = "no CI"
-checkText (ChecksPending passed total) = "◐ CI " <> showText passed <> "/" <> showText total
+checkText (ChecksPending passed total _) = "◐ CI " <> showText passed <> "/" <> showText total
 checkText (ChecksPassed total) = "✓ CI " <> showText total <> "/" <> showText total
-checkText (ChecksFailed passed total) = "× CI " <> showText passed <> "/" <> showText total
+checkText (ChecksFailed passed total _) = "× CI " <> showText passed <> "/" <> showText total
 checkText ChecksUnknown = "? CI unknown"
 
 mergeText :: MergeState -> Text
@@ -1303,7 +1307,7 @@ drawOverlay state overlay =
       HelpOverlay -> drawHelp
       SettingsOverlay -> drawSettings state
       ProcessesOverlay -> drawProcesses state
-      DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails state item)
+      DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
       ReviewOverlay issueNumber -> drawReview state issueNumber
       SolveChooser _ issue -> drawSolveChooser issue
       SolveOverlay issueNumber -> drawSolve state issueNumber
@@ -1790,16 +1794,45 @@ drawReviewInput session =
     . txtWrap
     $ "> " <> session.reviewSessionInput <> "█"
 
-drawDetails :: AppState -> BoardItem -> Widget Name
-drawDetails state item =
+-- | Everything the details overlay reads. Like 'CardEnv', this exists so the
+-- overlay is a pure function of retained state: opening it never issues a
+-- request, and a test can render it without an 'AppState'.
+data DetailsEnv = DetailsEnv
+  { detailsConfig :: ResolvedConfig,
+    detailsBoard :: Board,
+    detailsNow :: UTCTime,
+    detailsTimeZone :: TimeZone
+  }
+
+detailsEnv :: AppState -> DetailsEnv
+detailsEnv state =
+  DetailsEnv
+    { detailsConfig = state.appConfig,
+      detailsBoard = state.appBoard,
+      detailsNow = state.appNow,
+      detailsTimeZone = state.appTimeZone
+    }
+
+-- | The §11 details overlay: every field the design lists, in labeled
+-- sections. A field that cannot apply to the item's kind -- branches or a
+-- merge state on an issue -- is left out entirely rather than rendered blank,
+-- so an absent section means "not applicable" and never "unknown".
+drawDetails :: DetailsEnv -> BoardItem -> Widget Name
+drawDetails env item =
   vBox
     ( [ withAttr cardTitleAttr (txtWrap (itemHeading item)),
         txt "",
         hBox (map drawLabelForDetails (itemLabels item) <> detailsOverflowMarker),
         txt "",
         withAttr headingAttr (txt "Metadata"),
-        txtWrap (itemMetadata state.appNow item)
+        txtWrap (itemMetadata env.detailsNow item)
       ]
+        <> drawPeopleDetails item
+        <> drawBranchDetails item
+        <> drawLinkDetails env.detailsBoard item
+        <> drawMergeDetails item
+        <> drawCheckDetails item
+        <> drawTimestampDetails env item
         <> trackingDetails
         <> trackerDiagnosticDetails
         <> [ txt "",
@@ -1811,16 +1844,161 @@ drawDetails state item =
            ]
     )
   where
-    drawLabelForDetails label = withAttr (labelAttribute state.appConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
+    drawLabelForDetails label = withAttr (labelAttribute env.detailsConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
     detailsOverflowMarker
       | itemLabelOverflow item > 0 = [withAttr pendingAttr (txt ("+" <> showText (itemLabelOverflow item) <> " labels omitted"))]
       | otherwise = []
-    trackingDetails = case findEntry state.appBoard (itemId item) of
+    trackingDetails = case findEntry env.detailsBoard (itemId item) of
       Just (Tracked context _) -> drawTrackingDetails context
       _ -> []
     trackerDiagnosticDetails = case item of
-      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue state.appConfig.resolvedWorkflow issue)
+      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue env.detailsConfig.resolvedWorkflow issue)
       PullRequestItem _ -> []
+
+-- | A headed block of rows, in the same style as the existing Metadata, Body,
+-- and URL sections. An empty row list draws nothing at all, which is how an
+-- inapplicable field disappears instead of leaving a bare heading.
+detailsSection :: Text -> [Widget Name] -> [Widget Name]
+detailsSection _ [] = []
+detailsSection heading rows = [txt "", withAttr headingAttr (txt heading)] <> rows
+
+-- | Who the item belongs to, following what the snapshot actually acquires:
+-- issues retain assignees and pull requests retain their author, so each kind
+-- shows the one it has rather than an empty row for the other.
+drawPeopleDetails :: BoardItem -> [Widget Name]
+drawPeopleDetails (IssueItem issue) = detailsSection "Assignees" [txtWrap (assigneeDetailText issue)]
+drawPeopleDetails (PullRequestItem pullRequest) =
+  detailsSection "Author" [txtWrap ("@" <> sanitizeText pullRequest.pullRequestAuthor)]
+
+assigneeDetailText :: Issue -> Text
+assigneeDetailText issue
+  | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = "unassigned"
+  | otherwise =
+      Text.intercalate ", " ["@" <> sanitizeText assignee.assigneeLogin | assignee <- issue.issueAssignees]
+        <> overflowText issue.issueAssigneeOverflow
+
+drawBranchDetails :: BoardItem -> [Widget Name]
+drawBranchDetails (IssueItem _) = []
+drawBranchDetails (PullRequestItem pullRequest) =
+  detailsSection
+    "Branches"
+    [txtWrap (sanitizeText pullRequest.pullRequestHead <> " → " <> sanitizeText pullRequest.pullRequestBase)]
+
+drawLinkDetails :: Board -> BoardItem -> [Widget Name]
+drawLinkDetails _ (PullRequestItem pullRequest) =
+  detailsSection
+    "Linked issues"
+    [ txtWrap
+        ( linkedRefsText
+            (map (("#" <>) . showText) pullRequest.pullRequestLinkedIssues)
+            pullRequest.pullRequestLinkedIssueOverflow
+        )
+    ]
+drawLinkDetails board (IssueItem issue) =
+  detailsSection
+    "Linked pull requests"
+    [txtWrap (linkedRefsText (map (("#" <>) . showText) (linkedPullRequests board issue.issueNumber)) 0)]
+
+linkedRefsText :: [Text] -> Int -> Text
+linkedRefsText [] overflow
+  | overflow > 0 = "+" <> showText overflow <> " omitted"
+  | otherwise = "none"
+linkedRefsText refs overflow
+  | overflow > 0 = Text.intercalate ", " refs <> " · +" <> showText overflow <> " omitted"
+  | otherwise = Text.intercalate ", " refs
+
+-- | The pull requests that close an issue. GitHub reports this relationship
+-- only on the PR side, so the reverse direction is a lookup over the pull
+-- requests the snapshot already retained rather than another request.
+-- Relationships GitHub omitted -- from a truncated PR page, or from a capped
+-- closing-issue list -- stay omitted here; the board's existing truncation and
+-- @+N@ warnings are what disclose them.
+linkedPullRequests :: Board -> Int -> [Int]
+linkedPullRequests board issueNumber =
+  sort
+    [ pullRequest.pullRequestNumber
+      | entry <- concat (Map.elems board.boardColumns),
+        PullRequestItem pullRequest <- [entryItem entry],
+        issueNumber `elem` pullRequest.pullRequestLinkedIssues
+    ]
+
+drawMergeDetails :: BoardItem -> [Widget Name]
+drawMergeDetails (IssueItem _) = []
+drawMergeDetails (PullRequestItem pullRequest) =
+  detailsSection
+    "Mergeability"
+    [txtWrap (mergeText mergeState <> " — " <> mergeExplanation mergeState)]
+  where
+    mergeState = pullRequest.pullRequestMergeState
+
+-- | The §9 merge vocabulary a card compresses into one word, expanded into
+-- the sentence the overlay has room for. The leading term is always
+-- 'mergeText', so the overlay explains exactly the state the card colored.
+mergeExplanation :: MergeState -> Text
+mergeExplanation MergeClean = "the head is current and merges into the base without conflict"
+mergeExplanation MergeBehind = "the base has advanced past this head; update the branch before merging"
+mergeExplanation MergeBlocked = "GitHub reports the merge blocked and the head is not mergeable as it stands"
+mergeExplanation MergeProtected = "mergeable, and blocked only by repository policy the configured admin drainer can satisfy"
+mergeExplanation MergeConflicting = "the head conflicts with the base and cannot merge until the conflict is resolved"
+mergeExplanation MergeUnstable = "mergeable, but a non-required check is failing or still running"
+mergeExplanation MergeUnknown = "GitHub is still calculating mergeability; the next explicit refresh resolves it"
+
+drawCheckDetails :: BoardItem -> [Widget Name]
+drawCheckDetails (IssueItem _) = []
+drawCheckDetails (PullRequestItem pullRequest) =
+  detailsSection "Checks" (checkSummaryRows pullRequest.pullRequestChecks)
+
+-- | The rollup as rows: a truthful summary line, then one row per check that
+-- has not passed. A rollup with nothing outstanding contributes no detail
+-- rows, and a rollup past the §13 context cap says only that it is unknown --
+-- the partial nodes it saw are not presented as if they were complete.
+checkSummaryRows :: CheckSummary -> [Widget Name]
+checkSummaryRows ChecksNone = [withAttr dimAttr (txtWrap "no checks configured")]
+checkSummaryRows (ChecksPassed total) = [txtWrap (checkCountText total total)]
+checkSummaryRows ChecksUnknown =
+  [withAttr pendingAttr (txtWrap "unknown — the rollup exceeded the retained context cap")]
+checkSummaryRows (ChecksPending passed total details) = checkDetailRows passed total details
+checkSummaryRows (ChecksFailed passed total details) = checkDetailRows passed total details
+
+checkDetailRows :: Int -> Int -> [CheckDetail] -> [Widget Name]
+checkDetailRows passed total details = txtWrap (checkCountText passed total) : map drawCheckDetail details
+
+checkCountText :: Int -> Int -> Text
+checkCountText passed total = showText passed <> "/" <> showText total <> " passed"
+
+drawCheckDetail :: CheckDetail -> Widget Name
+drawCheckDetail detail =
+  withAttr (checkStateAttribute detail.checkDetailState)
+    . txtWrap
+    $ "• " <> sanitizeText detail.checkDetailName <> " — " <> checkStateText detail.checkDetailState
+
+checkStateAttribute :: CheckState -> AttrName
+checkStateAttribute CheckPassed = dimAttr
+checkStateAttribute CheckPending = pendingAttr
+checkStateAttribute CheckFailed = problemAttr
+
+checkStateText :: CheckState -> Text
+checkStateText CheckPassed = "passed"
+checkStateText CheckPending = "pending"
+checkStateText CheckFailed = "failed"
+
+-- | Absolute creation and update times alongside the relative age, which is
+-- recomputed from the redraw's own clock rather than cached with the item.
+drawTimestampDetails :: DetailsEnv -> BoardItem -> [Widget Name]
+drawTimestampDetails env item =
+  detailsSection
+    "Timestamps"
+    [ txtWrap ("created " <> absoluteTime env.detailsTimeZone (itemCreatedAt item)),
+      txtWrap ("updated " <> absoluteTime env.detailsTimeZone updated <> " · " <> relativeAge env.detailsNow updated)
+    ]
+  where
+    updated = itemUpdatedAt item
+
+-- | A timestamp in the viewer's own zone, always naming that zone so a bare
+-- wall-clock reading is never ambiguous.
+absoluteTime :: TimeZone -> UTCTime -> Text
+absoluteTime timeZone value =
+  Text.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M %Z" (utcToZonedTime timeZone value))
 
 drawTrackerDiagnosticDetails :: [TrackerDiagnostic] -> [Widget Name]
 drawTrackerDiagnosticDetails [] = []

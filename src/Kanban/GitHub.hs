@@ -70,11 +70,13 @@ data FetchState = FetchState
     pullRequestsTruncated :: Bool
   }
 
-data CheckState = CheckPassed | CheckPending | CheckFailed
-  deriving stock (Eq, Show)
-
+-- | One decoded rollup context. 'checkContextKey' is the deduplication
+-- identity (app/name, or status creator/context), which is deliberately not
+-- the name shown to the user: 'checkContextName' keeps the plain name GitHub
+-- reported so the details overlay can list it.
 data CheckContext = CheckContext
   { checkContextKey :: Text,
+    checkContextName :: Text,
     checkContextStartedAt :: Text,
     checkContextState :: CheckState
   }
@@ -400,6 +402,7 @@ parseCheckContext = withObject "status check context" $ \context -> do
       pure
         CheckContext
           { checkContextKey = "check:" <> app <> ":" <> name,
+            checkContextName = name,
             checkContextStartedAt = if Text.null startedAt then completedAt else startedAt,
             checkContextState = classifyCheckRun status conclusion
           }
@@ -411,6 +414,7 @@ parseCheckContext = withObject "status check context" $ \context -> do
       pure
         CheckContext
           { checkContextKey = "status:" <> creator <> ":" <> name,
+            checkContextName = name,
             checkContextStartedAt = createdAt,
             checkContextState = classifyStatusContext state
           }
@@ -448,16 +452,25 @@ classifyStatusContext "PENDING" = CheckPending
 classifyStatusContext "EXPECTED" = CheckPending
 classifyStatusContext _ = CheckFailed
 
+-- | Fold the rollup into the aggregate counts the board colors read, keeping
+-- the deduplicated checks that did not pass so the details overlay can name
+-- them. Detail comes from exactly the same @latest@ selection as the counts,
+-- so a superseded failure can never be listed beside a passing aggregate.
 summarizeChecks :: [CheckContext] -> CheckSummary
 summarizeChecks [] = ChecksNone
 summarizeChecks contexts
-  | any ((== CheckFailed) . (.checkContextState)) latest = ChecksFailed passed total
-  | any ((== CheckPending) . (.checkContextState)) latest = ChecksPending passed total
+  | any ((== CheckFailed) . (.checkContextState)) latest = ChecksFailed passed total outstanding
+  | any ((== CheckPending) . (.checkContextState)) latest = ChecksPending passed total outstanding
   | otherwise = ChecksPassed total
   where
     latest = Map.elems (Map.fromListWith latestContext [(context.checkContextKey, context) | context <- contexts])
     total = length latest
     passed = length (filter ((== CheckPassed) . (.checkContextState)) latest)
+    outstanding =
+      [ CheckDetail context.checkContextName context.checkContextState
+        | context <- latest,
+          context.checkContextState /= CheckPassed
+      ]
     latestContext left right
       | left.checkContextStartedAt >= right.checkContextStartedAt = left
       | otherwise = right

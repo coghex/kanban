@@ -9,14 +9,14 @@ import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (dropWhileEnd, find, findIndex, isInfixOf, sortOn)
+import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, nub, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
 import qualified Data.Text.Lazy as LazyText
-import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime, utc)
 import qualified Data.Vector as Vector
 import qualified Graphics.Vty as Vty
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
@@ -145,6 +145,7 @@ import Kanban.UI
     AgentSessionRef (..),
     CardEnv (..),
     ChatTranscript (..),
+    DetailsEnv (..),
     Name (..),
     OverlayMouseAction (..),
     PendingReviewInteraction (..),
@@ -176,7 +177,10 @@ import Kanban.UI
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
     drawCardFrame,
+    drawDetails,
     githubRefreshTimeoutMicros,
+    mergeExplanation,
+    mergeText,
     neutralAttr,
     normalizeCollapsedRow,
     normalizeSelectedRowsAfterToggle,
@@ -4084,7 +4088,7 @@ main = hspec $ do
           pullRequest.pullRequestLinkedIssueOverflow `shouldBe` 3
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
-          pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2
+          pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2 [CheckDetail "review-approved" CheckFailed]
           let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch True True)
           length warnings `shouldBe` 3
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
@@ -4103,6 +4107,28 @@ main = hspec $ do
           pullRequest.pullRequestChecks `shouldBe` ChecksPassed 3
           pullRequest.pullRequestMergeState `shouldBe` MergeProtected
           pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusReady
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- The retained per-check list must come out of the same latest-by-identity
+    -- selection the aggregate counts use, or a superseded failure could be
+    -- listed beside a passing aggregate.
+    it "retains only the latest non-passing check of each identity for the details overlay" $ do
+      case decodeGitHubItems (LazyByteString.pack githubMixedChecksResponse) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) ->
+          pullRequest.pullRequestChecks
+            `shouldBe` ChecksFailed
+              1
+              3
+              [ CheckDetail "integration-suite" CheckFailed,
+                CheckDetail "smoke" CheckPending
+              ]
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    it "keeps a rollup past the context cap unknown rather than retaining the partial nodes it saw" $ do
+      case decodeGitHubItems (LazyByteString.pack githubCappedChecksResponse) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksUnknown
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
     it "rejects GraphQL error responses" $
@@ -4201,6 +4227,25 @@ main = hspec $ do
           invalid <- loadRepositoryCache repository
           invalid `shouldSatisfy` isInvalidCache
 
+    it "round-trips the retained per-check detail and rejects the previous schema version" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+              pullRequest =
+                (basePullRequest 823 [36] False [])
+                  { pullRequestChecks =
+                      ChecksFailed 9 12 [CheckDetail "integration-suite" CheckFailed, CheckDetail "docs-lint" CheckPending]
+                  }
+              snapshot = RepoSnapshot [] [pullRequest] epoch False False
+          writeRepositoryCache repository snapshot `shouldReturn` Right ()
+          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
+          -- A version 2 file predates the retained detail, so it is ignored
+          -- rather than reused as though its checks were merely aggregate.
+          cachePath <- repositoryCachePath repository
+          written <- ByteString.readFile cachePath
+          ByteString.writeFile cachePath (downgradeCacheSchema written)
+          loadRepositoryCache repository `shouldReturn` CacheInvalid "cache ignored: unsupported schema version"
+
     it "round-trips global usage snapshots" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
@@ -4222,7 +4267,7 @@ main = hspec $ do
     -- merge-pending whenever checks are not yet ready, since a still-running
     -- check is more actionable information than a stale branch.
     it "reports checks-pending before merge-pending when approved, behind, and checks are still pending" $ do
-      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPending 1 2}
+      let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPending 1 2 [CheckDetail "build" CheckPending]}
       pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusPending "checks pending"
     it "reports merge-pending once approved, behind, and checks have already passed" $ do
       let pullRequest = (basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]) {pullRequestMergeState = MergeBehind, pullRequestChecks = ChecksPassed 4}
@@ -4271,7 +4316,7 @@ main = hspec $ do
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
 
     it "leaves an unapproved PR with pending checks neutral rather than showing checks-pending" $ do
-      let pullRequest = (basePullRequest 10 [] False []) {pullRequestChecks = ChecksPending 1 2}
+      let pullRequest = (basePullRequest 10 [] False []) {pullRequestChecks = ChecksPending 1 2 [CheckDetail "build" CheckPending]}
       pullRequestStatus defaultWorkflowConfig pullRequest `shouldBe` StatusNeutral
 
     it "renders an approved, amber-blocked PR's card as pending rather than approved" $ do
@@ -4468,6 +4513,79 @@ main = hspec $ do
       cardInterior asciiCard `shouldBe` cardInterior rendered
       monochrome `shouldBe` rendered
       cardBorderColumns asciiCard `shouldBe` (["+"] <> replicate 8 "|" <> ["+"], ["+"] <> replicate 8 "|" <> ["+"])
+
+  describe "details overlay §11 contract" $ do
+    it "shows every §11 field for a pull request, including branches, links, merge explanation, and individual checks" $ do
+      let rendered = renderDetails detailsFixtureBoard (PullRequestItem detailsFixturePullRequest)
+      -- Heading, labels and their GitHub-reported overflow.
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "#823")
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "Route Shift-wheel through the modal-aware path")
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "reviewed:approve")
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "+2 labels omitted")
+      -- A PR retains its author, so that is the person the overlay names.
+      detailsText rendered "Author" `shouldBe` Just "@agent"
+      detailsText rendered "Branches" `shouldBe` Just "issue-36-details → master"
+      detailsText rendered "Linked issues" `shouldBe` Just "#36, #812 · +3 omitted"
+      detailsText rendered "Mergeability"
+        `shouldBe` Just "behind — the base has advanced past this head; update the branch before merging"
+      -- Every non-passing check is named individually, beside a truthful
+      -- passed count -- not folded into the card's aggregate glyph.
+      detailsRows rendered "Checks"
+        `shouldBe` [ "9/12 passed",
+                     "• integration-suite — failed",
+                     "• docs-lint — pending"
+                   ]
+      detailsRows rendered "Timestamps"
+        `shouldBe` [ "created 2026-01-01 00:00 UTC",
+                     "updated 2026-01-02 00:00 UTC · 3h ago"
+                   ]
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "Routes Shift-wheel through the modal-aware ownership path.")
+      detailsText rendered "URL" `shouldBe` Just "https://example.test/pull/823"
+
+    it "shows the issue-side §11 fields, deriving linked pull requests from the retained snapshot" $ do
+      let rendered = renderDetails detailsFixtureBoard (IssueItem detailsFixtureIssue)
+      -- An issue retains assignees rather than an author.
+      detailsText rendered "Assignees" `shouldBe` Just "@worker, @second +1"
+      -- GitHub reports the link on the PR side only; the reverse direction is
+      -- a lookup over the pull requests the snapshot already retained.
+      detailsText rendered "Linked pull requests" `shouldBe` Just "#823, #851"
+      detailsRows rendered "Timestamps"
+        `shouldBe` [ "created 2026-01-01 00:00 UTC",
+                     "updated 2026-01-02 00:00 UTC · 3h ago"
+                   ]
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "under #900")
+      detailsText rendered "URL" `shouldBe` Just "https://example.test/issues/36"
+      -- Branches, mergeability, and checks cannot apply to an issue, so their
+      -- sections are absent rather than present and blank.
+      rendered `shouldSatisfy` all (not . Data.Text.isPrefixOf "Branches")
+      rendered `shouldSatisfy` all (not . Data.Text.isPrefixOf "Mergeability")
+      rendered `shouldSatisfy` all (not . Data.Text.isPrefixOf "Checks")
+
+    it "reports a rollup past the context cap as unknown instead of listing the nodes it did see" $ do
+      let unknownChecks = detailsFixturePullRequest {pullRequestChecks = ChecksUnknown}
+      detailsRows (renderDetails detailsFixtureBoard (PullRequestItem unknownChecks)) "Checks"
+        `shouldBe` ["unknown — the rollup exceeded the retained context cap"]
+
+    it "gives a complete rollup with nothing outstanding a truthful summary and no empty detail rows" $ do
+      let passed = detailsFixturePullRequest {pullRequestChecks = ChecksPassed 12}
+          none = detailsFixturePullRequest {pullRequestChecks = ChecksNone}
+      detailsRows (renderDetails detailsFixtureBoard (PullRequestItem passed)) "Checks" `shouldBe` ["12/12 passed"]
+      detailsRows (renderDetails detailsFixtureBoard (PullRequestItem none)) "Checks" `shouldBe` ["no checks configured"]
+
+    it "says 'none' rather than nothing when an item genuinely has no links" $ do
+      let unlinked = basePullRequest 999 [] False []
+      detailsText (renderDetails detailsFixtureBoard (PullRequestItem unlinked)) "Linked issues" `shouldBe` Just "none"
+      detailsText (renderDetails detailsFixtureBoard (IssueItem (baseIssue 404 []))) "Linked pull requests" `shouldBe` Just "none"
+
+    it "explains every merge state the decoder can produce, always leading with the card's own word" $ do
+      let states = [MergeClean, MergeBehind, MergeBlocked, MergeProtected, MergeConflicting, MergeUnstable, MergeUnknown]
+          explanations = map mergeExplanation states
+          explain state = detailsText (renderDetails detailsFixtureBoard (PullRequestItem (detailsFixturePullRequest {pullRequestMergeState = state}))) "Mergeability"
+      explanations `shouldSatisfy` all (not . Data.Text.null)
+      length (nub explanations) `shouldBe` length states
+      -- §9's vocabulary is what the overlay leads with, so its sentence can
+      -- never disagree with the word the card already showed.
+      map explain states `shouldBe` map (\state -> Just (mergeText state <> " — " <> mergeExplanation state)) states
 
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
@@ -4759,6 +4877,109 @@ cardFixturePullRequestEntry =
             pullRequestReviewDecision = ReviewApproved
           }
     )
+
+-- | A pull request carrying every §11 field at once: a head and base that
+-- differ, more linked issues than GitHub returned, a behind branch, and a
+-- rollup with both a failure and a still-running check.
+detailsFixturePullRequest :: PullRequest
+detailsFixturePullRequest =
+  (basePullRequest 823 [36, 812] False [Label "reviewed:approve" "2f9e44", Label "input" "0075ca"])
+    { pullRequestTitle = "Route Shift-wheel through the modal-aware path",
+      pullRequestBody = "Routes Shift-wheel through the modal-aware ownership path.",
+      pullRequestUrl = "https://example.test/pull/823",
+      pullRequestBase = "master",
+      pullRequestHead = "issue-36-details",
+      pullRequestMergeState = MergeBehind,
+      pullRequestChecks =
+        ChecksFailed 9 12 [CheckDetail "integration-suite" CheckFailed, CheckDetail "docs-lint" CheckPending],
+      pullRequestLabelOverflow = 2,
+      pullRequestLinkedIssueOverflow = 3,
+      pullRequestCreatedAt = epoch,
+      pullRequestUpdatedAt = detailsFixtureUpdatedAt
+    }
+
+-- | The issue side of the same contract: retained assignees plus overflow,
+-- tracker membership, and pull requests that link back to it.
+detailsFixtureIssue :: Issue
+detailsFixtureIssue =
+  (baseIssue 36 [Assignee "worker", Assignee "second"])
+    { issueTitle = "Details overlay omits most required fields",
+      issueBody = "The overlay renders only a subset of the fields the design requires.",
+      issueUrl = "https://example.test/issues/36",
+      issueLabels = [Label "bug" "d73a4a"],
+      issueAssigneeOverflow = 1,
+      issueCreatedAt = epoch,
+      issueUpdatedAt = detailsFixtureUpdatedAt
+    }
+
+detailsFixtureUpdatedAt :: UTCTime
+detailsFixtureUpdatedAt = addUTCTime 86400 epoch
+
+-- | A board holding both fixtures, a tracker that owns the issue, and a
+-- second pull request linking the same issue, so the reverse-link derivation
+-- has more than one PR to find.
+detailsFixtureBoard :: Board
+detailsFixtureBoard =
+  deriveBoard
+    defaultWorkflowConfig
+    ( RepoSnapshot
+        [ (baseIssue 900 [])
+            { issueLabels = [Label "epic" "5319e7"],
+              issueBody = "## Children\n- [ ] #36 — A1: Details overlay fields"
+            },
+          detailsFixtureIssue
+        ]
+        [detailsFixturePullRequest, basePullRequest 851 [36] False []]
+        epoch
+        False
+        False
+    )
+
+-- | Draw the details overlay at the width the real overlay gives its content
+-- and read it back as plain text.
+renderDetails :: Board -> BoardItem -> [Text]
+renderDetails board item = renderWidgetLines (themeFor testOptions) width (hLimit width (drawDetails environment item))
+  where
+    width = 84
+    environment =
+      DetailsEnv
+        { detailsConfig = testResolvedConfig,
+          detailsBoard = board,
+          -- Three hours after the fixtures were updated, so the relative age
+          -- is computed from this redraw rather than stored with the item.
+          detailsNow = addUTCTime (3 * 3600) detailsFixtureUpdatedAt,
+          detailsTimeZone = utc
+        }
+
+-- | Every heading the overlay can draw, so a section can be read back as the
+-- rows between its own heading and the next one.
+detailsHeadings :: [Text]
+detailsHeadings =
+  [ "Metadata",
+    "Assignees",
+    "Author",
+    "Branches",
+    "Linked issues",
+    "Linked pull requests",
+    "Mergeability",
+    "Checks",
+    "Timestamps",
+    "Tracker",
+    "Tracker warnings",
+    "Body",
+    "URL"
+  ]
+
+-- | The rows of one overlay section.
+detailsRows :: [Text] -> Text -> [Text]
+detailsRows rendered heading =
+  map Data.Text.strip (takeWhile (`notElem` detailsHeadings) (drop 1 (dropWhile (/= heading) rendered)))
+
+-- | A section's rows rejoined into the single logical line they wrapped from.
+detailsText :: [Text] -> Text -> Maybe Text
+detailsText rendered heading = case detailsRows rendered heading of
+  [] -> Nothing
+  rows -> Just (Data.Text.unwords rows)
 
 -- | Draw one card at a fixed width and read the frame back as plain text, the
 -- way a terminal would show it.
@@ -5151,6 +5372,63 @@ githubRerunResponse =
       "}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
       "}}}"
     ]
+
+-- | A rollup holding a superseded failure (now green), a current failure, and
+-- a rerun that is still running, so the aggregate counts and the retained
+-- detail both have something to select from.
+githubMixedChecksResponse :: String
+githubMixedChecksResponse =
+  githubChecksResponse
+    5
+    [ checkRunJson "build-test" "SUCCESS" "2026-07-17T14:43:00Z",
+      checkRunJson "integration-suite" "SUCCESS" "2026-07-17T14:40:00Z",
+      checkRunJson "integration-suite" "FAILURE" "2026-07-17T14:50:00Z",
+      checkRunJson "smoke" "FAILURE" "2026-07-17T14:30:00Z",
+      runningCheckRunJson "smoke" "2026-07-17T14:55:00Z"
+    ]
+
+-- | A rollup GitHub reports as larger than the 100 contexts §13 requests.
+githubCappedChecksResponse :: String
+githubCappedChecksResponse =
+  githubChecksResponse 150 [checkRunJson "build-test" "SUCCESS" "2026-07-17T14:43:00Z"]
+
+-- | One open pull request whose only interesting field is its check rollup.
+githubChecksResponse :: Int -> [String] -> String
+githubChecksResponse totalCount nodes =
+  unlines
+    [ "{\"data\":{\"repository\":{",
+      "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
+      "\"pullRequests\":{\"nodes\":[{",
+      "\"number\":860,\"title\":\"Mixed checks\",\"body\":\"Closes #36\",\"url\":\"https://example.test/pull/860\",",
+      "\"labels\":{\"totalCount\":0,\"nodes\":[]},",
+      "\"author\":{\"login\":\"author\"},\"isDraft\":false,\"baseRefName\":\"master\",\"headRefName\":\"fix\",",
+      "\"closingIssuesReferences\":{\"totalCount\":1,\"nodes\":[{\"number\":36}]},",
+      "\"reviewDecision\":null,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"UNSTABLE\",",
+      "\"statusCheckRollup\":{\"contexts\":{\"totalCount\":" <> show totalCount <> ",\"nodes\":[",
+      intercalate "," nodes,
+      "]}},",
+      "\"createdAt\":\"2026-07-17T13:21:31Z\",\"updatedAt\":\"2026-07-17T14:48:47Z\"",
+      "}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
+      "}}}"
+    ]
+
+runningCheckRunJson :: String -> String -> String
+runningCheckRunJson name startedAt =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"IN_PROGRESS\",\"conclusion\":null,\"startedAt\":\""
+    <> startedAt
+    <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | Rewrite a written cache file's schema version to the previous one, leaving
+-- the rest byte-for-byte intact so the version gate is what rejects it.
+downgradeCacheSchema :: ByteString.ByteString -> ByteString.ByteString
+downgradeCacheSchema =
+  ByteString.pack
+    . Data.Text.unpack
+    . Data.Text.replace "\"schemaVersion\":3" "\"schemaVersion\":2"
+    . Data.Text.pack
+    . ByteString.unpack
 
 checkRunJson :: String -> String -> String -> String
 checkRunJson name conclusion startedAt =

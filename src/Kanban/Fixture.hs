@@ -50,7 +50,7 @@ fixtureSnapshot =
         ],
       snapshotPullRequests =
         [ pullRequest 823 "Fix modal scroll routing" "Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel events." [label "reviewed:approve" "2f9e44", label "input" "0075ca", label "ui" "5319e7"] False [812] ReviewApproved MergeClean (ChecksPassed 14),
-          pullRequest 841 "Split the input dispatch facade" "Moves per-domain dispatch into small modules while preserving the public facade." [label "refactor" "c5def5"] False [833] ReviewRequired MergeBehind (ChecksPending 9 14),
+          pullRequest 841 "Split the input dispatch facade" "Moves per-domain dispatch into small modules while preserving the public facade." [label "refactor" "c5def5"] False [833] ReviewRequired MergeBehind (ChecksPending 12 14 [CheckDetail "integration-suite" CheckPending, CheckDetail "docs-lint" CheckPending]),
           pullRequest 847 "Prototype native sub-issue import" "An early draft of the native GitHub sub-issue membership adapter." [label "experimental" "fbca04"] True [756] ReviewUnknown MergeUnknown ChecksUnknown,
           pullRequest 851 "Resolve save envelope conflict" "Updates the branch after the persistence registry changed on master." [label "reviewed:approve" "2f9e44"] False [] ReviewApproved MergeConflicting (ChecksPassed 12)
         ],

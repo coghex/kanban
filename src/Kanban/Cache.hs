@@ -78,8 +78,11 @@ instance ToJSON UsageCacheEnvelope where
         "snapshots" .= envelope.usageSnapshots
       ]
 
+-- | Version 3 added the per-check detail 'CheckSummary' retains for the §11
+-- details overlay. A version 2 file decodes its check summaries without that
+-- detail, so it is rejected as unsupported rather than silently reused.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion :: Int
-repositoryCacheSchemaVersion = 2
+repositoryCacheSchemaVersion = 3
 usageCacheSchemaVersion = 1
 
 repositoryCachePath :: Repository -> IO FilePath

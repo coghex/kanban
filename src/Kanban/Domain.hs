@@ -8,6 +8,8 @@ module Kanban.Domain
     Board (..),
     BoardColumn (..),
     BoardItem (..),
+    CheckDetail (..),
+    CheckState (..),
     CheckSummary (..),
     ColumnEntry (..),
     Freshness (..),
@@ -34,6 +36,7 @@ module Kanban.Domain
     itemLabelOverflow,
     itemLabels,
     itemTitle,
+    itemUpdatedAt,
   )
 where
 
@@ -98,11 +101,35 @@ data MergeState
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | The normalized state of one status-check context, after a check run's
+-- status/conclusion pair or a status context's state has been classified.
+data CheckState = CheckPassed | CheckPending | CheckFailed
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | One retained status check: the name GitHub reports and its normalized
+-- state. This is display data for the §11 details overlay, kept alongside the
+-- aggregate counts so the overlay never needs a second request.
+data CheckDetail = CheckDetail
+  { checkDetailName :: Text,
+    checkDetailState :: CheckState
+  }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | A pull request's status-check rollup.
+--
+-- Only the two summaries that have something outstanding carry per-check
+-- detail, and that list holds exactly the deduplicated checks that did not
+-- pass. Attaching it to those constructors alone is what keeps the overlay
+-- honest: 'ChecksNone' and 'ChecksPassed' have no detail rows to render, and
+-- 'ChecksUnknown' -- a rollup past the §13 context cap -- cannot present the
+-- partial nodes it did see as if they were the whole story.
 data CheckSummary
   = ChecksNone
-  | ChecksPending Int Int
+  | ChecksPending Int Int [CheckDetail]
   | ChecksPassed Int
-  | ChecksFailed Int Int
+  | ChecksFailed Int Int [CheckDetail]
   | ChecksUnknown
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -284,3 +311,7 @@ itemLabelOverflow (PullRequestItem pullRequest) = pullRequest.pullRequestLabelOv
 itemCreatedAt :: BoardItem -> UTCTime
 itemCreatedAt (IssueItem issue) = issue.issueCreatedAt
 itemCreatedAt (PullRequestItem pullRequest) = pullRequest.pullRequestCreatedAt
+
+itemUpdatedAt :: BoardItem -> UTCTime
+itemUpdatedAt (IssueItem issue) = issue.issueUpdatedAt
+itemUpdatedAt (PullRequestItem pullRequest) = pullRequest.pullRequestUpdatedAt

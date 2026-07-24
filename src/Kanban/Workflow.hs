@@ -272,7 +272,7 @@ hasLabel :: Text -> [Label] -> Bool
 hasLabel name = any ((== Text.toCaseFold name) . Text.toCaseFold . (.labelName))
 
 checksFailed :: CheckSummary -> Bool
-checksFailed (ChecksFailed _ _) = True
+checksFailed (ChecksFailed _ _ _) = True
 checksFailed _ = False
 
 checksReady :: CheckSummary -> Bool
@@ -284,7 +284,7 @@ checksReady _ = False
 -- readiness; 'ChecksUnknown' (a truncated rollup) must not silently gain
 -- that same priority.
 checksPending :: CheckSummary -> Bool
-checksPending (ChecksPending _ _) = True
+checksPending (ChecksPending _ _ _) = True
 checksPending _ = False
 
 mergeStateReady :: MergeState -> Bool
