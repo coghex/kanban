@@ -40,14 +40,15 @@ def git_ref_exists(repo_dir, ref):
     return proc.returncode == 0
 
 
-class HappyPathDrainCycleTest(unittest.TestCase):
-    """Exercises process_pr() end-to-end: an approved, green PR gets merged,
-    its linked issue closed, its worktree/branches removed, and the local
-    default branch fast-forwarded to the (simulated) merge commit GitHub
-    produced -- with no real network access.
+class ProcessPrFixture(unittest.TestCase):
+    """Shared scaffolding for process_pr()/loop() tests: a real temporary Git
+    repository plus a scriptable fake `gh`, with no real network access.
     """
 
     def setUp(self):
+        self._build_fixture()
+
+    def _build_fixture(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -110,8 +111,8 @@ class HappyPathDrainCycleTest(unittest.TestCase):
         self.fake = fake_cli.FakeCli(self.root / "fake-cli")
         self.fake.install("gh")
 
-    def _script_pr_view(self):
-        pr_json = {
+    def _base_pr_json(self):
+        return {
             "number": 42,
             "title": "Add feature",
             "url": "https://github.com/acme/widgets/pull/42",
@@ -144,9 +145,32 @@ class HappyPathDrainCycleTest(unittest.TestCase):
                 }
             ],
         }
-        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
 
-    def _run_process_pr(self):
+    def _script_pr_view(self, *overrides):
+        # Each positional override scripts one queued `gh pr view 42`
+        # response, consumed in order by successive calls (see fake_cli's
+        # ordered-response queue) -- this is how a scenario gives different
+        # snapshots to process_pr()'s penultimate, final, and (once merged)
+        # post-merge audit reads. With no overrides, one default green
+        # response is scripted and reused for every call.
+        if not overrides:
+            overrides = ({},)
+        for override in overrides:
+            pr_json = self._base_pr_json()
+            pr_json.update(override)
+            self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+
+    def _pr_view_calls(self):
+        return [
+            call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "view"]
+        ]
+
+    def _pr_merge_calls(self):
+        return [
+            call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
+        ]
+
+    def _run_process_pr(self, *, dry_run=False, gates=None):
         state = {
             "version": drain_prs.STATE_VERSION,
             "attempt_counter": 3,
@@ -161,20 +185,30 @@ class HappyPathDrainCycleTest(unittest.TestCase):
                 }
             },
         }
+        if gates is None:
+            gates = drain_prs.GateConfig(
+                required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+            )
         env_overrides = self.fake.environ_overrides()
         with mock.patch.dict(os.environ, env_overrides):
             result = drain_prs.process_pr(
                 self.ctx,
                 42,
-                dry_run=False,
+                dry_run=dry_run,
                 repair_conflicts=True,
                 state=state,
-                gates=drain_prs.GateConfig(
-                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
-                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
-                ),
+                gates=gates,
             )
         return result, state
+
+
+class HappyPathDrainCycleTest(ProcessPrFixture):
+    """Exercises process_pr() end-to-end: an approved, green PR gets merged,
+    its linked issue closed, its worktree/branches removed, and the local
+    default branch fast-forwarded to the (simulated) merge commit GitHub
+    produced -- with no real network access.
+    """
 
     def test_happy_path_merges_cleans_up_and_forgets(self):
         self._script_pr_view()
@@ -213,6 +247,195 @@ class HappyPathDrainCycleTest(unittest.TestCase):
         self.assertEqual(
             run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
         )
+
+        # Penultimate read, final gate re-check, and exactly one post-merge
+        # audit read -- a clean merge costs at most one extra `gh pr view`.
+        self.assertEqual(len(self._pr_view_calls()), 3)
+
+    def test_dry_run_performs_no_merge_or_post_merge_audit_read(self):
+        self._script_pr_view({"closingIssuesReferences": []})
+
+        result, state = self._run_process_pr(dry_run=True)
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        # Only the penultimate and final gate reads -- no merge happened, so
+        # there is nothing for a post-merge audit to sample.
+        self.assertEqual(len(self._pr_view_calls()), 2)
+        self.assertIn("42", state["prs"])
+
+
+class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
+    """Covers issue #28: the final pre-merge gate re-check and the
+    post-merge audit that catches whatever still slips through the
+    read-to-merge gap.
+    """
+
+    def test_approval_withdrawn_between_penultimate_and_final_read_defers(self):
+        self._script_pr_view({}, {"labels": []})
+
+        result, state = self._run_process_pr()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertIn("42", state["prs"])
+
+    def test_post_merge_audit_detects_missing_approve_label(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_pr_view({}, {}, {"labels": []})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run_process_pr()
+
+        message = str(raised.exception)
+        self.assertIn("42", message)
+        self.assertIn(self.head_sha, message)
+        self.assertIn(drain_prs.APPROVE_LABEL, message)
+        self.assertEqual(len(self._pr_view_calls()), 3)
+
+    def test_post_merge_audit_detects_changes_requested_label(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_pr_view(
+            {},
+            {},
+            {
+                "labels": [
+                    {"name": drain_prs.APPROVE_LABEL},
+                    {"name": drain_prs.CHANGES_LABEL},
+                ]
+            },
+        )
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run_process_pr()
+
+        self.assertIn(drain_prs.CHANGES_LABEL, str(raised.exception))
+
+    def test_post_merge_audit_detects_head_mismatch(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        other_sha = "f" * 40
+        self._script_pr_view({}, {}, {"headRefOid": other_sha})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run_process_pr()
+
+        message = str(raised.exception)
+        self.assertIn(self.head_sha, message)
+        self.assertIn(other_sha, message)
+
+    def test_post_merge_audit_detects_required_check_regressions(self):
+        # configured_check_state()/classify_check() only ever produce three
+        # non-success classes (missing, pending, failure -- the latter also
+        # covering SKIPPED/CANCELLED conclusions), so those three cover the
+        # space regardless of which of the two configured checks regresses.
+        names = {
+            "ci": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            "review": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        }
+        green = {
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "completedAt": "2026-07-18T00:00:01Z",
+        }
+        violations = {
+            "missing": None,
+            "pending": {"status": "IN_PROGRESS"},
+            "failure": {"status": "COMPLETED", "conclusion": "FAILURE"},
+        }
+        for kind, check_name in names.items():
+            other_kind = "review" if kind == "ci" else "ci"
+            other_entry = {"name": names[other_kind], **green}
+            for violation, entry_overrides in violations.items():
+                with self.subTest(kind=kind, violation=violation):
+                    self._build_fixture()
+                    rollup = [other_entry]
+                    if entry_overrides is not None:
+                        rollup.append({"name": check_name, **entry_overrides})
+                    self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+                    self._script_pr_view(
+                        {}, {}, {"statusCheckRollup": rollup}
+                    )
+
+                    with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+                        self._run_process_pr()
+
+                    self.assertIn(check_name, str(raised.exception))
+
+    def test_post_merge_audit_allows_a_disabled_check(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._script_pr_view(
+            {},
+            {},
+            {
+                "statusCheckRollup": [
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-07-18T00:00:00Z",
+                    }
+                ]
+            },
+        )
+        gates = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=None,
+        )
+
+        result, state = self._run_process_pr(gates=gates)
+
+        self.assertTrue(result)
+        self.assertNotIn("42", state["prs"])
+
+    def test_post_merge_audit_read_failure_is_fatal(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_pr_view({}, {})
+        self.fake.script(
+            "gh", ["pr", "view", "42"], stderr="boom", exit_code=1
+        )
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run_process_pr()
+
+        self.assertIn("boom", str(raised.exception))
+
+    def test_post_merge_audit_error_stops_the_loop_instead_of_retrying(self):
+        self.fake.script(
+            "gh",
+            ["pr", "list"],
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                        "isDraft": False,
+                        "headRefOid": self.head_sha,
+                    }
+                ]
+            ),
+        )
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_pr_view({}, {}, {"labels": []})
+        gates = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+        env_overrides = self.fake.environ_overrides()
+        with mock.patch.dict(os.environ, env_overrides):
+            with self.assertRaises(drain_prs.PostMergeAuditError):
+                drain_prs.loop(
+                    self.ctx,
+                    interval=0,
+                    once=True,
+                    dry_run=False,
+                    repair_conflicts=True,
+                    gates=gates,
+                )
 
 
 class WorktreeMatchingSafetyTests(unittest.TestCase):

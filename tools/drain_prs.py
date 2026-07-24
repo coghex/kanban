@@ -100,6 +100,10 @@ class ModelUnavailableError(DrainError):
     pass
 
 
+class PostMergeAuditError(DrainError):
+    pass
+
+
 @dataclass
 class RepoContext:
     path: Path
@@ -845,7 +849,74 @@ def update_branch(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> Non
         add_approval_label(ctx, number)
 
 
-def merge_pr(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> bool:
+def audit_merged_pr(
+    ctx: RepoContext,
+    number: int,
+    expected_head: str,
+    gates: GateConfig,
+) -> None:
+    # Samples state exactly once, immediately after the merge call returns.
+    # It mitigates the residual read-to-merge race (see the comment above
+    # the final gate re-check in process_pr()) by turning a slipped-through
+    # mutation into a loud incident instead of a silent merge -- it cannot
+    # eliminate the race, and it can still miss a mutation that lands and is
+    # reversed between this single sample and the merge itself.
+    try:
+        audited = get_pr(ctx, number)
+    except DrainError as exc:
+        raise PostMergeAuditError(
+            f"PR #{number}: post-merge audit read failed after merging "
+            f"{expected_head}: {exc}"
+        ) from exc
+
+    audited_head = audited.get("headRefOid")
+    labels = sorted(item["name"] for item in audited.get("labels", []))
+    check_names = {
+        "ci": gates.required_ci_check,
+        "review": gates.required_review_check,
+    }
+    check_evidence: dict[str, tuple[str | None, str | None, str | None]] = {}
+    problems: list[str] = []
+
+    if audited_head != expected_head:
+        problems.append(
+            f"audited head {audited_head} does not match merged head {expected_head}"
+        )
+    if not has_label(audited, APPROVE_LABEL):
+        problems.append(f"{APPROVE_LABEL!r} label missing")
+    if has_label(audited, CHANGES_LABEL):
+        problems.append(f"{CHANGES_LABEL!r} label present")
+    for kind, name in check_names.items():
+        state = configured_check_state(audited, name)
+        item = latest_check(audited, name) if name is not None else None
+        check_evidence[kind] = (
+            name,
+            item.get("status") if item else None,
+            item.get("conclusion") if item else None,
+        )
+        if not check_gate_satisfied(state):
+            problems.append(f"{kind} check {name!r} was {state}")
+
+    if not problems:
+        return
+
+    evidence = (
+        f"expected_head={expected_head} audited_head={audited_head} "
+        f"labels={labels} "
+        + " ".join(
+            f"{kind}_check={name} {kind}_status={status} {kind}_conclusion={conclusion}"
+            for kind, (name, status, conclusion) in check_evidence.items()
+        )
+    )
+    raise PostMergeAuditError(
+        f"PR #{number}: post-merge audit found a gate violation after "
+        f"merging {expected_head} ({'; '.join(problems)}); {evidence}"
+    )
+
+
+def merge_pr(
+    ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool, gates: GateConfig
+) -> bool:
     number = pr["number"]
     head_sha = pr["headRefOid"]
     log(f"PR #{number}: merging with admin merge commit")
@@ -868,6 +939,7 @@ def merge_pr(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> bool:
         check=False,
     )
     if proc.returncode == 0:
+        audit_merged_pr(ctx, number, head_sha, gates)
         return True
 
     refreshed = get_pr(ctx, number)
@@ -2126,7 +2198,12 @@ def process_pr(
 
     # Re-check mutable gate state immediately before the admin merge. The
     # match-head guard below covers a concurrent push; this covers a verdict
-    # withdrawal or a newly pending check on the same head.
+    # withdrawal or a newly pending check on the same head. A mutation that
+    # lands in the remaining gap between this read and the merge call can
+    # still slip through unnoticed -- that residual race is not eliminated,
+    # only mitigated: merge_pr() audits the post-merge state right after a
+    # successful merge and raises a fatal PostMergeAuditError if it doesn't
+    # match what was just checked here.
     pr = get_pr(ctx, number)
     if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
         log(f"PR #{number}: approval changed before merge; deferring")
@@ -2142,7 +2219,7 @@ def process_pr(
         log(f"PR #{number}: review gate changed before merge; deferring")
         return True
 
-    merged = merge_pr(ctx, pr, dry_run=dry_run)
+    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates)
     if not merged:
         return True
     cleanup_after_merge(ctx, pr, dry_run=dry_run)
@@ -2263,7 +2340,7 @@ def loop(
                         state=state,
                         gates=gates,
                     )
-                except ModelUnavailableError:
+                except (ModelUnavailableError, PostMergeAuditError):
                     raise
                 except DrainError as exc:
                     cooldown = record_pr_failure(state, number, str(exc))

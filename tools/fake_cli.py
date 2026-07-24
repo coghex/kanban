@@ -33,6 +33,10 @@ def _calls_path(state_dir: Path, binary: str) -> Path:
     return state_dir / f"{binary}.calls.jsonl"
 
 
+def _match_counts_path(state_dir: Path, binary: str) -> Path:
+    return state_dir / f"{binary}.match_counts.json"
+
+
 def run_as(binary: str, argv: list[str]) -> int:
     """Entry point executed by the installed shim scripts."""
     state_dir = Path(os.environ["FAKE_CLI_STATE_DIR"])
@@ -47,15 +51,31 @@ def run_as(binary: str, argv: list[str]) -> int:
             if line.strip():
                 entries.append(json.loads(line))
 
-    for entry in entries:
-        match = entry["match"]
-        if argv[: len(match)] == match:
-            sys.stdout.write(entry.get("stdout", ""))
-            sys.stderr.write(entry.get("stderr", ""))
-            return entry.get("exit_code", 0)
+    matching = [entry for entry in entries if argv[: len(entry["match"])] == entry["match"]]
+    if not matching:
+        sys.stderr.write(f"fake_cli: no scripted response for {binary} {argv}\n")
+        return 99
 
-    sys.stderr.write(f"fake_cli: no scripted response for {binary} {argv}\n")
-    return 99
+    # Entries scripted with the exact same match are a queue: the Nth call
+    # for that match returns the Nth scripted entry, so a scenario can give
+    # different snapshots to repeated calls of the same command (e.g. three
+    # `gh pr view 42` responses for the penultimate, final, and post-merge
+    # reads). Once exhausted, later calls repeat the last entry, so a test
+    # that scripts a single response for a repeated command keeps working
+    # unmodified.
+    counts_path = _match_counts_path(state_dir, binary)
+    counts = json.loads(counts_path.read_text(encoding="utf-8")) if counts_path.exists() else {}
+    match = matching[0]["match"]
+    key = json.dumps(match)
+    same_match = [entry for entry in entries if entry["match"] == match]
+    index = min(counts.get(key, 0), len(same_match) - 1)
+    entry = same_match[index]
+    counts[key] = index + 1
+    counts_path.write_text(json.dumps(counts), encoding="utf-8")
+
+    sys.stdout.write(entry.get("stdout", ""))
+    sys.stderr.write(entry.get("stderr", ""))
+    return entry.get("exit_code", 0)
 
 
 class FakeCli:
@@ -68,6 +88,10 @@ class FakeCli:
         with mock.patch.dict(os.environ, fake.environ_overrides()):
             drain_prs.process_pr(...)
         fake.calls("gh")  # -> recorded invocations for assertions
+
+    Calling script() more than once with the same `match` queues additional
+    responses: the Nth call to a matching command returns the Nth scripted
+    entry, repeating the last one once the queue is exhausted.
     """
 
     def __init__(self, root: Path):
