@@ -37,7 +37,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (IOException, try)
-import Control.Monad (void, when)
+import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
@@ -647,32 +647,31 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- snapshot for a *confirmed* leader (already the complete group, not just
 -- the leader alone -- see 'managedProcess'). A gap still remains, though:
 -- a child forked *after* that snapshot but *before* the watcher's first
--- independent tick has nothing seeded to overlap with if the leader exits
--- in between (see 'recordCensusTick's continuity rule) -- 'known' would
--- then never be able to record it, ever, since nothing would ever again
--- overlap a permanently-vanished leader-only seed. The first several ticks
--- therefore run in a rapid burst ('bootstrapBurstTicks' of them,
--- 'bootstrapBurstIntervalMicros' apart) rather than immediately settling
--- into the steady 'censusIntervalMicros' cadence -- this narrows, without
--- eliminating, that specific window: a child forked and a leader exiting
--- both within a single burst interval could still be missed, but the
--- interval is far shorter than the steady-state one, so a real tool's
--- ordinary startup sequence (fork any helper children, then keep running)
--- is now overwhelmingly likely to have at least one burst tick land while
--- the leader is still alive to serve as the overlap anchor. Once the burst
--- is exhausted, ticking settles into the normal, steady cadence.
+-- independent tick has nothing in `known` to overlap with if the leader
+-- exits in between. Rather than merely narrowing that window by ticking
+-- faster, 'recordCensusTick' closes it structurally: any tick whose
+-- reading does not overlap `known` -- because `known` is stale (this
+-- exact case) or still empty (a presumed leader, below) -- is compared
+-- against `pending`, the *previous* tick's own non-overlapping reading
+-- instead. Two consecutive ticks that agree with each other promote that
+-- reading into `known`, even though neither individually overlapped the
+-- original seed -- so a same-group child that outlives its own seeded
+-- leader still gets recognized, on the very next tick, once its own
+-- continuity across two readings is established on its own terms. The
+-- first several ticks additionally run in a rapid burst
+-- ('bootstrapBurstTicks' of them, 'bootstrapBurstIntervalMicros' apart)
+-- rather than immediately settling into the steady 'censusIntervalMicros'
+-- cadence, so that second confirming tick -- and therefore this whole
+-- recovery path -- lands quickly rather than waiting out a full,
+-- comparatively long steady-state interval. Once the burst is exhausted,
+-- ticking settles into the normal, steady cadence.
 --
 -- A merely *presumed* leader has no seed at all -- `known` starts empty --
 -- but a watcher still runs for it (unlike a fully unverified/no-pid
--- process, which gets none at all): with nothing seeded, the very first
--- tick could only ever bootstrap trust from a single, unwitnessed reading,
--- exactly the blind trust this design exists to avoid. 'recordCensusTick'
--- instead requires *two consecutive* ticks to agree before treating an
--- empty `known` as bootstrapped -- a stability requirement, not a single
--- snapshot -- so a presumed leader's genuine, still-running group (or a
--- same-group child outliving a leader too fast to survive its own
--- verification) still gets a real, if narrower and slower, path to
--- provenance-backed cleanup, rather than being refused unresolved forever.
+-- process, which gets none at all): the exact same two-consecutive-tick
+-- `pending` mechanism is what gives it a real, if narrower and slower,
+-- path to provenance-backed cleanup too, rather than being refused
+-- unresolved forever purely because nothing was ever seeded.
 startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ Nothing _ = pure (pure [], pure [])
 startEmbeddedCensusWith takeSnapshot (Just pid) seedMembers = do
@@ -717,16 +716,25 @@ startEmbeddedCensusWith takeSnapshot (Just pid) seedMembers = do
 -- a genuine sibling of that continuing spawn, not a fresh occupant that
 -- arrived sometime after the last trusted member vanished.
 --
--- The one exception is bootstrapping an empty `known` (a *presumed*
--- leader -- see 'startEmbeddedCensusWith'): there, a tick's reading is
--- instead compared against `pending` (whatever the *previous* tick saw,
--- also while `known` was still empty). Two consecutive ticks that agree
--- (via the same 'membersStillInGroup' overlap check) are what promotes a
--- reading into `known` for the first time; a single, unconfirmed reading
--- never is. A tick with no overlap at all -- against `known` when it is
--- populated, or against `pending` when it is not -- changes neither: not
--- extended, not (re)bootstrapped, rather than risk folding in a reused
--- foreign group.
+-- When a tick's reading does *not* overlap `known` -- whether `known` is
+-- still empty (a *presumed* leader -- see 'startEmbeddedCensusWith') or
+-- was seeded/already extended but has since gone stale (a *confirmed*
+-- leader that exited, taking every `known` identity down with it, before
+-- any tick could catch a same-group child forked just beforehand) -- the
+-- reading is compared against `pending` instead: whatever the *previous*
+-- tick saw, also without overlapping `known` at the time. Two consecutive
+-- ticks that agree with each other (via the same 'membersStillInGroup'
+-- overlap check) are what promotes a reading into `known` when `known`
+-- itself could not vouch for it; a single, unconfirmed reading never is.
+-- This applies uniformly regardless of whether `known` is currently empty
+-- or merely stale, closing the same fast-exit gap for a leader that
+-- forked a child moments before dying that 'startEmbeddedCensusWith's
+-- verification-time seed alone cannot: a real, continuously-present child
+-- gets a second chance to be recognized on the very next tick, even once
+-- its own seeded anchor is already gone. A tick with no overlap at all --
+-- against `known`, and no agreement with `pending` either -- changes
+-- neither: not extended, not (re)bootstrapped, rather than risk folding in
+-- a reused foreign group from a single, one-off reading.
 recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO Bool
 recordCensusTick takeSnapshot pid stateRef = do
   snapshot <- takeSnapshot
@@ -738,9 +746,9 @@ recordCensusTick takeSnapshot pid stateRef = do
         (known, pending) <- readIORef stateRef
         let overlapsKnown = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
             overlapsPending = not (null (membersStillInGroup groupPidInt processes (Set.toList pending)))
-        if overlapsKnown || (Set.null known && overlapsPending)
+        if overlapsKnown || overlapsPending
           then atomicModifyIORef' stateRef (\(currentKnown, _) -> ((foldr Set.insert currentKnown groupMembers, Set.fromList groupMembers), ()))
-          else when (Set.null known) (atomicModifyIORef' stateRef (\(currentKnown, _) -> ((currentKnown, Set.fromList groupMembers), ())))
+          else atomicModifyIORef' stateRef (\(currentKnown, _) -> ((currentKnown, Set.fromList groupMembers), ()))
         pure True
   where
     groupPidInt = fromIntegral pid

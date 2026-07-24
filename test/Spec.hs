@@ -667,6 +667,53 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
+    it "a confirmed leader's census still reaches a same-group child even when its own seed can never again overlap anything real, once two ticks confirm the child on its own terms" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.3; exit 0"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        -- Forces 'verifyGroupLeaderWith' to confirm a leader with a
+        -- deliberately *wrong* start time -- a seed that can never again
+        -- match any real reading, no matter how long the real leader
+        -- stays alive. This simulates the worst case of the exact race
+        -- this test targets (a child forked after verification, leader
+        -- exiting before the watcher's first independent tick): the
+        -- census's only possible path to ever recording the child at all
+        -- is the two-consecutive-tick `pending` mechanism confirming the
+        -- child on its own terms, with no help whatsoever from the
+        -- original seed overlapping anything real.
+        let staleLeaderIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "a moment that never really happened",
+                  processIdentityCommand = "stale-seed-placeholder"
+                }
+        callCount <- newIORef (0 :: Int)
+        let stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              if count == (0 :: Int) then pure (Right [staleLeaderIdentity]) else defaultProcessSnapshot
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldBe` Nothing
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            waitForMember attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
+        waitForMember 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000
