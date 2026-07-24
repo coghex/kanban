@@ -43,7 +43,7 @@ import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
 import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, terminateProcess)
+import System.Process (ProcessHandle, getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import Text.Read (readMaybe)
 
 data ProcessIdentity = ProcessIdentity
@@ -57,7 +57,7 @@ data ProcessIdentity = ProcessIdentity
   deriving anyclass (FromJSON, ToJSON)
 
 data ManagedProcess
-  = LocalManagedProcess ProcessHandle
+  = LocalManagedProcess ProcessHandle (Maybe CPid)
   | PersistentManagedProcess CPid
 
 -- | Wraps a freshly spawned local process handle as a 'ManagedProcess'.
@@ -71,37 +71,43 @@ data ManagedProcess
 -- so a violated precondition is surfaced immediately via the 'Just' case
 -- rather than only showing up later as an inexplicably unkillable process
 -- tree.
+--
+-- The PID is captured here, while the process is known to still be alive,
+-- and carried in the value rather than re-derived from the handle at
+-- signal time: 'getPid' goes 'Nothing' once the handle has been reaped
+-- (the leader exited and something already observed its exit code), which
+-- would otherwise leave a still-running group member — signalled via the
+-- exact same recorded pgid regardless of the leader's own reap state — with
+-- nothing left to reach it.
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcess processHandle = do
-  problem <- verifyGroupLeader processHandle
-  pure (LocalManagedProcess processHandle, problem)
+  spawnedPid <- getPid processHandle
+  problem <- verifyGroupLeader spawnedPid
+  pure (LocalManagedProcess processHandle spawnedPid, problem)
 
 -- | Confirms, via a fresh process snapshot, that a freshly spawned local
 -- process leads its own process group.
-verifyGroupLeader :: ProcessHandle -> IO (Maybe Text)
-verifyGroupLeader processHandle = do
-  maybePid <- getPid processHandle
-  case maybePid of
-    Nothing -> pure (Just "process has no PID to verify group leadership")
-    Just pid -> do
-      snapshot <- defaultProcessSnapshot
-      pure $ case snapshot of
-        Left message -> Just ("could not take a process snapshot to verify group leadership: " <> message)
-        Right processes -> case identityForPid (fromIntegral pid) processes of
-          Nothing -> Just "process was not found in a fresh process snapshot"
-          Just identity
-            | identity.processIdentityGroupPid == identity.processIdentityPid -> Nothing
-            | otherwise -> Just "process is not the leader of its own process group"
+verifyGroupLeader :: Maybe CPid -> IO (Maybe Text)
+verifyGroupLeader Nothing = pure (Just "process has no PID to verify group leadership")
+verifyGroupLeader (Just pid) = do
+  snapshot <- defaultProcessSnapshot
+  pure $ case snapshot of
+    Left message -> Just ("could not take a process snapshot to verify group leadership: " <> message)
+    Right processes -> case identityForPid (fromIntegral pid) processes of
+      Nothing -> Just "process was not found in a fresh process snapshot"
+      Just identity
+        | identity.processIdentityGroupPid == identity.processIdentityPid -> Nothing
+        | otherwise -> Just "process is not the leader of its own process group"
 
 managedProcessGroup :: CPid -> ManagedProcess
 managedProcessGroup = PersistentManagedProcess
 
 managedProcessPid :: ManagedProcess -> IO (Maybe CPid)
-managedProcessPid (LocalManagedProcess processHandle) = getPid processHandle
+managedProcessPid (LocalManagedProcess processHandle _) = getPid processHandle
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
 
 managedProcessStopsWithDashboard :: ManagedProcess -> Bool
-managedProcessStopsWithDashboard (LocalManagedProcess _) = True
+managedProcessStopsWithDashboard (LocalManagedProcess _ _) = True
 managedProcessStopsWithDashboard (PersistentManagedProcess _) = False
 
 readProcessSnapshot :: IO (Either Text [ProcessIdentity])
@@ -283,44 +289,46 @@ isZombieStat :: Text -> Bool
 isZombieStat = Text.isInfixOf "Z"
 
 interruptManagedProcess :: ManagedProcess -> IO ()
-interruptManagedProcess (LocalManagedProcess processHandle) = signalOwnedGroup sigINT processHandle
+interruptManagedProcess (LocalManagedProcess processHandle capturedPid) = signalOwnedGroup sigINT processHandle capturedPid
 interruptManagedProcess (PersistentManagedProcess processId) = ignoreIOException (signalProcessGroup sigINT processId)
 
 -- | Ctrl-C's escalation for a still-owned process: SIGINT first, then fall
--- back to 'killManagedProcess's bounded TERM/KILL escalation only if the
--- process is still alive after the grace window. 'killManagedProcess'
--- already no-ops once a local process has exited and safely ignores an
--- absent persistent group (ESRCH), so no separate liveness check is needed
--- here before falling back to it.
+-- back to 'killManagedProcess's bounded TERM/KILL escalation regardless of
+-- whether the process still looks alive after the grace window — signalling
+-- an already-gone recorded group is a harmless no-op (ESRCH), and skipping
+-- it on a guess would risk leaving a surviving group member unsignalled.
 interruptThenKillManagedProcess :: ManagedProcess -> IO ()
 interruptThenKillManagedProcess process = do
   interruptManagedProcess process
   threadDelay terminationGraceMicros
   killManagedProcess process
 
+-- | TERM, a grace period, then KILL — signalling the pgid captured at spawn
+-- time regardless of whether the leader's own handle has already been
+-- reaped, so a leader that exited (naturally or otherwise) before this ran
+-- never leaves a surviving group member unsignalled. This is deliberately
+-- unconditional: confirming the group is actually empty first would need a
+-- process-table census, which is out of scope for this best-effort
+-- ownership mechanism (see issue #16). 'waitForProcess', not the
+-- non-blocking 'getProcessExitCode', reaps the handle last: SIGKILL cannot
+-- be caught or deferred, so the leader (if it was ever actually still
+-- running) dies essentially immediately, and this blocks only long enough
+-- to guarantee it is actually reaped rather than possibly left a zombie.
 killManagedProcess :: ManagedProcess -> IO ()
-killManagedProcess (LocalManagedProcess processHandle) = do
-  exitCode <- getProcessExitCode processHandle
-  case exitCode of
-    Just _ -> pure ()
-    Nothing -> do
-      signalOwnedGroup sigTERM processHandle
-      threadDelay terminationGraceMicros
-      stopped <- getProcessExitCode processHandle
-      case stopped of
-        Just _ -> pure ()
-        Nothing -> signalOwnedGroup sigKILL processHandle
+killManagedProcess (LocalManagedProcess processHandle capturedPid) = do
+  signalOwnedGroup sigTERM processHandle capturedPid
+  threadDelay terminationGraceMicros
+  signalOwnedGroup sigKILL processHandle capturedPid
+  void (waitForProcess processHandle)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
   ignoreIOException (signalProcessGroup sigKILL processId)
 
-signalOwnedGroup :: Signal -> ProcessHandle -> IO ()
-signalOwnedGroup signal processHandle = do
-  processId <- getPid processHandle
-  case processId of
-    Just pid -> signalGroupOrOwnedPid signal pid
-    Nothing -> ignoreIOException (terminateProcess processHandle)
+signalOwnedGroup :: Signal -> ProcessHandle -> Maybe CPid -> IO ()
+signalOwnedGroup signal processHandle capturedPid = case capturedPid of
+  Just pid -> signalGroupOrOwnedPid signal pid
+  Nothing -> ignoreIOException (terminateProcess processHandle)
 
 -- | Signals the process group led by `pid`; when no such group exists
 -- (ESRCH — e.g. `pid` was never actually a group leader), falls back to
