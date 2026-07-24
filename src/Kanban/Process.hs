@@ -37,7 +37,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (IOException, try)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
@@ -645,110 +645,92 @@ watchManagedProcessCensus = pure . managedProcessCensus
 --
 -- `known` starts seeded directly from 'verifyGroupLeaderWith's own
 -- snapshot for a *confirmed* leader (already the complete group, not just
--- the leader alone -- see 'managedProcess'). A gap still remains, though:
--- a child forked *after* that snapshot but *before* the watcher's first
--- independent tick has nothing in `known` to overlap with if the leader
--- exits in between. Rather than merely narrowing that window by ticking
--- faster, 'recordCensusTick' closes it structurally: any tick whose
--- reading does not overlap `known` -- because `known` is stale (this
--- exact case) or still empty (a presumed leader, below) -- is compared
--- against `pending`, the *previous* tick's own non-overlapping reading
--- instead. Two consecutive ticks that agree with each other promote that
--- reading into `known`, even though neither individually overlapped the
--- original seed -- so a same-group child that outlives its own seeded
--- leader still gets recognized, on the very next tick, once its own
--- continuity across two readings is established on its own terms. The
--- first several ticks additionally run in a rapid burst
+-- the leader alone -- see 'managedProcess'). A gap remains: a child forked
+-- *after* that snapshot but *before* the watcher's first independent tick
+-- has nothing in `known` to overlap with if the leader exits in between,
+-- and 'known' can then never record it -- not on that tick, and not ever
+-- afterward, since nothing would ever again overlap a permanently-vanished
+-- seed. An earlier design tried closing this by promoting a reading two
+-- consecutive ticks agreed on even without any tie to the original seed;
+-- that opened exactly the reuse risk this whole file exists to prevent
+-- (an unrelated process that happens to occupy a freshly-reused pgid for
+-- two ticks would have been promoted just as readily as a genuine
+-- descendant), so 'recordCensusTick' does not do that. `known` may only
+-- ever be extended by overlapping `known` itself -- there is no second
+-- path. This is a deliberate, accepted trade: a child forked in that exact
+-- narrow window is left permanently unresolved (see 'killCensusVerified',
+-- which reports exactly that rather than ever guessing) rather than risk
+-- signalling a process this design was never able to verify belongs to
+-- this spawn at all. The first several ticks still run in a rapid burst
 -- ('bootstrapBurstTicks' of them, 'bootstrapBurstIntervalMicros' apart)
 -- rather than immediately settling into the steady 'censusIntervalMicros'
--- cadence, so that second confirming tick -- and therefore this whole
--- recovery path -- lands quickly rather than waiting out a full,
--- comparatively long steady-state interval. Once the burst is exhausted,
--- ticking settles into the normal, steady cadence.
+-- cadence, narrowing -- without pretending to eliminate -- how long that
+-- window stays open, before settling into the normal, steady cadence.
 --
--- A merely *presumed* leader has no seed at all -- `known` starts empty --
--- but a watcher still runs for it (unlike a fully unverified/no-pid
--- process, which gets none at all): the exact same two-consecutive-tick
--- `pending` mechanism is what gives it a real, if narrower and slower,
--- path to provenance-backed cleanup too, rather than being refused
--- unresolved forever purely because nothing was ever seeded.
+-- A merely *presumed* leader has no seed at all: no watcher is even
+-- started for it (unlike a confirmed one), since there is nothing it
+-- could ever legitimately extend from, and bootstrapping trust from an
+-- unwitnessed pid would be exactly the same risk. Its cleanup is
+-- consequently unresolved from the outset, for the same reason.
 startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ Nothing _ = pure (pure [], pure [])
+startEmbeddedCensusWith _ (Just _) [] = pure (pure [], pure [])
 startEmbeddedCensusWith takeSnapshot (Just pid) seedMembers = do
-  stateRef <- newIORef (Set.fromList seedMembers, Set.empty)
-  watcherId <- forkIO (watchLoop stateRef bootstrapBurstTicks True)
-  pure (peek stateRef, stopAndCollect watcherId stateRef)
+  knownRef <- newIORef (Set.fromList seedMembers)
+  watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks True)
+  pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
-    peek :: IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO [ProcessIdentity]
-    peek stateRef = Set.toList . fst <$> readIORef stateRef
-    stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO [ProcessIdentity]
-    stopAndCollect watcherId stateRef = do
+    peek :: IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
+    peek knownRef = Set.toList <$> readIORef knownRef
+    stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
+    stopAndCollect watcherId knownRef = do
       killThread watcherId
-      Set.toList . fst <$> readIORef stateRef
-    watchLoop :: IORef (Set ProcessIdentity, Set ProcessIdentity) -> Int -> Bool -> IO ()
+      Set.toList <$> readIORef knownRef
+    watchLoop :: IORef (Set ProcessIdentity) -> Int -> Bool -> IO ()
     watchLoop _ _ False = pure ()
-    watchLoop stateRef burstTicksLeft True = do
+    watchLoop knownRef burstTicksLeft True = do
       threadDelay (if burstTicksLeft > 0 then bootstrapBurstIntervalMicros else censusIntervalMicros)
-      stillOpen <- recordCensusTick takeSnapshot pid stateRef
-      watchLoop stateRef (max 0 (burstTicksLeft - 1)) stillOpen
+      stillOpen <- recordCensusTick takeSnapshot pid knownRef
+      watchLoop knownRef (max 0 (burstTicksLeft - 1)) stillOpen
 
 -- | Records one tick of a census (see 'startEmbeddedCensusWith'). Returns
 -- 'True' while the group still has any live members at all (the watcher
 -- should keep going), or 'False' the moment a tick finds it genuinely
--- empty (the watcher should stop itself) -- but never clears the `known`
--- half of the state either way, so a census that once recorded real
--- members and has since gone empty stays distinguishable from one that
--- has never recorded anything at all (see 'startEmbeddedCensusWith' for
--- why that distinction matters). A snapshot failure is treated as
--- inconclusive, not as emptiness -- it changes nothing, and reports 'True'
--- so the watcher keeps trying on its next tick rather than prematurely
--- giving up on a still-live group.
+-- empty (the watcher should stop itself) -- but never clears `knownRef`
+-- either way, so a census that once recorded real members and has since
+-- gone empty stays distinguishable from one that has never recorded
+-- anything at all (see 'startEmbeddedCensusWith' for why that distinction
+-- matters). A snapshot failure is treated as inconclusive, not as
+-- emptiness -- it neither adds nor clears anything, and reports 'True' so
+-- the watcher keeps trying on its next tick rather than prematurely giving
+-- up on a still-live group.
 --
 -- Sampling only every 'censusIntervalMicros' -- not continuously -- leaves
 -- a real gap: the *entire* original group could exit and this exact pgid
 -- get reused by a fully unrelated process, all within a single interval,
 -- with no tick ever observing genuine emptiness in between. A tick's
--- freshly-observed `groupMembers` is therefore only ever merged into
--- `known` when it overlaps (by identity-and-group continuity, the same
--- 'membersStillInGroup' check used everywhere else) what `known` already
--- trusted -- proof that at least one already-trusted identity was *still
--- alive* at this exact tick, so whatever else shares its pgid right now is
--- a genuine sibling of that continuing spawn, not a fresh occupant that
--- arrived sometime after the last trusted member vanished.
---
--- When a tick's reading does *not* overlap `known` -- whether `known` is
--- still empty (a *presumed* leader -- see 'startEmbeddedCensusWith') or
--- was seeded/already extended but has since gone stale (a *confirmed*
--- leader that exited, taking every `known` identity down with it, before
--- any tick could catch a same-group child forked just beforehand) -- the
--- reading is compared against `pending` instead: whatever the *previous*
--- tick saw, also without overlapping `known` at the time. Two consecutive
--- ticks that agree with each other (via the same 'membersStillInGroup'
--- overlap check) are what promotes a reading into `known` when `known`
--- itself could not vouch for it; a single, unconfirmed reading never is.
--- This applies uniformly regardless of whether `known` is currently empty
--- or merely stale, closing the same fast-exit gap for a leader that
--- forked a child moments before dying that 'startEmbeddedCensusWith's
--- verification-time seed alone cannot: a real, continuously-present child
--- gets a second chance to be recognized on the very next tick, even once
--- its own seeded anchor is already gone. A tick with no overlap at all --
--- against `known`, and no agreement with `pending` either -- changes
--- neither: not extended, not (re)bootstrapped, rather than risk folding in
--- a reused foreign group from a single, one-off reading.
-recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO Bool
-recordCensusTick takeSnapshot pid stateRef = do
+-- freshly-observed `groupMembers` is therefore only ever merged into the
+-- trusted census when it overlaps (by identity-and-group continuity, the
+-- same 'membersStillInGroup' check used everywhere else) what the census
+-- already trusted -- proof that at least one already-trusted identity was
+-- *still alive* at this exact tick, so whatever else shares its pgid right
+-- now is a genuine sibling of that continuing spawn, not a fresh occupant
+-- that arrived sometime after the last trusted member vanished. A tick
+-- with zero such overlap leaves the census exactly as it was -- unresolved
+-- for this tick, not extended -- rather than risk folding in a reused
+-- foreign group. There is no other path to extending `known`; see
+-- 'startEmbeddedCensusWith' for why.
+recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
+recordCensusTick takeSnapshot pid knownRef = do
   snapshot <- takeSnapshot
   case snapshot of
     Left _ -> pure True
     Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
       [] -> pure False
       groupMembers -> do
-        (known, pending) <- readIORef stateRef
-        let overlapsKnown = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
-            overlapsPending = not (null (membersStillInGroup groupPidInt processes (Set.toList pending)))
-        if overlapsKnown || overlapsPending
-          then atomicModifyIORef' stateRef (\(currentKnown, _) -> ((foldr Set.insert currentKnown groupMembers, Set.fromList groupMembers), ()))
-          else atomicModifyIORef' stateRef (\(currentKnown, _) -> ((currentKnown, Set.fromList groupMembers), ()))
+        known <- readIORef knownRef
+        let continuous = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
+        when continuous (atomicModifyIORef' knownRef (\current -> (foldr Set.insert current groupMembers, ())))
         pure True
   where
     groupPidInt = fromIntegral pid

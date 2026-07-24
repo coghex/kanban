@@ -52,7 +52,7 @@ module Kanban.Review
 where
 
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay, withMVar)
-import Control.Exception (Exception, IOException, displayException, finally, try)
+import Control.Exception (Exception, IOException, bracket_, displayException, finally, try)
 import Control.Monad (forever, unless, void, when)
 import Data.Aeson
   ( FromJSON (..),
@@ -297,10 +297,14 @@ data ReviewClient = ReviewClient
     reviewToolProcesses :: MVar ToolRegistry,
     -- | Counts tool invocations currently between a successful
     -- 'reserveToolInvocation' and their own final cleanup (deregister or
-    -- 'registerOrphanedToolProcess'), so 'drainToolProcesses' can wait for
-    -- every in-flight straggler to finish its own best-effort cleanup
-    -- before a whole-client shutdown returns -- see 'awaitNoInFlightInvocations'.
-    reviewInFlightInvocations :: MVar Int,
+    -- 'registerOrphanedToolProcess'), keyed by owning thread, so
+    -- 'drainToolProcesses' can wait for every in-flight straggler
+    -- client-wide before a whole-client shutdown returns (see
+    -- 'awaitNoInFlightInvocations'), and 'killReviewTools' can wait for
+    -- just its own thread's stragglers (see
+    -- 'awaitNoInFlightInvocationsFor') without blocking on unrelated
+    -- threads' work.
+    reviewInFlightInvocations :: MVar (Map Text Int),
     reviewEventSink :: ReviewEvent -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
@@ -570,7 +574,7 @@ startReviewClient workflowConfig repository eventSink = do
       pendingRequests <- newMVar Map.empty
       threadIssues <- newMVar Map.empty
       toolProcesses <- newMVar emptyToolRegistry
-      inFlightInvocations <- newMVar 0
+      inFlightInvocations <- newMVar Map.empty
       outputDone <- newEmptyMVar
       errorDone <- newEmptyMVar
       let client =
@@ -643,7 +647,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
   pendingRequests <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolProcesses <- newMVar emptyToolRegistry
-  inFlightInvocations <- newMVar 0
+  inFlightInvocations <- newMVar Map.empty
   outputDone <- newEmptyMVar
   errorDone <- newEmptyMVar
   pure
@@ -792,39 +796,58 @@ interruptReview client threadId turnId =
     (object ["threadId" .= threadId, "turnId" .= turnId])
 
 -- | Marks an invocation 'reserveToolInvocation' has already counted as
--- in-flight (see there for why the count is incremented atomically with
--- the reservation itself, not here) as finished once `action` completes,
--- however it completes -- covering every exit path (deregister,
--- 'registerOrphanedToolProcess', or an early-return failure) with one
--- wrapper around the whole invocation body.
-releaseInFlightInvocation :: ReviewClient -> IO a -> IO a
-releaseInFlightInvocation client action =
-  action `finally` modifyMVar_ client.reviewInFlightInvocations (pure . subtract 1)
+-- in-flight for `threadId` (see there for why the count is incremented
+-- atomically with the reservation itself, not here) as finished once
+-- `action` completes, however it completes -- covering every exit path
+-- (deregister, 'registerOrphanedToolProcess', or an early-return failure)
+-- with one wrapper around the whole invocation body.
+releaseInFlightInvocation :: ReviewClient -> Text -> IO a -> IO a
+releaseInFlightInvocation client threadId action =
+  action `finally` modifyMVar_ client.reviewInFlightInvocations (pure . Map.update releaseCount threadId)
+  where
+    releaseCount count
+      | count <= 1 = Nothing
+      | otherwise = Just (count - 1)
 
 -- | Blocks, with no attempt limit, until every invocation
--- 'reserveToolInvocation' counted as in-flight has finished its own cleanup
--- (see 'releaseInFlightInvocation'). Shutdown must retain ownership of a
--- straggler until it is genuinely done, not merely until some fixed budget
--- elapses: giving up early and returning would let 'stopReviewClient'
--- report itself finished while a spawned process (and its census watcher)
--- is still only reachable through that straggler's own in-progress
--- best-effort cleanup, with no other drain ever coming back for it. This
--- is safe to block on unboundedly because every code path that increments
--- the count is paired, via 'releaseInFlightInvocation's 'finally', with
--- exactly one decrement -- the count is therefore guaranteed to reach zero
--- once every already-bounded cleanup path (createProcess, the tool's own
--- capped timeout, 'killManagedProcessVerified's bounded retries,
--- 'Kanban.Review.confirmToolProcessTerminated's bounded retries) finishes,
--- however long that takes. Must only be called once new registrations are
--- already refused (i.e. after the registry has been closed), so the count
--- can only ever count down to zero, never be replenished by a fresh
+-- 'reserveToolInvocation' counted as in-flight -- for *any* thread -- has
+-- finished its own cleanup (see 'releaseInFlightInvocation'). Shutdown
+-- must retain ownership of a straggler until it is genuinely done, not
+-- merely until some fixed budget elapses: giving up early and returning
+-- would let 'stopReviewClient' report itself finished while a spawned
+-- process (and its census watcher) is still only reachable through that
+-- straggler's own in-progress best-effort cleanup, with no other drain
+-- ever coming back for it. This is safe to block on unboundedly because
+-- every code path that increments a thread's count is paired, via
+-- 'releaseInFlightInvocation's 'finally', with exactly one decrement --
+-- every count is therefore guaranteed to reach zero once every
+-- already-bounded cleanup path (createProcess, the tool's own capped
+-- timeout, 'killManagedProcessVerified's bounded retries,
+-- 'Kanban.Review.confirmToolProcessTerminated's bounded retries)
+-- finishes, however long that takes. Must only be called once new
+-- registrations are already refused client-wide (i.e. after the registry
+-- has been closed), so no count can ever be replenished by a fresh
 -- invocation racing in underneath.
 awaitNoInFlightInvocations :: ReviewClient -> IO ()
 awaitNoInFlightInvocations client = go
   where
     go = do
-      count <- readMVar client.reviewInFlightInvocations
-      when (count > 0) (threadDelay inFlightPollMicros >> go)
+      counts <- readMVar client.reviewInFlightInvocations
+      when (not (Map.null counts)) (threadDelay inFlightPollMicros >> go)
+
+-- | As 'awaitNoInFlightInvocations', but scoped to a single thread's own
+-- in-flight count -- used by 'killReviewTools' so cancelling one thread's
+-- turn does not block on unrelated threads' entirely unrelated in-flight
+-- work. Must only be called while `threadId` is already fenced against new
+-- registrations (see 'toolRegistryCancellingThreads'), so its count can
+-- only ever count down to zero for the duration of this wait, never be
+-- replenished underneath it.
+awaitNoInFlightInvocationsFor :: ReviewClient -> Text -> IO ()
+awaitNoInFlightInvocationsFor client threadId = go
+  where
+    go = do
+      counts <- readMVar client.reviewInFlightInvocations
+      when (Map.member threadId counts) (threadDelay inFlightPollMicros >> go)
 
 -- | Reserves a slot for a tool invocation about to be spawned, *before* any
 -- process exists -- so a concurrent drain (below) can see and cancel it
@@ -855,7 +878,7 @@ reserveToolInvocation client threadId = do
     if registry.toolRegistryClosed || Map.member threadId registry.toolRegistryCancellingThreads
       then pure (registry, False)
       else do
-        modifyMVar_ client.reviewInFlightInvocations (pure . (+ 1))
+        modifyMVar_ client.reviewInFlightInvocations (pure . Map.insertWith (+) threadId 1)
         pure (registry {toolRegistryEntries = Map.insert invocationId (ToolEntry threadId Nothing False) registry.toolRegistryEntries}, True)
   pure (if accepted then Just invocationId else Nothing)
 
@@ -928,16 +951,59 @@ deregisterToolProcess client invocationId =
 killReviewTools :: ReviewClient -> Text -> IO ()
 killReviewTools = killReviewToolsWith (pure ())
 
+-- | Fences `threadId` against new registrations (see
+-- 'toolRegistryCancellingThreads') for the duration of `action`, releasing
+-- the fence again once `action` returns or throws -- regardless of which.
+-- 'killReviewToolsWith' holds this for its *entire* body, not just its
+-- first claim step, so the fence stays active across the wait for that
+-- thread's own in-flight stragglers and the second drain that reaches any
+-- orphan entry they left behind (see 'drainToolProcesses' for the same
+-- two-phase shape at whole-client shutdown). Nested/overlapping fences of
+-- the same thread compose correctly: the ref-counted map only drops the
+-- entry once every holder has released it.
+withThreadFenced :: ReviewClient -> Text -> IO a -> IO a
+withThreadFenced client threadId =
+  bracket_
+    (modifyMVar_ client.reviewToolProcesses (\registry -> pure registry {toolRegistryCancellingThreads = Map.insertWith (+) threadId 1 registry.toolRegistryCancellingThreads}))
+    (modifyMVar_ client.reviewToolProcesses (\registry -> pure registry {toolRegistryCancellingThreads = Map.update releaseFence threadId registry.toolRegistryCancellingThreads}))
+  where
+    releaseFence count
+      | count <= 1 = Nothing
+      | otherwise = Just (count - 1)
+
 -- | As 'killReviewTools', but runs `afterClaim` right after this call's own
--- claim-and-fence step (see 'drainMatchingToolProcessesWith') and just
--- before it starts confirming anything -- exposed so tests can pause one
--- of two overlapping cancellations for the same thread right at that
--- point, to deterministically prove the fence stays active until *every*
--- concurrent fencer has released it (see 'ToolRegistry'), not just the
--- first to finish. Production code always calls this with @pure ()@.
+-- first claim step (see 'drainMatchingToolProcessesWith') and just before
+-- it starts confirming anything -- exposed so tests can pause one of two
+-- overlapping cancellations for the same thread right at that point, to
+-- deterministically prove the fence stays active until *every* concurrent
+-- fencer has released it (see 'ToolRegistry'), not just the first to
+-- finish. Production code always calls this with @pure ()@.
+--
+-- Two-phase, mirroring 'drainToolProcesses': the first drain only ever
+-- sees invocations that had already reached 'attachToolProcess' (or a
+-- reservation that never got that far) by the time this call's fence took
+-- effect. A straggler still between 'reserveToolInvocation' and its own
+-- spawn completing is invisible to it -- its reservation is claimed and
+-- dropped as (at the time) trivially confirmed, since 'toolEntryProcess'
+-- is still 'Nothing' -- and only surfaces, if its own best-effort
+-- 'confirmToolProcessTerminated' attempt fails, via
+-- 'registerOrphanedToolProcess' sometime *after* this first drain has
+-- already returned. Waiting for just `threadId`'s own in-flight stragglers
+-- (see 'awaitNoInFlightInvocationsFor', called only once the fence is
+-- already active so its count can only fall) and draining a second time is
+-- what actually reaches any orphan-registered entry those stragglers left
+-- behind, rather than leaving a cancelled tool unowned and live until some
+-- unrelated later cancellation or client shutdown happens to sweep it up.
+-- The fence itself is held by 'withThreadFenced' across both drains and
+-- the wait between them, so neither inner drain needs to fence again.
 killReviewToolsWith :: IO () -> ReviewClient -> Text -> IO ()
 killReviewToolsWith afterClaim client threadId =
-  drainMatchingToolProcessesWith afterClaim client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Just threadId}) ((== threadId) . toolEntryThread)
+  withThreadFenced client threadId $ do
+    drainMatchingToolProcessesWith afterClaim client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Nothing}) matchesThread
+    awaitNoInFlightInvocationsFor client threadId
+    drainMatchingToolProcessesWith (pure ()) client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Nothing}) matchesThread
+  where
+    matchesThread = (== threadId) . toolEntryThread
 
 data DrainOptions = DrainOptions
   { drainCloseRegistry :: Bool,
@@ -1455,7 +1521,7 @@ runGitHubCommand client threadId ghPath arguments input = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> releaseInFlightInvocation client $ do
+    Just invocationId -> releaseInFlightInvocation client threadId $ do
       started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
       case started of
         Left exception -> do
@@ -1602,7 +1668,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
-    Just invocationId -> releaseInFlightInvocation client $ do
+    Just invocationId -> releaseInFlightInvocation client threadId $ do
       beforeSpawn
       executable <- findExecutable "claude"
       case executable of

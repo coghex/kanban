@@ -589,50 +589,26 @@ main = hspec $ do
           Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
         void stopCensus
 
-    it "managedProcessWith never bootstraps census trust from a presumed (unverified) leader on a single, unconfirmed reading" $ do
+    it "managedProcessWith starts no watcher at all for a presumed (unverified) leader, leaving its census permanently empty" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
       Just pid <- getPid process
       let cleanup = void (try (signalProcessGroup sigKILL pid) :: IO (Either IOException ()))
       flip finally cleanup $ do
-        let foreignIdentity =
-              ProcessIdentity
-                { processIdentityPid = fromIntegral pid,
-                  processIdentityParentPid = 1,
-                  processIdentityGroupPid = fromIntegral pid,
-                  processIdentityStartedAt = "a much later moment",
-                  processIdentityCommand = "unrelated-foreign-leader"
-                }
-        callCount <- newIORef (0 :: Int)
-        -- The first snapshot -- 'verifyGroupLeaderWith's own leadership
-        -- check -- reports the leader not found at all, simulating a
-        -- fast-exiting leader whose own verification snapshot lost the
-        -- race: the "presumed" case. The very next snapshot (the census's
-        -- synchronous bootstrap tick) reports a *different* identity
-        -- occupying the exact same pid/pgid once, as if the kernel had
-        -- already reused it -- but every reading after that shows nothing
-        -- there at all, so that single appearance was never itself
-        -- genuinely stable.
-        let stubSnapshot = do
-              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
-              pure (Right (if count == (1 :: Int) then [foreignIdentity] else []))
+        -- Forces 'verifyGroupLeaderWith's own leadership check to report
+        -- the leader not found at all -- the "presumed" case -- even
+        -- though the real process is genuinely alive and would otherwise
+        -- be found by a real snapshot.
+        let stubSnapshot = pure (Right [])
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
         (peekCensus, stopCensus) <- watchManagedProcessCensus managed
-        -- Refuses to bootstrap from a single, unconfirmed tick: the
-        -- pending candidate was never reconfirmed by a second, agreeing
-        -- tick before the group was observed empty again.
         threadDelay 200000
         census <- peekCensus
         census `shouldBe` []
         void stopCensus
 
-    it "a presumed (unverified) leader's census still reaches a same-group child once two consecutive ticks confirm it, closing the fast-exit orphan gap" $ do
-      -- Lingers 500ms past forking the child before exiting -- long enough
-      -- for the census's two-consecutive-tick bootstrap requirement (see
-      -- recordCensusTick's `pending` state in "Kanban.Process") to
-      -- genuinely confirm the child's continuity before the leader
-      -- disappears.
+    it "a presumed (unverified) leader's census permanently leaves a same-group child unresolved, rather than ever promoting a reading with no tie to a verified seed" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.5; exit 0"]) {create_group = True}
       callCount <- newIORef (0 :: Int)
@@ -642,8 +618,9 @@ main = hspec $ do
             -- very first snapshot) is forced to see nothing, simulating a
             -- leader whose verification lost the race against its own
             -- near-instant exit -- the "presumed" case. Every later
-            -- snapshot (the census's own ticks, and the final,
-            -- real-scheduler-timed kill-confirmation checks) sees reality.
+            -- snapshot (which no watcher is ever started to consult, and
+            -- the final, real-scheduler-timed kill-confirmation checks)
+            -- would otherwise see reality.
             if count == (0 :: Int) then pure (Right []) else defaultProcessSnapshot
       (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
       groupLeaderProblem `shouldSatisfy` isJust
@@ -661,13 +638,15 @@ main = hspec $ do
                   | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
         waitForMember 50
         confirmed <- killManagedProcessVerified managed
-        confirmed `shouldBe` True
-        finalSnapshot <- readProcessSnapshot
-        case finalSnapshot of
+        confirmed `shouldBe` False
+        -- Left unresolved without ever signalling: the child is still
+        -- alive, since nothing was ever recorded to justify trusting it.
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
           Left message -> expectationFailure (Data.Text.unpack message)
-          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+          Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
 
-    it "a confirmed leader's census still reaches a same-group child even when its own seed can never again overlap anything real, once two ticks confirm the child on its own terms" $ do
+    it "a confirmed leader's census permanently leaves a same-group child unresolved once its own seed can never again overlap anything real, rather than ever promoting an unanchored reading" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.3; exit 0"]) {create_group = True}
       Just leaderPid <- getPid process
@@ -676,13 +655,11 @@ main = hspec $ do
         -- Forces 'verifyGroupLeaderWith' to confirm a leader with a
         -- deliberately *wrong* start time -- a seed that can never again
         -- match any real reading, no matter how long the real leader
-        -- stays alive. This simulates the worst case of the exact race
-        -- this test targets (a child forked after verification, leader
-        -- exiting before the watcher's first independent tick): the
-        -- census's only possible path to ever recording the child at all
-        -- is the two-consecutive-tick `pending` mechanism confirming the
-        -- child on its own terms, with no help whatsoever from the
-        -- original seed overlapping anything real.
+        -- stays alive -- simulating the exact race this test targets (a
+        -- child forked after verification, leader exiting before the
+        -- watcher's first independent tick). With `known` only ever
+        -- extendable by overlapping `known` itself, this seed can never
+        -- be extended, no matter how stably the child persists.
         let staleLeaderIdentity =
               ProcessIdentity
                 { processIdentityPid = fromIntegral leaderPid,
@@ -708,11 +685,13 @@ main = hspec $ do
                   | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
         waitForMember 50
         confirmed <- killManagedProcessVerified managed
-        confirmed `shouldBe` True
-        finalSnapshot <- readProcessSnapshot
-        case finalSnapshot of
+        confirmed `shouldBe` False
+        -- Left unresolved without ever signalling: the child is still
+        -- alive, since nothing was ever recorded to justify trusting it.
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
           Left message -> expectationFailure (Data.Text.unpack message)
-          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+          Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
