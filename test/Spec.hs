@@ -97,6 +97,7 @@ import Kanban.Review
     githubIssueViewArguments,
     githubLabelCreateArguments,
     killReviewTools,
+    killReviewToolsWith,
     newReviewClientForTesting,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
@@ -3000,6 +3001,47 @@ main = hspec $ do
           case result of
             Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
             other -> expectationFailure ("expected the held-open invocation to be refused once its reservation was cancelled, got " <> show other)
+
+    it "keeps a thread fenced against new registrations while a second, overlapping same-thread cancellation is still draining, even after the first one has already finished" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        flip finally (stopReviewClient client) $ do
+          reachedBarrier <- newEmptyMVar
+          releaseBarrier <- newEmptyMVar
+          slowCancelDone <- newEmptyMVar
+          -- The fence is ref-counted (see ToolRegistry), not a bare
+          -- membership flag: two overlapping killReviewTools calls for the
+          -- same thread must each hold their own reference, and the thread
+          -- stays fenced until *both* release it. Nothing needs to be
+          -- registered on "thread-a" at all -- drainMatchingToolProcesses
+          -- fences the thread in the very same atomic step regardless of
+          -- whether anything actually matched, so this "slow" cancellation
+          -- is held open purely via the injected hook, with no real
+          -- process or reservation involved.
+          let barrierHook = putMVar reachedBarrier () >> takeMVar releaseBarrier
+          void . forkIO $ (killReviewToolsWith barrierHook client "thread-a" >> putMVar slowCancelDone ())
+          timeout 5000000 (takeMVar reachedBarrier) `shouldReturn` Just ()
+          -- A second, ordinary cancellation for the same thread runs to
+          -- completion entirely inside the first's still-open window --
+          -- incrementing, then fully releasing, its own reference.
+          killReviewTools client "thread-a"
+          -- The first cancellation's own reference is still held: a fresh
+          -- registration attempt must still be refused, even though the
+          -- second cancellation has already fully finished.
+          stillFenced <- runAuthenticatedClaude client "thread-a" "SHOULD BE REFUSED"
+          case stillFenced of
+            Left message -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
+            other -> expectationFailure ("expected registration to still be refused while the slow cancellation is draining, got " <> show other)
+          tryTakeMVar slowCancelDone `shouldReturn` Nothing
+          -- Releasing the first cancellation's own barrier lets it finish
+          -- and release its reference too -- only now should the thread
+          -- accept registrations normally again.
+          putMVar releaseBarrier ()
+          timeout 5000000 (takeMVar slowCancelDone) `shouldReturn` Just ()
+          reopened <- runAuthenticatedClaude client "thread-a" "SHORT"
+          case reopened of
+            Left message -> message `shouldNotSatisfy` Data.Text.isInfixOf "not currently accepting"
+            _ -> pure ()
 
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

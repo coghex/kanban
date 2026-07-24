@@ -34,6 +34,7 @@ module Kanban.Review
     githubLabelCreateArguments,
     interruptReview,
     killReviewTools,
+    killReviewToolsWith,
     newReviewClientForTesting,
     renderCanonicalIssueReviewResult,
     resolveCanonicalIssueReviewer,
@@ -75,8 +76,6 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -258,15 +257,22 @@ data ToolEntry = ToolEntry
 -- cannot slip through unregistered and outlive the cancel. Unlike the
 -- permanent close, membership is temporary -- cleared once that specific
 -- 'killReviewTools' call finishes -- so the thread can register normally
--- again for its next turn.
+-- again for its next turn. Ref-counted, not a bare 'Set' membership flag:
+-- two overlapping 'killReviewTools' calls for the same thread (e.g. a
+-- steered turn cancelling one still-draining cancellation) can each fence
+-- it independently, and the thread must stay fenced until *every* such
+-- call has finished draining, not merely the first one to complete --
+-- otherwise a fresh invocation could reserve and attach in the gap after
+-- the first call clears the fence while the second is still actively
+-- cancelling.
 data ToolRegistry = ToolRegistry
   { toolRegistryEntries :: Map Int ToolEntry,
     toolRegistryClosed :: Bool,
-    toolRegistryCancellingThreads :: Set Text
+    toolRegistryCancellingThreads :: Map Text Int
   }
 
 emptyToolRegistry :: ToolRegistry
-emptyToolRegistry = ToolRegistry Map.empty False Set.empty
+emptyToolRegistry = ToolRegistry Map.empty False Map.empty
 
 data ReviewClient = ReviewClient
   { reviewInput :: Handle,
@@ -846,7 +852,7 @@ reserveToolInvocation :: ReviewClient -> Text -> IO (Maybe Int)
 reserveToolInvocation client threadId = do
   invocationId <- atomicModifyIORef' client.reviewNextToolInvocationId (\current -> (current + 1, current))
   accepted <- modifyMVar client.reviewToolProcesses $ \registry ->
-    if registry.toolRegistryClosed || Set.member threadId registry.toolRegistryCancellingThreads
+    if registry.toolRegistryClosed || Map.member threadId registry.toolRegistryCancellingThreads
       then pure (registry, False)
       else do
         modifyMVar_ client.reviewInFlightInvocations (pure . (+ 1))
@@ -920,8 +926,18 @@ deregisterToolProcess client invocationId =
 -- whether or not anything actually needed killing, so the thread accepts
 -- registrations normally again for its next turn.
 killReviewTools :: ReviewClient -> Text -> IO ()
-killReviewTools client threadId =
-  drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Just threadId}) ((== threadId) . toolEntryThread)
+killReviewTools = killReviewToolsWith (pure ())
+
+-- | As 'killReviewTools', but runs `afterClaim` right after this call's own
+-- claim-and-fence step (see 'drainMatchingToolProcessesWith') and just
+-- before it starts confirming anything -- exposed so tests can pause one
+-- of two overlapping cancellations for the same thread right at that
+-- point, to deterministically prove the fence stays active until *every*
+-- concurrent fencer has released it (see 'ToolRegistry'), not just the
+-- first to finish. Production code always calls this with @pure ()@.
+killReviewToolsWith :: IO () -> ReviewClient -> Text -> IO ()
+killReviewToolsWith afterClaim client threadId =
+  drainMatchingToolProcessesWith afterClaim client (DrainOptions {drainCloseRegistry = False, drainFenceThread = Just threadId}) ((== threadId) . toolEntryThread)
 
 data DrainOptions = DrainOptions
   { drainCloseRegistry :: Bool,
@@ -946,15 +962,23 @@ data DrainOptions = DrainOptions
 -- a described OS process remains unconfirmed. A still-unspawned
 -- (reserved) entry has nothing to kill yet: it is trivially treated as
 -- confirmed and removed here, so 'attachToolProcess' later finds it gone
--- and self-kills whatever it just spawned instead. A fenced thread is
--- always unfenced again before returning, regardless of outcome, so a
--- per-thread cancel never permanently blocks that thread's future turns.
+-- and self-kills whatever it just spawned instead. A fenced thread's
+-- reference count is always released again before returning, regardless
+-- of outcome, so a per-thread cancel never permanently blocks that
+-- thread's future turns -- but only once *every* concurrent fencer of
+-- that thread has done the same (see 'ToolRegistry'), not merely this
+-- call.
 drainMatchingToolProcesses :: ReviewClient -> DrainOptions -> (ToolEntry -> Bool) -> IO ()
-drainMatchingToolProcesses client options matches = do
+drainMatchingToolProcesses = drainMatchingToolProcessesWith (pure ())
+
+-- | As 'drainMatchingToolProcesses', but runs `afterClaim` right after the
+-- claim-and-fence step, before confirming anything -- see 'killReviewToolsWith'.
+drainMatchingToolProcessesWith :: IO () -> ReviewClient -> DrainOptions -> (ToolEntry -> Bool) -> IO ()
+drainMatchingToolProcessesWith afterClaim client options matches = do
   owned <- modifyMVar client.reviewToolProcesses $ \registry ->
     let matching = Map.filter matches registry.toolRegistryEntries
         claimed = Map.map (\entry -> entry {toolEntryDraining = True}) matching
-        cancelling = maybe registry.toolRegistryCancellingThreads (`Set.insert` registry.toolRegistryCancellingThreads) options.drainFenceThread
+        cancelling = maybe registry.toolRegistryCancellingThreads (\t -> Map.insertWith (+) t 1 registry.toolRegistryCancellingThreads) options.drainFenceThread
      in pure
           ( registry
               { toolRegistryEntries = Map.union claimed registry.toolRegistryEntries,
@@ -963,14 +987,18 @@ drainMatchingToolProcesses client options matches = do
               },
             matching
           )
+  afterClaim
   confirmed <- mapM (confirmEntry client . toolEntryProcess) owned
   modifyMVar_ client.reviewToolProcesses $ \registry ->
     pure
       registry
         { toolRegistryEntries = Map.difference registry.toolRegistryEntries (Map.filter id confirmed),
-          toolRegistryCancellingThreads = maybe registry.toolRegistryCancellingThreads (`Set.delete` registry.toolRegistryCancellingThreads) options.drainFenceThread
+          toolRegistryCancellingThreads = maybe registry.toolRegistryCancellingThreads (\t -> Map.update releaseFence t registry.toolRegistryCancellingThreads) options.drainFenceThread
         }
   where
+    releaseFence count
+      | count <= 1 = Nothing
+      | otherwise = Just (count - 1)
     confirmEntry _ Nothing = pure True
     confirmEntry theClient (Just (managed, peekCensus, stopCensus)) =
       confirmToolProcessTerminated theClient managed peekCensus stopCensus
