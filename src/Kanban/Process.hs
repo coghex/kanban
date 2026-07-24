@@ -105,27 +105,26 @@ data ManagedProcess
 -- A *confirmed* leader's census is seeded from the *complete* group
 -- membership already visible in the exact same snapshot
 -- 'verifyGroupLeaderWith' took to confirm leadership -- not a single bare
--- identity, and not a separate, later snapshot taken once the watcher
--- itself starts ticking. Broadly capturing every process already sharing
--- that pgid at verification time (not just the leader) means a child
--- forked before verification is trusted from the very first moment, even
--- if the leader itself happens to exit before the watcher's own first
--- independent tick ever runs -- closing the specific gap a leader-only
--- seed would otherwise leave between "confirmed leader" and "first tick",
--- during which a genuinely legitimate sibling could never establish
--- overlap with an already-vanished sole seed. The watcher's first
--- *independent* tick only runs 'censusIntervalMicros' later, same as
--- every subsequent one -- there is no separate, extra-narrow "immediate"
--- tick anymore, since the verification snapshot itself already serves
--- that role. A merely *presumed* leader (its own verification inconclusive
--- -- see 'verifyGroupLeaderWith') has no snapshot to seed from at all, and
--- the census starts genuinely empty for it: bootstrapping trust from
--- whatever a still-later, independent snapshot finds sharing that bare pid
--- would extend exactly the kind of unwitnessed trust this whole design
--- exists to avoid, into precisely the case (a leader too fast to survive
--- even its own verification snapshot) where pid reuse is most plausible.
--- Cleanup for a presumed leader is consequently left unresolved rather
--- than guessed at.
+-- identity. A *presumed* leader (its own verification inconclusive -- see
+-- 'verifyGroupLeaderWith') starts with no seed at all. Either way, the
+-- watcher's own first tick runs synchronously, immediately, before this
+-- function even returns -- not after any scheduled delay -- and that
+-- first tick (like every one after it) can trust its full reading via
+-- either of two independently safe proofs, not the seed's overlap alone:
+-- overlapping what's already `known`, or the leader simply not having
+-- been reaped *by anyone* yet, an OS-level guarantee (see
+-- 'startEmbeddedCensusWith') that this exact pid cannot possibly have
+-- been handed to an unrelated process. This is what actually closes the
+-- gap a seed-only design would otherwise leave open between "verified" (or
+-- presumed) and "first independent tick": a child forked, and its leader
+-- exited, entirely before verification's own snapshot ever ran is still
+-- caught, seed or no seed, for as long as nothing has reaped the leader
+-- yet -- which, for both a confirmed and a presumed leader alike, is true
+-- from the moment 'managedProcess' is called through to whenever this
+-- invocation's own normal completion eventually reaps it. Cleanup remains
+-- unresolved -- rather than ever guessed at -- only for the much narrower
+-- residual case where the leader is reaped before any tick, seeded or
+-- not, ever had a chance to witness a genuine sibling at all.
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcess = managedProcessWith defaultProcessSnapshot
 
@@ -155,7 +154,9 @@ managedProcessWith takeSnapshot processHandle = do
 -- particular check could not verify it. Discarding it in that case would
 -- recreate the reaped-leader orphan bug for exactly the fast-exiting tools
 -- this is meant to fix -- but it is, precisely because it is unverified,
--- never returned with a census seed.
+-- never returned with a census *seed* (see 'startEmbeddedCensusWith' for
+-- why an empty seed here still gets a genuine, not-yet-reaped-protected
+-- census watcher of its own, not no watcher at all).
 verifyGroupLeaderWith :: IO (Either Text [ProcessIdentity]) -> ProcessHandle -> IO (Maybe CPid, [ProcessIdentity], Maybe Text)
 verifyGroupLeaderWith takeSnapshot processHandle = do
   maybePid <- getPid processHandle
@@ -693,18 +694,30 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- above unless the leader had already been reaped by something outside
 -- this module entirely (which 'managedProcess's own contract rules out).
 --
--- A merely *presumed* leader has no seed at all: no watcher is even
--- started for it (unlike a confirmed one), since there is nothing it
--- could ever legitimately extend from, and bootstrapping trust from an
--- unwitnessed pid would be exactly the same risk -- the not-yet-reaped
--- proof establishes that *whoever currently occupies this pgid* is
--- trustworthy, not that this presumed pid is its own group's leader in
--- the first place, which is the one thing that snapshot already failed to
--- confirm. Its cleanup is consequently unresolved from the outset, for
--- the same reason as before.
+-- A merely *presumed* leader (`Just pid` but an empty seed -- see
+-- 'verifyGroupLeaderWith') still gets a real watcher, seeded with nothing
+-- at all rather than short-circuited away entirely: the not-yet-reaped
+-- proof above does not depend on independently verifying `known`'s
+-- starting contents in the first place, only on the leader not having
+-- been reaped yet, which holds exactly as well here as for a confirmed
+-- leader. What verification failed to confirm was never "is this pid its
+-- own group leader" being false -- that case is a *confirmed* non-leader,
+-- which returns 'Nothing' for the pid entirely and never reaches this
+-- function's general case at all (see 'verifyGroupLeaderWith') -- it was
+-- only that the snapshot taken to confirm it either failed outright or
+-- lost the race against a near-instantly-exiting leader. POSIX setpgid
+-- for @create_group = True@ runs synchronously before exec, so a pid this
+-- fresh is already trustworthy as its own group id for querying purposes
+-- even though this particular snapshot could not verify it (the same
+-- reasoning 'killManagedProcess's per-pid fallback already relies on for
+-- signalling a presumed leader directly). An empty starting seed simply
+-- means the very first tick has nothing to overlap -- but, exactly as
+-- for a confirmed leader, it does not need to: not-yet-reaped alone
+-- already justifies trusting whatever that first tick finds sharing this
+-- pgid, including a child forked and its leader exited before
+-- verification's own snapshot ever ran.
 startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> IO (Maybe ExitCode) -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ _ Nothing _ = pure (pure [], pure [])
-startEmbeddedCensusWith _ _ (Just _) [] = pure (pure [], pure [])
 startEmbeddedCensusWith takeSnapshot checkReaped (Just pid) seedMembers = do
   knownRef <- newIORef (Set.fromList seedMembers)
   stillOpenAfterFirstTick <- recordCensusTick takeSnapshot checkReaped pid knownRef

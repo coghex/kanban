@@ -38,7 +38,6 @@ import Kanban.Process
     ManagedProcess,
     ProcessIdentity (..),
     checkGroupMembershipWith,
-    defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
@@ -590,16 +589,19 @@ main = hspec $ do
           Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
         void stopCensus
 
-    it "managedProcessWith starts no watcher at all for a presumed (unverified) leader, leaving its census permanently empty" $ do
+    it "managedProcessWith starts a real, empty-seeded watcher for a presumed (unverified) leader, which self-stops the instant its own first tick also finds nothing" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
       Just pid <- getPid process
       let cleanup = void (try (signalProcessGroup sigKILL pid) :: IO (Either IOException ()))
       flip finally cleanup $ do
-        -- Forces 'verifyGroupLeaderWith's own leadership check to report
-        -- the leader not found at all -- the "presumed" case -- even
-        -- though the real process is genuinely alive and would otherwise
-        -- be found by a real snapshot.
+        -- Forces every snapshot -- verification's own, and the watcher's
+        -- synchronous first tick -- to report nothing at all, even though
+        -- the real process is genuinely alive and would otherwise be
+        -- found. This is not "no watcher starts" (it does -- see
+        -- 'startEmbeddedCensusWith'), but a genuinely empty first tick
+        -- still stops it immediately, exactly as it would for a confirmed
+        -- leader whose group is genuinely empty.
         let stubSnapshot = pure (Right [])
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
@@ -609,43 +611,49 @@ main = hspec $ do
         census `shouldBe` []
         void stopCensus
 
-    it "a presumed (unverified) leader's census permanently leaves a same-group child unresolved, rather than ever promoting a reading with no tie to a verified seed" $ do
+    it "the not-yet-reaped proof lets a presumed leader's census record, and killManagedProcessVerified actually kill, a child even though verification itself never observed the leader at all" $ do
       (_, _, _, process) <-
-        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.5; exit 0"]) {create_group = True}
-      callCount <- newIORef (0 :: Int)
-      let stubSnapshot = do
-            count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
-            -- Only 'verifyGroupLeaderWith's own leadership check (the
-            -- very first snapshot) is forced to see nothing, simulating a
-            -- leader whose verification lost the race against its own
-            -- near-instant exit -- the "presumed" case. Every later
-            -- snapshot (which no watcher is ever started to consult, and
-            -- the final, real-scheduler-timed kill-confirmation checks)
-            -- would otherwise see reality.
-            if count == (0 :: Int) then pure (Right []) else defaultProcessSnapshot
-      (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
-      groupLeaderProblem `shouldSatisfy` isJust
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 100"]) {create_group = True}
       Just leaderPid <- getPid process
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
-        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
-        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
-            waitForMember attempts = do
-              snapshotResult <- readProcessSnapshot
-              case snapshotResult of
-                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
-                _
-                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
-                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
-        waitForMember 50
+        callCount <- newIORef (0 :: Int)
+        let isChildOfLeader identity =
+              identity.processIdentityGroupPid == fromIntegral leaderPid && identity.processIdentityPid /= fromIntegral leaderPid
+            -- Verification's own snapshot (call 0) is forced to see
+            -- nothing at all -- the "presumed" case -- even though the
+            -- real leader is genuinely alive throughout (via its own
+            -- "sleep 100") and would otherwise be found. Every later
+            -- tick sees reality, filtered down to just the child, so the
+            -- leader itself is never once witnessed by anything this
+            -- census ever consults -- exactly the reviewer's scenario:
+            -- "the leader is absent at verification but its surviving
+            -- child remains in the group."
+            stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              real <- readProcessSnapshot
+              pure $ case (count :: Int, real) of
+                (_, Left message) -> Left message
+                (0, Right _) -> Right []
+                (_, Right snapshot) -> Right (filter isChildOfLeader snapshot)
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldSatisfy` isJust
+        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        let waitForRecordedChild attempts = do
+              census <- peekCensus
+              if any isChildOfLeader census
+                then pure ()
+                else
+                  if attempts <= (0 :: Int)
+                    then expectationFailure "presumed leader's census never recorded the child despite the leader remaining genuinely unreaped throughout"
+                    else threadDelay 100000 >> waitForRecordedChild (attempts - 1)
+        waitForRecordedChild 50
         confirmed <- killManagedProcessVerified managed
-        confirmed `shouldBe` False
-        -- Left unresolved without ever signalling: the child is still
-        -- alive, since nothing was ever recorded to justify trusting it.
-        afterAttempt <- readProcessSnapshot
-        case afterAttempt of
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
-          Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
 
     it "recordCensusTick leaves `known` unresolved once the leader is already reaped and its seed shares no overlap with a fresh snapshot" $ do
       -- Unlike the not-yet-reaped case (see the regression above), an
