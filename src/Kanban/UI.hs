@@ -1822,7 +1822,7 @@ drawDetails env item =
   vBox
     ( [ withAttr cardTitleAttr (txtWrap (itemHeading item)),
         txt "",
-        hBox (map drawLabelForDetails (itemLabels item) <> detailsOverflowMarker),
+        drawDetailsLabels env.detailsConfig.resolvedWorkflow item,
         txt "",
         withAttr headingAttr (txt "Metadata"),
         txtWrap (itemMetadata env.detailsNow item)
@@ -1844,16 +1844,43 @@ drawDetails env item =
            ]
     )
   where
-    drawLabelForDetails label = withAttr (labelAttribute env.detailsConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
-    detailsOverflowMarker
-      | itemLabelOverflow item > 0 = [withAttr pendingAttr (txt ("+" <> showText (itemLabelOverflow item) <> " labels omitted"))]
-      | otherwise = []
     trackingDetails = case findEntry env.detailsBoard (itemId item) of
       Just (Tracked context _) -> drawTrackingDetails context
       _ -> []
     trackerDiagnosticDetails = case item of
       IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue env.detailsConfig.resolvedWorkflow issue)
       PullRequestItem _ -> []
+
+-- | Label chips as wrapped rows, measured against the width the overlay
+-- actually got.
+--
+-- A single row of chips would be cropped on the right by a viewport that only
+-- scrolls vertically, taking labels -- and eventually the overflow marker
+-- itself -- somewhere the reader can never reach. Wrapping instead means
+-- every retained label stays on screen, and since the overlay can be as tall
+-- as it likes, a chip is never evicted to make room. The only summarized
+-- count is what GitHub omitted, plus any single label too wide for a whole
+-- row, and it gets its own wrapped line rather than a chip that could be
+-- clipped away.
+drawDetailsLabels :: WorkflowConfig -> BoardItem -> Widget Name
+drawDetailsLabels workflow item =
+  BrickTypes.Widget BrickTypes.Greedy BrickTypes.Fixed $ do
+    context <- BrickTypes.getContext
+    let width = BrickTypes.availWidth context
+        names = map (sanitizeText . (.labelName)) (itemLabels item)
+        rows = labelChipRows width (length names + 1) names (itemLabelOverflow item)
+        omitted = sum [count | row <- rows, OverflowChip count <- row]
+        chipRows = filter (not . null) (map (filter isLabelChip) rows)
+        drawChip (LabelChip name) = withAttr (labelAttribute workflow name) (txt (" " <> name <> " "))
+        drawChip (OverflowChip count) = withAttr pendingAttr (txt (overflowChipText count))
+        marker
+          | omitted > 0 = [withAttr pendingAttr (txtWrap ("+" <> showText omitted <> " labels omitted"))]
+          | otherwise = []
+    BrickTypes.render (vBox (map (hBox . intersperse (txt " ") . map drawChip) chipRows <> marker))
+
+isLabelChip :: CardChip -> Bool
+isLabelChip (LabelChip _) = True
+isLabelChip (OverflowChip _) = False
 
 -- | A headed block of rows, in the same style as the existing Metadata, Body,
 -- and URL sections. An empty row list draws nothing at all, which is how an

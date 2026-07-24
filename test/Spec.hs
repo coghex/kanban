@@ -4577,6 +4577,34 @@ main = hspec $ do
       rendered `shouldSatisfy` all (not . Data.Text.isPrefixOf "Mergeability")
       rendered `shouldSatisfy` all (not . Data.Text.isPrefixOf "Checks")
 
+    -- The overlay's viewport only scrolls vertically, so anything a single
+    -- chip row pushed past the right edge would be unreachable, not merely
+    -- off-screen. §11 requires every retained label plus the exact overflow
+    -- count, so the chips have to wrap instead.
+    it "wraps label chips at a narrow width rather than cropping labels out of reach" $ do
+      let many =
+            detailsFixturePullRequest
+              { pullRequestLabels = [Label name "2f9e44" | name <- ["reviewed:approve", "input", "ui", "code-health", "architecture"]],
+                pullRequestLabelOverflow = 2
+              }
+          rendered = renderDetailsAt 30 detailsFixtureBoard (PullRequestItem many)
+          labelBlock = takeWhile (/= "Metadata") rendered
+      mapM_ (\name -> labelBlock `shouldSatisfy` any (Data.Text.isInfixOf name)) ["reviewed:approve", "input", "ui", "code-health", "architecture"]
+      labelBlock `shouldSatisfy` any (Data.Text.isInfixOf "+2 labels omitted")
+      -- Wrapping, not overrunning: no row exceeds the width it was given.
+      map displayWidth rendered `shouldSatisfy` all (<= 30)
+
+    it "counts a label too wide for a whole row in the overflow marker instead of dropping it silently" $ do
+      let oversized =
+            detailsFixturePullRequest
+              { pullRequestLabels = [Label (Data.Text.replicate 40 "x") "2f9e44", Label "ui" "0075ca"],
+                pullRequestLabelOverflow = 1
+              }
+          rendered = renderDetailsAt 20 detailsFixtureBoard (PullRequestItem oversized)
+          labelBlock = takeWhile (/= "Metadata") rendered
+      labelBlock `shouldSatisfy` any (Data.Text.isInfixOf "ui")
+      labelBlock `shouldSatisfy` any (Data.Text.isInfixOf "+2 labels omitted")
+
     it "reports a rollup past the context cap as unknown instead of listing the nodes it did see" $ do
       let unknownChecks = detailsFixturePullRequest {pullRequestChecks = ChecksUnknown}
       detailsRows (renderDetails detailsFixtureBoard (PullRequestItem unknownChecks)) "Checks"
@@ -4954,9 +4982,11 @@ detailsFixtureBoard =
 -- | Draw the details overlay at the width the real overlay gives its content
 -- and read it back as plain text.
 renderDetails :: Board -> BoardItem -> [Text]
-renderDetails board item = renderWidgetLines (themeFor testOptions) width (hLimit width (drawDetails environment item))
+renderDetails = renderDetailsAt 84
+
+renderDetailsAt :: Int -> Board -> BoardItem -> [Text]
+renderDetailsAt width board item = renderWidgetLines (themeFor testOptions) width (hLimit width (drawDetails environment item))
   where
-    width = 84
     environment =
       DetailsEnv
         { detailsConfig = testResolvedConfig,
