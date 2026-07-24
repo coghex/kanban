@@ -1143,11 +1143,11 @@ def find_matching_worktree(ctx: RepoContext, pr: dict[str, Any]) -> Path | None:
 def prepare_review_worktree(
     ctx: RepoContext,
     pr: dict[str, Any],
-) -> tuple[Path, bool]:
-    existing = find_matching_worktree(ctx, pr)
-    if existing is not None:
-        return existing, False
-
+) -> Path:
+    # Always a throwaway detached worktree, never a matched live one. The
+    # stale-head rereviewer runs Codex with approvals and the sandbox
+    # bypassed, so pointing it at a solve worktree would let it read a HEAD
+    # behind the head under review and write over uncommitted work.
     tmpdir = Path(
         tempfile.mkdtemp(prefix=f"drain-prs-rereview-{pr['number']}-")
     )
@@ -1163,7 +1163,7 @@ def prepare_review_worktree(
         ],
         cwd=ctx.path,
     )
-    return tmpdir, True
+    return tmpdir
 
 
 def drain_rereview_prompt(ctx: RepoContext, number: int, expected_head: str) -> str:
@@ -1199,11 +1199,31 @@ def rereview_pr_with_codex(
     if dry_run:
         return pr
 
-    review_path, temporary = prepare_review_worktree(ctx, pr)
+    review_path = prepare_review_worktree(ctx, pr)
     output_file = Path(tempfile.gettempdir()) / f"drain-prs-rereview-{number}.out"
     prompt = drain_rereview_prompt(ctx, number, expected_head)
 
     try:
+        # The same pre-launch guards the conflict reviewer applies. The
+        # worktree was just created detached at the remote branch tip, which
+        # is not pinned to headRefOid: a push landing between the PR read and
+        # this fetch would leave it on a different commit, so verify against
+        # the head actually under review before Codex starts.
+        local_status = run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=review_path,
+        ).stdout.strip()
+        if local_status:
+            raise DrainError(
+                f"PR #{number}: rereview worktree {review_path} was dirty "
+                f"before Codex launched:\n{local_status}"
+            )
+        local_head = run(["git", "rev-parse", "HEAD"], cwd=review_path).stdout.strip()
+        if local_head != expected_head:
+            raise DrainError(
+                f"PR #{number}: rereview worktree head {local_head[:12]} did "
+                f"not match expected PR head {expected_head[:12]}."
+            )
         try:
             run(
                 [
@@ -1267,8 +1287,10 @@ def rereview_pr_with_codex(
             )
         return refreshed
     finally:
-        if temporary:
-            remove_worktree(ctx, review_path, dry_run=False)
+        # Drainer-owned and disposable: force removal so a dirty tree -- the
+        # very state the guard above rejects -- cannot mask the error that is
+        # already propagating.
+        remove_worktree(ctx, review_path, dry_run=False, allow_dirty_force=True)
 
 
 def recover_stale_approval(
