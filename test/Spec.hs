@@ -56,6 +56,7 @@ import Kanban.Process
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
+    recordCensusTick,
     watchManagedProcessCensus,
   )
 import Kanban.Repository (parseRepositoryName, resolveRepository)
@@ -646,52 +647,40 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
 
-    it "a confirmed leader's census permanently leaves a same-group child unresolved once its own seed can never again overlap anything real, rather than ever promoting an unanchored reading" $ do
-      (_, _, _, process) <-
-        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.3; exit 0"]) {create_group = True}
-      Just leaderPid <- getPid process
-      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
-      flip finally cleanup $ do
-        -- Forces 'verifyGroupLeaderWith' to confirm a leader with a
-        -- deliberately *wrong* start time -- a seed that can never again
-        -- match any real reading, no matter how long the real leader
-        -- stays alive -- simulating the exact race this test targets (a
-        -- child forked after verification, leader exiting before the
-        -- watcher's first independent tick). With `known` only ever
-        -- extendable by overlapping `known` itself, this seed can never
-        -- be extended, no matter how stably the child persists.
-        let staleLeaderIdentity =
-              ProcessIdentity
-                { processIdentityPid = fromIntegral leaderPid,
-                  processIdentityParentPid = 1,
-                  processIdentityGroupPid = fromIntegral leaderPid,
-                  processIdentityStartedAt = "a moment that never really happened",
-                  processIdentityCommand = "stale-seed-placeholder"
-                }
-        callCount <- newIORef (0 :: Int)
-        let stubSnapshot = do
-              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
-              if count == (0 :: Int) then pure (Right [staleLeaderIdentity]) else defaultProcessSnapshot
-        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
-        groupLeaderProblem `shouldBe` Nothing
-        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
-        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
-            waitForMember attempts = do
-              snapshotResult <- readProcessSnapshot
-              case snapshotResult of
-                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
-                _
-                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
-                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
-        waitForMember 50
-        confirmed <- killManagedProcessVerified managed
-        confirmed `shouldBe` False
-        -- Left unresolved without ever signalling: the child is still
-        -- alive, since nothing was ever recorded to justify trusting it.
-        afterAttempt <- readProcessSnapshot
-        case afterAttempt of
-          Left message -> expectationFailure (Data.Text.unpack message)
-          Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
+    it "recordCensusTick leaves `known` unresolved once the leader is already reaped and its seed shares no overlap with a fresh snapshot" $ do
+      -- Unlike the not-yet-reaped case (see the regression above), an
+      -- *already*-reaped leader forfeits the OS-level "this pid cannot
+      -- possibly have been reused yet" proof -- 'getProcessExitCode'
+      -- having already returned once means the kernel is now free to hand
+      -- this exact pid to an unrelated process at any moment. With that
+      -- proof gone, the only remaining path to trust a tick's reading is
+      -- overlapping `known` itself (the original mechanism), which a
+      -- deliberately wrong seed -- simulating a leader reaped before any
+      -- not-yet-reaped-covered tick ever ran -- can never do, no matter
+      -- how stably a same-group child persists.
+      let staleLeaderIdentity =
+            ProcessIdentity
+              { processIdentityPid = 4242,
+                processIdentityParentPid = 1,
+                processIdentityGroupPid = 4242,
+                processIdentityStartedAt = "a moment that never really happened",
+                processIdentityCommand = "stale-seed-placeholder"
+              }
+          childIdentity =
+            ProcessIdentity
+              { processIdentityPid = 4243,
+                processIdentityParentPid = 4242,
+                processIdentityGroupPid = 4242,
+                processIdentityStartedAt = "synthetic-child-start",
+                processIdentityCommand = "synthetic-child"
+              }
+          checkReaped = pure (Just ExitSuccess)
+          takeSnapshot = pure (Right [childIdentity])
+      knownRef <- newIORef (Set.fromList [staleLeaderIdentity])
+      stillOpen <- recordCensusTick takeSnapshot checkReaped 4242 knownRef
+      stillOpen `shouldBe` True
+      known <- readIORef knownRef
+      known `shouldBe` Set.fromList [staleLeaderIdentity]
 
     it "managedProcessWith's synchronous first tick still catches a same-group child forked (and its leader already gone) before any scheduled watcher tick could ever fire" $ do
       (_, _, _, process) <-
@@ -741,6 +730,50 @@ main = hspec $ do
         census <- peekCensus
         census `shouldSatisfy` any ((== childIdentity.processIdentityPid) . processIdentityPid)
         void stopCensus
+
+    it "the not-yet-reaped leader still lets the census record, and killManagedProcessVerified actually kill, a child that every snapshot omits the leader from starting with the very first tick" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 100"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        callCount <- newIORef (0 :: Int)
+        let isLeaderIdentity identity = identity.processIdentityPid == fromIntegral leaderPid
+            isChildOfLeader identity = identity.processIdentityGroupPid == fromIntegral leaderPid && not (isLeaderIdentity identity)
+            -- Every tick from the very first (synchronous) one onward sees
+            -- only the child -- the leader is never once visible, exactly
+            -- as the reviewer's scenario describes ("that tick then sees
+            -- only the child, cannot overlap the vanished leader seed").
+            -- The leader stays genuinely alive (and therefore genuinely
+            -- unreaped) for the whole test via its own "sleep 100", so
+            -- without the not-yet-reaped proof this census could never be
+            -- extended past its leader-only seed, no matter how long the
+            -- watcher keeps ticking.
+            stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              real <- readProcessSnapshot
+              pure $ case (count :: Int, real) of
+                (_, Left message) -> Left message
+                (0, Right snapshot) -> Right (filter isLeaderIdentity snapshot)
+                (_, Right snapshot) -> Right (filter isChildOfLeader snapshot)
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        let waitForRecordedChild attempts = do
+              census <- peekCensus
+              if any isChildOfLeader census
+                then pure ()
+                else
+                  if attempts <= (0 :: Int)
+                    then expectationFailure "census never recorded the child despite the leader remaining genuinely unreaped throughout"
+                    else threadDelay 100000 >> waitForRecordedChild (attempts - 1)
+        waitForRecordedChild 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do

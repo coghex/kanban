@@ -1143,10 +1143,28 @@ confirmToolProcessTerminated client managed peekCensus stopCensus = go confirmAt
 -- 'confirmToolProcessTerminated' so a leader already exited and reaped
 -- still has its recorded process group signalled and confirmed rather than
 -- silently skipped.
+--
+-- 'confirmToolProcessTerminated' already retries the app-server's own
+-- termination a bounded number of times, but its own bound (unlike
+-- 'awaitNoInFlightInvocations'-style unbounded waits elsewhere in this
+-- module) cannot always be raised safely: a confirmed leader whose entire
+-- census seed vanished before any tick could ever witness it (see
+-- 'Kanban.Process.startEmbeddedCensusWith') can leave termination
+-- genuinely, permanently unconfirmable, and retrying that case forever
+-- would just turn a bounded failure into an unbounded hang. Its result is
+-- therefore never discarded: a failure to confirm is surfaced as its own,
+-- distinctly worded protocol warning (in addition to
+-- 'confirmToolProcessTerminated's own generic one) and recorded in the
+-- session log, so a quit that could not actually confirm cleanup is
+-- discoverable after the fact rather than looking identical to a clean
+-- one.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  void (confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop)
+  confirmed <- confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
+  unless confirmed $ do
+    client.reviewEventSink (ReviewProtocolWarning "review client stopped without confirming the app-server's own process group fully terminated")
+    mapM_ (\sessionLog -> logMessage sessionLog "stop-unconfirmed" "app-server process group termination could not be confirmed") client.reviewSessionLog
   ignoreIOException (hClose client.reviewInput)
 
 closeReviewLog :: Maybe SessionLog -> IO ()
@@ -1235,13 +1253,32 @@ readServerErrors client errorHandle = do
 -- readers only see EOF once every holder of those pipes -- including that
 -- survivor -- is gone. Waiting on the readers first would deadlock exactly
 -- the crash this cleanup exists to catch.
+--
+-- 'confirmToolProcessTerminated' can still, despite that ordering, fail to
+-- confirm every survivor gone (its own retries are bounded -- see
+-- 'stopReviewClient' for why raising that bound is not always safe). A
+-- survivor that outlives it keeps holding the app-server's stdout/stderr
+-- pipes open, so waiting on the readers is bounded by
+-- 'pipeReaderShutdownTimeoutMicros' rather than unboundedly: this function
+-- runs on its own thread and its completion is what the rest of the app
+-- (the UI's 'ReviewClientStopped' handler, this session's log) is waiting
+-- on, so hanging here would hang the entire client shutdown, not merely
+-- leave one already-known survivor unconfirmed. A timeout is reported as
+-- its own distinct protocol warning rather than silently proceeding as if
+-- the readers cleanly reached EOF.
 watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  void (confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop)
-  takeMVar client.reviewOutputDone
-  takeMVar client.reviewErrorDone
+  confirmed <- confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
+  unless confirmed $
+    client.reviewEventSink (ReviewProtocolWarning "app-server process group termination could not be confirmed after it exited")
+  readersDone <- timeout pipeReaderShutdownTimeoutMicros (takeMVar client.reviewOutputDone >> takeMVar client.reviewErrorDone)
+  case readersDone of
+    Just () -> pure ()
+    Nothing -> do
+      client.reviewEventSink (ReviewProtocolWarning "gave up waiting for the app-server's output/error readers to reach EOF -- a surviving process may still hold its pipes open")
+      mapM_ (\sessionLog -> logMessage sessionLog "stop-unconfirmed" "output/error readers never reached EOF") client.reviewSessionLog
   mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode exitCode)) client.reviewSessionLog
   closeReviewLog client.reviewSessionLog
   client.reviewEventSink (ReviewClientStopped (renderExitCode exitCode))
@@ -2049,6 +2086,15 @@ finalOutputSchema =
 
 initializationTimeoutMicros :: Int
 initializationTimeoutMicros = 10 * 1000 * 1000
+
+-- | Bounds 'watchServerProcess's wait for the output/error readers to reach
+-- EOF, comfortably longer than 'confirmToolProcessTerminated's own worst
+-- case (its three attempts, 'confirmRetryDelayMicros' apart, which runs
+-- immediately beforehand) so a normal confirm-then-EOF sequence never trips
+-- it, while still bounding the case where a survivor 'confirmToolProcessTerminated'
+-- could not confirm gone keeps holding the pipes open indefinitely.
+pipeReaderShutdownTimeoutMicros :: Int
+pipeReaderShutdownTimeoutMicros = 5 * 1000 * 1000
 
 claudeReviewerTimeoutMicros :: Int
 claudeReviewerTimeoutMicros = 10 * 60 * 1000 * 1000
