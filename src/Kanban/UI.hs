@@ -3359,7 +3359,8 @@ startIssueReview issue = do
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
           armVisibleReviewTicks
     _ -> do
-      let session = newReviewSession issue requestedStage
+      let priorGeneration = maybe 0 (.reviewSessionTickGeneration) (Map.lookup issue.issueNumber state.appReviewSessions)
+          session = newReviewSession issue requestedStage priorGeneration
       modify
         ( \current ->
             current
@@ -3406,8 +3407,16 @@ reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
 issueReviewStage :: WorkflowConfig -> Issue -> ReviewStage
 issueReviewStage config issue = reviewStageForLabels config (map (.labelName) issue.issueLabels)
 
-newReviewSession :: Issue -> ReviewStage -> ReviewSession
-newReviewSession issue stage =
+-- | 'priorGeneration' must be 0 for an issue with no previous session, or
+-- the replaced session's 'reviewSessionTickGeneration' when 'startIssueReview'
+-- discards a non-reusable one (e.g. its stage no longer matches current
+-- labels): a stale tick from that old session can still be in flight
+-- carrying that exact generation, so this session must start from it
+-- rather than reset to 0, or the new session's first arm could mint a
+-- generation the old stale tick also matches -- reintroducing a second
+-- live chain (issue #30 round-2 review).
+newReviewSession :: Issue -> ReviewStage -> Int -> ReviewSession
+newReviewSession issue stage priorGeneration =
   ReviewSession
     { reviewSessionIssue = issue,
       reviewSessionStage = stage,
@@ -3419,7 +3428,7 @@ newReviewSession issue stage =
       reviewSessionPending = Nothing,
       reviewSessionInput = "",
       reviewSessionSpinnerFrame = 0,
-      reviewSessionTickGeneration = 0,
+      reviewSessionTickGeneration = priorGeneration,
       reviewSessionTickArmed = False
     }
 
