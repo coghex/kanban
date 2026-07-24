@@ -12,6 +12,8 @@ module Kanban.UI
     ReviewDigitAction (..),
     ReviewPhase (..),
     ReviewSession (..),
+    ReviewTickArmOutcome (..),
+    ReviewTickFireOutcome (..),
     SolvePhase (..),
     SolveSession (..),
     approvedAttr,
@@ -23,6 +25,8 @@ module Kanban.UI
     cardInteriorAttribute,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
+    decideReviewTickArm,
+    decideReviewTickFire,
     failureActivity,
     githubRefreshTimeoutMicros,
     neutralAttr,
@@ -318,7 +322,18 @@ data ReviewSession = ReviewSession
     reviewSessionTranscript :: ChatTranscript,
     reviewSessionPending :: Maybe PendingReviewInteraction,
     reviewSessionInput :: Text,
-    reviewSessionSpinnerFrame :: Int
+    reviewSessionSpinnerFrame :: Int,
+    -- | Identifies the current tick chain. A fired tick only advances the
+    -- frame and reschedules itself when it still carries this generation;
+    -- bumped only when a new chain is actually armed (see
+    -- 'decideReviewTickArm'), never on every trigger, so concurrent
+    -- triggers for the same running turn coalesce onto one chain.
+    reviewSessionTickGeneration :: Int,
+    -- | Whether a tick chain is currently in flight for
+    -- 'reviewSessionTickGeneration', so a repeated trigger (e.g. an
+    -- answered question followed by the backend's matching
+    -- 'ReviewTurnStarted') is absorbed instead of arming a second chain.
+    reviewSessionTickArmed :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -370,7 +385,7 @@ data AppEvent
   | DrainerToggleFinished (Either Text DrainerStatus)
   | ReviewBackendStarted (Either Text ReviewClient)
   | ReviewProtocolEvent ReviewEvent
-  | ReviewAnimationTick Text
+  | ReviewAnimationTick Int Int
   | SolveProtocolEvent SolveEvent
   | SolveAnimationTick Int
   | SolveBoardRefreshRequested
@@ -1818,7 +1833,7 @@ handleEvent event = do
     (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
     (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
     (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent
-    (_, AppEvent (ReviewAnimationTick threadId)) -> applyReviewAnimationTick threadId
+    (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applyReviewAnimationTick issueNumber generation
     (_, AppEvent (SolveProtocolEvent solveEvent)) -> applySolveEvent solveEvent
     (_, AppEvent (SolveAnimationTick issueNumber)) -> applySolveAnimationTick issueNumber
     (_, AppEvent SolveBoardRefreshRequested) -> startBoardRefresh
@@ -1830,6 +1845,7 @@ handleEvent event = do
     (_, AppEvent (CanonicalIssueReviewProcessStarted issueNumber process)) -> do
       modify (\current -> current {appCanonicalReviewProcesses = Map.insert issueNumber process current.appCanonicalReviewProcesses})
       modifyReviewSession issueNumber (\session -> session {reviewSessionActivity = "reviewing issue"})
+      armReviewTick issueNumber
     (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
     (Just HelpOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
@@ -2046,7 +2062,9 @@ openSelectedAgentSession = do
     Just entry -> case entry.agentSessionRef of
       SolveAgent issueNumber -> modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
       PullRequestAgent number -> modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay number), appNotice = Nothing})
-      ReviewAgent issueNumber -> modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
+      ReviewAgent issueNumber -> do
+        modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
+        armReviewTick issueNumber
       WorkerAgent _ -> setNotice "This persistent worker is waiting for its issue or PR metadata; press u to refresh the board"
 
 killSelectedAgentSession :: EventM Name AppState ()
@@ -2340,7 +2358,7 @@ submitQuestionAnswer issueNumber requestId answer displayAnswer = do
                     reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\nYou: " <> displayAnswer <> "\n")
                   }
             )
-          >> scheduleReviewForIssue issueNumber
+          >> armReviewTick issueNumber
     _ -> setNotice "Codex app-server is not connected"
 
 submitApprovalAnswer :: Int -> ReviewRequestId -> Bool -> Bool -> Text -> EventM Name AppState ()
@@ -2361,7 +2379,7 @@ submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer = d
                     reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> displayAnswer <> "\n")
                   }
             )
-          >> scheduleReviewForIssue issueNumber
+          >> armReviewTick issueNumber
     _ -> setNotice "Codex app-server is not connected"
 
 sendReviewFeedback :: Int -> ReviewSession -> EventM Name AppState ()
@@ -2384,13 +2402,6 @@ sendReviewFeedback issueNumber session = do
                   }
             )
     _ -> setNotice "The review session has not connected yet"
-
-scheduleReviewForIssue :: Int -> EventM Name AppState ()
-scheduleReviewForIssue issueNumber = do
-  state <- get
-  case Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionThreadId) of
-    Just threadId -> scheduleReviewTick threadId
-    Nothing -> pure ()
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
 -- session's connection/process state rather than inline in
@@ -3338,8 +3349,9 @@ startIssueReview issue = do
   let requestedStage = issueReviewStage state.appConfig.resolvedWorkflow issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
-      | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) ->
+      | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
+          armReviewTick issue.issueNumber
     _ -> do
       let session = newReviewSession issue requestedStage
       modify
@@ -3400,7 +3412,9 @@ newReviewSession issue stage =
       reviewSessionTranscript = plainTranscript (if stage == IssueRevision then "" else "Running canonical issue-review:v2 gate…\n"),
       reviewSessionPending = Nothing,
       reviewSessionInput = "",
-      reviewSessionSpinnerFrame = 0
+      reviewSessionSpinnerFrame = 0,
+      reviewSessionTickGeneration = 0,
+      reviewSessionTickArmed = False
     }
 
 launchCanonicalIssueReview :: Int -> ReviewStage -> EventM Name AppState ()
@@ -3764,7 +3778,10 @@ applyReviewEvent reviewEvent = case reviewEvent of
               reviewSessionPending = Nothing
             }
       )
-    scheduleReviewTick threadId
+    state <- get
+    case findReviewSessionByThread threadId state of
+      Just (issueNumber, _) -> armReviewTick issueNumber
+      Nothing -> pure ()
   ReviewOutput threadId outputKind delta
     | Text.null threadId ->
         whenReviewOverlayOpen (\_ -> setNotice (reviewOutputPrefix outputKind <> sanitizeText delta))
@@ -3915,25 +3932,106 @@ applyReviewEvent reviewEvent = case reviewEvent of
             }
       | otherwise = session
 
-applyReviewAnimationTick :: Text -> EventM Name AppState ()
-applyReviewAnimationTick threadId = do
-  state <- get
-  case findReviewSessionByThread threadId state of
-    Just (_, session)
-      | session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning] -> do
-          modifyReviewSessionByThread threadId (\current -> current {reviewSessionSpinnerFrame = current.reviewSessionSpinnerFrame + 1})
-          scheduleReviewTick threadId
-    _ -> pure ()
+-- | Whether the review overlay -- and therefore every session's tab within
+-- it, including a thread-less canonical stage -- is currently on screen.
+-- Ticks are the only thing driving periodic redraws for review animation,
+-- so gating them on this keeps a closed or backgrounded review from
+-- redrawing at all (docs/design.md:333-340).
+reviewOverlayVisible :: Maybe Overlay -> Bool
+reviewOverlayVisible (Just (ReviewOverlay _)) = True
+reviewOverlayVisible _ = False
 
-scheduleReviewTick :: Text -> EventM Name AppState ()
-scheduleReviewTick threadId = do
+-- | Whether a session in this phase, with the review overlay in this
+-- visibility, should be animating at all. A canonical stage holds
+-- 'ReviewStarting' for the whole life of its process, so this one phase
+-- set covers both a running canonical process and an in-progress
+-- app-server turn.
+reviewTickEligible :: ReviewPhase -> Bool -> Bool
+reviewTickEligible phase overlayVisible = overlayVisible && phase `elem` [ReviewStarting, ReviewRunning]
+
+-- | Result of asking whether a trigger -- an answered question/approval,
+-- a 'ReviewTurnStarted' notification, a canonical process starting, or the
+-- review overlay reopening -- should arm a new tick chain.
+data ReviewTickArmOutcome
+  = ArmReviewTick Int
+  | ReviewTickAlreadyArmed
+  | ReviewTickNotEligible
+  deriving stock (Eq, Show)
+
+-- | issue #30: every trigger used to call the tick scheduler
+-- unconditionally, so a fast answer/approval and the backend's matching
+-- 'ReviewTurnStarted' notification each armed their own independent tick
+-- chain for the same turn. This coalesces repeated triggers: a chain
+-- already armed for the current generation absorbs the request instead of
+-- spawning a second one, so at most one chain is ever live per session.
+decideReviewTickArm :: ReviewPhase -> Bool -> Bool -> Int -> ReviewTickArmOutcome
+decideReviewTickArm phase overlayVisible armed currentGeneration
+  | not (reviewTickEligible phase overlayVisible) = ReviewTickNotEligible
+  | armed = ReviewTickAlreadyArmed
+  | otherwise = ArmReviewTick (currentGeneration + 1)
+
+-- | Result of a fired 'ReviewAnimationTick' checked against its session's
+-- current generation/phase/visibility.
+data ReviewTickFireOutcome
+  = ReviewTickStale
+  | ReviewTickReschedule
+  | ReviewTickExpire
+  deriving stock (Eq, Show)
+
+-- | issue #30: a tick only advances the frame and reschedules itself when
+-- it still carries its session's current generation -- a tick from a
+-- superseded chain (one the session has since moved past) is dropped
+-- silently instead of rearming alongside whatever chain replaced it. This
+-- is the fix for the verified fast-resume race: a tick scheduled before a
+-- question/approval can arrive after a fast answer restores the running
+-- phase, and generation-matching alone would let it rearm alongside the
+-- chain the answer itself coalesced onto -- so a match reschedules the
+-- *same* chain rather than proving a second one is safe to keep.
+decideReviewTickFire :: Int -> Int -> ReviewPhase -> Bool -> ReviewTickFireOutcome
+decideReviewTickFire sessionGeneration tickGeneration phase overlayVisible
+  | sessionGeneration /= tickGeneration = ReviewTickStale
+  | reviewTickEligible phase overlayVisible = ReviewTickReschedule
+  | otherwise = ReviewTickExpire
+
+-- | The single entry point every trigger calls to (re)start review
+-- animation for an issue's session. Coalesces via 'decideReviewTickArm' so
+-- repeated triggers for the same running turn never arm more than one
+-- chain.
+armReviewTick :: Int -> EventM Name AppState ()
+armReviewTick issueNumber = do
+  state <- get
+  let overlayVisible = reviewOverlayVisible state.appOverlay
+  case Map.lookup issueNumber state.appReviewSessions of
+    Nothing -> pure ()
+    Just session -> case decideReviewTickArm session.reviewSessionPhase overlayVisible session.reviewSessionTickArmed session.reviewSessionTickGeneration of
+      ArmReviewTick generation -> do
+        modifyReviewSession issueNumber (\current -> current {reviewSessionTickGeneration = generation, reviewSessionTickArmed = True})
+        scheduleReviewTick issueNumber generation
+      ReviewTickAlreadyArmed -> pure ()
+      ReviewTickNotEligible -> pure ()
+
+applyReviewAnimationTick :: Int -> Int -> EventM Name AppState ()
+applyReviewAnimationTick issueNumber generation = do
+  state <- get
+  let overlayVisible = reviewOverlayVisible state.appOverlay
+  case Map.lookup issueNumber state.appReviewSessions of
+    Nothing -> pure ()
+    Just session -> case decideReviewTickFire session.reviewSessionTickGeneration generation session.reviewSessionPhase overlayVisible of
+      ReviewTickStale -> pure ()
+      ReviewTickReschedule -> do
+        modifyReviewSession issueNumber (\current -> current {reviewSessionSpinnerFrame = current.reviewSessionSpinnerFrame + 1})
+        scheduleReviewTick issueNumber generation
+      ReviewTickExpire -> modifyReviewSession issueNumber (\current -> current {reviewSessionTickArmed = False})
+
+scheduleReviewTick :: Int -> Int -> EventM Name AppState ()
+scheduleReviewTick issueNumber generation = do
   eventChannel <- (.appEventChannel) <$> get
   void
     . liftIO
     . forkIO
     $ do
       threadDelay reviewAnimationIntervalMicros
-      writeBChan eventChannel (ReviewAnimationTick threadId)
+      writeBChan eventChannel (ReviewAnimationTick issueNumber generation)
 
 reviewAnimationIntervalMicros :: Int
 reviewAnimationIntervalMicros = 100 * 1000
