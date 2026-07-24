@@ -4,11 +4,13 @@ module Kanban.Workflow
     entryItem,
     isApproved,
     isProblem,
+    isStatusLabel,
+    orderCardLabels,
     pullRequestStatus,
   )
 where
 
-import Data.List (sortOn)
+import Data.List (partition, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -232,8 +234,30 @@ attentionKey config item =
   )
 
 needsRereview :: BoardItem -> Bool
-needsRereview (IssueItem issue) = hasLabel "reviewed:revised" issue.issueLabels
+needsRereview (IssueItem issue) = hasLabel rereviewLabel issue.issueLabels
 needsRereview (PullRequestItem _) = False
+
+rereviewLabel :: Text
+rereviewLabel = "reviewed:revised"
+
+-- | Whether a label name carries workflow status: the approval,
+-- changes-requested, blocked, and rereview names 'isApproved', 'isProblem',
+-- and 'needsRereview' recognize, matched case-insensitively the same way.
+isStatusLabel :: WorkflowConfig -> Text -> Bool
+isStatusLabel config name =
+  folded == Text.toCaseFold config.approvalLabel
+    || folded == Text.toCaseFold config.changesRequestedLabel
+    || folded == Text.toCaseFold rereviewLabel
+    || folded `Set.member` Set.map Text.toCaseFold config.blockedLabels
+  where
+    folded = Text.toCaseFold name
+
+-- | The card label order: workflow-status labels first, keeping the order the
+-- provider returned them in, then every remaining label alphabetically.
+orderCardLabels :: WorkflowConfig -> [Label] -> [Label]
+orderCardLabels config labels = statusLabels <> sortOn (Text.toCaseFold . (.labelName)) otherLabels
+  where
+    (statusLabels, otherLabels) = partition (isStatusLabel config . (.labelName)) labels
 
 hasProblemLabel :: WorkflowConfig -> [Label] -> Bool
 hasProblemLabel config labels =

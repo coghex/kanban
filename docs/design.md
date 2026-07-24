@@ -518,6 +518,25 @@ at most three display lines, and append `…` when truncated. This is more stabl
 than trying to count natural-language sentences in issue templates, lists, and
 code-heavy bodies.
 
+### Card height and truncation
+
+Every element above gets its own budget, measured in terminal display cells at
+the card's current inner width, so no element can quietly consume another's
+room:
+
+- The title wraps to at most two lines and takes a `…` when truncated, leaving
+  the excerpt its three lines however long the title is.
+- Label chips are placed whole or not at all. When labels remain after two
+  rows — or GitHub reported omitted labels — a whole `+N` chip is always
+  placed, evicting a trailing chip if that is the only way to fit it. `N`
+  counts both the labels GitHub omitted and the ones that had no room.
+- Metadata, tracker context, tracker diagnostics, and pull-request status wrap
+  rather than truncate; they are always visible.
+
+The card's height is then the number of rows those budgets produced, so cards
+in a column vary in height and no interior row is ever cropped. A resize
+re-lays out every card from the new width on the next redraw, with no refresh.
+
 ### External text sanitization
 
 Titles, label names, and bodies arrive from GitHub and may contain emoji,

@@ -1,6 +1,7 @@
 module Main (main) where
 
-import Brick (BrickEvent (..), Location (..))
+import Brick (AttrMap, BrickEvent (..), Location (..), Widget, hLimit)
+import Brick.Main (renderWidget)
 import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, SomeException, bracket, finally, throwIO, throwTo, try, uninterruptibleMask_)
 import Control.Monad (void)
@@ -8,14 +9,18 @@ import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (find, findIndex, isInfixOf, sortOn)
+import Data.List (dropWhileEnd, find, findIndex, isInfixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
+import qualified Data.Text.Lazy as LazyText
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, minutesToTimeZone, secondsToDiffTime)
+import qualified Data.Vector as Vector
 import qualified Graphics.Vty as Vty
+import Graphics.Vty.PictureToSpans (displayOpsForPic)
+import Graphics.Vty.Span (SpanOp (..))
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
@@ -26,6 +31,7 @@ import Kanban.Cache
     writeUsageCache,
   )
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
+import Kanban.Card (CardChip (..), boundedLines, displayWidth, labelChipRows)
 import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
@@ -137,6 +143,7 @@ import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChil
 import Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    CardEnv (..),
     ChatTranscript (..),
     Name (..),
     OverlayMouseAction (..),
@@ -168,6 +175,7 @@ import Kanban.UI
     cardInteriorAttribute,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
+    drawCardFrame,
     githubRefreshTimeoutMicros,
     neutralAttr,
     normalizeCollapsedRow,
@@ -188,9 +196,10 @@ import Kanban.UI
     reviewSessionsNeedingArm,
     revisedAttr,
     solveSessionAlreadyResolved,
+    themeFor,
     visibleSelectionRows,
   )
-import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, pullRequestStatus)
+import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, orderCardLabels, pullRequestStatus)
 import Kanban.Worker
   ( ProviderSlot (..),
     PullRequestWorkerTask (..),
@@ -4319,6 +4328,125 @@ main = hspec $ do
       cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 3}) `shouldBe` 3
       cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 9}) `shouldBe` 9
 
+  describe "card line budgeting" $ do
+    it "keeps a wrapped excerpt within its line budget and marks the truncation" $ do
+      boundedLines 10 3 "alpha beta gamma delta epsilon zeta" `shouldBe` ["alpha beta", "gamma", "delta…"]
+      boundedLines 10 3 "alpha beta gamma delta" `shouldBe` ["alpha beta", "gamma", "delta"]
+
+    it "leaves text that fits untouched, so an ellipsis only ever means dropped content" $ do
+      boundedLines 10 3 "alpha beta gamma" `shouldBe` ["alpha beta", "gamma"]
+      boundedLines 10 2 "" `shouldBe` []
+
+    it "reflows to the width it is given rather than to a fixed layout" $ do
+      boundedLines 5 3 "alpha beta gamma delta" `shouldBe` ["alpha", "beta", "gamm…"]
+      boundedLines 22 3 "alpha beta gamma delta" `shouldBe` ["alpha beta gamma delta"]
+
+    it "caps a title at two lines the same way, so it cannot crowd out the excerpt" $
+      boundedLines 12 2 "#812  Modal input leaks through the overlay"
+        `shouldBe` ["#812 Modal", "input leaks…"]
+
+    it "measures display cells, not characters, so wide glyphs cannot overrun the border" $ do
+      boundedLines 5 3 (Data.Text.replicate 8 "漢") `shouldBe` ["漢漢", "漢漢", "漢漢…"]
+      map displayWidth (boundedLines 5 3 (Data.Text.replicate 8 "漢")) `shouldBe` [4, 4, 5]
+
+    it "packs whole label chips into two rows and counts the rest into +N" $
+      labelChipRows 20 2 ["alpha", "beta", "gamma", "delta", "epsilon"] 0
+        `shouldBe` [ [LabelChip "alpha", LabelChip "beta"],
+                     [LabelChip "gamma", LabelChip "delta", OverflowChip 1]
+                   ]
+
+    it "adds the overflow GitHub itself reported to the chips it could not place" $ do
+      labelChipRows 20 2 ["alpha", "beta"] 4 `shouldBe` [[LabelChip "alpha", LabelChip "beta", OverflowChip 4]]
+      labelChipRows 20 2 ["alpha", "beta", "gamma", "delta", "epsilon"] 3
+        `shouldBe` [ [LabelChip "alpha", LabelChip "beta"],
+                     [LabelChip "gamma", LabelChip "delta", OverflowChip 4]
+                   ]
+
+    it "omits and counts a chip too wide for a whole row rather than cropping it" $
+      labelChipRows 10 2 ["a-very-long-label", "beta"] 0 `shouldBe` [[LabelChip "beta", OverflowChip 1]]
+
+    it "gives the marker a spare row when the last one is full" $
+      labelChipRows 16 2 ["alpha", "beta"] 1 `shouldBe` [[LabelChip "alpha", LabelChip "beta"], [OverflowChip 1]]
+
+    it "evicts a trailing chip when that is the only way to show a whole marker" $
+      labelChipRows 16 1 ["alpha", "beta"] 1 `shouldBe` [[LabelChip "alpha", OverflowChip 2]]
+
+    it "orders workflow-status labels first and the remaining labels alphabetically" $ do
+      let labels =
+            [ Label "ui" "5319e7",
+              Label "bug" "d73a4a",
+              Label "reviewed:approve" "2f9e44",
+              Label "Blocked" "b60205",
+              Label "architecture" "0e8a16"
+            ]
+      map (.labelName) (orderCardLabels defaultWorkflowConfig labels)
+        `shouldBe` ["reviewed:approve", "Blocked", "architecture", "bug", "ui"]
+
+  describe "rendered cards" $ do
+    it "shows every §11 element inside a frame sized to its own content" $ do
+      let rendered = renderCard testOptions False cardFixtureEntry 46
+      map Data.Text.strip (cardInterior rendered)
+        `shouldBe` [ "#812 Modal input leaks through the overlay",
+                     "and reaches the board beneath it",
+                     "reviewed:approve   architecture   bug",
+                     "code-health   input   ui  +2",
+                     "@claude-agent · updated now",
+                     "Empty modal areas currently allow pointer",
+                     "events to reach lower pages, which is",
+                     "visible whenever a dialog overlaps the…"
+                   ]
+      map displayWidth rendered `shouldBe` replicate (length rendered) 46
+      cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 8 "│" <> ["╰"], ["╮"] <> replicate 8 "│" <> ["╯"])
+
+    it "reflows the same card, including its truncation markers, at a narrower width" $ do
+      let rendered = renderCard testOptions False cardFixtureEntry 34
+      map Data.Text.strip (cardInterior rendered)
+        `shouldBe` [ "#812 Modal input leaks through",
+                     "the overlay and reaches the…",
+                     "reviewed:approve",
+                     "architecture   bug  +5",
+                     "@claude-agent · updated now",
+                     "Empty modal areas currently",
+                     "allow pointer events to reach",
+                     "lower pages, which is visible…"
+                   ]
+      map displayWidth rendered `shouldBe` replicate (length rendered) 34
+      cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 8 "│" <> ["╰"], ["╮"] <> replicate 8 "│" <> ["╯"])
+
+    it "grows the frame for a tracked card's tracker-context row" $ do
+      let rendered = renderCard testOptions True cardFixtureTrackedEntry 46
+      take 1 (map Data.Text.strip (cardInterior rendered)) `shouldBe` ["F2 · tracker #700 · MULTI-TRACKED"]
+      length rendered `shouldBe` length (renderCard testOptions False cardFixtureEntry 46) + 1
+      map displayWidth rendered `shouldBe` replicate (length rendered) 46
+      cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 9 "│" <> ["╰"], ["╮"] <> replicate 9 "│" <> ["╯"])
+
+    it "keeps a pull request's CI and merge status row visible" $ do
+      let rendered = renderCard testOptions False cardFixturePullRequestEntry 46
+      map Data.Text.strip (cardInterior rendered)
+        `shouldBe` [ "PR #823 Route Shift-wheel through the",
+                     "modal-aware ownership path",
+                     "reviewed:approve   input",
+                     "#812 · agent → master · updated now",
+                     "Routes Shift-wheel through the same",
+                     "modal-aware ownership path as ordinary",
+                     "wheel events.",
+                     "✓ CI 14/14 · clean"
+                   ]
+      map displayWidth rendered `shouldBe` replicate (length rendered) 46
+
+    it "sizes a sparse card to its own content rather than to a fixed height" $ do
+      let rendered = renderCard testOptions False (Standalone (IssueItem (baseIssue 5 []))) 46
+      map Data.Text.strip (cardInterior rendered) `shouldBe` ["#5 Issue 5", "unassigned · updated now", "Body"]
+      cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 3 "│" <> ["╰"], ["╮"] <> replicate 3 "│" <> ["╯"])
+
+    it "lays a card out identically under the ASCII and no-color options" $ do
+      let rendered = renderCard testOptions False cardFixtureEntry 46
+          asciiCard = renderCard (testOptions {optionAscii = True}) False cardFixtureEntry 46
+          monochrome = renderCard (testOptions {optionColor = ColorNever}) False cardFixtureEntry 46
+      cardInterior asciiCard `shouldBe` cardInterior rendered
+      monochrome `shouldBe` rendered
+      cardBorderColumns asciiCard `shouldBe` (["+"] <> replicate 8 "|" <> ["+"], ["+"] <> replicate 8 "|" <> ["+"])
+
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
       withTemporaryCacheRoot $ \configRoot ->
@@ -4537,6 +4665,96 @@ showText = Data.Text.pack . show
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)
+
+-- | An issue that exercises every §11 element at once: a title too long for
+-- one row, more labels than two rows can hold plus GitHub-reported overflow,
+-- an assignee, and a body far longer than the excerpt budget.
+cardFixtureIssue :: Issue
+cardFixtureIssue =
+  Issue
+    { issueNumber = 812,
+      issueTitle = "Modal input leaks through the overlay and reaches the board beneath it",
+      issueBody =
+        "Empty modal areas currently allow pointer events to reach lower pages, which is "
+          <> "visible whenever a dialog overlaps the world and the reviewer scrolls the board.",
+      issueUrl = "https://example.test/issues/812",
+      issueLabels =
+        [ Label "ui" "5319e7",
+          Label "bug" "d73a4a",
+          Label "reviewed:approve" "2f9e44",
+          Label "input" "0075ca",
+          Label "code-health" "1d76db",
+          Label "architecture" "0e8a16"
+        ],
+      issueAssignees = [Assignee "claude-agent"],
+      issueCreatedAt = epoch,
+      issueUpdatedAt = epoch,
+      issueLabelOverflow = 2,
+      issueAssigneeOverflow = 0
+    }
+
+cardFixtureEntry :: ColumnEntry
+cardFixtureEntry = Standalone (IssueItem cardFixtureIssue)
+
+-- | The same issue as a tracked child of two trackers, which adds the
+-- tracker-context row above the title.
+cardFixtureTrackedEntry :: ColumnEntry
+cardFixtureTrackedEntry =
+  Tracked
+    (TrackingContext (TrackerMembership (fixtureTracker 700) (TrackerChild 812 (Just "F2") 1 False)) [fixtureMembership 701 812])
+    (IssueItem cardFixtureIssue)
+
+-- | A pull request, which carries the CI/merge status row cards must keep.
+cardFixturePullRequestEntry :: ColumnEntry
+cardFixturePullRequestEntry =
+  Standalone
+    ( PullRequestItem
+        (basePullRequest 823 [812] False [Label "reviewed:approve" "2f9e44", Label "input" "0075ca"])
+          { pullRequestTitle = "Route Shift-wheel through the modal-aware ownership path",
+            pullRequestBody = "Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel events.",
+            pullRequestChecks = ChecksPassed 14,
+            pullRequestMergeState = MergeClean,
+            pullRequestReviewDecision = ReviewApproved
+          }
+    )
+
+-- | Draw one card at a fixed width and read the frame back as plain text, the
+-- way a terminal would show it.
+renderCard :: Options -> Bool -> ColumnEntry -> Int -> [Text]
+renderCard options selected entry width =
+  renderWidgetLines (themeFor options) width (hLimit width (drawCardFrame environment selected entry))
+  where
+    environment =
+      CardEnv
+        { cardOptions = options,
+          cardConfig = testResolvedConfig,
+          cardNow = epoch,
+          cardSolveSessions = Map.empty
+        }
+
+renderWidgetLines :: AttrMap -> Int -> Widget Name -> [Text]
+renderWidgetLines theme width widget =
+  dropWhileEnd Data.Text.null (map rowText (Vector.toList (displayOpsForPic picture region)))
+  where
+    region = (width, 80)
+    picture = renderWidget (Just theme) [widget] region
+    rowText = Data.Text.stripEnd . foldMap spanText . Vector.toList
+    spanText (TextSpan _ _ _ value) = LazyText.toStrict value
+    spanText (Skip columns) = Data.Text.replicate columns " "
+    spanText (RowEnd columns) = Data.Text.replicate columns " "
+
+-- | The interior of a card frame: every row between the top and bottom
+-- borders, with the side borders stripped.
+cardInterior :: [Text] -> [Text]
+cardInterior rendered = map (Data.Text.dropEnd 1 . Data.Text.drop 1) (drop 1 (dropLast rendered))
+  where
+    dropLast [] = []
+    dropLast rows = take (length rows - 1) rows
+
+-- | The frame's left and right border columns, top to bottom. Equal-length
+-- runs of edge glyphs are what proves the frame matches the content height.
+cardBorderColumns :: [Text] -> ([Text], [Text])
+cardBorderColumns rendered = (map (Data.Text.take 1) rendered, map (Data.Text.takeEnd 1) rendered)
 
 isLeft :: Either left right -> Bool
 isLeft (Left _) = True
