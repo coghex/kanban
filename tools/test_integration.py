@@ -438,11 +438,10 @@ class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
                 )
 
 
-class WorktreeMatchingSafetyTests(unittest.TestCase):
-    """Regression coverage for issue #24: directory-basename scoring alone
-    must never positively identify a worktree for deletion or sandbox-
-    bypassed reuse -- only an exact branch match, or (for a detached
-    worktree, independent of its name) an exact PR-head SHA match, may.
+class WorktreeFixture(unittest.TestCase):
+    """Shared scaffolding for worktree-selection tests: a real temporary Git
+    repository whose PR #42 head lives on a pushed `issue-42-feature` branch,
+    with no worktree checked out on it.
     """
 
     def setUp(self):
@@ -491,6 +490,14 @@ class WorktreeMatchingSafetyTests(unittest.TestCase):
             "closingIssuesReferences": [],
         }
 
+
+class WorktreeMatchingSafetyTests(WorktreeFixture):
+    """Regression coverage for issue #24: directory-basename scoring alone
+    must never positively identify a worktree for deletion or sandbox-
+    bypassed reuse -- only an exact branch match, or (for a detached
+    worktree, independent of its name) an exact PR-head SHA match, may.
+    """
+
     def test_unrelated_named_worktree_not_deleted_or_reused_but_cleanup_continues(self):
         experiment_wt = self.root / "experiment-42"
         run_git(
@@ -500,15 +507,14 @@ class WorktreeMatchingSafetyTests(unittest.TestCase):
 
         self.assertIsNone(drain_prs.find_matching_worktree(self.ctx, self.pr))
 
-        reused_path, created_new = drain_prs.prepare_review_worktree(self.ctx, self.pr)
+        review_path = drain_prs.prepare_review_worktree(self.ctx, self.pr)
 
-        def _cleanup_reused_path():
-            if reused_path.exists():
-                run_git(["worktree", "remove", "--force", str(reused_path)], cwd=self.main)
+        def _cleanup_review_path():
+            if review_path.exists():
+                run_git(["worktree", "remove", "--force", str(review_path)], cwd=self.main)
 
-        self.addCleanup(_cleanup_reused_path)
-        self.assertTrue(created_new)
-        self.assertNotEqual(reused_path.resolve(), experiment_wt.resolve())
+        self.addCleanup(_cleanup_review_path)
+        self.assertNotEqual(review_path.resolve(), experiment_wt.resolve())
 
         # The temporary review worktree is genuinely at the PR head, so it is
         # itself a legitimate exact-detached-HEAD match and gets swept up by
@@ -570,6 +576,165 @@ class WorktreeMatchingSafetyTests(unittest.TestCase):
             result = drain_prs.find_matching_worktree(self.ctx, self.pr)
 
         self.assertIsNone(result)
+
+
+class StaleHeadRereviewIsolationTests(WorktreeFixture):
+    """Regression coverage for issue #26: the stale-head rereviewer runs Codex
+    with approvals and the sandbox bypassed, so it must always get its own
+    temporary worktree, verified clean and at the exact head under review
+    before the agent launches, and removed afterwards in every outcome.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.fake = fake_cli.FakeCli(self.root / "fake-cli")
+        self.fake.install("gh")
+        self.fake.install("codex")
+        self.prepared = []
+
+    def _recording_prepare(self, *, tamper=None):
+        real_prepare = drain_prs.prepare_review_worktree
+
+        def prepare(ctx, pr):
+            path = real_prepare(ctx, pr)
+            self.addCleanup(self._force_remove, path)
+            head = run_git(["rev-parse", "HEAD"], cwd=path)
+            self.prepared.append((path, head))
+            if tamper is not None:
+                tamper(path)
+            return path
+
+        return mock.patch.object(drain_prs, "prepare_review_worktree", prepare)
+
+    def _force_remove(self, path):
+        if path.exists():
+            run_git(["worktree", "remove", "--force", str(path)], cwd=self.main)
+
+    def _script_approving_rereview(self):
+        pr_json = dict(self.pr, labels=[{"name": drain_prs.APPROVE_LABEL}])
+        # Both `gh pr view 42` reads share a match prefix, so they are served
+        # in order: get_pr() first, then latest_review_marker()'s comments.
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script(
+            "gh",
+            ["pr", "view", "42"],
+            stdout=json.dumps(
+                {
+                    "comments": [
+                        {
+                            "createdAt": "2026-07-20T00:00:00Z",
+                            "body": (
+                                "<!-- pr-review:v1 reviewer=codex "
+                                f"head={self.head_sha} verdict=APPROVE -->"
+                            ),
+                        }
+                    ]
+                }
+            ),
+        )
+        self.fake.script("codex", ["exec"], stdout="")
+
+    def _codex_calls(self):
+        return self.fake.calls("codex")
+
+    def _rereview(self):
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            return drain_prs.rereview_pr_with_codex(self.ctx, self.pr, dry_run=False)
+
+    def test_matched_dirty_stale_worktree_is_not_reused_and_is_left_untouched(self):
+        # An interrupted solve: a live worktree on the PR's branch, sitting
+        # behind the pushed head with uncommitted work in the tree.
+        live_wt = self.root / "issue-42-live"
+        run_git(["worktree", "add", "-q", str(live_wt), "issue-42-feature"], cwd=self.main)
+        run_git(["reset", "--hard", "-q", self.base_sha], cwd=live_wt)
+        (live_wt / "README").write_text("half-finished edit\n", encoding="utf-8")
+        (live_wt / "scratch.txt").write_text("uncommitted work\n", encoding="utf-8")
+
+        # It is an exact branch match, so the old reuse path would have handed
+        # this very worktree to sandbox-bypassed Codex.
+        self.assertEqual(
+            drain_prs.find_matching_worktree(self.ctx, self.pr), live_wt.resolve()
+        )
+
+        self._script_approving_rereview()
+        with self._recording_prepare():
+            refreshed = self._rereview()
+
+        self.assertEqual(refreshed["headRefOid"], self.head_sha)
+
+        self.assertEqual(len(self.prepared), 1)
+        review_path, prepared_head = self.prepared[0]
+        self.assertNotEqual(review_path.resolve(), live_wt.resolve())
+        self.assertEqual(prepared_head, self.head_sha)
+
+        codex_calls = self._codex_calls()
+        self.assertEqual(len(codex_calls), 1)
+        args = codex_calls[0]["args"]
+        self.assertEqual(args[args.index("-C") + 1], str(review_path))
+
+        # The temporary worktree is gone; the live one is exactly as it was.
+        self.assertFalse(review_path.exists())
+        self.assertTrue(live_wt.exists())
+        self.assertEqual(run_git(["rev-parse", "HEAD"], cwd=live_wt), self.base_sha)
+        self.assertEqual(
+            (live_wt / "README").read_text(encoding="utf-8"), "half-finished edit\n"
+        )
+        self.assertEqual(
+            (live_wt / "scratch.txt").read_text(encoding="utf-8"), "uncommitted work\n"
+        )
+
+    def test_review_worktree_at_wrong_head_fails_before_codex_and_is_removed(self):
+        # The remote branch moves after the drainer captured the PR head, so
+        # the fresh temporary worktree lands on a commit that is not under
+        # review.
+        mover = self.root / "mover"
+        run_git(
+            ["clone", "-q", "-b", "issue-42-feature", str(self.bare), str(mover)],
+            cwd=self.root,
+        )
+        run_git(["config", "user.email", "test@example.com"], cwd=mover)
+        run_git(["config", "user.name", "Test"], cwd=mover)
+        (mover / "later.txt").write_text("pushed after the PR read\n", encoding="utf-8")
+        run_git(["add", "later.txt"], cwd=mover)
+        run_git(["commit", "-q", "-m", "later push"], cwd=mover)
+        moved_sha = run_git(["rev-parse", "HEAD"], cwd=mover)
+        run_git(["push", "-q", "origin", "issue-42-feature"], cwd=mover)
+        self.assertNotEqual(moved_sha, self.head_sha)
+
+        self._script_approving_rereview()
+        with self._recording_prepare():
+            with self.assertRaises(drain_prs.DrainError) as caught:
+                self._rereview()
+
+        message = str(caught.exception)
+        self.assertIn(moved_sha[:12], message)
+        self.assertIn(self.head_sha[:12], message)
+        self.assertIn("did not match expected PR head", message)
+
+        self.assertEqual(self._codex_calls(), [])
+        self.assertEqual(len(self.prepared), 1)
+        review_path, _ = self.prepared[0]
+        self.assertFalse(review_path.exists())
+
+    def test_dirty_review_worktree_fails_before_codex_and_is_removed(self):
+        def dirty(path):
+            (path / "README").write_text("stray edit\n", encoding="utf-8")
+            (path / "untracked.txt").write_text("stray file\n", encoding="utf-8")
+
+        self._script_approving_rereview()
+        with self._recording_prepare(tamper=dirty):
+            with self.assertRaises(drain_prs.DrainError) as caught:
+                self._rereview()
+
+        message = str(caught.exception)
+        self.assertIn("was dirty", message)
+        self.assertIn("README", message)
+        self.assertIn("untracked.txt", message)
+
+        self.assertEqual(self._codex_calls(), [])
+        self.assertEqual(len(self.prepared), 1)
+        review_path, _ = self.prepared[0]
+        self.assertFalse(review_path.exists())
 
 
 if __name__ == "__main__":
