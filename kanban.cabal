@@ -45,6 +45,7 @@ library
   exposed-modules:
     Kanban.CLI
     Kanban.Cache
+    Kanban.Card
     Kanban.Claude
     Kanban.Codex
     Kanban.Config
@@ -117,4 +118,5 @@ test-suite kanban-test
     text,
     time,
     unix,
+    vector                >= 0.13 && < 0.14,
     vty                   >= 6.2 && < 6.6

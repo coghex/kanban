@@ -1,6 +1,7 @@
 module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    CardEnv (..),
     ChatTranscript (..),
     Name (..),
     OverlayMouseAction (..),
@@ -27,6 +28,7 @@ module Kanban.UI
     codexRefreshTimeoutMicros,
     decideReviewTickArm,
     decideReviewTickFire,
+    drawCardFrame,
     failureActivity,
     githubRefreshTimeoutMicros,
     neutralAttr,
@@ -53,6 +55,7 @@ module Kanban.UI
     revisedAttr,
     runDashboard,
     solveSessionAlreadyResolved,
+    themeFor,
     visibleSelectionRows,
   )
 where
@@ -86,6 +89,14 @@ import Kanban.Cache
     writeUsageCache,
   )
 import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
+import Kanban.Card
+  ( CardChip (..),
+    boundedLines,
+    displayWidth,
+    labelChipRows,
+    overflowChipText,
+    wrappedLines,
+  )
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), TimeoutsConfig (..))
@@ -165,7 +176,7 @@ import Kanban.Settings
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
-import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, pullRequestStatus)
+import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, orderCardLabels, pullRequestStatus)
 import Kanban.Worker
   ( ProcessIdentity,
     PullRequestWorkerTask (..),
@@ -815,63 +826,103 @@ drawCard state column row entry =
         <+> solveBadge state (entryItem entry)
         <+> reviewBadge state (entryItem entry)
         <+> branchPrefix state column row entry
-        <+> drawCardFrame state selected entry (vBox (cardLines state selected entry))
+        <+> drawCardFrame (cardEnv state) selected entry
     marker = if state.appOptions.optionAscii then ">" else "▌"
 
-drawCardFrame :: AppState -> Bool -> ColumnEntry -> Widget Name -> Widget Name
-drawCardFrame state selected entry contents =
-  withBorderStyle (cardBorderStyle state)
-    . vBox
-    $ [ hBox [withAttr topBottomAttribute (txt topLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt topRight)],
-        hBox
-          [ withAttr leftAttribute verticalEdge,
-            withAttr interiorAttribute (vLimit middleHeight (padLeftRight 1 (padRight Max contents))),
-            withAttr statusAttribute verticalEdge
-          ],
-        hBox [withAttr topBottomAttribute (txt bottomLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt bottomRight)]
-      ]
+-- | Everything a card needs to draw itself that the entry does not carry.
+-- Splitting it out of 'AppState' keeps card rendering exercisable on its own.
+data CardEnv = CardEnv
+  { cardOptions :: Options,
+    cardConfig :: ResolvedConfig,
+    cardNow :: UTCTime,
+    cardSolveSessions :: Map Int SolveSession
+  }
+
+cardEnv :: AppState -> CardEnv
+cardEnv state =
+  CardEnv
+    { cardOptions = state.appOptions,
+      cardConfig = state.appConfig,
+      cardNow = state.appNow,
+      cardSolveSessions = state.appSolveSessions
+    }
+
+-- | Cells the frame spends on itself: two border columns plus the one-cell
+-- padding on either side of the interior.
+cardFrameOverhead :: Int
+cardFrameOverhead = 4
+
+-- | Card titles wrap to at most two rows, so a long one cannot crowd out the
+-- excerpt below it.
+cardTitleLimit :: Int
+cardTitleLimit = 2
+
+-- | §11 allows two rows of label chips before the rest becomes @+N@.
+cardLabelRowLimit :: Int
+cardLabelRowLimit = 2
+
+-- | Draw a card at whatever width the column leaves it, sizing the frame to
+-- the content it actually laid out. Every interior widget below is exactly one
+-- row wide, so the border edges match the interior and nothing is cropped.
+drawCardFrame :: CardEnv -> Bool -> ColumnEntry -> Widget Name
+drawCardFrame env selected entry =
+  BrickTypes.Widget BrickTypes.Greedy BrickTypes.Fixed $ do
+    context <- BrickTypes.getContext
+    let innerWidth = max 0 (BrickTypes.availWidth context - cardFrameOverhead)
+        contents = cardLines env selected entry innerWidth
+        interiorHeight = length contents
+        verticalEdge = vBox (replicate interiorHeight (str [vertical]))
+    BrickTypes.render
+      . withBorderStyle (cardBorderStyle env.cardOptions)
+      . vBox
+      $ [ hBox [withAttr topBottomAttribute (txt topLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt topRight)],
+          hBox
+            [ withAttr leftAttribute verticalEdge,
+              withAttr interiorAttribute (padLeftRight 1 (padRight Max (vBox contents))),
+              withAttr statusAttribute verticalEdge
+            ],
+          hBox [withAttr topBottomAttribute (txt bottomLeft), withAttr topBottomAttribute hBorder, withAttr statusAttribute (txt bottomRight)]
+        ]
   where
     item = entryItem entry
     (topLeft, topRight, bottomLeft, bottomRight, vertical)
-      | state.appOptions.optionAscii = ("+", "+", "+", "+", '|')
+      | env.cardOptions.optionAscii = ("+", "+", "+", "+", '|')
       | otherwise = ("╭", "╮", "╰", "╯", '│')
-    statusAttribute = cardStatusAttribute state item
+    statusAttribute = cardStatusAttribute env item
     topBottomAttribute = if selected then selectedAttr else statusAttribute
     leftAttribute = if selected then selectedAttr else statusAttribute
     interiorAttribute = cardInteriorAttribute statusAttribute
-    middleHeight = baseHeight + case entry of
-      Standalone _ -> 0
-      Tracked _ _ -> 1
-      TrackerHeader _ -> 0
-    baseHeight = case item of
-      IssueItem _ -> 7
-      PullRequestItem _ -> 8
-    verticalEdge = vBox (replicate middleHeight (str [vertical]))
 
 -- | The configured card excerpt height, in rows.
 cardExcerptLimit :: ResolvedConfig -> Int
 cardExcerptLimit config = config.resolvedLimits.limitsExcerptLines
 
-cardLines :: AppState -> Bool -> ColumnEntry -> [Widget Name]
-cardLines state selected entry =
-  trackingLine
-    <> [ withAttr (if selected then selectedTitleAttr else cardTitleAttr) (txtWrap (itemHeading item)),
-    drawCardLabels state item,
-    withAttr dimAttr (txtWrap (itemMetadata state item)),
-    vLimit (cardExcerptLimit state.appConfig) (txtWrap (excerpt (itemBody item)))
-       ]
-    <> statusLine
+-- | The card interior as one widget per rendered row, laid out for
+-- @innerWidth@ cells. Titles and excerpts get their own line budgets so
+-- neither can starve the other, and metadata and status content is wrapped
+-- rather than dropped.
+cardLines :: CardEnv -> Bool -> ColumnEntry -> Int -> [Widget Name]
+cardLines env selected entry innerWidth =
+  trackingLines
+    <> map (withAttr titleAttribute . txt) (boundedLines innerWidth cardTitleLimit (itemHeading item))
+    <> cardLabelRows env item innerWidth
+    <> map (withAttr dimAttr . txt) (wrappedLines innerWidth (itemMetadata env.cardNow item))
+    <> map txt (boundedLines innerWidth (cardExcerptLimit env.cardConfig) (excerpt (itemBody item)))
+    <> statusLines
   where
     item = entryItem entry
-    trackingLine = case entry of
+    workflow = env.cardConfig.resolvedWorkflow
+    titleAttribute = if selected then selectedTitleAttr else cardTitleAttr
+    trackingLines = case entry of
       Standalone _ -> []
-      Tracked context _ -> [drawTrackingLine context]
+      Tracked context _ -> drawTrackingLine innerWidth context
       TrackerHeader _ -> []
-    statusLine = case item of
-      IssueItem issue -> case trackerDiagnosticsForIssue state.appConfig.resolvedWorkflow issue of
-        [] -> []
-        diagnostic : _ -> [withAttr pendingAttr (txtWrap ("TRACKER · " <> renderTrackerDiagnostic diagnostic))]
-      PullRequestItem _ -> [withAttr (statusTextAttr state.appConfig.resolvedWorkflow item) (txt (itemStatusText item))]
+    statusLines = case item of
+      IssueItem issue -> concatMap diagnosticRows (trackerDiagnosticsForIssue workflow issue)
+      PullRequestItem _ ->
+        map (withAttr (statusTextAttr workflow item) . txt) (wrappedLines innerWidth (itemStatusText item))
+    diagnosticRows diagnostic =
+      map (withAttr pendingAttr . txt) (wrappedLines innerWidth ("TRACKER · " <> renderTrackerDiagnostic diagnostic))
 
 drawTrackerHeader :: AppState -> BoardColumn -> Int -> Tracker -> Bool -> Widget Name
 drawTrackerHeader state column row tracker expanded =
@@ -906,19 +957,26 @@ drawTrackerHeader state column row tracker expanded =
         <> " complete"
         <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
 
-drawTrackingLine :: TrackingContext -> Widget Name
-drawTrackingLine context =
-  withAttr trackerAttr (txt (childKey <> " · tracker #" <> showText trackerNumber))
-    <+> multiTracked
+-- | The tracker-context rows. They wrap rather than truncate, so a long
+-- implementation key or tracker reference stays fully visible and the frame
+-- grows to hold it. The multi-tracked warning shares the reference's last row
+-- while both fit, and otherwise keeps its own attribute on its own rows.
+drawTrackingLine :: Int -> TrackingContext -> [Widget Name]
+drawTrackingLine innerWidth context
+  | innerWidth <= 0 = []
+  | null context.trackingAdditional = referenceRows
+  | displayWidth (referenceText <> inlineWarning) <= innerWidth =
+      [withAttr trackerAttr (txt referenceText) <+> withAttr pendingAttr (txt inlineWarning)]
+  | otherwise = referenceRows <> map (withAttr pendingAttr . txt) (wrappedLines innerWidth "MULTI-TRACKED")
   where
     child = context.trackingPrimary.membershipChild
     childKey = case child.trackerChildImplementationKey of
       Just key -> key
       Nothing -> "step " <> showText (child.trackerChildChecklistOrder + 1)
     trackerNumber = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
-    multiTracked
-      | null context.trackingAdditional = emptyWidget
-      | otherwise = withAttr pendingAttr (txt " · MULTI-TRACKED")
+    referenceText = childKey <> " · tracker #" <> showText trackerNumber
+    referenceRows = map (withAttr trackerAttr . txt) (wrappedLines innerWidth referenceText)
+    inlineWarning = " · MULTI-TRACKED"
 
 branchPrefix :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
 branchPrefix state column row entry = case entry of
@@ -940,18 +998,16 @@ entryPrimaryTrackerNumber (TrackerHeader tracker) = Just tracker.trackerIssue.is
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
 
-drawLabel :: AppState -> Label -> Widget Name
-drawLabel state label = withAttr (labelAttribute state.appConfig.resolvedWorkflow label.labelName) (txt (" " <> sanitizeText label.labelName <> " ")) <+> txt " "
-
-drawCardLabels :: AppState -> BoardItem -> Widget Name
-drawCardLabels state item = hBox (map (drawLabel state) visibleLabels <> overflowMarker)
+-- | Label chips as whole rows. 'labelChipRows' decides what fits; every chip
+-- it returns is drawn complete, and the @+N@ it appends counts both the labels
+-- GitHub omitted and the ones that had no room here.
+cardLabelRows :: CardEnv -> BoardItem -> Int -> [Widget Name]
+cardLabelRows env item innerWidth = map drawRow (labelChipRows innerWidth cardLabelRowLimit names (itemLabelOverflow item))
   where
-    labels = itemLabels item
-    visibleLabels = take 4 labels
-    hiddenLabels = max 0 (length labels - length visibleLabels) + itemLabelOverflow item
-    overflowMarker
-      | hiddenLabels > 0 = [withAttr pendingAttr (txt ("+" <> showText hiddenLabels))]
-      | otherwise = []
+    names = map (sanitizeText . (.labelName)) (orderCardLabels env.cardConfig.resolvedWorkflow (itemLabels item))
+    drawRow chips = hBox (intersperse (txt " ") (map drawChip chips))
+    drawChip (LabelChip name) = withAttr (labelAttribute env.cardConfig.resolvedWorkflow name) (txt (" " <> name <> " "))
+    drawChip (OverflowChip count) = withAttr pendingAttr (txt (overflowChipText count))
 
 itemHeading :: BoardItem -> Text
 itemHeading (IssueItem issue) = "#" <> showText issue.issueNumber <> "  " <> sanitizeText issue.issueTitle
@@ -966,16 +1022,16 @@ itemBody :: BoardItem -> Text
 itemBody (IssueItem issue) = issue.issueBody
 itemBody (PullRequestItem pullRequest) = pullRequest.pullRequestBody
 
-itemMetadata :: AppState -> BoardItem -> Text
-itemMetadata state (IssueItem issue) = ownership <> " · updated " <> relativeAge state.appNow issue.issueUpdatedAt
+itemMetadata :: UTCTime -> BoardItem -> Text
+itemMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge now issue.issueUpdatedAt
   where
     ownership
       | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = "unassigned"
       | otherwise =
           Text.intercalate ", " ["@" <> assignee.assigneeLogin | assignee <- issue.issueAssignees]
             <> overflowText issue.issueAssigneeOverflow
-itemMetadata state (PullRequestItem pullRequest) =
-  linked <> pullRequest.pullRequestAuthor <> " → " <> pullRequest.pullRequestBase <> " · updated " <> relativeAge state.appNow pullRequest.pullRequestUpdatedAt
+itemMetadata now (PullRequestItem pullRequest) =
+  linked <> pullRequest.pullRequestAuthor <> " → " <> pullRequest.pullRequestBase <> " · updated " <> relativeAge now pullRequest.pullRequestUpdatedAt
   where
     linked = case pullRequest.pullRequestLinkedIssues of
       []
@@ -1019,13 +1075,13 @@ mergeText MergeUnknown = "calculating"
 -- 'blockingSeverity' downgrades it from a problem) must still render
 -- pending rather than the plain approved color, and only a fully ready PR
 -- gets the ready color.
-cardStatusAttribute :: AppState -> BoardItem -> AttrName
-cardStatusAttribute state (PullRequestItem pullRequest) = pullRequestCardAttribute state.appConfig.resolvedWorkflow pullRequest
-cardStatusAttribute state item
-  | isProblem state.appConfig.resolvedWorkflow item = problemAttr
-  | Just solveAttribute <- solveCardAttribute state item = solveAttribute
-  | itemHasAmberWarning state.appConfig.resolvedWorkflow item = pendingAttr
-  | isApproved state.appConfig.resolvedWorkflow item = approvedAttr
+cardStatusAttribute :: CardEnv -> BoardItem -> AttrName
+cardStatusAttribute env (PullRequestItem pullRequest) = pullRequestCardAttribute env.cardConfig.resolvedWorkflow pullRequest
+cardStatusAttribute env item
+  | isProblem env.cardConfig.resolvedWorkflow item = problemAttr
+  | Just solveAttribute <- solveCardAttribute env item = solveAttribute
+  | itemHasAmberWarning env.cardConfig.resolvedWorkflow item = pendingAttr
+  | isApproved env.cardConfig.resolvedWorkflow item = approvedAttr
 cardStatusAttribute _ _ = neutralAttr
 
 pullRequestCardAttribute :: WorkflowConfig -> PullRequest -> AttrName
@@ -1047,9 +1103,9 @@ cardInteriorAttribute statusAttribute
   | statusAttribute == approvedAttr || statusAttribute == readyAttr = approvedInteriorAttr
   | otherwise = neutralAttr
 
-solveCardAttribute :: AppState -> BoardItem -> Maybe AttrName
+solveCardAttribute :: CardEnv -> BoardItem -> Maybe AttrName
 solveCardAttribute _ (PullRequestItem _) = Nothing
-solveCardAttribute state (IssueItem issue) = solveSessionAttribute <$> Map.lookup issue.issueNumber state.appSolveSessions
+solveCardAttribute env (IssueItem issue) = solveSessionAttribute <$> Map.lookup issue.issueNumber env.cardSolveSessions
 
 statusTextAttr :: WorkflowConfig -> BoardItem -> AttrName
 statusTextAttr config item
@@ -1742,7 +1798,7 @@ drawDetails state item =
         hBox (map drawLabelForDetails (itemLabels item) <> detailsOverflowMarker),
         txt "",
         withAttr headingAttr (txt "Metadata"),
-        txtWrap (itemMetadata state item)
+        txtWrap (itemMetadata state.appNow item)
       ]
         <> trackingDetails
         <> trackerDiagnosticDetails
@@ -4781,9 +4837,9 @@ usesOpenBorders state =
   not state.appOptions.optionAscii
     && state.appOptions.optionBorder == BorderOpen
 
-cardBorderStyle :: AppState -> BorderStyle
-cardBorderStyle state
-  | state.appOptions.optionAscii = ascii
+cardBorderStyle :: Options -> BorderStyle
+cardBorderStyle options
+  | options.optionAscii = ascii
   | otherwise = unicode
 
 doubleBorderStyle :: BorderStyle
