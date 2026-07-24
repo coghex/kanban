@@ -83,7 +83,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, ProcessIdentity, forceCensusTick, killCensusVerified, killManagedProcess, managedProcess, watchManagedProcessCensus)
+import Kanban.Process (ManagedProcess, ProcessIdentity, forceCensusTick, killCensusVerified, killManagedProcess, killManagedProcessVerified, managedProcess, watchManagedProcessCensus)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -1770,14 +1770,33 @@ runCanonicalCommandWith timeoutMicros repository issueNumber executable argument
         -- return 'Nothing' and leave that survivor completely unreachable
         -- and unowned once this returns.
         Nothing -> killManagedProcess managed >> finishLog sessionLog >> pure (Left "Canonical issue review timed out after one hour")
-        Just (ExitSuccess, Right output, errors) -> do
-          logCaptured sessionLog output errors
-          finishLog sessionLog
-          pure (Right (decodeClaudeBytes output))
-        Just (ExitFailure code, Right output, Right errors) ->
-          logCaptured sessionLog output (Right errors) >> finishLog sessionLog >> pure (Left ("Canonical issue reviewer exited with status " <> Text.pack (show code) <> renderClaudeFailureDetails output errors))
-        Just (_, Left exception, _) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review output: " <> exceptionText exception))
-        Just (_, _, Left exception) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review diagnostics: " <> exceptionText exception))
+        Just (exitCode, output, errors) -> do
+          -- A *normal* completion -- the leader exiting on its own,
+          -- however that went -- is not the same as this spawn's process
+          -- group actually being empty: the leader could have forked a
+          -- same-group child and closed its own inherited stdout/stderr
+          -- before exiting, letting waitForProcess and both capture
+          -- threads all complete normally while that child keeps running,
+          -- entirely untracked once this function returns (the caller
+          -- only ever sees a plain 'Either', with no further handle on
+          -- this managed process at all). killManagedProcessVerified is
+          -- always safe to call unconditionally here: if the recorded
+          -- group is already genuinely empty (the ordinary case), its own
+          -- first fresh check confirms that and returns without ever
+          -- sending a signal; it only actually terminates anything if a
+          -- survivor is found.
+          survivorConfirmed <- killManagedProcessVerified managed
+          unless survivorConfirmed $
+            mapM_ (\value -> logMessage value "group-unconfirmed" "canonical issue reviewer's process group could not be confirmed terminated after it exited") sessionLog
+          case (exitCode, output, errors) of
+            (ExitSuccess, Right outputBytes, _) -> do
+              logCaptured sessionLog outputBytes errors
+              finishLog sessionLog
+              pure (Right (decodeClaudeBytes outputBytes))
+            (ExitFailure code, Right outputBytes, Right errorBytes) ->
+              logCaptured sessionLog outputBytes (Right errorBytes) >> finishLog sessionLog >> pure (Left ("Canonical issue reviewer exited with status " <> Text.pack (show code) <> renderClaudeFailureDetails outputBytes errorBytes))
+            (_, Left exception, _) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review output: " <> exceptionText exception))
+            (_, _, Left exception) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review diagnostics: " <> exceptionText exception))
     Right _ -> finishLog sessionLog >> pure (Left "Canonical issue reviewer did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot

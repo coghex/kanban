@@ -3686,6 +3686,59 @@ main = hspec $ do
             Left message -> expectationFailure (Data.Text.unpack message)
             Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
+    it "runCanonicalCommandWith kills a same-group child that survives its leader's own normal, successful exit" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "test" "test"
+            fakeReviewer = temporaryRoot </> "fake-canonical-reviewer"
+        -- Forks a TERM-resistant detached child, same as the timeout
+        -- regression above, but this time the child redirects its own
+        -- copies of the inherited stdout/stderr pipes away entirely
+        -- (rather than leaving them open) before the leader exits
+        -- successfully -- so neither capture thread ever blocks waiting
+        -- for EOF, and waitForProcess/both captures complete normally,
+        -- taking the *ordinary success* path, not the timeout path. Lingers
+        -- briefly (well inside the census's initial rapid-tick burst --
+        -- see 'Kanban.Process.bootstrapBurstIntervalMicros') before
+        -- exiting, rather than exiting instantly: a genuinely instant
+        -- "fork child, exit" leader can outrun even a synchronous first
+        -- observation (the child not yet existing when verification and
+        -- the very next tick both run), which is a distinct, already
+        -- narrowed-but-documented residual gap (see
+        -- 'Kanban.Process.startEmbeddedCensusWith') this test is not
+        -- about -- this one is specifically about a group that a tick
+        -- genuinely could witness, but nothing after the leader's own
+        -- normal exit ever tried to. The child survives regardless,
+        -- exactly the "leader exited cleanly, but a same-group child is
+        -- still running and now completely untracked" scenario the
+        -- round-30 review flagged.
+        ByteString.writeFile
+          fakeReviewer
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' >/dev/null 2>&1 &",
+                "sleep 0.2",
+                "exit 0"
+              ]
+          )
+        setFileMode fakeReviewer 0o700
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          leaderPidCollected <- newEmptyMVar
+          let onStarted managed = managedProcessPid managed >>= mapM_ (putMVar leaderPidCollected)
+          result <- timeout 5000000 (runCanonicalCommandWith 4000000 repository 16 fakeReviewer [] onStarted)
+          case result of
+            Just (Right _) -> pure ()
+            other -> expectationFailure ("expected the canonical reviewer's own clean exit to be reported as a normal success, got " <> show other)
+          leaderPid <- takeMVar leaderPidCollected
+          let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+              waitForKilled attempts = do
+                snapshotResult <- readProcessSnapshot
+                case snapshotResult of
+                  Right snapshot | null (membersOfGroup snapshot) -> pure ()
+                  _
+                    | attempts <= (0 :: Int) -> expectationFailure "surviving child was not killed after the canonical reviewer's own normal, successful exit"
+                    | otherwise -> threadDelay 100000 >> waitForKilled (attempts - 1)
+          waitForKilled 50
+
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
       cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
