@@ -38,6 +38,7 @@ import Kanban.Process
     ManagedProcess,
     ProcessIdentity (..),
     checkGroupMembershipWith,
+    defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
@@ -93,6 +94,7 @@ import Kanban.Review
     decodeReviewWireMessage,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    confirmToolProcessTerminatedOrKeepTryingWith,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
@@ -700,16 +702,19 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
 
-    it "recordCensusTick leaves `known` unresolved once the leader's pid is already free for reuse and its seed shares no overlap with a fresh snapshot" $ do
-      -- Unlike the not-yet-reaped case (see the regression above), a pid
-      -- that no longer resolves to anything (fully reaped, free for the
-      -- kernel to reassign) forfeits the OS-level "this pid cannot
-      -- possibly have been reused yet" proof. With that proof gone, the
-      -- only remaining path to trust a tick's reading is overlapping
-      -- `known` itself (the original mechanism), which a deliberately
-      -- wrong seed -- simulating a leader reaped before any
-      -- not-yet-reaped-covered tick ever ran -- can never do, no matter
-      -- how stably a same-group child persists.
+    it "recordCensusTick leaves `known` unresolved once the leader's handle is already reaped, even when a foreign occupant now sits at the exact same pgid" $ do
+      -- Once the leader's own 'ProcessHandle' is genuinely reaped,
+      -- 'managedProcessHandleStillOpen' forfeits the identity-anchored
+      -- "this pid cannot possibly have been reused yet" proof -- the
+      -- kernel is now free to hand this exact pid to an unrelated
+      -- process. This simulates exactly that: `childIdentity` here stands
+      -- in for a fully foreign process a reused pid/pgid now happens to
+      -- hold (the reviewer's round-25 scenario), sharing no relation to
+      -- `staleLeaderIdentity` at all beyond the coincidental pgid number.
+      -- With the handle-open proof gone, the only remaining path to trust
+      -- a tick's reading is overlapping `known` itself (the original
+      -- mechanism), which this deliberately wrong seed can never do, no
+      -- matter how stably the foreign occupant persists.
       let staleLeaderIdentity =
             ProcessIdentity
               { processIdentityPid = 4242,
@@ -723,13 +728,13 @@ main = hspec $ do
               { processIdentityPid = 4243,
                 processIdentityParentPid = 4242,
                 processIdentityGroupPid = 4242,
-                processIdentityStartedAt = "synthetic-child-start",
-                processIdentityCommand = "synthetic-child"
+                processIdentityStartedAt = "synthetic-foreign-occupant-start",
+                processIdentityCommand = "synthetic-foreign-occupant"
               }
-          checkStillOccupied = pure False
+          checkHandleStillOpen = pure False
           takeSnapshot = pure (Right [childIdentity])
       knownRef <- newIORef (Set.fromList [staleLeaderIdentity])
-      stillOpen <- recordCensusTick takeSnapshot checkStillOccupied 4242 knownRef
+      stillOpen <- recordCensusTick takeSnapshot checkHandleStillOpen 4242 knownRef
       stillOpen `shouldBe` True
       known <- readIORef knownRef
       known `shouldBe` Set.fromList [staleLeaderIdentity]
@@ -3370,6 +3375,59 @@ main = hspec $ do
           case reopened of
             Left message -> message `shouldNotSatisfy` Data.Text.isInfixOf "not currently accepting"
             _ -> pure ()
+
+    it "confirmToolProcessTerminatedOrKeepTryingWith keeps retrying in the background once a bounded attempt cannot confirm, and eventually confirms once the census legitimately can" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        (_, _, _, process) <-
+          createProcess (proc "sh" ["-c", "sleep 100"]) {create_group = True}
+        Just leaderPid <- getPid process
+        let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+        flip finally cleanup $ do
+          nowConfirmable <- newIORef False
+          let -- While unconfirmable, every snapshot -- verification's
+              -- own, every census tick, and every kill-time check --
+              -- sees only a synthetic occupant sharing the leader's pgid
+              -- that no real 'ps' snapshot could ever also show, so
+              -- continuity with anything real can never be established
+              -- and confirmToolProcessTerminated's bounded attempt is
+              -- guaranteed to exhaust its retries and give up. Once
+              -- flipped to confirmable, every snapshot reverts to
+              -- genuine, real data -- the still-running census watcher's
+              -- own next tick (not-yet-reaped, since the leader is
+              -- genuinely alive) picks up the real leader for real, and
+              -- a subsequent confirm attempt can then actually verify
+              -- and terminate it.
+              unconfirmableIdentity =
+                ProcessIdentity
+                  { processIdentityPid = fromIntegral leaderPid + 999999,
+                    processIdentityParentPid = fromIntegral leaderPid,
+                    processIdentityGroupPid = fromIntegral leaderPid,
+                    processIdentityStartedAt = "synthetic-unconfirmable",
+                    processIdentityCommand = "synthetic-unconfirmable"
+                  }
+              stubSnapshot = do
+                confirmable <- readIORef nowConfirmable
+                if confirmable then defaultProcessSnapshot else pure (Right [unconfirmableIdentity])
+          (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+          groupLeaderProblem `shouldSatisfy` isJust
+          (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+          client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+          confirmed <-
+            confirmToolProcessTerminatedOrKeepTryingWith (threadDelay 50000) client managed peekCensus stopCensus
+          confirmed `shouldBe` False
+          afterFirstAttempt <- readProcessSnapshot
+          case afterFirstAttempt of
+            Left message -> expectationFailure (Data.Text.unpack message)
+            Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+          writeIORef nowConfirmable True
+          let waitForBackgroundConfirm attempts = do
+                snapshotResult <- readProcessSnapshot
+                case snapshotResult of
+                  Right snapshot | not (any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot) -> pure ()
+                  _
+                    | attempts <= (0 :: Int) -> expectationFailure "background cleanup owner never confirmed and killed the leader once it became confirmable"
+                    | otherwise -> threadDelay 100000 >> waitForBackgroundConfirm (attempts - 1)
+          waitForBackgroundConfirm 50
 
     it "does not deadlock cleaning up an app-server crash that leaves a group-inheriting child alive" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

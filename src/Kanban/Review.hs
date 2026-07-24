@@ -22,6 +22,7 @@ module Kanban.Review
     beginIssueReview,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    confirmToolProcessTerminatedOrKeepTryingWith,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -1089,13 +1090,48 @@ drainMatchingToolProcessesWith afterClaim client options matches = do
 -- is what actually reaches any orphan-registered entry those stragglers
 -- left behind, rather than leaving it, and the process and census watcher
 -- it names, unowned once this returns.
+--
+-- Both drain passes are still bounded (each entry's own
+-- 'confirmToolProcessTerminated' attempt is capped at
+-- 'confirmAttempts'), and can therefore return with entries still
+-- registered (marked draining, never removed -- see
+-- 'drainMatchingToolProcessesWith'): a leader whose census could never
+-- establish continuity (the documented residual gap in
+-- 'Kanban.Process.startEmbeddedCensusWith') stays genuinely unconfirmable
+-- no matter how many *bounded* attempts run. Rather than returning with
+-- those entries permanently unowned once this function's own two passes
+-- are spent, a detached background thread keeps retrying the exact same
+-- drain, unboundedly, until the registry is finally empty -- an active
+-- cleanup owner for as long as anything remains, not a one-shot best
+-- effort. This does not block the caller (a quitting client should not
+-- hang indefinitely on a single unconfirmable straggler), but it does
+-- mean the process and its census watcher are never simply abandoned:
+-- either the background retries eventually succeed (the watcher's own
+-- ongoing ticks can still catch a survivor a bounded attempt missed), or
+-- they keep trying for as long as this client -- and the Haskell RTS
+-- backing it -- is alive at all.
 drainToolProcesses :: ReviewClient -> IO ()
-drainToolProcesses client = do
+drainToolProcesses = drainToolProcessesWith (threadDelay backgroundCleanupRetryDelayMicros)
+
+-- | As 'drainToolProcesses', but with the background cleanup owner's own
+-- retry-to-retry wait injectable -- e.g. to deterministically prove it
+-- eventually reaches an entry a bounded attempt could not, without a test
+-- actually waiting out 'backgroundCleanupRetryDelayMicros'.
+drainToolProcessesWith :: IO () -> ReviewClient -> IO ()
+drainToolProcessesWith backgroundRetryDelay client = do
   close
   awaitNoInFlightInvocations client
   close
+  stillOwned <- registryNonEmpty
+  when stillOwned (void (forkIO keepDraining))
   where
     close = drainMatchingToolProcesses client (DrainOptions {drainCloseRegistry = True, drainFenceThread = Nothing}) (const True)
+    registryNonEmpty = not . Map.null . toolRegistryEntries <$> readMVar client.reviewToolProcesses
+    keepDraining = do
+      backgroundRetryDelay
+      close
+      stillOwned <- registryNonEmpty
+      when stillOwned keepDraining
 
 -- | Kills `managed` and confirms, via 'killCensusVerified', that its
 -- recorded process group is now empty -- retrying the kill escalation a
@@ -1138,30 +1174,60 @@ confirmToolProcessTerminated client managed peekCensus stopCensus = go confirmAt
               threadDelay confirmRetryDelayMicros
               go (attemptsLeft - 1)
 
+-- | As 'confirmToolProcessTerminated', but a bounded failure to confirm
+-- does not end this function's own ownership of `managed`: it is surfaced
+-- immediately (this function's caller still gets the same 'Bool' result,
+-- promptly, so it is never blocked on an unconfirmable straggler), and a
+-- detached background thread then keeps retrying, unboundedly, until
+-- termination is finally confirmed -- the same active-cleanup-owner
+-- pattern 'drainToolProcesses' uses for the tool registry, applied here to
+-- a single directly-managed process (namely the app-server itself).
+confirmToolProcessTerminatedOrKeepTrying :: ReviewClient -> ManagedProcess -> IO [ProcessIdentity] -> IO [ProcessIdentity] -> IO Bool
+confirmToolProcessTerminatedOrKeepTrying = confirmToolProcessTerminatedOrKeepTryingWith (threadDelay backgroundCleanupRetryDelayMicros)
+
+-- | As 'confirmToolProcessTerminatedOrKeepTrying', but with the background
+-- cleanup owner's own retry-to-retry wait injectable -- e.g. to
+-- deterministically prove it eventually confirms termination once
+-- whatever blocked a bounded attempt is resolved, without a test actually
+-- waiting out 'backgroundCleanupRetryDelayMicros'.
+confirmToolProcessTerminatedOrKeepTryingWith :: IO () -> ReviewClient -> ManagedProcess -> IO [ProcessIdentity] -> IO [ProcessIdentity] -> IO Bool
+confirmToolProcessTerminatedOrKeepTryingWith backgroundRetryDelay client managed peekCensus stopCensus = do
+  confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
+  unless confirmed (void (forkIO keepTrying))
+  pure confirmed
+  where
+    keepTrying = do
+      backgroundRetryDelay
+      confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
+      unless confirmed keepTrying
+
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
 -- every registered tool process first, then the app-server itself, both via
--- 'confirmToolProcessTerminated' so a leader already exited and reaped
--- still has its recorded process group signalled and confirmed rather than
--- silently skipped.
+-- 'confirmToolProcessTerminatedOrKeepTrying' so a leader already exited and
+-- reaped still has its recorded process group signalled and confirmed
+-- rather than silently skipped.
 --
--- 'confirmToolProcessTerminated' already retries the app-server's own
--- termination a bounded number of times, but its own bound (unlike
--- 'awaitNoInFlightInvocations'-style unbounded waits elsewhere in this
--- module) cannot always be raised safely: a confirmed leader whose entire
--- census seed vanished before any tick could ever witness it (see
--- 'Kanban.Process.startEmbeddedCensusWith') can leave termination
--- genuinely, permanently unconfirmable, and retrying that case forever
--- would just turn a bounded failure into an unbounded hang. Its result is
--- therefore never discarded: a failure to confirm is surfaced as its own,
--- distinctly worded protocol warning (in addition to
--- 'confirmToolProcessTerminated's own generic one) and recorded in the
--- session log, so a quit that could not actually confirm cleanup is
--- discoverable after the fact rather than looking identical to a clean
--- one.
+-- Neither this call's own confirmation nor 'drainToolProcesses's registry
+-- drain is ever allowed to simply abandon a process it cannot immediately
+-- confirm gone (see both for why a bounded attempt genuinely can fail: a
+-- confirmed leader whose entire census seed vanished before any tick
+-- could ever witness it -- see 'Kanban.Process.startEmbeddedCensusWith'
+-- -- can leave termination truly, if rarely, unconfirmable within any
+-- fixed number of attempts). A bounded failure here is still surfaced
+-- immediately, as its own distinctly worded protocol warning (in addition
+-- to 'confirmToolProcessTerminated's own generic one) and recorded in the
+-- session log, so a quit that could not *immediately* confirm cleanup is
+-- discoverable right away rather than looking identical to a clean one --
+-- but this function itself still returns promptly either way, since a
+-- quitting client must not hang indefinitely on a single unconfirmed
+-- straggler. What changes from a purely bounded attempt is that nothing
+-- is ever left permanently unowned once this function returns: a
+-- background thread keeps retrying every unconfirmed piece until it
+-- finally succeeds, for as long as this client is alive at all.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
   drainToolProcesses client
-  confirmed <- confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
+  confirmed <- confirmToolProcessTerminatedOrKeepTrying client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
   unless confirmed $ do
     client.reviewEventSink (ReviewProtocolWarning "review client stopped without confirming the app-server's own process group fully terminated")
     mapM_ (\sessionLog -> logMessage sessionLog "stop-unconfirmed" "app-server process group termination could not be confirmed") client.reviewSessionLog
@@ -1254,23 +1320,24 @@ readServerErrors client errorHandle = do
 -- survivor -- is gone. Waiting on the readers first would deadlock exactly
 -- the crash this cleanup exists to catch.
 --
--- 'confirmToolProcessTerminated' can still, despite that ordering, fail to
--- confirm every survivor gone (its own retries are bounded -- see
--- 'stopReviewClient' for why raising that bound is not always safe). A
--- survivor that outlives it keeps holding the app-server's stdout/stderr
--- pipes open, so waiting on the readers is bounded by
--- 'pipeReaderShutdownTimeoutMicros' rather than unboundedly: this function
--- runs on its own thread and its completion is what the rest of the app
--- (the UI's 'ReviewClientStopped' handler, this session's log) is waiting
--- on, so hanging here would hang the entire client shutdown, not merely
--- leave one already-known survivor unconfirmed. A timeout is reported as
--- its own distinct protocol warning rather than silently proceeding as if
--- the readers cleanly reached EOF.
+-- 'confirmToolProcessTerminatedOrKeepTrying' can still, despite that
+-- ordering, fail to *immediately* confirm every survivor gone (its own
+-- bounded attempt's retries are limited -- see 'stopReviewClient' for why
+-- raising that bound is not always safe -- though a background thread
+-- keeps retrying afterward). A survivor that outlives the bounded attempt
+-- keeps holding the app-server's stdout/stderr pipes open, so waiting on
+-- the readers is bounded by 'pipeReaderShutdownTimeoutMicros' rather than
+-- unboundedly: this function runs on its own thread and its completion is
+-- what the rest of the app (the UI's 'ReviewClientStopped' handler, this
+-- session's log) is waiting on, so hanging here would hang the entire
+-- client shutdown, not merely leave one already-known survivor
+-- unconfirmed. A timeout is reported as its own distinct protocol warning
+-- rather than silently proceeding as if the readers cleanly reached EOF.
 watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
-  confirmed <- confirmToolProcessTerminated client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
+  confirmed <- confirmToolProcessTerminatedOrKeepTrying client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
   unless confirmed $
     client.reviewEventSink (ReviewProtocolWarning "app-server process group termination could not be confirmed after it exited")
   readersDone <- timeout pipeReaderShutdownTimeoutMicros (takeMVar client.reviewOutputDone >> takeMVar client.reviewErrorDone)
@@ -2123,6 +2190,16 @@ confirmRetryDelayMicros = 600 * 1000
 -- | How often 'awaitNoInFlightInvocations' re-checks the in-flight count.
 inFlightPollMicros :: Int
 inFlightPollMicros = 200 * 1000
+
+-- | How long the background cleanup owner ('drainToolProcesses',
+-- 'confirmToolProcessTerminatedOrKeepTrying') waits between retries once a
+-- bounded attempt has already failed and handed ownership off to it. Much
+-- longer than 'confirmRetryDelayMicros': this is no longer racing to catch
+-- an imminent census tick on a client someone is actively waiting on, just
+-- periodically checking in on a straggler in the background for as long
+-- as it takes.
+backgroundCleanupRetryDelayMicros :: Int
+backgroundCleanupRetryDelayMicros = 30 * 1000 * 1000
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000

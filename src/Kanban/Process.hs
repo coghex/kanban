@@ -43,6 +43,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -51,7 +52,7 @@ import GHC.Generics (Generic)
 import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
-import System.Posix.Signals (Signal, nullSignal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
+import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, terminateProcess)
 import Text.Read (readMaybe)
 
@@ -134,7 +135,7 @@ managedProcess = managedProcessWith defaultProcessSnapshot
 managedProcessWith :: IO (Either Text [ProcessIdentity]) -> ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcessWith takeSnapshot processHandle = do
   (verifiedPid, seedMembers, problem) <- verifyGroupLeaderWith takeSnapshot processHandle
-  (peekCensus, stopCensus) <- startEmbeddedCensusWith takeSnapshot (maybe (pure False) stillOccupiesPid verifiedPid) verifiedPid seedMembers
+  (peekCensus, stopCensus) <- startEmbeddedCensusWith takeSnapshot (managedProcessHandleStillOpen processHandle) verifiedPid seedMembers
   pure (LocalManagedProcess processHandle verifiedPid peekCensus stopCensus, problem)
 
 -- | Confirms, via a fresh process snapshot taken while the leader should
@@ -673,32 +674,48 @@ watchManagedProcessCensus = pure . managedProcessCensus
 --
 -- Instead, `known` may be extended by either of two independently safe
 -- proofs: overlapping `known` itself (the original mechanism, still the
--- only proof available once the leader is reaped -- see below), or the
--- leader's pid simply still being occupied -- by anyone, alive or a
--- zombie -- at the time of this exact tick's snapshot (see
--- 'recordCensusTick'). The latter is not a timing heuristic like the
--- rejected two-tick promotion -- it is an OS-level guarantee: a pid
--- cannot be reassigned to an unrelated process while it remains occupied
--- by whatever already holds it, so if it was still occupied bracketing
--- this tick's snapshot, whatever the snapshot shows sharing this pgid
--- right now is still a genuine descendant of the very same spawn -- not a
--- coincidence needing a second corroborating sample, and not a window
--- that narrows only probabilistically with faster polling. This check
--- (see 'stillOccupiesPid') deliberately does *not* use
--- 'getProcessExitCode'/'waitForProcess': those are destructive polls --
+-- only proof available once the leader is reaped -- see below), or
+-- 'managedProcessHandleStillOpen' reporting the leader's own
+-- 'ProcessHandle' still open -- i.e. genuinely unreaped, by *anyone*,
+-- anywhere in the whole program -- both immediately before and
+-- immediately after this exact tick's snapshot (see 'recordCensusTick').
+--
+-- An earlier version of this same idea checked a bare pid's OS-level
+-- existence (POSIX's null signal) instead of the handle. That was
+-- unsound: existence alone only proves *something* currently occupies
+-- that pid number, not that it is still the process this module spawned.
+-- If the original group had already emptied and its pid/pgid gotten
+-- reused by a fully unrelated foreign leader before the probe ever ran,
+-- the null-signal check would succeed against that foreign occupant just
+-- as readily as against a genuine survivor, and this tick would wrongly
+-- adopt the foreign group as trusted provenance. 'managedProcessHandleStillOpen'
+-- has no such gap: it never queries the OS process table by number at
+-- all, only 'getPid's own in-memory bookkeeping for *this specific*
+-- 'ProcessHandle' (see there) -- which can only ever report the leader
+-- unreaped for as long as *no* successful 'getProcessExitCode'/'waitForProcess'
+-- call has happened on this exact handle, from anywhere, a fact a
+-- reused pid number cannot forge no matter what the kernel does with it.
+-- This is a genuine identity anchor, not a bare-occupancy proxy: it is
+-- tied to the one, unique, in-process value that names *this* spawn and
+-- nothing else, never to a reusable OS-level number.
+--
+-- Checking is deliberately non-destructive and bracketed around the
+-- snapshot (both immediately before and immediately after), for the same
+-- two reasons established over the last two rounds: 'getProcessExitCode'/
+-- 'waitForProcess' themselves must never be used for this check, since
 -- the first call to ever observe a zombie leader's exit reaps it right
 -- then, on the spot, which would make this exact tick's own check of it
 -- report "reaped" even when the snapshot it is meant to vouch for was
--- captured while genuinely still safe, silently defeating the very
--- protection this mechanism exists to provide. A plain existence probe
--- (POSIX's null signal, which checks whether a pid is still occupied
--- without delivering anything or disturbing wait state) has no such
--- side effect, and can safely be checked on both sides of the snapshot
--- without ever being the reason a "not yet reaped" proof stops being
--- true. This closes exactly the gap the two-tick mechanism tried and
--- failed to close safely: a child forked and its leader reaped (by us,
--- elsewhere, once this invocation's own normal completion runs) all
--- before a single tick ever lands.
+-- captured while genuinely still safe -- 'getPid' has no such side effect
+-- (a pure read, confirmed against the @process@ library's own source);
+-- and a single check on only one side of the snapshot would leave the
+-- *other* side -- where the handle could still be closed just before or
+-- just after the probe ran -- unwitnessed. This closes exactly the gap
+-- the two-tick mechanism tried and failed to close safely: a child
+-- forked and its leader reaped (by us, elsewhere, once this invocation's
+-- own normal completion runs) all before a single tick ever lands --
+-- without ever trusting a bare, reusable pid number to stand in for
+-- genuine identity.
 --
 -- The very first tick runs synchronously, here, before this function ever
 -- returns a watcher to its caller -- not after the first
@@ -713,29 +730,32 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- 'verifyGroupLeaderWith') still gets a real watcher, seeded with nothing
 -- at all rather than short-circuited away entirely: the not-yet-reaped
 -- proof above does not depend on independently verifying `known`'s
--- starting contents in the first place, only on the leader not having
--- been reaped yet, which holds exactly as well here as for a confirmed
--- leader. What verification failed to confirm was never "is this pid its
--- own group leader" being false -- that case is a *confirmed* non-leader,
--- which returns 'Nothing' for the pid entirely and never reaches this
--- function's general case at all (see 'verifyGroupLeaderWith') -- it was
--- only that the snapshot taken to confirm it either failed outright or
--- lost the race against a near-instantly-exiting leader. POSIX setpgid
--- for @create_group = True@ runs synchronously before exec, so a pid this
--- fresh is already trustworthy as its own group id for querying purposes
--- even though this particular snapshot could not verify it (the same
--- reasoning 'killManagedProcess's per-pid fallback already relies on for
--- signalling a presumed leader directly). An empty starting seed simply
--- means the very first tick has nothing to overlap -- but, exactly as
--- for a confirmed leader, it does not need to: not-yet-reaped alone
--- already justifies trusting whatever that first tick finds sharing this
--- pgid, including a child forked and its leader exited before
--- verification's own snapshot ever ran.
+-- starting contents in the first place, only on the leader's own handle
+-- not having been reaped yet, which holds exactly as well here as for a
+-- confirmed leader -- 'managedProcessHandleStillOpen' consults the same
+-- 'ProcessHandle' regardless of whether 'verifyGroupLeaderWith's own
+-- snapshot ever managed to independently confirm it. What verification
+-- failed to confirm was never "is this pid its own group leader" being
+-- false -- that case is a *confirmed* non-leader, which returns 'Nothing'
+-- for the pid entirely and never reaches this function's general case at
+-- all (see 'verifyGroupLeaderWith') -- it was only that the snapshot
+-- taken to confirm it either failed outright or lost the race against a
+-- near-instantly-exiting leader. POSIX setpgid for @create_group = True@
+-- runs synchronously before exec, so a pid this fresh is already
+-- trustworthy as its own group id for querying purposes even though this
+-- particular snapshot could not verify it (the same reasoning
+-- 'killManagedProcess's per-pid fallback already relies on for signalling
+-- a presumed leader directly). An empty starting seed simply means the
+-- very first tick has nothing to overlap -- but, exactly as for a
+-- confirmed leader, it does not need to: not-yet-reaped alone already
+-- justifies trusting whatever that first tick finds sharing this pgid,
+-- including a child forked and its leader exited before verification's
+-- own snapshot ever ran.
 startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> IO Bool -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ _ Nothing _ = pure (pure [], pure [])
-startEmbeddedCensusWith takeSnapshot checkStillOccupied (Just pid) seedMembers = do
+startEmbeddedCensusWith takeSnapshot checkHandleStillOpen (Just pid) seedMembers = do
   knownRef <- newIORef (Set.fromList seedMembers)
-  stillOpenAfterFirstTick <- recordCensusTick takeSnapshot checkStillOccupied pid knownRef
+  stillOpenAfterFirstTick <- recordCensusTick takeSnapshot checkHandleStillOpen pid knownRef
   watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks stillOpenAfterFirstTick)
   pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
@@ -749,7 +769,7 @@ startEmbeddedCensusWith takeSnapshot checkStillOccupied (Just pid) seedMembers =
     watchLoop _ _ False = pure ()
     watchLoop knownRef burstTicksLeft True = do
       threadDelay (if burstTicksLeft > 0 then bootstrapBurstIntervalMicros else censusIntervalMicros)
-      stillOpen <- recordCensusTick takeSnapshot checkStillOccupied pid knownRef
+      stillOpen <- recordCensusTick takeSnapshot checkHandleStillOpen pid knownRef
       watchLoop knownRef (max 0 (burstTicksLeft - 1)) stillOpen
 
 -- | Records one tick of a census (see 'startEmbeddedCensusWith'). Returns
@@ -775,23 +795,26 @@ startEmbeddedCensusWith takeSnapshot checkStillOccupied (Just pid) seedMembers =
 -- everywhere else) what the census already trusted -- proof that at least
 -- one already-trusted identity was *still alive* at this exact tick, so
 -- whatever else shares its pgid right now is a genuine sibling of that
--- continuing spawn -- or `checkStillOccupied` (see 'stillOccupiesPid')
--- reports the leader's pid still occupied by *something* both immediately
--- before and immediately after the snapshot, which is proof this exact
--- pid could not possibly have been reassigned to an unrelated process
+-- continuing spawn -- or `checkHandleStillOpen` (see
+-- 'managedProcessHandleStillOpen') reports the leader's own
+-- 'ProcessHandle' still open, both immediately before and immediately
+-- after the snapshot, which is proof *this specific spawn* could not
+-- possibly have been reaped -- and its pid thereby freed for reuse --
 -- anywhere in that bracket, regardless of whether anything in `known`
--- happens to still be visible in the snapshot itself. Bracketing rather
--- than checking only once matters here: `checkStillOccupied` is a plain
--- existence probe with no side effect, so nothing is lost by calling it
--- twice, and a single check on only one side would leave the *other*
--- side of the snapshot -- where the pid could still have been freed and
--- reassigned before or after the probe ran -- unwitnessed. A tick
--- satisfying neither proof leaves the census exactly as it was --
--- unresolved for this tick, not extended -- rather than risk folding in a
--- reused foreign group.
+-- happens to still be visible in the snapshot itself. This is an identity
+-- check, not a bare pid-occupancy one: it can only ever report the
+-- *original* leader unreaped, never a coincidentally-reused pid an
+-- unrelated foreign process now happens to hold. Bracketing rather than
+-- checking only once matters here: `checkHandleStillOpen` has no side
+-- effect, so nothing is lost by calling it twice, and a single check on
+-- only one side would leave the *other* side of the snapshot -- where the
+-- handle could still have been closed before or after the probe ran --
+-- unwitnessed. A tick satisfying neither proof leaves the census exactly
+-- as it was -- unresolved for this tick, not extended -- rather than risk
+-- folding in a reused foreign group.
 recordCensusTick :: IO (Either Text [ProcessIdentity]) -> IO Bool -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
-recordCensusTick takeSnapshot checkStillOccupied pid knownRef = do
-  occupiedBefore <- checkStillOccupied
+recordCensusTick takeSnapshot checkHandleStillOpen pid knownRef = do
+  openBefore <- checkHandleStillOpen
   snapshot <- takeSnapshot
   case snapshot of
     Left _ -> pure True
@@ -799,27 +822,31 @@ recordCensusTick takeSnapshot checkStillOccupied pid knownRef = do
       [] -> pure False
       groupMembers -> do
         known <- readIORef knownRef
-        occupiedAfter <- checkStillOccupied
+        openAfter <- checkHandleStillOpen
         let overlapsKnown = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
-            notYetReaped = occupiedBefore && occupiedAfter
+            notYetReaped = openBefore && openAfter
             trustworthy = overlapsKnown || notYetReaped
         when trustworthy (atomicModifyIORef' knownRef (\current -> (foldr Set.insert current groupMembers, ())))
         pure True
   where
     groupPidInt = fromIntegral pid
 
--- | A non-destructive existence probe for `pid`: 'True' if *something* --
--- alive or a zombie awaiting reap -- still occupies it right now, 'False'
--- once it has been fully reaped and is free for the kernel to reassign.
--- Uses POSIX's null signal ('nullSignal'), which only checks whether a
--- signal *could* be delivered without ever actually delivering one --
--- unlike 'getProcessExitCode'/'waitForProcess', this never itself performs
--- the reap that would end the very occupancy it is asked to report on (see
--- 'recordCensusTick' for why that distinction matters).
-stillOccupiesPid :: CPid -> IO Bool
-stillOccupiesPid pid = do
-  result <- try (signalProcess nullSignal pid) :: IO (Either IOException ())
-  pure (either (const False) (const True) result)
+-- | Whether `processHandle` is still open -- i.e. whether *nothing*,
+-- anywhere in the whole program, has yet reaped it via a successful
+-- 'getProcessExitCode'/'waitForProcess' call. A pure, in-memory read of
+-- the handle's own bookkeeping ('getPid'; confirmed non-destructive
+-- against the @process@ library's own source), not a query against the
+-- OS process table by bare pid number: a bare-pid existence probe (e.g.
+-- POSIX's null signal) cannot distinguish "still the process we spawned"
+-- from "an unrelated process the kernel has since reassigned this exact
+-- pid to", since the only thing such a check can observe is whether some
+-- pid number is occupied by anyone at all. This check has no such gap --
+-- 'getPid' can only ever report 'Just' for a handle exactly as long as
+-- the specific child *this* handle was constructed for remains unreaped,
+-- regardless of what pid number the kernel has since handed to some
+-- entirely different process.
+managedProcessHandleStillOpen :: ProcessHandle -> IO Bool
+managedProcessHandleStillOpen processHandle = isJust <$> getPid processHandle
 
 -- | Confirms `managed`'s recorded group terminated. `peekCensus` (see
 -- 'watchManagedProcessCensus') is consulted *before* ever sending a
