@@ -633,13 +633,14 @@ startReviewClient workflowConfig repository eventSink = do
 -- performs, so tests can exercise the tool-invocation and registry machinery
 -- (@kanban_run_claude@, @kanban_github_issue@, 'killReviewTools',
 -- 'stopReviewClient') directly. The client's own "app-server" is a harmless
--- placeholder process (@cat@, which just reads its stdin until closed or
--- killed) so shutdown still has a real, killable process to operate on.
+-- placeholder process (@git --version@, already an audited invocation of
+-- this codebase's own workflow) so shutdown still has a real, killable
+-- process to operate on.
 newReviewClientForTesting :: FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
 newReviewClientForTesting repositoryRoot repositorySlug eventSink = do
   (Just inputHandle, Just _outputHandle, Just _errorHandle, processHandle) <-
     createProcess
-      (proc "cat" [])
+      (proc "git" ["--version"])
         { std_in = CreatePipe,
           std_out = CreatePipe,
           std_err = CreatePipe,
