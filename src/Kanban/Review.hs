@@ -46,6 +46,7 @@ module Kanban.Review
     runCanonicalIssueReview,
     runCanonicalCommandWith,
     runGitHubIssueTool,
+    runGitHubIssueUpdateWith,
     sendReviewMessage,
     startReviewClient,
     stopReviewClient,
@@ -851,6 +852,34 @@ awaitNoInFlightInvocationsFor client threadId = go
       counts <- readMVar client.reviewInFlightInvocations
       when (Map.member threadId counts) (threadDelay inFlightPollMicros >> go)
 
+-- | Holds `threadId`'s in-flight count up for the duration of `action`,
+-- without touching the tool registry at all -- unlike
+-- 'reserveToolInvocation'/'releaseInFlightInvocation', which are paired
+-- around a single spawned process. Exists for a caller whose own single
+-- logical operation spans multiple, sequential 'runGitHubCommand'
+-- invocations (see 'runGitHubIssueUpdate'): wrapping the whole operation
+-- keeps this thread's in-flight count above zero for its *entire*
+-- duration, including the gaps between each individual sub-invocation
+-- where no process is registered at all. Without this, a cancellation
+-- landing in one of those gaps would see this thread's count already at
+-- zero, finish immediately, and release its thread fence (see
+-- 'withThreadFenced') before the next sub-invocation ever reserves --
+-- letting that next @gh@ spawn escape cancellation entirely, even though
+-- the overall tool call it belongs to was never actually cancelled. The
+-- ref-counted map composes correctly with the per-sub-invocation holds
+-- 'reserveToolInvocation'/'releaseInFlightInvocation' already take: this
+-- is simply one more concurrent holder of the same count, never
+-- confused with the others.
+withThreadInFlightHeld :: ReviewClient -> Text -> IO a -> IO a
+withThreadInFlightHeld client threadId =
+  bracket_
+    (modifyMVar_ client.reviewInFlightInvocations (pure . Map.insertWith (+) threadId 1))
+    (modifyMVar_ client.reviewInFlightInvocations (pure . Map.update releaseCount threadId))
+  where
+    releaseCount count
+      | count <= 1 = Nothing
+      | otherwise = Just (count - 1)
+
 -- | Reserves a slot for a tool invocation about to be spawned, *before* any
 -- process exists -- so a concurrent drain (below) can see and cancel it
 -- even before 'createProcess' or 'managedProcess's own @ps@-based check
@@ -1626,13 +1655,35 @@ githubIssueEditArguments repo request = baseArguments <> addArguments <> removeA
       | null request.githubToolRemoveLabels = []
       | otherwise = ["--remove-label", Text.unpack (Text.intercalate "," request.githubToolRemoveLabels)]
 
+-- | As 'runGitHubIssueUpdate', but runs `afterComment` right after the
+-- comment sub-invocation (if any) completes and just before the label
+-- sub-invocations begin -- exposed so a test can pause deterministically
+-- in exactly the gap a same-thread cancellation landing there must not
+-- let escape (see 'withThreadInFlightHeld'), rather than racing real
+-- process/scheduler timing to land it. Production code always calls this
+-- with @pure ()@.
 runGitHubIssueUpdate :: ReviewClient -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueUpdate client threadId ghPath request = do
+runGitHubIssueUpdate = runGitHubIssueUpdateWith (pure ())
+
+-- | Posts a comment (if requested) and then applies label changes, as up
+-- to three entirely separate, sequential @gh@ invocations
+-- ('runGitHubCommand', 'ensureRevisedLabel', 'applyReviewLabels') -- each
+-- independently reserved and released around its own single process, with
+-- nothing registered in between them at all. 'withThreadInFlightHeld'
+-- wraps this whole sequence so a cancellation ('killReviewTools') that
+-- lands in one of those gaps still waits for -- and stays fenced against
+-- new registrations for -- the *entire* multi-step update, not just
+-- whichever single @gh@ call happens to be running (or between calls)
+-- when it starts; see there for why a per-sub-invocation-only accounting
+-- would let a later step spawn after cancellation had already finished.
+runGitHubIssueUpdateWith :: IO () -> ReviewClient -> Text -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueUpdateWith afterComment client threadId ghPath request = withThreadInFlightHeld client threadId $ do
   commentResult <- case request.githubToolComment of
     Nothing -> pure (Right Nothing)
     Just comment ->
       fmap (fmap (Just . Text.strip))
         (runGitHubCommand client threadId ghPath (githubIssueCommentArguments client.reviewRepositorySlug request.githubToolIssue) comment)
+  afterComment
   case commentResult of
     Left message -> pure (Left message)
     Right commentUrl -> do

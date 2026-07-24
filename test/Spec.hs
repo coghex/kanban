@@ -110,6 +110,7 @@ import Kanban.Review
     runAuthenticatedClaudeWith,
     runCanonicalCommandWith,
     runGitHubIssueTool,
+    runGitHubIssueUpdateWith,
     startReviewClient,
     stopReviewClient,
     renderCanonicalIssueReviewResult,
@@ -224,7 +225,7 @@ import Kanban.Worker
     waitForWorkerStart,
     workerDeadlineReason,
   )
-import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
@@ -3586,6 +3587,69 @@ main = hspec $ do
                     | attempts <= (0 :: Int) -> expectationFailure "background cleanup owner never confirmed and killed the leader once it became confirmable"
                     | otherwise -> threadDelay 100000 >> waitForBackgroundConfirm (attempts - 1)
           waitForBackgroundConfirm 50
+
+    it "keeps a multi-step GitHub issue update's later gh spawn from escaping cancellation that lands in the gap after an earlier sub-invocation completes" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            fakeGh = binaryRoot </> "gh"
+            secondCallMarker = temporaryRoot </> "second-call-happened"
+        createDirectory binaryRoot
+        -- The comment sub-invocation completes (and fully deregisters)
+        -- normally; anything else (the label sub-invocation) leaves a
+        -- marker behind if it ever actually runs, which -- if this
+        -- round's fix works -- it must not.
+        ByteString.writeFile
+          fakeGh
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "case \"$1 $2\" in",
+                "  \"issue comment\") cat >/dev/null; echo https://example.test/comment; exit 0 ;;",
+                "  *) touch \"" <> ByteString.pack secondCallMarker <> "\"; exit 0 ;;",
+                "esac"
+              ]
+          )
+        setFileMode fakeGh 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+          client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+          flip finally (stopReviewClient client) $ do
+            executable <- findExecutable "gh"
+            ghPath <- maybe (expectationFailure "fake gh not found on PATH" >> error "unreachable") pure executable
+            let request =
+                  GitHubIssueToolRequest
+                    { githubToolOperation = GitHubIssueUpdate,
+                      githubToolIssue = 1,
+                      githubToolComment = Just "a comment",
+                      githubToolAddLabels = ["bug"],
+                      githubToolRemoveLabels = []
+                    }
+            reachedGap <- newEmptyMVar
+            releaseGap <- newEmptyMVar
+            resultDone <- newEmptyMVar
+            killDone <- newEmptyMVar
+            let afterComment = putMVar reachedGap () >> takeMVar releaseGap
+            void . forkIO $ runGitHubIssueUpdateWith afterComment client "thread-a" ghPath request >>= putMVar resultDone
+            -- By the time this barrier is reached, the comment
+            -- sub-invocation has already fully completed and
+            -- deregistered -- the registry is genuinely empty for this
+            -- thread, exactly the gap between sub-invocations the
+            -- round-33 review described.
+            timeout 5000000 (takeMVar reachedGap) `shouldReturn` Just ()
+            void . forkIO $ (killReviewTools client "thread-a" >> putMVar killDone ())
+            -- Give killReviewTools a real chance to reach its own wait
+            -- (which, with the fix, cannot finish yet -- this thread's
+            -- in-flight count is still held up by the still-paused
+            -- runGitHubIssueUpdateWith) before releasing the barrier.
+            threadDelay 300000
+            tryTakeMVar killDone `shouldReturn` Nothing
+            putMVar releaseGap ()
+            result <- timeout 5000000 (takeMVar resultDone)
+            case result of
+              Just (Left _) -> pure ()
+              other -> expectationFailure ("expected the multi-step update to be cancelled without ever reaching its second gh call, got " <> show other)
+            timeout 5000000 (takeMVar killDone) `shouldReturn` Just ()
+            secondCallHappened <- doesFileExist secondCallMarker
+            secondCallHappened `shouldBe` False
 
     it "stopReviewClient reaps the app-server's own handle even on the pre-watcher shutdown path, where watchServerProcess never started" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
