@@ -363,7 +363,7 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         threadDelay 1200000
         timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
         census <- peekCensus
@@ -399,7 +399,7 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         staleCensus <- peekCensus
         staleCensus `shouldSatisfy` (not . null)
         let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
@@ -535,7 +535,7 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         census <- peekCensus
         census `shouldSatisfy` (not . null)
         let failingSnapshot = pure (Left "simulated ps failure")
@@ -557,7 +557,7 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         realCensus <- peekCensus
         realCensus `shouldSatisfy` (not . null)
         -- Simulates the exact pgid being reused by a fully unrelated
@@ -599,7 +599,7 @@ main = hspec $ do
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
       flip finally cleanup $ do
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         realCensus <- peekCensus
         realCensus `shouldSatisfy` (not . null)
         -- Simulates a fully unrelated process reusing the exact leader
@@ -652,7 +652,7 @@ main = hspec $ do
         let stubSnapshot = pure (Right [])
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         threadDelay 200000
         census <- peekCensus
         census `shouldBe` []
@@ -685,7 +685,7 @@ main = hspec $ do
                 (_, Right snapshot) -> Right (filter isChildOfLeader snapshot)
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
-        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, _stopCensus) <- watchManagedProcessCensus managed
         let waitForRecordedChild attempts = do
               census <- peekCensus
               if any isChildOfLeader census
@@ -783,7 +783,7 @@ main = hspec $ do
                 _ -> Right [childIdentity]
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
         census <- peekCensus
         census `shouldSatisfy` any ((== childIdentity.processIdentityPid) . processIdentityPid)
         void stopCensus
@@ -815,7 +815,7 @@ main = hspec $ do
                 (_, Right snapshot) -> Right (filter isChildOfLeader snapshot)
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldBe` Nothing
-        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, _stopCensus) <- watchManagedProcessCensus managed
         let waitForRecordedChild attempts = do
               census <- peekCensus
               if any isChildOfLeader census
@@ -864,7 +864,7 @@ main = hspec $ do
               pure (fmap (filter isChildOfLeader) real)
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
-        (peekCensus, _stopCensus) <- watchManagedProcessCensus managed
+        (peekCensus, _forceCensusTick, _stopCensus) <- watchManagedProcessCensus managed
         let waitForRecordedChild attempts = do
               census <- peekCensus
               if any isChildOfLeader census
@@ -874,6 +874,59 @@ main = hspec $ do
                     then expectationFailure "census never recorded the child despite the leader remaining an unreaped zombie throughout"
                     else threadDelay 100000 >> waitForRecordedChild (attempts - 1)
         waitForRecordedChild 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
+
+    it "forceCensusTick lets a caller about to reap the leader observe, right now, a child no scheduled watcher tick has had a chance to see yet, and killManagedProcessVerified can then kill it" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 100"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        let isLeaderIdentity identity = identity.processIdentityPid == fromIntegral leaderPid
+            isChildOfLeader identity = identity.processIdentityGroupPid == fromIntegral leaderPid && not (isLeaderIdentity identity)
+        -- Every snapshot -- verification's own and every *scheduled*
+        -- watcher tick -- is filtered down to just the leader, hiding the
+        -- real child from anything except one specific, deliberately
+        -- narrow window: this is the reviewer's exact
+        -- "post-initial-tick/pre-next-tick reap window" scenario, except
+        -- the child stays hidden indefinitely rather than just briefly,
+        -- so no amount of waiting for a scheduled tick could ever catch
+        -- it on its own -- only a caller that forces one, right before
+        -- reaping the leader (as every real waitForProcess call site in
+        -- "Kanban.Review" now does), can.
+        revealChild <- newIORef False
+        let stubSnapshot = do
+              reveal <- readIORef revealChild
+              real <- readProcessSnapshot
+              pure (fmap (filter (\identity -> reveal || isLeaderIdentity identity)) real)
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, forceTick, _stopCensus) <- watchManagedProcessCensus managed
+        -- Give the real child every chance to exist, and several
+        -- scheduled bootstrap-burst ticks every chance to run against the
+        -- still-hidden stub, before ever forcing anything.
+        threadDelay 300000
+        stillHidden <- peekCensus
+        stillHidden `shouldSatisfy` all isLeaderIdentity
+        realSnapshot <- readProcessSnapshot
+        case realSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldSatisfy` (not . null)
+        -- Reveal the child for exactly the duration of this one forced
+        -- tick -- narrow enough that no independently-scheduled watcher
+        -- tick could plausibly race into this exact window -- to isolate
+        -- that it is specifically this call, not some coincidental
+        -- background tick, that catches it.
+        writeIORef revealChild True
+        forceTick
+        writeIORef revealChild False
+        afterForce <- peekCensus
+        afterForce `shouldSatisfy` any isChildOfLeader
         confirmed <- killManagedProcessVerified managed
         confirmed `shouldBe` True
         finalSnapshot <- readProcessSnapshot
@@ -3410,7 +3463,7 @@ main = hspec $ do
                 if confirmable then defaultProcessSnapshot else pure (Right [unconfirmableIdentity])
           (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
           groupLeaderProblem `shouldSatisfy` isJust
-          (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+          (peekCensus, _forceCensusTick, stopCensus) <- watchManagedProcessCensus managed
           client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
           confirmed <-
             confirmToolProcessTerminatedOrKeepTryingWith (threadDelay 50000) client managed peekCensus stopCensus

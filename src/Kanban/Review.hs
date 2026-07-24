@@ -83,7 +83,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, ProcessIdentity, killCensusVerified, killManagedProcess, managedProcess, watchManagedProcessCensus)
+import Kanban.Process (ManagedProcess, ProcessIdentity, forceCensusTick, killCensusVerified, killManagedProcess, managedProcess, watchManagedProcessCensus)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -568,7 +568,7 @@ startReviewClient workflowConfig repository eventSink = do
       hSetBuffering outputHandle LineBuffering
       (processManaged, groupLeaderProblem) <- managedProcess processHandle
       mapM_ (\problem -> eventSink (ReviewProtocolWarning ("app-server process group leadership: " <> problem))) groupLeaderProblem
-      (processCensusPeek, processCensusStop) <- watchManagedProcessCensus processManaged
+      (processCensusPeek, _, processCensusStop) <- watchManagedProcessCensus processManaged
       writeLock <- newMVar ()
       requestCounter <- newIORef 2
       toolInvocationCounter <- newIORef 1
@@ -641,7 +641,7 @@ newReviewClientForTesting workflowConfig repositoryRoot eventSink = do
   void (forkIO (drainHandle outputHandle))
   void (forkIO (drainHandle errorHandle))
   (processManaged, _) <- managedProcess processHandle
-  (processCensusPeek, processCensusStop) <- watchManagedProcessCensus processManaged
+  (processCensusPeek, _, processCensusStop) <- watchManagedProcessCensus processManaged
   writeLock <- newMVar ()
   requestCounter <- newIORef 2
   toolInvocationCounter <- newIORef 1
@@ -1333,8 +1333,21 @@ readServerErrors client errorHandle = do
 -- client shutdown, not merely leave one already-known survivor
 -- unconfirmed. A timeout is reported as its own distinct protocol warning
 -- rather than silently proceeding as if the readers cleanly reached EOF.
+--
+-- 'forceCensusTick' runs immediately before 'waitForProcess' reaps the
+-- app-server's own leader handle: the census's own background watcher
+-- only ticks every 'Kanban.Process.censusIntervalMicros' in steady state,
+-- and a child forked (with the leader then reaped by *this exact call*)
+-- entirely within that gap would otherwise never be witnessed while
+-- 'Kanban.Process.managedProcessHandleStillOpen' could still vouch for
+-- it -- permanently losing the not-yet-reaped proof for it, with no
+-- background retry ever able to recover what was never recorded in the
+-- first place. Forcing one last, synchronous observation right before
+-- the reap closes that gap down to the same back-to-back-syscalls window
+-- the embedded census's own initial synchronous tick already achieves.
 watchServerProcess :: ReviewClient -> IO ()
 watchServerProcess client = do
+  forceCensusTick client.reviewProcessManaged
   exitCode <- waitForProcess client.reviewProcess
   drainToolProcesses client
   confirmed <- confirmToolProcessTerminatedOrKeepTrying client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
@@ -1634,7 +1647,7 @@ runGitHubCommand client threadId ghPath arguments input = do
         Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
           (managed, groupLeaderProblem) <- managedProcess processHandle
           mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-          (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+          (peekCensus, _, stopCensus) <- watchManagedProcessCensus managed
           attached <- attachToolProcess client invocationId managed peekCensus stopCensus
           if not attached
             then do
@@ -1652,6 +1665,7 @@ runGitHubCommand client threadId ghPath arguments input = do
                 Right () -> do
                   completed <-
                     timeout githubCommandTimeoutMicros $ do
+                      forceCensusTick managed
                       exitCode <- waitForProcess processHandle
                       output <- takeMVar outputResult
                       errors <- takeMVar errorResult
@@ -1705,6 +1719,7 @@ runCanonicalCommandWith timeoutMicros repository issueNumber executable argument
       void . forkIO $ captureHandle outputHandle outputResult
       void . forkIO $ captureHandle errorHandle errorResult
       completed <- timeout timeoutMicros $ do
+        forceCensusTick managed
         exitCode <- waitForProcess processHandle
         output <- takeMVar outputResult
         errors <- takeMVar errorResult
@@ -1788,7 +1803,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
             Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
               (managed, groupLeaderProblem) <- managedProcess processHandle
               mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
-              (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+              (peekCensus, _, stopCensus) <- watchManagedProcessCensus managed
               attached <- attachToolProcess client invocationId managed peekCensus stopCensus
               if not attached
                 then do
@@ -1806,6 +1821,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
                     Right () -> do
                       completed <-
                         timeout claudeReviewerTimeoutMicros $ do
+                          forceCensusTick managed
                           exitCode <- waitForProcess processHandle
                           output <- takeMVar outputResult
                           errors <- takeMVar errorResult
