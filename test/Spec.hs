@@ -589,6 +589,51 @@ main = hspec $ do
           Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
         void stopCensus
 
+    it "killCensusVerifiedWith refuses to escalate to SIGKILL against a foreign group whose child's parent pid merely numbers the same as a census-recorded pid reused after TERM" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        realCensus <- peekCensus
+        realCensus `shouldSatisfy` (not . null)
+        -- Simulates a fully unrelated process reusing the exact leader
+        -- pid TERM was just sent to (freed for reuse the instant it is
+        -- reaped) as its own new group leader, and forking its own,
+        -- entirely foreign child -- so that child's parent pid *numbers*
+        -- the same as a pid the census still has recorded, without being
+        -- the same process in any other way. An escalation gate that
+        -- trusted a bare parent-pid-number match here would wrongly
+        -- authorize SIGKILL against this foreign group; only the real
+        -- leader's own recorded identity (pid, start time, group, and
+        -- command line all matching) should ever be trusted.
+        let foreignChildIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid + 999999,
+                  processIdentityParentPid = fromIntegral leaderPid,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "a much later moment",
+                  processIdentityCommand = "unrelated-foreign-child"
+                }
+        callCount <- newIORef (0 :: Int)
+        let stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              pure (Right (if count == (0 :: Int) then realCensus else [foreignChildIdentity]))
+        confirmed <- killCensusVerifiedWith stubSnapshot managed (pure realCensus)
+        confirmed `shouldBe` False
+        -- Escalation to SIGKILL was refused despite the parent-pid-number
+        -- coincidence: the real leader is still alive, which it would not
+        -- be had SIGKILL actually reached its real, still-live group.
+        threadDelay 100000
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+        void stopCensus
+
     it "managedProcessWith starts a real, empty-seeded watcher for a presumed (unverified) leader, which self-stops the instant its own first tick also finds nothing" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}

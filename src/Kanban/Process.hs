@@ -529,15 +529,13 @@ killManagedProcessVerified managed = killManagedProcess managed >> pure True
 -- emptied the original group, that pgid is immediately free for the
 -- kernel to hand to a fully unrelated process, and a single snapshot
 -- cannot tell a freshly-reused foreign occupant apart from a legitimate
--- survivor or a legitimate child a dying member's own TERM handler just
--- forked. 'confirmEscalationTarget' ties the decision back to `peekCensus`
--- -- the same continuously-updating, provenance-backed witness used to
--- justify sending TERM in the first place -- rather than a fresh,
--- unwitnessed reading: only an occupant that is *itself* still
--- census-known, or is the freshly-forked child of a pid the census
--- already recorded (see there), is trusted enough for SIGKILL. An
--- ambiguous reading -- neither, or a snapshot failure -- reports
--- unresolved rather than ever guessing.
+-- survivor. 'confirmEscalationTarget' ties the decision back to
+-- `peekCensus` -- the same continuously-updating, provenance-backed
+-- witness used to justify sending TERM in the first place -- rather than
+-- a fresh, unwitnessed reading: only an occupant that is *itself* still
+-- census-known is trusted enough for SIGKILL. An ambiguous reading --
+-- nothing still census-known, or a snapshot failure -- reports unresolved
+-- rather than ever guessing.
 killIdentitiesVerified :: IO (Either Text [ProcessIdentity]) -> IO [ProcessIdentity] -> CPid -> [ProcessIdentity] -> IO Bool
 killIdentitiesVerified takeSnapshot peekCensus pid _expected = do
   ignoreIOException (signalProcessGroup sigTERM pid)
@@ -559,19 +557,34 @@ killIdentitiesVerified takeSnapshot peekCensus pid _expected = do
     groupPidInt = fromIntegral pid
 
 -- | Confirms whatever currently occupies `groupPid` is trustworthy enough
--- for 'killIdentitiesVerified' to escalate to SIGKILL: either (a) it is
--- itself an identity `peekCensus` has already recorded (a genuine
--- survivor, or a child the watcher's own ongoing ticking independently
--- caught during the grace wait), or (b) its `processIdentityParentPid`
--- names a pid `peekCensus` has already recorded -- a freshly-forked child
--- of a *known* member, reachable even if that specific child was never
--- itself directly witnessed (round 10's "TERM handler forks a child"
+-- for 'killIdentitiesVerified' to escalate to SIGKILL: it is itself an
+-- identity `peekCensus` has already recorded (a genuine survivor, or a
+-- child the watcher's own ongoing ticking independently caught during the
+-- grace wait) -- matched, like everywhere else in this module, by
+-- identity-and-group continuity ('membersStillInGroup'), not merely a
+-- bare pid number. A pgid reused by a fully unrelated foreign process
+-- satisfies this only if it happens to also recreate a census-recorded
+-- pid *and* start time *and* command line, an astronomically unlikely
+-- coincidence rather than a plausible attack. Returns 'Nothing'
+-- (ambiguous, do not escalate) if the group reads empty, the snapshot
+-- fails, or nothing census-known survives.
+--
+-- An earlier design additionally trusted a fresh occupant whose
+-- `processIdentityParentPid` merely *numbered* the same as some
+-- previously-census-recorded pid (round 10's "TERM handler forks a child"
 -- scenario: the dying member is census-known, even once it is itself
--- gone). A pgid reused by a fully unrelated foreign process satisfies
--- neither: it shares no identity with anything the census ever recorded,
--- and its parent is some unrelated shell or supervisor, not this spawn's
--- own dying member. Returns 'Nothing' (ambiguous, do not escalate) if the
--- group reads empty, the snapshot fails, or neither condition holds.
+-- gone) -- but a dying member's own pid is exactly the pid TERM was just
+-- sent to, and once reaped it becomes immediately eligible for OS reuse.
+-- An unrelated new process spawned moments later, coincidentally reusing
+-- that exact pid as its own leader and forking its own, entirely foreign
+-- child, would have that child's parent pid match the same number --
+-- authorizing SIGKILL against a foreign group this design was never able
+-- to verify belongs to this spawn at all. Unlike a leader's own pid (see
+-- 'startEmbeddedCensusWith'), this module has no live 'ProcessHandle' for
+-- an arbitrary non-leader census member, so there is no not-yet-reaped
+-- proof available to rescue this case safely -- it is left permanently
+-- unresolved (no escalation) rather than trusting a bare, reusable pid
+-- number.
 confirmEscalationTarget :: IO (Either Text [ProcessIdentity]) -> IO [ProcessIdentity] -> Int -> IO (Maybe [ProcessIdentity])
 confirmEscalationTarget takeSnapshot peekCensus groupPid = do
   snapshot <- takeSnapshot
@@ -581,10 +594,8 @@ confirmEscalationTarget takeSnapshot peekCensus groupPid = do
       [] -> pure Nothing
       currentMembers -> do
         census <- peekCensus
-        let knownPids = Set.fromList (map processIdentityPid census)
-            survivors = membersStillInGroup groupPid processes census
-            freshChildren = filter ((`Set.member` knownPids) . processIdentityParentPid) currentMembers
-        if null survivors && null freshChildren
+        let survivors = membersStillInGroup groupPid processes census
+        if null survivors
           then pure Nothing
           else pure (Just currentMembers)
 
