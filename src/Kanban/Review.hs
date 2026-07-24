@@ -45,7 +45,9 @@ module Kanban.Review
     runAuthenticatedClaudeWith,
     runCanonicalIssueReview,
     runCanonicalCommandWith,
+    runGitHubCommandWith,
     runGitHubIssueTool,
+    runGitHubIssueToolWith,
     runGitHubIssueUpdateWith,
     sendReviewMessage,
     startReviewClient,
@@ -1231,6 +1233,30 @@ confirmToolProcessTerminatedOrKeepTryingWith backgroundRetryDelay client managed
       confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
       unless confirmed keepTrying
 
+-- | Forks a detached thread that reaps `processHandle` once it actually
+-- exits, for a "kill-only" completion path (every call site below) whose
+-- own termination confirmation goes through 'confirmToolProcessTerminated'/
+-- 'killCensusVerified': for a verified local leader, that machinery signals
+-- and confirms via the recorded process group id and a fresh @ps@-based
+-- census snapshot, deliberately never re-inspecting `processHandle` itself
+-- (see 'Kanban.Process.killManagedProcess'), so nothing else ever calls
+-- 'waitForProcess'/'getProcessExitCode' on this exact handle once it is
+-- genuinely killed -- leaving the leader itself as a permanently unreaped
+-- zombie, invisible to every @ps@-based check this codebase otherwise
+-- relies on (see 'Kanban.Process.isZombieStat'), even once its whole group
+-- reads back confirmed-empty. This is the same zombie-leak
+-- 'stopReviewClient' already guards against for the app-server's own
+-- handle, applied here to every tool invocation's leader instead. Safe to
+-- start even alongside an already-outstanding in-band 'waitForProcess' call
+-- on the same handle (e.g. one interrupted mid-flight by a 'timeout' that
+-- has just fired): the @process@ library documents 'waitForProcess' as
+-- callable for the same process from multiple threads at once.
+-- 'forceCensusTick' runs first, for the same reason it runs before every
+-- other real reap of a managed leader's handle in this module.
+reapKilledToolProcess :: ManagedProcess -> ProcessHandle -> IO ()
+reapKilledToolProcess managed processHandle =
+  void (forkIO (forceCensusTick managed >> void (waitForProcess processHandle)))
+
 -- | Quitting terminates the owned app-server process (DESIGN.md §7): drains
 -- every registered tool process first, then the app-server itself, both via
 -- 'confirmToolProcessTerminatedOrKeepTrying' so a leader already exited and
@@ -1603,8 +1629,26 @@ githubActionSummary request = case request.githubToolOperation of
       | otherwise = " review labels…"
 
 runGitHubIssueTool :: ReviewClient -> Text -> GitHubIssueToolRequest -> IO (Either Text Text)
-runGitHubIssueTool client threadId request = do
+runGitHubIssueTool = runGitHubIssueToolWith (pure ())
+
+-- | As 'runGitHubIssueTool', but runs `afterLookup` right after
+-- 'findExecutable' resolves and before the first sub-invocation ever
+-- reserves. 'findExecutable' itself takes real, measurable time and runs
+-- before any reservation or in-flight accounting exists for this call: a
+-- same-thread 'killReviewTools' landing during that lookup (or in the gap
+-- right after it returns) would otherwise see no registry entry and no
+-- in-flight count for this thread, finish immediately, and release its
+-- fence before the first 'reserveToolInvocation' ever happens -- letting
+-- that first @gh@ spawn escape a cancellation that had already completed.
+-- 'withThreadInFlightHeld' below closes that gap the same way
+-- 'runGitHubIssueUpdateWith' already closes the gap *between*
+-- sub-invocations. Exposed so a test can pause deterministically right at
+-- the lookup, rather than racing real process/scheduler timing to land it.
+-- Production code always calls this with @pure ()@.
+runGitHubIssueToolWith :: IO () -> ReviewClient -> Text -> GitHubIssueToolRequest -> IO (Either Text Text)
+runGitHubIssueToolWith afterLookup client threadId request = withThreadInFlightHeld client threadId $ do
   executable <- findExecutable "gh"
+  afterLookup
   case executable of
     Nothing -> pure (Left "GitHub CLI was not found on PATH")
     Just ghPath -> case request.githubToolOperation of
@@ -1724,7 +1768,18 @@ partialUpdateMessage (Just commentUrl) message =
   "The issue comment was posted at " <> commentUrl <> ", but the label update failed: " <> message
 
 runGitHubCommand :: ReviewClient -> Text -> FilePath -> [String] -> Text -> IO (Either Text Text)
-runGitHubCommand client threadId ghPath arguments input = do
+runGitHubCommand = runGitHubCommandWith (const (pure ()))
+
+-- | As 'runGitHubCommand', but runs `beforeAttach` right after the process
+-- is spawned and its census watcher started, and just before
+-- 'attachToolProcess' -- exposed so a test can pause an already-real,
+-- already-spawned invocation at exactly the point where a concurrent
+-- 'killReviewTools'/'drainToolProcesses' can still claim its reservation
+-- and make 'attachToolProcess' fail (see there), rather than racing real
+-- process/scheduler timing to land it. Production code always calls this
+-- with @const (pure ())@.
+runGitHubCommandWith :: (ManagedProcess -> IO ()) -> ReviewClient -> Text -> FilePath -> [String] -> Text -> IO (Either Text Text)
+runGitHubCommandWith beforeAttach client threadId ghPath arguments input = do
   reserved <- reserveToolInvocation client threadId
   case reserved of
     Nothing -> pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
@@ -1738,9 +1793,11 @@ runGitHubCommand client threadId ghPath arguments input = do
           (managed, groupLeaderProblem) <- managedProcess processHandle
           mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
           (peekCensus, _, stopCensus) <- watchManagedProcessCensus managed
+          beforeAttach managed
           attached <- attachToolProcess client invocationId managed peekCensus stopCensus
           if not attached
             then do
+              reapKilledToolProcess managed processHandle
               confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
               unless confirmed (registerOrphanedToolProcess client threadId managed peekCensus stopCensus)
               pure (Left "Kanban refused the GitHub CLI invocation: this thread is not currently accepting new tool processes")
@@ -1769,6 +1826,11 @@ runGitHubCommand client threadId ghPath arguments input = do
               -- is the only registry entry ever pointing at. Deregistering only
               -- once confirmed leaves an unconfirmed entry registered for a
               -- later drain to retry, rather than dropping ownership of it here.
+              -- On the timeout branch, the in-band 'waitForProcess' above was
+              -- itself interrupted mid-flight and never reaped the leader --
+              -- 'reapKilledToolProcess' is always started here regardless of
+              -- which branch was taken, so that gap is covered too.
+              reapKilledToolProcess managed processHandle
               confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
               when confirmed (deregisterToolProcess client invocationId)
               pure result
@@ -1959,6 +2021,7 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
               attached <- attachToolProcess client invocationId managed peekCensus stopCensus
               if not attached
                 then do
+                  reapKilledToolProcess managed processHandle
                   confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
                   unless confirmed (registerOrphanedToolProcess client threadId managed peekCensus stopCensus)
                   pure (Left "Kanban refused the Claude invocation: this thread is not currently accepting new tool processes")
@@ -1988,6 +2051,12 @@ runAuthenticatedClaudeWith beforeSpawn client threadId prompt = do
                   -- entry ever pointing at. Deregistering only once confirmed
                   -- leaves an unconfirmed entry registered for a later drain to
                   -- retry, rather than dropping ownership of it here.
+                  -- On the timeout branch, the in-band 'waitForProcess' above
+                  -- was itself interrupted mid-flight and never reaped the
+                  -- leader -- 'reapKilledToolProcess' is always started here
+                  -- regardless of which branch was taken, so that gap is
+                  -- covered too.
+                  reapKilledToolProcess managed processHandle
                   confirmed <- confirmToolProcessTerminated client managed peekCensus stopCensus
                   when confirmed (deregisterToolProcess client invocationId)
                   pure result

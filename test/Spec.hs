@@ -109,7 +109,9 @@ import Kanban.Review
     runAuthenticatedClaude,
     runAuthenticatedClaudeWith,
     runCanonicalCommandWith,
+    runGitHubCommandWith,
     runGitHubIssueTool,
+    runGitHubIssueToolWith,
     runGitHubIssueUpdateWith,
     startReviewClient,
     stopReviewClient,
@@ -3650,6 +3652,96 @@ main = hspec $ do
             timeout 5000000 (takeMVar killDone) `shouldReturn` Just ()
             secondCallHappened <- doesFileExist secondCallMarker
             secondCallHappened `shouldBe` False
+
+    it "keeps a same-thread cancellation from escaping through the gap before runGitHubIssueTool's first gh reservation" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        flip finally (stopReviewClient client) $ do
+          let request =
+                GitHubIssueToolRequest
+                  { githubToolOperation = GitHubIssueRead,
+                    githubToolIssue = 1,
+                    githubToolComment = Nothing,
+                    githubToolAddLabels = [],
+                    githubToolRemoveLabels = []
+                  }
+          reachedGap <- newEmptyMVar
+          releaseGap <- newEmptyMVar
+          resultDone <- newEmptyMVar
+          killDone <- newEmptyMVar
+          -- 'findExecutable' itself, and the gap right after it returns,
+          -- precede any reservation or in-flight accounting for this call
+          -- -- exactly the window the round-34 review flagged as an escape
+          -- for a same-thread cancellation. Without the round-35 fix,
+          -- killReviewTools below would see nothing registered and no
+          -- in-flight count for this thread, and finish well within the
+          -- 300ms delay.
+          let afterLookup = putMVar reachedGap () >> takeMVar releaseGap
+          void . forkIO $ runGitHubIssueToolWith afterLookup client "thread-a" request >>= putMVar resultDone
+          timeout 5000000 (takeMVar reachedGap) `shouldReturn` Just ()
+          void . forkIO $ (killReviewTools client "thread-a" >> putMVar killDone ())
+          threadDelay 300000
+          tryTakeMVar killDone `shouldReturn` Nothing
+          putMVar releaseGap ()
+          result <- timeout 5000000 (takeMVar resultDone)
+          case result of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
+            other -> expectationFailure ("expected the raced invocation to be refused after cancellation claimed it before its first reservation, got " <> show other)
+          timeout 5000000 (takeMVar killDone) `shouldReturn` Just ()
+
+    it "reaps the raw handle of a gh invocation whose reservation is claimed by a concurrent cancellation before it ever attaches" $
+      withReviewToolFixtures $ \temporaryRoot -> do
+        client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
+        flip finally (stopReviewClient client) $ do
+          executable <- findExecutable "gh"
+          ghPath <- maybe (expectationFailure "fake gh not found on PATH" >> error "unreachable") pure executable
+          reachedGap <- newEmptyMVar
+          releaseGap <- newEmptyMVar
+          resultDone <- newEmptyMVar
+          killDone <- newEmptyMVar
+          leaderPidCollected <- newEmptyMVar
+          -- Captures the leader's pid immediately, inside 'beforeAttach',
+          -- while the handle is still live -- 'managedProcessPid' is a
+          -- *live* query (see its own haddock), so capturing it any later
+          -- would itself hit the "handle already reaped" trap this test
+          -- exists to catch.
+          let beforeAttach managed = do
+                managedProcessPid managed >>= mapM_ (putMVar leaderPidCollected)
+                putMVar reachedGap ()
+                takeMVar releaseGap
+          void . forkIO $ runGitHubCommandWith beforeAttach client "thread-a" ghPath ["issue", "view", "1"] "" >>= putMVar resultDone
+          timeout 5000000 (takeMVar reachedGap) `shouldReturn` Just ()
+          -- The reservation is still sitting in the registry, unattached --
+          -- killReviewTools claims and trivially confirms it (nothing to
+          -- kill yet, from its perspective), then blocks in
+          -- awaitNoInFlightInvocationsFor on this thread's in-flight count,
+          -- which the still-paused invocation above continues to hold up.
+          void . forkIO $ (killReviewTools client "thread-a" >> putMVar killDone ())
+          threadDelay 300000
+          tryTakeMVar killDone `shouldReturn` Nothing
+          putMVar releaseGap ()
+          -- Releasing the pause lets attachToolProcess run: it finds the
+          -- reservation gone (claimed above) and fails, taking the
+          -- "not attached" branch -- confirmToolProcessTerminated kills the
+          -- real, still-running fake gh process via its process group,
+          -- never touching processHandle itself (see
+          -- 'Kanban.Process.killManagedProcess'). Without this round's
+          -- fix, nothing ever reaps that handle once it is killed.
+          result <- timeout 5000000 (takeMVar resultDone)
+          case result of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "not currently accepting"
+            other -> expectationFailure ("expected the raced invocation to be refused after its reservation was claimed, got " <> show other)
+          timeout 5000000 (takeMVar killDone) `shouldReturn` Just ()
+          leaderPid <- takeMVar leaderPidCollected
+          let waitForReaped attempts = do
+                stillZombie <- isZombiePid (fromIntegral leaderPid)
+                if not stillZombie
+                  then pure ()
+                  else
+                    if attempts <= (0 :: Int)
+                      then expectationFailure "gh invocation killed after losing the attach race was left as an unreaped zombie"
+                      else threadDelay 100000 >> waitForReaped (attempts - 1)
+          waitForReaped 50
 
     it "stopReviewClient reaps the app-server's own handle even on the pre-watcher shutdown path, where watchServerProcess never started" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
