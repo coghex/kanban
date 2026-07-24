@@ -30,6 +30,8 @@ module Kanban.UI
     failureActivity,
     githubRefreshTimeoutMicros,
     neutralAttr,
+    normalizeCollapsedRow,
+    normalizeSelectedRowsAfterToggle,
     orphanMessage,
     overlayMouseAction,
     pendingAttr,
@@ -51,6 +53,7 @@ module Kanban.UI
     revisedAttr,
     runDashboard,
     solveSessionAlreadyResolved,
+    visibleSelectionRows,
   )
 where
 
@@ -4578,13 +4581,13 @@ preserveSelection :: AppState -> Board -> (BoardColumn, Map BoardColumn Int)
 preserveSelection state board =
   case selectedItem state >>= (findItem board . itemId) of
     Just (column, row, _) ->
-      let visibleRow = normalizeCollapsedRow state board column row
+      let visibleRow = normalizeCollapsedRow state.appExpandedTrackers board column row
        in (column, rowsWithSelection column visibleRow)
     Nothing -> (state.appSelectedColumn, clampedRows)
   where
     clampedRows =
       Map.fromList
-        [ (column, normalizeCollapsedRow state board column (clampRow board column (selectedRow state column)))
+        [ (column, normalizeCollapsedRow state.appExpandedTrackers board column (clampRow board column (selectedRow state column)))
           | column <- allColumns
         ]
     rowsWithSelection selectedColumn selectedIndex = Map.insert selectedColumn selectedIndex clampedRows
@@ -4592,14 +4595,20 @@ preserveSelection state board =
 clampRow :: Board -> BoardColumn -> Int -> Int
 clampRow board column row = max 0 (min row (length (entriesForBoard board column) - 1))
 
-normalizeCollapsedRow :: AppState -> Board -> BoardColumn -> Int -> Int
-normalizeCollapsedRow state board column row = case safeIndex row entries >>= entryPrimaryTrackerNumber of
+normalizeCollapsedRow :: Set Int -> Board -> BoardColumn -> Int -> Int
+normalizeCollapsedRow expandedTrackers board column row = case safeIndex row entries >>= entryPrimaryTrackerNumber of
   Just trackerNumber
-    | trackerNumber `Set.notMember` state.appExpandedTrackers ->
+    | trackerNumber `Set.notMember` expandedTrackers ->
         maybe row id (findIndex ((== Just trackerNumber) . entryPrimaryTrackerNumber) entries)
   _ -> row
   where
     entries = entriesForBoard board column
+
+-- | Collapsing a tracker only repairs the toggling column's own remembered
+-- row; every other column can still be pointing at a row that just became
+-- hidden board-wide, so re-run 'normalizeCollapsedRow' over all of them.
+normalizeSelectedRowsAfterToggle :: Set Int -> Board -> Map BoardColumn Int -> Map BoardColumn Int
+normalizeSelectedRowsAfterToggle expandedTrackers board = Map.mapWithKey (normalizeCollapsedRow expandedTrackers board)
 
 refreshOverlay :: Board -> Maybe Overlay -> (Maybe Overlay, Maybe Text)
 refreshOverlay _ Nothing = (Nothing, Nothing)
@@ -4640,7 +4649,7 @@ entriesForBoard board column = Map.findWithDefault [] column board.boardColumns
 moveCard :: Int -> EventM Name AppState ()
 moveCard delta = modify $ \state ->
   let column = state.appSelectedColumn
-      rows = visibleSelectionRows state column
+      rows = visibleSelectionRows state.appExpandedTrackers state.appBoard column
       currentPosition = maybe 0 id (findIndex (== selectedRow state column) rows)
       nextPosition = max 0 (min (length rows - 1) (currentPosition + delta))
    in case safeIndex nextPosition rows of
@@ -4657,7 +4666,7 @@ moveColumn delta = modify $ \state ->
 selectBoundary :: Bool -> EventM Name AppState ()
 selectBoundary selectLast = modify $ \state ->
   let column = state.appSelectedColumn
-      rows = visibleSelectionRows state column
+      rows = visibleSelectionRows state.appExpandedTrackers state.appBoard column
       target = if selectLast then safeLast rows else safeIndex 0 rows
    in case target of
         Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
@@ -4681,20 +4690,21 @@ toggleTrackerFromClick column row trackerNumber =
 toggleTrackerState :: BoardColumn -> Int -> Int -> AppState -> AppState
 toggleTrackerState column row trackerNumber state
   | trackerNumber `Set.member` state.appExpandedTrackers =
-      state
-        { appSelectedColumn = column,
-          appExpandedTrackers = Set.delete trackerNumber state.appExpandedTrackers,
-          appSelectedRows = Map.insert column row state.appSelectedRows,
-          appEnsureSelectionVisible = True,
-          appNotice = Just ("Collapsed epic #" <> showText trackerNumber)
-        }
+      retarget (Set.delete trackerNumber state.appExpandedTrackers) ("Collapsed epic #" <> showText trackerNumber)
   | otherwise =
+      retarget (Set.insert trackerNumber state.appExpandedTrackers) ("Expanded epic #" <> showText trackerNumber)
+  where
+    retarget expandedTrackers notice =
       state
         { appSelectedColumn = column,
-          appExpandedTrackers = Set.insert trackerNumber state.appExpandedTrackers,
-          appSelectedRows = Map.insert column row state.appSelectedRows,
+          appExpandedTrackers = expandedTrackers,
+          appSelectedRows =
+            normalizeSelectedRowsAfterToggle
+              expandedTrackers
+              state.appBoard
+              (Map.insert column row state.appSelectedRows),
           appEnsureSelectionVisible = True,
-          appNotice = Just ("Expanded epic #" <> showText trackerNumber)
+          appNotice = Just notice
         }
 
 openSelectedDetails :: EventM Name AppState ()
@@ -4715,15 +4725,15 @@ selectedItem state = entryItem <$> selectedEntry state
 selectedEntry :: AppState -> Maybe ColumnEntry
 selectedEntry state = safeIndex (selectedRow state state.appSelectedColumn) (entriesFor state state.appSelectedColumn)
 
-visibleSelectionRows :: AppState -> BoardColumn -> [Int]
-visibleSelectionRows state column = collect (zip [0 ..] (entriesFor state column))
+visibleSelectionRows :: Set Int -> Board -> BoardColumn -> [Int]
+visibleSelectionRows expandedTrackers board column = collect (zip [0 ..] (entriesForBoard board column))
   where
     collect [] = []
     collect indexedEntries@((row, entry) : rest) = case entryPrimaryTrackerNumber entry of
       Nothing -> row : collect rest
       Just trackerNumber ->
         let (groupEntries, remaining) = span ((== Just trackerNumber) . entryPrimaryTrackerNumber . snd) indexedEntries
-         in if trackerNumber `Set.member` state.appExpandedTrackers
+         in if trackerNumber `Set.member` expandedTrackers
               then map fst groupEntries <> collect remaining
               else row : collect remaining
 

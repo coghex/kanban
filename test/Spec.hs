@@ -170,6 +170,8 @@ import Kanban.UI
     codexRefreshTimeoutMicros,
     githubRefreshTimeoutMicros,
     neutralAttr,
+    normalizeCollapsedRow,
+    normalizeSelectedRowsAfterToggle,
     pendingAttr,
     problemAttr,
     pullRequestCardAttribute,
@@ -186,6 +188,7 @@ import Kanban.UI
     reviewSessionsNeedingArm,
     revisedAttr,
     solveSessionAlreadyResolved,
+    visibleSelectionRows,
   )
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, pullRequestStatus)
 import Kanban.Worker
@@ -3936,6 +3939,57 @@ main = hspec $ do
           map (.membershipTracker.trackerIssue.issueNumber) trackingContext.trackingAdditional `shouldBe` [100]
         values -> expectationFailure ("unexpected multi-tracked entries: " <> show values)
 
+  describe "epic collapse selection normalization" $ do
+    it "moves another column's remembered row to the tracker's first row there once collapse hides it" $ do
+      let issuesEntries = [fixtureTrackedEntry 100 [] 1, fixtureTrackedEntry 100 [] 2]
+          activeEntries = [fixtureTrackedEntry 100 [] 3, fixtureTrackedEntry 100 [] 4]
+          board = fixtureBoard [(Issues, issuesEntries), (Active, activeEntries)]
+          -- Active's remembered row is #4 (row 1), a non-first child of #100.
+          selectedBeforeCollapse = Map.fromList [(Issues, 0), (Active, 1)]
+          expandedAfterCollapse = Set.empty
+      normalizeSelectedRowsAfterToggle expandedAfterCollapse board selectedBeforeCollapse
+        `shouldBe` Map.fromList [(Issues, 0), (Active, 0)]
+
+    it "leaves a column empty of that tracker at row zero" $ do
+      let board = fixtureBoard [(Issues, [fixtureTrackedEntry 100 [] 1])]
+      normalizeCollapsedRow Set.empty board Done 0 `shouldBe` 0
+
+    it "does not move a selection under a still-expanded tracker, a standalone card, or an entry only additionally tracking the collapsed epic" $ do
+      let activeEntries =
+            [ fixtureTrackedEntry 200 [] 6, -- row 0: unrelated, still-expanded tracker
+              fixtureTrackedEntry 200 [100] 7, -- row 1: primary tracker 200; 100 is only an additional membership
+              fixtureStandaloneEntry 5 -- row 2: unrelated standalone card
+            ]
+          board = fixtureBoard [(Active, activeEntries)]
+          expandedAfterCollapse = Set.singleton 200
+      normalizeCollapsedRow expandedAfterCollapse board Active 0 `shouldBe` 0
+      normalizeCollapsedRow expandedAfterCollapse board Active 1 `shouldBe` 1
+      normalizeCollapsedRow expandedAfterCollapse board Active 2 `shouldBe` 2
+
+    it "leaves every column's remembered row unchanged when expanding" $ do
+      let issuesEntries = [fixtureTrackedEntry 100 [] 1, fixtureTrackedEntry 100 [] 2]
+          activeEntries = [fixtureStandaloneEntry 5]
+          board = fixtureBoard [(Issues, issuesEntries), (Active, activeEntries)]
+          selected = Map.fromList [(Issues, 1), (Active, 0)]
+          expandedAfterExpand = Set.singleton 100
+      normalizeSelectedRowsAfterToggle expandedAfterExpand board selected `shouldBe` selected
+
+    it "leaves the affected column's remembered row on a visible entry, so moveCard advances past the collapsed group instead of defaulting to the top" $ do
+      let activeEntries =
+            [ fixtureTrackedEntry 100 [] 3, -- row 0: first child of #100, the collapsed header row
+              fixtureTrackedEntry 100 [] 4, -- row 1: stale remembered row, hidden by the collapse
+              fixtureStandaloneEntry 5 -- row 2: next visible target after the collapsed group
+            ]
+          board = fixtureBoard [(Active, activeEntries)]
+          expandedAfterCollapse = Set.empty
+          normalizedRow = normalizeCollapsedRow expandedAfterCollapse board Active 1
+          rows = visibleSelectionRows expandedAfterCollapse board Active
+          currentPosition = maybe 0 id (findIndex (== normalizedRow) rows)
+      normalizedRow `shouldBe` 0
+      rows `shouldBe` [0, 2]
+      currentPosition `shouldBe` 0
+      (rows !! (currentPosition + 1)) `shouldBe` 2
+
   describe "tracker checklist parsing" $ do
     it "parses supported checkboxes, progress, and natural keys only in tracker sections" $ do
       let body =
@@ -4423,6 +4477,26 @@ main = hspec $ do
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
   Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0
+
+fixtureTracker :: Int -> Tracker
+fixtureTracker number = Tracker (baseIssue number []) 0 0 Map.empty []
+
+fixtureMembership :: Int -> Int -> TrackerMembership
+fixtureMembership trackerNumber childNumber = TrackerMembership (fixtureTracker trackerNumber) (TrackerChild childNumber Nothing 0 False)
+
+-- | A tracked entry whose primary tracker is 'primaryTrackerNumber'; any
+-- 'additionalTrackerNumbers' become its secondary (non-primary) memberships.
+fixtureTrackedEntry :: Int -> [Int] -> Int -> ColumnEntry
+fixtureTrackedEntry primaryTrackerNumber additionalTrackerNumbers childNumber =
+  Tracked
+    (TrackingContext (fixtureMembership primaryTrackerNumber childNumber) (map (`fixtureMembership` childNumber) additionalTrackerNumbers))
+    (IssueItem (baseIssue childNumber []))
+
+fixtureStandaloneEntry :: Int -> ColumnEntry
+fixtureStandaloneEntry number = Standalone (IssueItem (baseIssue number []))
+
+fixtureBoard :: [(BoardColumn, [ColumnEntry])] -> Board
+fixtureBoard populated = Board (Map.fromList ([(column, []) | column <- [minBound .. maxBound]] <> populated))
 
 basePullRequest :: Int -> [Int] -> Bool -> [Label] -> PullRequest
 basePullRequest number linked draft labels =
