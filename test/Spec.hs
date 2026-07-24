@@ -38,6 +38,7 @@ import Kanban.Process
     ManagedProcess,
     ProcessIdentity (..),
     checkGroupMembershipWith,
+    defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
     interruptManagedProcess,
@@ -546,7 +547,49 @@ main = hspec $ do
           Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
         void stopCensus
 
-    it "managedProcessWith never bootstraps census trust from a presumed (unverified) leader, refusing to certify a pgid a later snapshot shows reused" $ do
+    it "killCensusVerifiedWith refuses to escalate to SIGKILL against a foreign group that reused the pgid after TERM, rather than trusting a bare post-TERM snapshot" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        realCensus <- peekCensus
+        realCensus `shouldSatisfy` (not . null)
+        -- Simulates the exact pgid being reused by a fully unrelated
+        -- process immediately after TERM: every snapshot from this point
+        -- on (the post-TERM emptiness check, and the escalation check)
+        -- shows only this foreign occupant, which shares no identity with
+        -- the real census and has no relation (by parent pid) to
+        -- anything it ever recorded either.
+        let foreignIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid + 999999,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "a much later moment",
+                  processIdentityCommand = "unrelated-foreign-occupant"
+                }
+        callCount <- newIORef (0 :: Int)
+        let stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              pure (Right (if count == (0 :: Int) then realCensus else [foreignIdentity]))
+        confirmed <- killCensusVerifiedWith stubSnapshot managed (pure realCensus)
+        confirmed `shouldBe` False
+        -- TERM was unavoidably sent for real (the leader ignores it, being
+        -- TERM-resistant), but escalation to SIGKILL was refused: the
+        -- real leader is still alive, which it would not be had SIGKILL
+        -- actually been sent to its real, still-live process group.
+        threadDelay 100000
+        afterAttempt <- readProcessSnapshot
+        case afterAttempt of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+        void stopCensus
+
+    it "managedProcessWith never bootstraps census trust from a presumed (unverified) leader on a single, unconfirmed reading" $ do
       (_, _, _, process) <-
         createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
       Just pid <- getPid process
@@ -564,22 +607,65 @@ main = hspec $ do
         -- The first snapshot -- 'verifyGroupLeaderWith's own leadership
         -- check -- reports the leader not found at all, simulating a
         -- fast-exiting leader whose own verification snapshot lost the
-        -- race: the "presumed" case. Every snapshot after that (the
-        -- census's synchronous bootstrap tick, and any later tick) reports
-        -- a *different* identity occupying the exact same pid/pgid, as if
-        -- the kernel had already reused it in the meantime.
+        -- race: the "presumed" case. The very next snapshot (the census's
+        -- synchronous bootstrap tick) reports a *different* identity
+        -- occupying the exact same pid/pgid once, as if the kernel had
+        -- already reused it -- but every reading after that shows nothing
+        -- there at all, so that single appearance was never itself
+        -- genuinely stable.
         let stubSnapshot = do
               count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
-              pure (Right (if count == (0 :: Int) then [] else [foreignIdentity]))
+              pure (Right (if count == (1 :: Int) then [foreignIdentity] else []))
         (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
         groupLeaderProblem `shouldSatisfy` isJust
         (peekCensus, stopCensus) <- watchManagedProcessCensus managed
-        -- Refuses to bootstrap: despite the census's own tick seeing a
-        -- non-empty, broadly-matching group, nothing was ever seeded to
-        -- require overlap with, so nothing gets trusted.
+        -- Refuses to bootstrap from a single, unconfirmed tick: the
+        -- pending candidate was never reconfirmed by a second, agreeing
+        -- tick before the group was observed empty again.
+        threadDelay 200000
         census <- peekCensus
         census `shouldBe` []
         void stopCensus
+
+    it "a presumed (unverified) leader's census still reaches a same-group child once two consecutive ticks confirm it, closing the fast-exit orphan gap" $ do
+      -- Lingers 500ms past forking the child before exiting -- long enough
+      -- for the census's two-consecutive-tick bootstrap requirement (see
+      -- recordCensusTick's `pending` state in "Kanban.Process") to
+      -- genuinely confirm the child's continuity before the leader
+      -- disappears.
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.5; exit 0"]) {create_group = True}
+      callCount <- newIORef (0 :: Int)
+      let stubSnapshot = do
+            count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+            -- Only 'verifyGroupLeaderWith's own leadership check (the
+            -- very first snapshot) is forced to see nothing, simulating a
+            -- leader whose verification lost the race against its own
+            -- near-instant exit -- the "presumed" case. Every later
+            -- snapshot (the census's own ticks, and the final,
+            -- real-scheduler-timed kill-confirmation checks) sees reality.
+            if count == (0 :: Int) then pure (Right []) else defaultProcessSnapshot
+      (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+      groupLeaderProblem `shouldSatisfy` isJust
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            waitForMember attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
+        waitForMember 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do

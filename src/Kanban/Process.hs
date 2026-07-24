@@ -272,19 +272,31 @@ checkIdentityPresenceWith takeSnapshot expected = do
       | otherwise -> IdentityPresent
 
 -- | Like `matchingIdentities`, but additionally requires the *live* process
--- (its current snapshot entry, not the possibly-stale recorded one) to still
--- belong to `groupPid` and still run the same command line. A process that
--- kept its PID and start time but moved to a different group must not keep
--- the old, now up-for-reuse group id looking "owned" -- and, since `ps`
--- only reports start times at one-second resolution (see
--- 'mapMaybeProcessLine'), a bare pid+start-time match alone cannot rule out
--- an unrelated process that happened to reuse the exact same pid within the
--- same reported second. Requiring the command line to match too doesn't
--- eliminate that ambiguity -- a same-second replacement running the exact
--- same command is still indistinguishable from this codebase's available
--- process-table data -- but it does rule out the far more common case of an
--- unrelated command landing on the reused pid within that window, which a
--- bare pid+start-time match alone would have silently accepted.
+-- (its current snapshot entry, not the possibly-stale recorded one) to
+-- still belong to `groupPid` and still run the same command line. A
+-- process that kept its PID and start time but moved to a different group
+-- must not keep the old, now up-for-reuse group id looking "owned". This
+-- deliberately does *not* also require the parent pid to match: a
+-- genuinely tracked descendant's parent pid legitimately changes once its
+-- original parent exits and it gets reparented (to init/launchd) -- the
+-- entire reason this codebase tracks descendants by a continuously-updated
+-- census rather than a live parent-chain walk (see
+-- 'startEmbeddedCensusWith'). Requiring parent pid to stay fixed would
+-- reject exactly the reparented survivors this whole design exists to
+-- still reach.
+--
+-- KNOWN, ACCEPTED LIMITATION: `ps` only reports start times at
+-- one-second resolution (see 'mapMaybeProcessLine'), and this codebase has
+-- no access to a true, unambiguous process-birth identity (e.g. a
+-- kernel-assigned monotonic sequence number) without additional
+-- platform-specific system calls this project does not currently make.
+-- Matching on pid, start time, group, and command line together
+-- substantially narrows -- but provably cannot eliminate -- the
+-- possibility that an unrelated process reusing the exact same pid within
+-- the same reported second, running an identical command line, is
+-- mistaken for the original. This is a genuine, currently irreducible gap
+-- given the data available from `ps`, not an oversight; closing it fully
+-- would require a different process-identity mechanism entirely.
 membersStillInGroup :: Int -> [ProcessIdentity] -> [ProcessIdentity] -> [ProcessIdentity]
 membersStillInGroup groupPid snapshot expected =
   [ process
@@ -497,7 +509,7 @@ killManagedProcessVerified managed@(LocalManagedProcess _ (Just _) peekCensus _)
             else threadDelay killConfirmRetryDelayMicros >> go (attemptsLeft - 1)
 killManagedProcessVerified managed = killManagedProcess managed >> pure True
 
--- | TERM, wait, verify via 'checkGroupEmpty', escalate to KILL and verify
+-- | TERM, wait, verify via 'checkGroupEmptyWith', escalate to KILL and verify
 -- again if needed -- shared by every kill path here once it has already
 -- decided, via a provenance-backed census
 -- ('killCensusVerified'/'killManagedProcessVerified'), that `pid`'s group
@@ -514,70 +526,73 @@ killManagedProcessVerified managed = killManagedProcess managed >> pure True
 -- emptied the original group, that pgid is immediately free for the
 -- kernel to hand to a fully unrelated process, and a single snapshot
 -- cannot tell a freshly-reused foreign occupant apart from a legitimate
--- survivor (or a legitimate child a dying member's own TERM handler just
--- forked). 'confirmStableOccupants' requires whatever is found to still be
--- the same, continuously-present occupant across a short follow-up window
--- before SIGKILL is ever sent to it -- true either way for a genuine
--- survivor/TERM-handler child (which keeps running), but false for a
--- pgid that gets reused again in the gap between the two checks. This
--- narrows, without eliminating, the reuse window SIGKILL could otherwise
--- exploit: an unrelated occupant that itself persists across the short
--- confirmation gap is still indistinguishable from a legitimate one with
--- the data available here. An ambiguous reading -- nothing stable, or a
--- snapshot failure at any point -- reports unresolved rather than ever
--- guessing.
-killIdentitiesVerified :: CPid -> [ProcessIdentity] -> IO Bool
-killIdentitiesVerified pid _expected = do
+-- survivor or a legitimate child a dying member's own TERM handler just
+-- forked. 'confirmEscalationTarget' ties the decision back to `peekCensus`
+-- -- the same continuously-updating, provenance-backed witness used to
+-- justify sending TERM in the first place -- rather than a fresh,
+-- unwitnessed reading: only an occupant that is *itself* still
+-- census-known, or is the freshly-forked child of a pid the census
+-- already recorded (see there), is trusted enough for SIGKILL. An
+-- ambiguous reading -- neither, or a snapshot failure -- reports
+-- unresolved rather than ever guessing.
+killIdentitiesVerified :: IO (Either Text [ProcessIdentity]) -> IO [ProcessIdentity] -> CPid -> [ProcessIdentity] -> IO Bool
+killIdentitiesVerified takeSnapshot peekCensus pid _expected = do
   ignoreIOException (signalProcessGroup sigTERM pid)
   threadDelay terminationGraceMicros
-  afterTerm <- checkGroupEmpty groupPidInt
+  afterTerm <- checkGroupEmptyWith takeSnapshot groupPidInt
   case afterTerm of
     Right True -> pure True
     Right False -> do
-      stable <- confirmStableOccupants groupPidInt
-      case stable of
+      trusted <- confirmEscalationTarget takeSnapshot peekCensus groupPidInt
+      case trusted of
         Nothing -> pure False
         Just _ -> do
           ignoreIOException (signalProcessGroup sigKILL pid)
           threadDelay terminationGraceMicros
-          afterKill <- checkGroupEmpty groupPidInt
+          afterKill <- checkGroupEmptyWith takeSnapshot groupPidInt
           pure (afterKill == Right True)
     Left _ -> pure False
   where
     groupPidInt = fromIntegral pid
 
--- | Confirms whatever currently occupies `groupPid` has been the same,
--- continuously-present occupant across a short follow-up window
--- ('stabilityConfirmMicros') -- not merely whatever a single instantaneous
--- reading happened to find -- before 'killIdentitiesVerified' trusts it
--- enough to escalate to SIGKILL. Returns 'Nothing' (ambiguous, do not
--- escalate) if either reading is empty, either snapshot fails, or nothing
--- overlaps between the two; otherwise returns the identities confirmed
--- present in both.
-confirmStableOccupants :: Int -> IO (Maybe [ProcessIdentity])
-confirmStableOccupants groupPid = do
-  first <- defaultProcessSnapshot
-  case first of
+-- | Confirms whatever currently occupies `groupPid` is trustworthy enough
+-- for 'killIdentitiesVerified' to escalate to SIGKILL: either (a) it is
+-- itself an identity `peekCensus` has already recorded (a genuine
+-- survivor, or a child the watcher's own ongoing ticking independently
+-- caught during the grace wait), or (b) its `processIdentityParentPid`
+-- names a pid `peekCensus` has already recorded -- a freshly-forked child
+-- of a *known* member, reachable even if that specific child was never
+-- itself directly witnessed (round 10's "TERM handler forks a child"
+-- scenario: the dying member is census-known, even once it is itself
+-- gone). A pgid reused by a fully unrelated foreign process satisfies
+-- neither: it shares no identity with anything the census ever recorded,
+-- and its parent is some unrelated shell or supervisor, not this spawn's
+-- own dying member. Returns 'Nothing' (ambiguous, do not escalate) if the
+-- group reads empty, the snapshot fails, or neither condition holds.
+confirmEscalationTarget :: IO (Either Text [ProcessIdentity]) -> IO [ProcessIdentity] -> Int -> IO (Maybe [ProcessIdentity])
+confirmEscalationTarget takeSnapshot peekCensus groupPid = do
+  snapshot <- takeSnapshot
+  case snapshot of
     Left _ -> pure Nothing
-    Right processesBefore -> case filter ((== groupPid) . processIdentityGroupPid) processesBefore of
+    Right processes -> case filter ((== groupPid) . processIdentityGroupPid) processes of
       [] -> pure Nothing
-      membersBefore -> do
-        threadDelay stabilityConfirmMicros
-        second <- defaultProcessSnapshot
-        case second of
-          Left _ -> pure Nothing
-          Right processesAfter -> case membersStillInGroup groupPid processesAfter membersBefore of
-            [] -> pure Nothing
-            stillPresent -> pure (Just stillPresent)
+      currentMembers -> do
+        census <- peekCensus
+        let knownPids = Set.fromList (map processIdentityPid census)
+            survivors = membersStillInGroup groupPid processes census
+            freshChildren = filter ((`Set.member` knownPids) . processIdentityParentPid) currentMembers
+        if null survivors && null freshChildren
+          then pure Nothing
+          else pure (Just currentMembers)
 
 -- | Whether the process group led by `groupPid` is, per a fresh snapshot,
 -- completely empty right now -- the actual definition of "confirmed
 -- terminated" (see 'killIdentitiesVerified'): restricted to whether
 -- specific previously-recorded identities survive would miss a fresh
 -- same-group child a dying member forked moments before exiting.
-checkGroupEmpty :: Int -> IO (Either Text Bool)
-checkGroupEmpty groupPid = do
-  snapshot <- defaultProcessSnapshot
+checkGroupEmptyWith :: IO (Either Text [ProcessIdentity]) -> Int -> IO (Either Text Bool)
+checkGroupEmptyWith takeSnapshot groupPid = do
+  snapshot <- takeSnapshot
   pure (null . filter ((== groupPid) . processIdentityGroupPid) <$> snapshot)
 
 -- | As 'managedProcessCensus', but wrapped in 'IO' for source
@@ -628,7 +643,7 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- trusting a bare, unwitnessed snapshot of exactly the reused pgid this
 -- design exists to distrust.
 --
--- `knownRef` starts seeded directly from 'verifyGroupLeaderWith's own
+-- `known` starts seeded directly from 'verifyGroupLeaderWith's own
 -- snapshot for a *confirmed* leader (already the complete group, not just
 -- the leader alone -- see 'managedProcess'). A gap still remains, though:
 -- a child forked *after* that snapshot but *before* the watcher's first
@@ -645,86 +660,87 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- ordinary startup sequence (fork any helper children, then keep running)
 -- is now overwhelmingly likely to have at least one burst tick land while
 -- the leader is still alive to serve as the overlap anchor. Once the burst
--- is exhausted, ticking settles into the normal, steady cadence. For a
--- merely *presumed* leader, there is no seed at all -- `knownRef` starts
--- and stays empty, and no watcher is even started (nothing could ever
--- establish overlap with an empty base to accumulate anyway); see
--- 'recordCensusTick' for why that is the correct, deliberate outcome
--- rather than a bug.
+-- is exhausted, ticking settles into the normal, steady cadence.
+--
+-- A merely *presumed* leader has no seed at all -- `known` starts empty --
+-- but a watcher still runs for it (unlike a fully unverified/no-pid
+-- process, which gets none at all): with nothing seeded, the very first
+-- tick could only ever bootstrap trust from a single, unwitnessed reading,
+-- exactly the blind trust this design exists to avoid. 'recordCensusTick'
+-- instead requires *two consecutive* ticks to agree before treating an
+-- empty `known` as bootstrapped -- a stability requirement, not a single
+-- snapshot -- so a presumed leader's genuine, still-running group (or a
+-- same-group child outliving a leader too fast to survive its own
+-- verification) still gets a real, if narrower and slower, path to
+-- provenance-backed cleanup, rather than being refused unresolved forever.
 startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> Maybe CPid -> [ProcessIdentity] -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
 startEmbeddedCensusWith _ Nothing _ = pure (pure [], pure [])
-startEmbeddedCensusWith _ (Just _) [] = pure (pure [], pure [])
 startEmbeddedCensusWith takeSnapshot (Just pid) seedMembers = do
-  knownRef <- newIORef (Set.fromList seedMembers)
-  watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks True)
-  pure (peek knownRef, stopAndCollect watcherId knownRef)
+  stateRef <- newIORef (Set.fromList seedMembers, Set.empty)
+  watcherId <- forkIO (watchLoop stateRef bootstrapBurstTicks True)
+  pure (peek stateRef, stopAndCollect watcherId stateRef)
   where
-    peek :: IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
-    peek knownRef = Set.toList <$> readIORef knownRef
-    stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
-    stopAndCollect watcherId knownRef = do
+    peek :: IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO [ProcessIdentity]
+    peek stateRef = Set.toList . fst <$> readIORef stateRef
+    stopAndCollect :: ThreadId -> IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO [ProcessIdentity]
+    stopAndCollect watcherId stateRef = do
       killThread watcherId
-      Set.toList <$> readIORef knownRef
-    watchLoop :: IORef (Set ProcessIdentity) -> Int -> Bool -> IO ()
+      Set.toList . fst <$> readIORef stateRef
+    watchLoop :: IORef (Set ProcessIdentity, Set ProcessIdentity) -> Int -> Bool -> IO ()
     watchLoop _ _ False = pure ()
-    watchLoop knownRef burstTicksLeft True = do
+    watchLoop stateRef burstTicksLeft True = do
       threadDelay (if burstTicksLeft > 0 then bootstrapBurstIntervalMicros else censusIntervalMicros)
-      stillOpen <- recordCensusTick takeSnapshot pid knownRef
-      watchLoop knownRef (max 0 (burstTicksLeft - 1)) stillOpen
+      stillOpen <- recordCensusTick takeSnapshot pid stateRef
+      watchLoop stateRef (max 0 (burstTicksLeft - 1)) stillOpen
 
 -- | Records one tick of a census (see 'startEmbeddedCensusWith'). Returns
 -- 'True' while the group still has any live members at all (the watcher
 -- should keep going), or 'False' the moment a tick finds it genuinely
--- empty (the watcher should stop itself) -- but never clears `knownRef`
--- either way, so a census that once recorded real members and has since
--- gone empty stays distinguishable from one that has never recorded
--- anything at all (see 'startEmbeddedCensusWith' for why that distinction
--- matters). A snapshot failure is treated as inconclusive, not as
--- emptiness -- it neither adds nor clears anything, and reports 'True' so
--- the watcher keeps trying on its next tick rather than prematurely giving
--- up on a still-live group.
+-- empty (the watcher should stop itself) -- but never clears the `known`
+-- half of the state either way, so a census that once recorded real
+-- members and has since gone empty stays distinguishable from one that
+-- has never recorded anything at all (see 'startEmbeddedCensusWith' for
+-- why that distinction matters). A snapshot failure is treated as
+-- inconclusive, not as emptiness -- it changes nothing, and reports 'True'
+-- so the watcher keeps trying on its next tick rather than prematurely
+-- giving up on a still-live group.
 --
 -- Sampling only every 'censusIntervalMicros' -- not continuously -- leaves
 -- a real gap: the *entire* original group could exit and this exact pgid
 -- get reused by a fully unrelated process, all within a single interval,
 -- with no tick ever observing genuine emptiness in between. A tick's
--- freshly-observed `groupMembers` is therefore only ever merged into the
--- trusted census when it overlaps (by identity-and-group continuity, the
--- same 'membersStillInGroup' check used everywhere else) what the census
--- already trusted -- proof that at least one already-trusted identity was
--- *still alive* at this exact tick, so whatever else shares its pgid right
--- now is a genuine sibling of that continuing spawn, not a fresh occupant
--- that arrived sometime after the last trusted member vanished. A tick
--- with zero such overlap leaves the census exactly as it was -- unresolved
--- for this tick, not extended -- rather than risk folding in a reused
--- foreign group.
+-- freshly-observed `groupMembers` is therefore only ever merged into
+-- `known` when it overlaps (by identity-and-group continuity, the same
+-- 'membersStillInGroup' check used everywhere else) what `known` already
+-- trusted -- proof that at least one already-trusted identity was *still
+-- alive* at this exact tick, so whatever else shares its pgid right now is
+-- a genuine sibling of that continuing spawn, not a fresh occupant that
+-- arrived sometime after the last trusted member vanished.
 --
--- There is deliberately no bootstrapping exemption for an empty
--- `knownRef`: unlike a previous design, a tick never trusts whatever it
--- finds merely because nothing has been recorded yet. A *confirmed* leader
--- never needs one -- 'startEmbeddedCensusWith' already seeds `knownRef`
--- with its verified identity before this ever runs, so the very first tick
--- overlaps that seed normally. A *presumed* leader has no seed and
--- consequently never accumulates any census evidence at all: bootstrapping
--- trust from an independent, later snapshot of a bare, unverified pid
--- would extend exactly the unwitnessed trust this design exists to avoid
--- into precisely the case -- a leader too fast to survive even its own
--- verification snapshot -- where pid reuse before that snapshot is most
--- plausible. 'killCensusVerified' already reports an empty census as
--- unresolved rather than falling back to a bare snapshot, so this
--- correctly, permanently leaves a presumed leader's cleanup unresolved
--- rather than ever guessing at it.
-recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
-recordCensusTick takeSnapshot pid knownRef = do
+-- The one exception is bootstrapping an empty `known` (a *presumed*
+-- leader -- see 'startEmbeddedCensusWith'): there, a tick's reading is
+-- instead compared against `pending` (whatever the *previous* tick saw,
+-- also while `known` was still empty). Two consecutive ticks that agree
+-- (via the same 'membersStillInGroup' overlap check) are what promotes a
+-- reading into `known` for the first time; a single, unconfirmed reading
+-- never is. A tick with no overlap at all -- against `known` when it is
+-- populated, or against `pending` when it is not -- changes neither: not
+-- extended, not (re)bootstrapped, rather than risk folding in a reused
+-- foreign group.
+recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity, Set ProcessIdentity) -> IO Bool
+recordCensusTick takeSnapshot pid stateRef = do
   snapshot <- takeSnapshot
   case snapshot of
     Left _ -> pure True
     Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
       [] -> pure False
       groupMembers -> do
-        known <- readIORef knownRef
-        let continuous = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
-        when continuous (atomicModifyIORef' knownRef (\current -> (foldr Set.insert current groupMembers, ())))
+        (known, pending) <- readIORef stateRef
+        let overlapsKnown = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
+            overlapsPending = not (null (membersStillInGroup groupPidInt processes (Set.toList pending)))
+        if overlapsKnown || (Set.null known && overlapsPending)
+          then atomicModifyIORef' stateRef (\(currentKnown, _) -> ((foldr Set.insert currentKnown groupMembers, Set.fromList groupMembers), ()))
+          else when (Set.null known) (atomicModifyIORef' stateRef (\(currentKnown, _) -> ((currentKnown, Set.fromList groupMembers), ())))
         pure True
   where
     groupPidInt = fromIntegral pid
@@ -782,7 +798,7 @@ killCensusVerifiedWith takeSnapshot (LocalManagedProcess _ (Just pid) _ _) peekC
           [] -> pure True
           currentMembers
             | null (membersStillInGroup groupPidInt processes census) -> pure False
-            | otherwise -> killIdentitiesVerified pid currentMembers
+            | otherwise -> killIdentitiesVerified takeSnapshot peekCensus pid currentMembers
   where
     groupPidInt = fromIntegral pid
 killCensusVerifiedWith _ managed _peekCensus = killManagedProcessVerified managed
@@ -814,15 +830,6 @@ ignoreIOException action = void (try action :: IO (Either IOException ()))
 
 terminationGraceMicros :: Int
 terminationGraceMicros = 750 * 1000
-
--- | The follow-up gap 'confirmStableOccupants' waits between its two
--- readings before 'killIdentitiesVerified' trusts an occupant enough to
--- escalate to SIGKILL. Short relative to 'terminationGraceMicros', so
--- confirming stability doesn't meaningfully slow down the common case
--- (survivors that are, in fact, stable) while still requiring more than a
--- single instantaneous reading.
-stabilityConfirmMicros :: Int
-stabilityConfirmMicros = 150 * 1000
 
 -- | How often 'startEmbeddedCensusWith' takes a fresh snapshot to record new
 -- descendants, once its initial burst (see 'bootstrapBurstTicks') is
