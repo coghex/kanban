@@ -693,6 +693,55 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldSatisfy` (not . null)
 
+    it "managedProcessWith's synchronous first tick still catches a same-group child forked (and its leader already gone) before any scheduled watcher tick could ever fire" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        let leaderIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "synthetic-leader-start",
+                  processIdentityCommand = "synthetic-leader"
+                }
+            childIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral leaderPid + 1,
+                  processIdentityParentPid = fromIntegral leaderPid,
+                  processIdentityGroupPid = fromIntegral leaderPid,
+                  processIdentityStartedAt = "synthetic-child-start",
+                  processIdentityCommand = "synthetic-child"
+                }
+        callCount <- newIORef (0 :: Int)
+        let -- Call 0 is 'verifyGroupLeaderWith's own seed snapshot: only the
+            -- leader exists yet, exactly as if it ran a moment before the
+            -- child was ever forked. Call 1 is 'startEmbeddedCensusWith's
+            -- synchronous first tick: leader and child now coexist -- the
+            -- reviewer's race only bites when the leader has *already*
+            -- exited by the time of the first observation, and this proves
+            -- that observation happens immediately, back-to-back with the
+            -- seed snapshot, not after any scheduled delay. Every later,
+            -- real-scheduler-timed tick shows the leader already gone --
+            -- only the child remains -- proving those alone, without the
+            -- synchronous first tick, could never have re-established
+            -- continuity: a leader-only `known` never again overlaps a
+            -- snapshot that no longer contains the leader at all.
+            stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              pure $ case count of
+                0 -> Right [leaderIdentity]
+                1 -> Right [leaderIdentity, childIdentity]
+                _ -> Right [childIdentity]
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldBe` Nothing
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        census <- peekCensus
+        census `shouldSatisfy` any ((== childIdentity.processIdentityPid) . processIdentityPid)
+        void stopCensus
+
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $
       withNonLeaderShell "trap 'exit 42' INT; while :; do sleep 1; done" $ \process -> do
         threadDelay 100000

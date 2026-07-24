@@ -661,11 +661,24 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- narrow window is left permanently unresolved (see 'killCensusVerified',
 -- which reports exactly that rather than ever guessing) rather than risk
 -- signalling a process this design was never able to verify belongs to
--- this spawn at all. The first several ticks still run in a rapid burst
--- ('bootstrapBurstTicks' of them, 'bootstrapBurstIntervalMicros' apart)
--- rather than immediately settling into the steady 'censusIntervalMicros'
--- cadence, narrowing -- without pretending to eliminate -- how long that
--- window stays open, before settling into the normal, steady cadence.
+-- this spawn at all.
+--
+-- The very first tick runs synchronously, here, before this function ever
+-- returns a watcher to its caller -- not after the first
+-- 'bootstrapBurstIntervalMicros' delay like every later tick. A delayed
+-- first tick left the *entire* bootstrap interval (originally
+-- 'censusIntervalMicros', later shortened to 'bootstrapBurstIntervalMicros'
+-- but never eliminated) open for exactly the fork-then-exit race above to
+-- run to completion inside it. Taking one more snapshot immediately,
+-- synchronously, back to back with 'verifyGroupLeaderWith's own seed
+-- snapshot, narrows that window to the two calls' own back-to-back
+-- execution time -- no scheduled delay, no watcher-thread scheduling
+-- latency, in between -- rather than leaving a full scheduled interval for
+-- a same-group child to be forked and its leader to exit inside. This
+-- narrows, but -- like every other timing-based defense in this module --
+-- cannot provably eliminate, the underlying race; the remaining burst and
+-- steady-state ticks (see below) continue narrowing it further for
+-- anything that still slips past this first one.
 --
 -- A merely *presumed* leader has no seed at all: no watcher is even
 -- started for it (unlike a confirmed one), since there is nothing it
@@ -677,7 +690,8 @@ startEmbeddedCensusWith _ Nothing _ = pure (pure [], pure [])
 startEmbeddedCensusWith _ (Just _) [] = pure (pure [], pure [])
 startEmbeddedCensusWith takeSnapshot (Just pid) seedMembers = do
   knownRef <- newIORef (Set.fromList seedMembers)
-  watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks True)
+  stillOpenAfterFirstTick <- recordCensusTick takeSnapshot pid knownRef
+  watcherId <- forkIO (watchLoop knownRef bootstrapBurstTicks stillOpenAfterFirstTick)
   pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
     peek :: IORef (Set ProcessIdentity) -> IO [ProcessIdentity]
