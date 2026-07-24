@@ -3587,43 +3587,42 @@ main = hspec $ do
       reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewFinished False)) `shouldBe` []
       reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewRunning True)) `shouldBe` []
 
-    -- issue #30 round-2 review: 'startIssueReview' discards a non-reusable
-    -- session (e.g. its recorded stage no longer matches current labels)
-    -- and replaces it with a genuinely fresh one for the same issue
-    -- number. A stale tick from the *old* session can still be in flight,
-    -- carrying whatever generation it last armed. A fresh session that
-    -- reset to generation 0 would then have its own first arm mint
-    -- generation 1 -- exactly what a commonly-reached old session's stale
-    -- tick also carries -- so that stale tick would incorrectly match and
-    -- reschedule alongside the new session's real chain. Carrying the old
-    -- generation forward as the new session's starting point (rather than
-    -- resetting to 0) avoids the collision, because the new session's
-    -- first arm always mints strictly past whatever the old session could
-    -- have left in flight.
+    -- issue #30 round-2/round-3 review: 'startIssueReview' discards a
+    -- non-reusable session (e.g. its recorded stage no longer matches
+    -- current labels) and replaces it with a genuinely fresh one for the
+    -- same issue number. A tick the *old* session already queued can
+    -- still be delivered, carrying whatever generation it last armed.
     it "would collide with a replaced session's stale in-flight tick if the generation reset to 0" $ do
       -- The old session reached generation 1 before being replaced, and
       -- left a tick in flight still carrying that generation.
       let staleTickGeneration = 1
-      -- newReviewSession's pre-fix behavior: the replacement session
-      -- starts at generation 0, so its first arm mints generation 1 --
-      -- exactly what the stale tick from the old session also carries.
+      -- A from-scratch replacement session resets to generation 0, so it
+      -- does not yet collide with the stale tick while unarmed...
+      decideReviewTickFire 0 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      -- ...but once that session's own first arm mints generation 1, the
+      -- stale tick matches it exactly and incorrectly reschedules.
       decideReviewTickArm ReviewStarting True False 0 `shouldBe` ArmReviewTick 1
-      let newSessionGeneration = 1 -- the ArmReviewTick 1 result above
-      -- The stale tick incorrectly matches and reschedules instead of
-      -- being dropped.
-      decideReviewTickFire newSessionGeneration staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+      decideReviewTickFire 1 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
 
-    it "carries the prior generation forward so a replaced session's stale tick is dropped" $ do
+    it "carrying the prior generation forward without bumping it still collides before the replacement's first arm" $ do
+      -- Seeding the replacement at exactly the old session's last
+      -- generation (rather than resetting to 0) is not sufficient on its
+      -- own: a queued stale tick arriving *before* the replacement's own
+      -- first arm still matches it exactly.
+      let staleTickGeneration = 1
+          seededButNotYetArmed = staleTickGeneration
+      decideReviewTickFire seededButNotYetArmed staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+
+    it "bumps the generation at replacement time so a queued stale tick is dropped even before the replacement's first arm" $ do
       let staleTickGeneration = 1 -- the old session's last-armed generation
-      -- newReviewSession's fixed behavior: the replacement session seeds
-      -- its generation from the old session's (1), so its first arm mints
-      -- generation 2, strictly past anything the old session could have
-      -- left in flight.
-      decideReviewTickArm ReviewStarting True False staleTickGeneration `shouldBe` ArmReviewTick 2
-      let newSessionGeneration = 2 -- the ArmReviewTick 2 result above
-      -- The stale tick, still carrying generation 1, no longer matches
-      -- and is dropped instead of colliding.
-      decideReviewTickFire newSessionGeneration staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+          replacementGeneration = staleTickGeneration + 1 -- newReviewSession's construction-time generation
+      -- The stale tick is dropped immediately, before the replacement
+      -- session has armed any chain of its own.
+      decideReviewTickFire replacementGeneration staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      -- Its own eventual first arm mints a generation still further past
+      -- the stale tick's, so the collision cannot resurface later either.
+      decideReviewTickArm ReviewStarting True False replacementGeneration `shouldBe` ArmReviewTick (replacementGeneration + 1)
+      decideReviewTickFire (replacementGeneration + 1) staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
 
   describe "issue-revision refresh reconciliation" $ do
     -- issue #72: a completed issue-revision that posted its amendment and

@@ -3410,11 +3410,13 @@ issueReviewStage config issue = reviewStageForLabels config (map (.labelName) is
 -- | 'priorGeneration' must be 0 for an issue with no previous session, or
 -- the replaced session's 'reviewSessionTickGeneration' when 'startIssueReview'
 -- discards a non-reusable one (e.g. its stage no longer matches current
--- labels): a stale tick from that old session can still be in flight
--- carrying that exact generation, so this session must start from it
--- rather than reset to 0, or the new session's first arm could mint a
--- generation the old stale tick also matches -- reintroducing a second
--- live chain (issue #30 round-2 review).
+-- labels). A tick queued by that old session can still be delivered before
+-- this replacement ever arms its own chain, and by the time it arrives
+-- this session is already visible and 'ReviewStarting' -- eligible -- so
+-- the generation must already be past whatever that old tick carries
+-- *at construction time*, not only from this session's own eventual first
+-- arm (issue #30 round-3 review). Bumping past 'priorGeneration' here
+-- achieves that regardless of when the first arm happens.
 newReviewSession :: Issue -> ReviewStage -> Int -> ReviewSession
 newReviewSession issue stage priorGeneration =
   ReviewSession
@@ -3428,7 +3430,7 @@ newReviewSession issue stage priorGeneration =
       reviewSessionPending = Nothing,
       reviewSessionInput = "",
       reviewSessionSpinnerFrame = 0,
-      reviewSessionTickGeneration = priorGeneration,
+      reviewSessionTickGeneration = priorGeneration + 1,
       reviewSessionTickArmed = False
     }
 
