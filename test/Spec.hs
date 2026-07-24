@@ -9,7 +9,7 @@ import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, nub, sortOn)
+import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -38,7 +38,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (decodeGitHubItems, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Process
   ( IdentityPresence (..),
@@ -4499,6 +4499,50 @@ main = hspec $ do
     it "requires a cursor whenever another page is needed" $
       paginationDecision 250 100 True Nothing `shouldSatisfy` isLeft
 
+  describe "GraphQL argument construction" $ do
+    -- GitHub permits all-numeric accounts and repositories, and gh's typed
+    -- -F flag coerces all-digit values to Int and true/false to Boolean.
+    -- The fixture below is the worst case: every String! variable holds a
+    -- value that -F would coerce into a type the query rejects.
+    let numericRepository = Repository "/tmp/board" "12345" "2048"
+        pagedState =
+          FetchState
+            { fetchedIssues = [],
+              fetchedPullRequests = [],
+              issueCursor = Just "42",
+              pullRequestCursor = Just "true",
+              fetchMoreIssues = True,
+              fetchMorePullRequests = True,
+              issuesTruncated = False,
+              pullRequestsTruncated = False
+            }
+        firstPageState = pagedState {issueCursor = Nothing, pullRequestCursor = Nothing}
+        pagedArguments = graphqlArguments defaultLimitsConfig numericRepository pagedState
+
+    it "passes every GraphQL String variable raw" $ do
+      flagForVariable "owner" pagedArguments `shouldBe` Just "-f"
+      flagForVariable "name" pagedArguments `shouldBe` Just "-f"
+      flagForVariable "issueCursor" pagedArguments `shouldBe` Just "-f"
+      flagForVariable "pullRequestCursor" pagedArguments `shouldBe` Just "-f"
+      flagForVariable "query" pagedArguments `shouldBe` Just "-f"
+
+    it "keeps the genuinely typed variables on the typed flag" $ do
+      flagForVariable "issuePageSize" pagedArguments `shouldBe` Just "-F"
+      flagForVariable "pullRequestPageSize" pagedArguments `shouldBe` Just "-F"
+      flagForVariable "fetchIssues" pagedArguments `shouldBe` Just "-F"
+      flagForVariable "fetchPullRequests" pagedArguments `shouldBe` Just "-F"
+
+    it "carries coercible owner, name, and cursor values through verbatim" $ do
+      pagedArguments `shouldContain` ["-f", "owner=12345"]
+      pagedArguments `shouldContain` ["-f", "name=2048"]
+      pagedArguments `shouldContain` ["-f", "issueCursor=42"]
+      pagedArguments `shouldContain` ["-f", "pullRequestCursor=true"]
+
+    it "omits absent cursors so the first request starts at the first page" $ do
+      let firstPageArguments = graphqlArguments defaultLimitsConfig numericRepository firstPageState
+      flagForVariable "issueCursor" firstPageArguments `shouldBe` Nothing
+      flagForVariable "pullRequestCursor" firstPageArguments `shouldBe` Nothing
+
   describe "Codex app-server decoding" $ do
     it "maps returned windows by duration and computes percentage left" $ do
       case decodeCodexUsageResponse epoch codexRateLimitResponse of
@@ -5459,6 +5503,17 @@ errorContains _ (Right _) = False
 -- documented escape hatch, so the user can act without reading the source.
 rejectsWithGuidance :: Text -> Either Text value -> Bool
 rejectsWithGuidance remoteValue = errorContains [remoteValue, "--repo OWNER/NAME"]
+
+-- | The gh flag a GraphQL variable is passed with, or 'Nothing' when the
+-- variable is absent from the argument vector.
+flagForVariable :: String -> [String] -> Maybe String
+flagForVariable variableName =
+  fmap fst . find (((variableName <> "=") `isPrefixOf`) . snd) . flaggedArguments
+  where
+    flaggedArguments (flag : value : rest)
+      | flag `elem` ["-f", "-F"] = (flag, value) : flaggedArguments rest
+    flaggedArguments (_ : rest) = flaggedArguments rest
+    flaggedArguments [] = []
 
 testOptions :: Options
 testOptions =

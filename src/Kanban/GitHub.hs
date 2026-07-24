@@ -1,7 +1,11 @@
 module Kanban.GitHub
-  ( GitHubResult (..),
+  ( -- 'FetchState' and 'graphqlArguments' are internal, exported so the
+    -- suite can assert the exact argv handed to gh without a live request.
+    FetchState (..),
+    GitHubResult (..),
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    graphqlArguments,
     paginationDecision,
     snapshotWarnings,
   )
@@ -207,13 +211,19 @@ paginationDecision _ _ True Nothing =
       }
 paginationDecision _ _ True (Just cursor) = Right (True, Just cursor, False)
 
+-- | Builds the @gh api graphql@ argument vector.  GraphQL @String!@
+-- variables go through @-f@, gh's always-raw flag, because @-F@ coerces
+-- all-digit values to Int and @true@/@false@ to Boolean: an owner or
+-- repository named @12345@ would otherwise be sent as an Int and rejected
+-- for every page of every refresh.  Only the genuinely typed variables --
+-- the @Int!@ page sizes and @Boolean!@ fetch controls -- keep @-F@.
 graphqlArguments :: LimitsConfig -> Repository -> FetchState -> [String]
 graphqlArguments limits repository state =
   [ "api",
     "graphql",
-    "-F",
+    "-f",
     "owner=" <> Text.unpack repository.repositoryOwner,
-    "-F",
+    "-f",
     "name=" <> Text.unpack repository.repositoryName,
     "-F",
     "issuePageSize=" <> show issuePageSize,
@@ -231,9 +241,13 @@ graphqlArguments limits repository state =
     issuePageSize = max 1 (min pageLimit (limits.limitsMaxOpenIssues - length state.fetchedIssues))
     pullRequestPageSize = max 1 (min pageLimit (limits.limitsMaxOpenPullRequests - length state.fetchedPullRequests))
 
+-- | Cursors are declared @String@ and are opaque to us, so they are passed
+-- raw as well; an all-digit cursor would otherwise corrupt pagination the
+-- same way.  An absent cursor stays omitted, which is what makes a request
+-- the first page.
 cursorArgument :: String -> Maybe Text -> [String]
 cursorArgument _ Nothing = []
-cursorArgument name (Just cursor) = ["-F", name <> "=" <> Text.unpack cursor]
+cursorArgument name (Just cursor) = ["-f", name <> "=" <> Text.unpack cursor]
 
 boolText :: Bool -> String
 boolText True = "true"
