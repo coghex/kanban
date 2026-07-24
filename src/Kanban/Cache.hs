@@ -7,6 +7,7 @@ module Kanban.Cache
     loadRepositoryCache,
     loadUsageCache,
     repositoryCachePath,
+    repositoryCacheSchemaVersion,
     usageCachePath,
     writeRepositoryCache,
     writeUsageCache,
@@ -16,14 +17,18 @@ where
 import Control.Exception (IOException, bracketOnError, try)
 import Data.Aeson
   ( FromJSON (parseJSON),
+    Result (..),
     ToJSON (toJSON),
+    Value,
     eitherDecodeFileStrict',
     encode,
+    fromJSON,
     object,
     withObject,
     (.:),
     (.=),
   )
+import Data.Aeson.Types (parse)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -78,8 +83,11 @@ instance ToJSON UsageCacheEnvelope where
         "snapshots" .= envelope.usageSnapshots
       ]
 
+-- | Version 3 added the per-check detail 'CheckSummary' retains for the §11
+-- details overlay. A version 2 file decodes its check summaries without that
+-- detail, so it is rejected as unsupported rather than silently reused.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion :: Int
-repositoryCacheSchemaVersion = 2
+repositoryCacheSchemaVersion = 3
 usageCacheSchemaVersion = 1
 
 repositoryCachePath :: Repository -> IO FilePath
@@ -99,12 +107,24 @@ loadRepositoryCache repository = do
   if not exists
     then pure CacheAbsent
     else do
-      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String CacheEnvelope))
+      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String Value))
       pure $ case result of
         Left exception -> CacheInvalid ("cache ignored: " <> Text.pack (show exception))
         Right (Left message) -> CacheInvalid ("cache ignored: " <> Text.pack message)
-        Right (Right envelope)
-          | envelope.schemaVersion /= repositoryCacheSchemaVersion -> CacheInvalid "cache ignored: unsupported schema version"
+        Right (Right value) -> loadDecodedCache repository value
+
+-- | The schema version is read on its own, before the snapshot is decoded at
+-- all. An older file's snapshot no longer matches the current shape, so
+-- decoding the whole envelope first would report a JSON parse error where the
+-- version gate should have said the schema is unsupported.
+loadDecodedCache :: Repository -> Value -> CacheLoad
+loadDecodedCache repository value = case parse (withObject "cache" (.: "schemaVersion")) value :: Result Int of
+  Error message -> CacheInvalid ("cache ignored: " <> Text.pack message)
+  Success version
+    | version /= repositoryCacheSchemaVersion -> CacheInvalid "cache ignored: unsupported schema version"
+    | otherwise -> case fromJSON value :: Result CacheEnvelope of
+        Error message -> CacheInvalid ("cache ignored: " <> Text.pack message)
+        Success envelope
           | envelope.repositoryKey /= repositoryIdentity repository -> CacheInvalid "cache ignored: repository identity mismatch"
           | otherwise -> CacheLoaded envelope.snapshot
 
