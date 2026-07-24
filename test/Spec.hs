@@ -3827,6 +3827,28 @@ main = hspec $ do
       let body = "## Remaining core work — children filed\n- [ ] #2 — A1: Valid"
       map (.trackerChildIssueNumber) (parseTrackerChildren [] body) `shouldBe` [2]
 
+    it "recognizes bare Phase, prefixed Phases, and Phase breakdown as tracker sections" $ do
+      let childrenOf body = map (.trackerChildIssueNumber) (parseTrackerChildren [] body)
+      childrenOf "## Phase\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Phases\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Phases (ordered)\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      let breakdown = "## Phase breakdown\n- [ ] #2 — A1: Valid"
+      childrenOf breakdown `shouldBe` [2]
+      snd (parseTrackerBody [] breakdown) `shouldBe` []
+
+    it "keeps every documented heading form recognized: Children, Children (ordered), Phase plan, Phase 1, and Phase A" $ do
+      let childrenOf body = map (.trackerChildIssueNumber) (parseTrackerChildren [] body)
+      childrenOf "## Children\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Children (ordered)\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Phase plan\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Phase 1\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+      childrenOf "## Phase A\n- [ ] #2 — A1: Valid" `shouldBe` [2]
+
+    it "does not recognize a heading that merely starts with the word phase, such as Phased rollout" $ do
+      let body = "## Phased rollout\n- [ ] #2 — A1: Ignored"
+      parseTrackerChildren [] body `shouldBe` []
+      snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
+
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
       case decodeGitHubItems (LazyByteString.pack githubResponse) of
