@@ -49,6 +49,7 @@ import Kanban.Process
     killVerifiedGroupWith,
     liveProcesses,
     managedProcess,
+    managedProcessWith,
     managedProcessGroup,
     managedProcessPid,
     matchingIdentities,
@@ -273,7 +274,15 @@ main = hspec $ do
 
     it "kills a surviving group member even though its recorded leader already exited and was reaped" $ do
       (_, _, _, process) <-
-        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & exit 0"]) {create_group = True}
+        -- Lingers past one census tick before exiting -- rather than
+        -- exiting the instant it forks the child -- so the embedded
+        -- census (see 'startEmbeddedCensusWith' in "Kanban.Process") gets
+        -- a real chance to observe leader and child coexisting at least
+        -- once, establishing the child as a legitimate, continuity-proven
+        -- sibling before the leader disappears (the census no longer
+        -- bootstraps trust from an unwitnessed first look, so this
+        -- coexistence is what actually establishes it).
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.8; exit 0"]) {create_group = True}
       (managed, groupLeaderProblem) <- managedProcess process
       Just leaderPid <- managedProcessPid managed
       -- A safety net independent of 'killManagedProcess' (the very function
@@ -444,20 +453,21 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> any ((== realIdentity.processIdentityPid) . processIdentityPid) snapshot `shouldBe` True
 
-    it "killManagedProcessVerified retries through its embedded census, still reaching a same-group child even when the leader is reaped before the census's next tick could witness it" $ do
-      -- The leader forks its detached child and exits essentially
-      -- instantly (no delay at all), so the embedded census's own
-      -- synchronous first tick -- taken the moment 'managedProcess'
-      -- verifies the leader, before this script has even started running
-      -- -- almost certainly records only the leader itself. By the time
-      -- this test can even observe the child in a real snapshot and call
-      -- killManagedProcessVerified, well under 'censusIntervalMicros' has
-      -- typically elapsed: without a retry that pauses for the watcher's
-      -- next tick to land, this would report unresolved (correctly
-      -- refusing to trust an as-yet-unwitnessed occupant) and never
-      -- actually reach the child at all.
+    it "killManagedProcessVerified retries through its embedded census, still reaching a same-group child even when the census's first tick hasn't caught up to it yet" $ do
+      -- The leader forks its detached child and lingers past one census
+      -- tick before exiting, so the embedded census legitimately witnesses
+      -- leader and child coexisting (establishing the child's continuity)
+      -- before the leader disappears. But the *synchronous bootstrap*
+      -- tick -- taken the instant 'managedProcess' seeds the census from
+      -- the just-verified leader identity, before this script has even
+      -- forked its child yet -- almost certainly records only the leader.
+      -- By the time this test can observe the child in a real snapshot and
+      -- call killManagedProcessVerified, the watcher's *next* tick (the
+      -- one that actually catches the child) may not have landed yet:
+      -- without a retry that pauses for it, this would report unresolved
+      -- on its first attempt and never actually reach the child at all.
       (_, _, _, process) <-
-        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & exit 0"]) {create_group = True}
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.8; exit 0"]) {create_group = True}
       (managed, groupLeaderProblem) <- managedProcess process
       Just leaderPid <- managedProcessPid managed
       let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
@@ -500,6 +510,41 @@ main = hspec $ do
         case afterAttempt of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+        void stopCensus
+
+    it "managedProcessWith never bootstraps census trust from a presumed (unverified) leader, refusing to certify a pgid a later snapshot shows reused" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done"]) {create_group = True}
+      Just pid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL pid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        let foreignIdentity =
+              ProcessIdentity
+                { processIdentityPid = fromIntegral pid,
+                  processIdentityParentPid = 1,
+                  processIdentityGroupPid = fromIntegral pid,
+                  processIdentityStartedAt = "a much later moment",
+                  processIdentityCommand = "unrelated-foreign-leader"
+                }
+        callCount <- newIORef (0 :: Int)
+        -- The first snapshot -- 'verifyGroupLeaderWith's own leadership
+        -- check -- reports the leader not found at all, simulating a
+        -- fast-exiting leader whose own verification snapshot lost the
+        -- race: the "presumed" case. Every snapshot after that (the
+        -- census's synchronous bootstrap tick, and any later tick) reports
+        -- a *different* identity occupying the exact same pid/pgid, as if
+        -- the kernel had already reused it in the meantime.
+        let stubSnapshot = do
+              count <- atomicModifyIORef' callCount (\current -> (current + 1, current))
+              pure (Right (if count == (0 :: Int) then [] else [foreignIdentity]))
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldSatisfy` isJust
+        (peekCensus, stopCensus) <- watchManagedProcessCensus managed
+        -- Refuses to bootstrap: despite the census's own tick seeing a
+        -- non-empty, broadly-matching group, nothing was ever seeded to
+        -- require overlap with, so nothing gets trusted.
+        census <- peekCensus
+        census `shouldBe` []
         void stopCensus
 
     it "flags a non-group-leader child at registration, then still delivers Ctrl-C via the per-PID fallback" $

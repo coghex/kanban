@@ -24,6 +24,7 @@ module Kanban.Process
     liveProcesses,
     liveProcessesWith,
     managedProcess,
+    managedProcessWith,
     managedProcessGroup,
     managedProcessPid,
     managedProcessStopsWithDashboard,
@@ -84,12 +85,12 @@ data ManagedProcess
 -- would otherwise leave a later 'killManagedProcess' call unable to signal
 -- the group at all, orphaning any surviving member.
 --
--- A background census watcher (see 'startEmbeddedCensus') is started here,
--- automatically, for every confirmed-or-presumed leader -- carried inside
--- the value as a peek and a stop-and-collect action -- so every kill
--- function has a genuine, continuously-observed-since-spawn provenance
--- witness available, not just whatever a snapshot taken at kill time
--- happens to find sharing this pgid: a pgid that has since been fully
+-- A background census watcher (see 'startEmbeddedCensusWith') is started
+-- here, automatically, for every confirmed-or-presumed leader -- carried
+-- inside the value as a peek and a stop-and-collect action -- so every
+-- kill function has a genuine, continuously-observed-since-spawn
+-- provenance witness available, not just whatever a snapshot taken at kill
+-- time happens to find sharing this pgid: a pgid that has since been fully
 -- vacated and reused by an unrelated process is never mistaken for a
 -- survivor of this spawn, no matter how long after spawn the kill actually
 -- happens. The watcher stops *itself*, with no caller action required, the
@@ -98,39 +99,65 @@ data ManagedProcess
 -- spawn has truly, fully exited) -- so a 'ManagedProcess' whose process
 -- simply runs to completion and is never explicitly killed still never
 -- leaks its watcher thread.
+--
+-- A *confirmed* leader's own verified identity (pid, start time, and
+-- group) is what seeds the census -- not a separate, later snapshot taken
+-- once the watcher itself starts ticking. Deriving the seed from the exact
+-- same snapshot 'verifyGroupLeaderWith' already took to confirm leadership
+-- avoids opening any *additional* window for reuse between "confirmed
+-- leader" and "trusted by the census" beyond what confirmation itself
+-- already required. A merely *presumed* leader (its own verification
+-- inconclusive -- see 'verifyGroupLeaderWith') has no such identity to
+-- seed with, and the census starts genuinely empty for it: bootstrapping
+-- trust from whatever a still-later, independent snapshot finds sharing
+-- that bare pid would extend exactly the kind of unwitnessed trust this
+-- whole design exists to avoid, into precisely the case (a leader too fast
+-- to survive even its own verification snapshot) where pid reuse is most
+-- plausible. Cleanup for a presumed leader is consequently left unresolved
+-- rather than guessed at.
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
-managedProcess processHandle = do
-  (verifiedPid, problem) <- verifyGroupLeader processHandle
-  (peekCensus, stopCensus) <- startEmbeddedCensus verifiedPid
+managedProcess = managedProcessWith defaultProcessSnapshot
+
+-- | As 'managedProcess', but with the verification/census snapshot source
+-- injectable -- e.g. to deterministically simulate a merely-presumed
+-- leader whose pid a later, independent snapshot shows reused by an
+-- unrelated process, without needing to race real OS pid reuse in a test.
+managedProcessWith :: IO (Either Text [ProcessIdentity]) -> ProcessHandle -> IO (ManagedProcess, Maybe Text)
+managedProcessWith takeSnapshot processHandle = do
+  (verifiedPid, verifiedIdentity, problem) <- verifyGroupLeaderWith takeSnapshot processHandle
+  (peekCensus, stopCensus) <- startEmbeddedCensusWith takeSnapshot verifiedPid verifiedIdentity
   pure (LocalManagedProcess processHandle verifiedPid peekCensus stopCensus, problem)
 
 -- | Confirms, via a fresh process snapshot taken while the leader should
 -- still be alive, that a freshly spawned local process leads its own
--- process group. A non-leader's own pid must never be signalled as if it
--- were its (shared, foreign-owned) process group, so a *confirmed*
--- non-leader yields 'Nothing'. But a leader so fast to exit that even this
--- snapshot's own external @ps@ invocation loses the race -- landing after
--- the process has already exited and been zombie-filtered out of the
--- snapshot entirely -- is not the same as a confirmed non-leader: POSIX
--- setpgid for @create_group = True@ runs synchronously before exec, so a
--- captured pid this fresh is still trustworthy as its own presumed group
--- id even though this particular check could not verify it. Discarding it
--- in that case would recreate the reaped-leader orphan bug for exactly the
--- fast-exiting tools this is meant to fix.
-verifyGroupLeader :: ProcessHandle -> IO (Maybe CPid, Maybe Text)
-verifyGroupLeader processHandle = do
+-- process group -- and, only when confirmed, returns that exact verified
+-- 'ProcessIdentity' too, as a census seed (see 'managedProcess'). A
+-- non-leader's own pid must never be signalled as if it were its (shared,
+-- foreign-owned) process group, so a *confirmed* non-leader yields
+-- 'Nothing'. But a leader so fast to exit that even this snapshot's own
+-- external @ps@ invocation loses the race -- landing after the process has
+-- already exited and been zombie-filtered out of the snapshot entirely --
+-- is not the same as a confirmed non-leader: POSIX setpgid for
+-- @create_group = True@ runs synchronously before exec, so a captured pid
+-- this fresh is still trustworthy as its own presumed group id for
+-- signalling purposes even though this particular check could not verify
+-- it. Discarding it in that case would recreate the reaped-leader orphan
+-- bug for exactly the fast-exiting tools this is meant to fix -- but it
+-- is, precisely because it is unverified, never returned as a census seed.
+verifyGroupLeaderWith :: IO (Either Text [ProcessIdentity]) -> ProcessHandle -> IO (Maybe CPid, Maybe ProcessIdentity, Maybe Text)
+verifyGroupLeaderWith takeSnapshot processHandle = do
   maybePid <- getPid processHandle
   case maybePid of
-    Nothing -> pure (Nothing, Just "process has no PID to verify group leadership")
+    Nothing -> pure (Nothing, Nothing, Just "process has no PID to verify group leadership")
     Just pid -> do
-      snapshot <- defaultProcessSnapshot
+      snapshot <- takeSnapshot
       pure $ case snapshot of
-        Left message -> (Just pid, Just ("could not take a process snapshot to verify group leadership: " <> message))
+        Left message -> (Just pid, Nothing, Just ("could not take a process snapshot to verify group leadership: " <> message))
         Right processes -> case identityForPid (fromIntegral pid) processes of
-          Nothing -> (Just pid, Just "process was not found in a fresh process snapshot")
+          Nothing -> (Just pid, Nothing, Just "process was not found in a fresh process snapshot")
           Just identity
-            | identity.processIdentityGroupPid == identity.processIdentityPid -> (Just pid, Nothing)
-            | otherwise -> (Nothing, Just "process is not the leader of its own process group")
+            | identity.processIdentityGroupPid == identity.processIdentityPid -> (Just pid, Just identity, Nothing)
+            | otherwise -> (Nothing, Nothing, Just "process is not the leader of its own process group")
 
 managedProcessGroup :: CPid -> ManagedProcess
 managedProcessGroup = PersistentManagedProcess
@@ -147,7 +174,7 @@ managedProcessPid (LocalManagedProcess processHandle _ _ _) = getPid processHand
 managedProcessPid (PersistentManagedProcess processId) = pure (Just processId)
 
 -- | The peek and stop-and-collect actions for a managed process's own
--- embedded census watcher (see 'managedProcess'/'startEmbeddedCensus').
+-- embedded census watcher (see 'managedProcess'/'startEmbeddedCensusWith').
 -- Every caller that owns responsibility for a 'ManagedProcess' through to
 -- confirmed termination must eventually run the stop action exactly once,
 -- to release the watcher thread.
@@ -535,13 +562,20 @@ watchManagedProcessCensus = pure . managedProcessCensus
 -- design exists to distrust.
 --
 -- The very first tick runs synchronously, before the background loop ever
--- starts waiting out 'censusIntervalMicros', so the census is essentially
--- never empty for a verified leader from the very start.
-startEmbeddedCensus :: Maybe CPid -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
-startEmbeddedCensus Nothing = pure (pure [], pure [])
-startEmbeddedCensus (Just pid) = do
-  knownRef <- newIORef Set.empty
-  stillOpen <- recordCensusTick pid knownRef
+-- starts waiting out 'censusIntervalMicros'. For a *confirmed* leader (see
+-- 'managedProcessWith'), `knownRef` already starts seeded with the
+-- verified identity, so this tick's own overlap check (see
+-- 'recordCensusTick') naturally succeeds -- the leader is still alive,
+-- moments after its own independent verification. For a merely *presumed*
+-- leader, `knownRef` starts genuinely empty and stays that way until some
+-- tick can establish real overlap, which -- with nothing seeded -- never
+-- happens; see 'recordCensusTick' for why that is the correct, deliberate
+-- outcome rather than a bug.
+startEmbeddedCensusWith :: IO (Either Text [ProcessIdentity]) -> Maybe CPid -> Maybe ProcessIdentity -> IO (IO [ProcessIdentity], IO [ProcessIdentity])
+startEmbeddedCensusWith _ Nothing _ = pure (pure [], pure [])
+startEmbeddedCensusWith takeSnapshot (Just pid) seedIdentity = do
+  knownRef <- newIORef (maybe Set.empty Set.singleton seedIdentity)
+  stillOpen <- recordCensusTick takeSnapshot pid knownRef
   watcherId <- forkIO (watchLoop knownRef stillOpen)
   pure (peek knownRef, stopAndCollect watcherId knownRef)
   where
@@ -555,16 +589,16 @@ startEmbeddedCensus (Just pid) = do
     watchLoop _ False = pure ()
     watchLoop knownRef True = do
       threadDelay censusIntervalMicros
-      stillOpen <- recordCensusTick pid knownRef
+      stillOpen <- recordCensusTick takeSnapshot pid knownRef
       watchLoop knownRef stillOpen
 
--- | Records one tick of a census (see 'startEmbeddedCensus'). Returns
+-- | Records one tick of a census (see 'startEmbeddedCensusWith'). Returns
 -- 'True' while the group still has any live members at all (the watcher
 -- should keep going), or 'False' the moment a tick finds it genuinely
 -- empty (the watcher should stop itself) -- but never clears `knownRef`
 -- either way, so a census that once recorded real members and has since
 -- gone empty stays distinguishable from one that has never recorded
--- anything at all (see 'startEmbeddedCensus' for why that distinction
+-- anything at all (see 'startEmbeddedCensusWith' for why that distinction
 -- matters). A snapshot failure is treated as inconclusive, not as
 -- emptiness -- it neither adds nor clears anything, and reports 'True' so
 -- the watcher keeps trying on its next tick rather than prematurely giving
@@ -583,20 +617,33 @@ startEmbeddedCensus (Just pid) = do
 -- that arrived sometime after the last trusted member vanished. A tick
 -- with zero such overlap leaves the census exactly as it was -- unresolved
 -- for this tick, not extended -- rather than risk folding in a reused
--- foreign group. The very first tick (an empty `knownRef`) is exempt from
--- this and always trusted outright: there is nothing yet to require
--- overlap with, and 'managedProcess' only just independently verified this
--- same pid moments earlier.
-recordCensusTick :: CPid -> IORef (Set ProcessIdentity) -> IO Bool
-recordCensusTick pid knownRef = do
-  snapshot <- defaultProcessSnapshot
+-- foreign group.
+--
+-- There is deliberately no bootstrapping exemption for an empty
+-- `knownRef`: unlike a previous design, a tick never trusts whatever it
+-- finds merely because nothing has been recorded yet. A *confirmed* leader
+-- never needs one -- 'startEmbeddedCensusWith' already seeds `knownRef`
+-- with its verified identity before this ever runs, so the very first tick
+-- overlaps that seed normally. A *presumed* leader has no seed and
+-- consequently never accumulates any census evidence at all: bootstrapping
+-- trust from an independent, later snapshot of a bare, unverified pid
+-- would extend exactly the unwitnessed trust this design exists to avoid
+-- into precisely the case -- a leader too fast to survive even its own
+-- verification snapshot -- where pid reuse before that snapshot is most
+-- plausible. 'killCensusVerified' already reports an empty census as
+-- unresolved rather than falling back to a bare snapshot, so this
+-- correctly, permanently leaves a presumed leader's cleanup unresolved
+-- rather than ever guessing at it.
+recordCensusTick :: IO (Either Text [ProcessIdentity]) -> CPid -> IORef (Set ProcessIdentity) -> IO Bool
+recordCensusTick takeSnapshot pid knownRef = do
+  snapshot <- takeSnapshot
   case snapshot of
     Left _ -> pure True
     Right processes -> case filter ((== groupPidInt) . processIdentityGroupPid) processes of
       [] -> pure False
       groupMembers -> do
         known <- readIORef knownRef
-        let continuous = Set.null known || not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
+        let continuous = not (null (membersStillInGroup groupPidInt processes (Set.toList known)))
         when continuous (atomicModifyIORef' knownRef (\current -> (foldr Set.insert current groupMembers, ())))
         pure True
   where
@@ -688,7 +735,7 @@ ignoreIOException action = void (try action :: IO (Either IOException ()))
 terminationGraceMicros :: Int
 terminationGraceMicros = 750 * 1000
 
--- | How often 'startEmbeddedCensus' takes a fresh snapshot to record new
+-- | How often 'startEmbeddedCensusWith' takes a fresh snapshot to record new
 -- descendants. Short enough that even a tool living only a couple of
 -- seconds gets at least one real tick before it can need killing.
 censusIntervalMicros :: Int
