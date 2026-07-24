@@ -918,12 +918,11 @@ cardLines env selected entry innerWidth =
       Tracked context _ -> drawTrackingLine innerWidth context
       TrackerHeader _ -> []
     statusLines = case item of
-      IssueItem issue -> case trackerDiagnosticsForIssue workflow issue of
-        [] -> []
-        diagnostic : _ ->
-          map (withAttr pendingAttr . txt) (wrappedLines innerWidth ("TRACKER · " <> renderTrackerDiagnostic diagnostic))
+      IssueItem issue -> concatMap diagnosticRows (trackerDiagnosticsForIssue workflow issue)
       PullRequestItem _ ->
         map (withAttr (statusTextAttr workflow item) . txt) (wrappedLines innerWidth (itemStatusText item))
+    diagnosticRows diagnostic =
+      map (withAttr pendingAttr . txt) (wrappedLines innerWidth ("TRACKER · " <> renderTrackerDiagnostic diagnostic))
 
 drawTrackerHeader :: AppState -> BoardColumn -> Int -> Tracker -> Bool -> Widget Name
 drawTrackerHeader state column row tracker expanded =

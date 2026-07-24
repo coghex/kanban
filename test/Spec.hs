@@ -4431,6 +4431,17 @@ main = hspec $ do
       take 2 (map Data.Text.strip (cardInterior rendered)) `shouldBe` ["F2 · tracker #700", "MULTI-TRACKED"]
       length rendered `shouldBe` length (renderCard testOptions False cardFixtureEntry 32) + 2
 
+    it "keeps every tracker diagnostic on the card, not just the first" $ do
+      let rendered = renderCard testOptions False cardFixtureDiagnosticEntry 46
+      drop 6 (map Data.Text.strip (cardInterior rendered))
+        `shouldBe` [ "TRACKER · line 3: checklist item has no",
+                     "issue reference",
+                     "TRACKER · line 4: malformed checklist",
+                     "checkbox",
+                     "TRACKER · line 5: duplicate child #2"
+                   ]
+      map displayWidth rendered `shouldBe` replicate (length rendered) 46
+
     it "keeps a pull request's CI and merge status row visible" $ do
       let rendered = renderCard testOptions False cardFixturePullRequestEntry 46
       map Data.Text.strip (cardInterior rendered)
@@ -4722,6 +4733,18 @@ cardFixtureLongKeyTrackedEntry =
   Tracked
     (TrackingContext (TrackerMembership (fixtureTracker 700) (TrackerChild 812 (Just "phase-two-renderer-contract") 1 False)) [])
     (IssueItem (baseIssue 812 []))
+
+-- | A tracker whose checklist is malformed three separate ways, so the card
+-- has more than one diagnostic to keep visible.
+cardFixtureDiagnosticEntry :: ColumnEntry
+cardFixtureDiagnosticEntry =
+  Standalone
+    ( IssueItem
+        (baseIssue 900 [])
+          { issueLabels = [Label "epic" "5319e7"],
+            issueBody = "## Children\n- [ ] #2 — A1: Valid\n- [ ] missing reference\n- [?] #3\n- [x] #2 — duplicate"
+          }
+    )
 
 -- | A pull request, which carries the CI/merge status row cards must keep.
 cardFixturePullRequestEntry :: ColumnEntry
