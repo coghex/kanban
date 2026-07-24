@@ -23,6 +23,7 @@ module Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     confirmToolProcessTerminatedOrKeepTryingWith,
+    killManagedProcessVerifiedOrKeepTryingWith,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -83,7 +84,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, ProcessIdentity, forceCensusTick, killCensusVerified, killManagedProcess, killManagedProcessVerified, managedProcess, watchManagedProcessCensus)
+import Kanban.Process (ManagedProcess, ProcessIdentity, forceCensusTick, killCensusVerified, killManagedProcessVerified, managedProcess, watchManagedProcessCensus)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -1345,9 +1346,10 @@ readServerErrors client errorHandle = do
 
 -- | The app-server exiting, however it happened, is the same "no longer
 -- owned" event as a deliberate quit: 'drainToolProcesses' and
--- 'killManagedProcess' here guarantee every review-owned tool process (and
--- the app-server's own surviving group members, if the leader itself
--- crashed and was reaped before this ran) are cleaned up as soon as the
+-- 'confirmToolProcessTerminatedOrKeepTrying' here guarantee every
+-- review-owned tool process (and the app-server's own surviving group
+-- members, if the leader itself crashed and was reaped before this ran)
+-- are cleaned up as soon as the
 -- process is confirmed gone -- not only when 'stopReviewClient' later runs,
 -- which an unexpected crash means may never happen (the UI drops its
 -- 'ReviewClient' reference once it observes 'ReviewClientStopped'). This
@@ -1735,6 +1737,33 @@ runGitHubCommand client threadId ghPath arguments input = do
 runCanonicalCommand :: Repository -> Int -> FilePath -> [String] -> (ManagedProcess -> IO ()) -> IO (Either Text Text)
 runCanonicalCommand = runCanonicalCommandWith canonicalReviewTimeoutMicros
 
+-- | As 'killManagedProcessVerified', but a bounded failure to confirm does
+-- not end this call's own ownership of `managed`: a detached background
+-- thread keeps retrying, unboundedly, until termination is finally
+-- confirmed -- the same active-cleanup-owner pattern
+-- 'confirmToolProcessTerminatedOrKeepTrying' uses for the tool registry
+-- and app-server, applied here to a standalone managed process (namely
+-- 'runCanonicalCommandWith's own leader) that has no 'ReviewClient' of
+-- its own to route per-retry warnings through.
+killManagedProcessVerifiedOrKeepTrying :: ManagedProcess -> IO Bool
+killManagedProcessVerifiedOrKeepTrying = killManagedProcessVerifiedOrKeepTryingWith (threadDelay backgroundCleanupRetryDelayMicros)
+
+-- | As 'killManagedProcessVerifiedOrKeepTrying', but with the background
+-- cleanup owner's own retry-to-retry wait injectable -- e.g. to
+-- deterministically prove it eventually confirms termination once
+-- whatever blocked a bounded attempt is resolved, without a test actually
+-- waiting out 'backgroundCleanupRetryDelayMicros'.
+killManagedProcessVerifiedOrKeepTryingWith :: IO () -> ManagedProcess -> IO Bool
+killManagedProcessVerifiedOrKeepTryingWith backgroundRetryDelay managed = do
+  confirmed <- killManagedProcessVerified managed
+  unless confirmed (void (forkIO keepTrying))
+  pure confirmed
+  where
+    keepTrying = do
+      backgroundRetryDelay
+      confirmed <- killManagedProcessVerified managed
+      unless confirmed keepTrying
+
 -- | As 'runCanonicalCommand', but with the overall timeout injectable --
 -- e.g. to deterministically exercise the timeout path in a test without
 -- waiting out the real one-hour budget.
@@ -1769,7 +1798,21 @@ runCanonicalCommandWith timeoutMicros repository issueNumber executable argument
         -- inherited stdout/stderr pipes open), a live handle query would
         -- return 'Nothing' and leave that survivor completely unreachable
         -- and unowned once this returns.
-        Nothing -> killManagedProcess managed >> finishLog sessionLog >> pure (Left "Canonical issue review timed out after one hour")
+        --
+        -- 'killManagedProcessVerifiedOrKeepTrying's own bounded attempt
+        -- can still fail to *immediately* confirm the group empty (a
+        -- transient snapshot failure, or the documented residual gap in
+        -- 'Kanban.Process.startEmbeddedCensusWith' where a census tick
+        -- was never able to witness a fast-forked child at all) -- a
+        -- background thread keeps retrying afterward, so this function
+        -- never simply returns having discarded ownership of a group it
+        -- could not immediately confirm empty.
+        Nothing -> do
+          confirmed <- killManagedProcessVerifiedOrKeepTrying managed
+          unless confirmed $
+            mapM_ (\value -> logMessage value "group-unconfirmed" "canonical issue reviewer's process group could not be confirmed terminated after timing out") sessionLog
+          finishLog sessionLog
+          pure (Left "Canonical issue review timed out after one hour")
         Just (exitCode, output, errors) -> do
           -- A *normal* completion -- the leader exiting on its own,
           -- however that went -- is not the same as this spawn's process
@@ -1779,13 +1822,15 @@ runCanonicalCommandWith timeoutMicros repository issueNumber executable argument
           -- threads all complete normally while that child keeps running,
           -- entirely untracked once this function returns (the caller
           -- only ever sees a plain 'Either', with no further handle on
-          -- this managed process at all). killManagedProcessVerified is
-          -- always safe to call unconditionally here: if the recorded
+          -- this managed process at all). killManagedProcessVerifiedOrKeepTrying
+          -- is always safe to call unconditionally here: if the recorded
           -- group is already genuinely empty (the ordinary case), its own
           -- first fresh check confirms that and returns without ever
           -- sending a signal; it only actually terminates anything if a
-          -- survivor is found.
-          survivorConfirmed <- killManagedProcessVerified managed
+          -- survivor is found, and keeps retrying in the background
+          -- rather than ever giving up on one it could not immediately
+          -- confirm.
+          survivorConfirmed <- killManagedProcessVerifiedOrKeepTrying managed
           unless survivorConfirmed $
             mapM_ (\value -> logMessage value "group-unconfirmed" "canonical issue reviewer's process group could not be confirmed terminated after it exited") sessionLog
           case (exitCode, output, errors) of

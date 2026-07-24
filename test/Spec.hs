@@ -96,6 +96,7 @@ import Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     confirmToolProcessTerminatedOrKeepTryingWith,
+    killManagedProcessVerifiedOrKeepTryingWith,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
@@ -3525,6 +3526,52 @@ main = hspec $ do
           client <- newReviewClientForTesting defaultWorkflowConfig temporaryRoot (const (pure ()))
           confirmed <-
             confirmToolProcessTerminatedOrKeepTryingWith (threadDelay 50000) client managed peekCensus stopCensus
+          confirmed `shouldBe` False
+          afterFirstAttempt <- readProcessSnapshot
+          case afterFirstAttempt of
+            Left message -> expectationFailure (Data.Text.unpack message)
+            Right snapshot -> any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot `shouldBe` True
+          writeIORef nowConfirmable True
+          let waitForBackgroundConfirm attempts = do
+                snapshotResult <- readProcessSnapshot
+                case snapshotResult of
+                  Right snapshot | not (any ((== leaderPid) . fromIntegral . processIdentityPid) snapshot) -> pure ()
+                  _
+                    | attempts <= (0 :: Int) -> expectationFailure "background cleanup owner never confirmed and killed the leader once it became confirmable"
+                    | otherwise -> threadDelay 100000 >> waitForBackgroundConfirm (attempts - 1)
+          waitForBackgroundConfirm 50
+
+    it "killManagedProcessVerifiedOrKeepTryingWith keeps retrying in the background once a bounded attempt cannot confirm, and eventually confirms once the census legitimately can" $
+      withTemporaryCacheRoot $ \_temporaryRoot -> do
+        (_, _, _, process) <-
+          createProcess (proc "sh" ["-c", "sleep 100"]) {create_group = True}
+        Just leaderPid <- getPid process
+        let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+        flip finally cleanup $ do
+          nowConfirmable <- newIORef False
+          -- Same construction as the confirmToolProcessTerminatedOrKeepTryingWith
+          -- regression above, applied to runCanonicalCommandWith's own
+          -- standalone (client-free) cleanup owner: while unconfirmable,
+          -- every snapshot sees only a synthetic occupant no real ps
+          -- snapshot could ever also show, guaranteeing
+          -- killManagedProcessVerified's bounded attempt exhausts its
+          -- retries and gives up; once flipped, every snapshot reverts to
+          -- genuine data and a subsequent attempt can actually verify and
+          -- terminate the real, still-alive leader.
+          let unconfirmableIdentity =
+                ProcessIdentity
+                  { processIdentityPid = fromIntegral leaderPid + 999999,
+                    processIdentityParentPid = fromIntegral leaderPid,
+                    processIdentityGroupPid = fromIntegral leaderPid,
+                    processIdentityStartedAt = "synthetic-unconfirmable",
+                    processIdentityCommand = "synthetic-unconfirmable"
+                  }
+              stubSnapshot = do
+                confirmable <- readIORef nowConfirmable
+                if confirmable then defaultProcessSnapshot else pure (Right [unconfirmableIdentity])
+          (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+          groupLeaderProblem `shouldSatisfy` isJust
+          confirmed <- killManagedProcessVerifiedOrKeepTryingWith (threadDelay 50000) managed
           confirmed `shouldBe` False
           afterFirstAttempt <- readProcessSnapshot
           case afterFirstAttempt of
