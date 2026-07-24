@@ -338,6 +338,13 @@ follow-up turn, and Ctrl-C interrupts the active turn. Only running turns chain
 short spinner ticks; completed, hidden, and idle sessions schedule no redraws.
 Quitting terminates the owned app-server process.
 
+Review, solve, and PR transcripts follow the live tail only while they are
+already at the bottom. Scrolling up during a turn holds the view where it is,
+however much output arrives; scrolling back down to the bottom resumes tailing,
+as does making the session visible again or starting a new turn. Output only
+ever moves the viewport for the session actually on screen, so a hidden overlay
+or a background review tab never disturbs what is being read.
+
 ## 8. Board state model
 
 The four columns are derived from current GitHub state. Issues carrying a
