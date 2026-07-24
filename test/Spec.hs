@@ -101,6 +101,7 @@ import Kanban.Review
     reviewStageForLabels,
     runAuthenticatedClaude,
     runAuthenticatedClaudeWith,
+    runCanonicalCommandWith,
     runGitHubIssueTool,
     startReviewClient,
     stopReviewClient,
@@ -3005,6 +3006,53 @@ main = hspec $ do
                             then expectationFailure "watchServerProcess deadlocked instead of reporting ReviewClientStopped"
                             else threadDelay 100000 >> waitForStopped (attempts - 1)
                 timeout 8000000 (waitForStopped 70) `shouldReturn` Just ()
+
+    it "runCanonicalCommandWith kills a same-group child holding stdout/stderr open after its leader exits, once the timeout fires" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "test" "test"
+            fakeReviewer = temporaryRoot </> "fake-canonical-reviewer"
+        -- Forks a TERM-resistant detached child that inherits stdout/stderr
+        -- without redirecting them away, then lingers past one census tick
+        -- before exiting itself (see the app-server crash regression above
+        -- for why the lingering matters) -- leaving the child alone,
+        -- holding those pipes open forever, exactly the "leader gone,
+        -- group-inheriting child survives" scenario 'runCanonicalCommand's
+        -- timeout branch must still be able to reach.
+        ByteString.writeFile
+          fakeReviewer
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &",
+                "sleep 0.8",
+                "exit 0"
+              ]
+          )
+        setFileMode fakeReviewer 0o700
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          leaderPidCollected <- newEmptyMVar
+          -- Captures the leader's pid immediately, inside 'processStarted',
+          -- while the handle is still live -- 'managedProcessPid' is a
+          -- *live* query (see its own haddock), so calling it only after
+          -- the whole timed-out call below has already returned would
+          -- itself hit exactly the "handle already reaped" trap this test
+          -- exists to catch, rather than the process group's captured pgid.
+          let onStarted managed = managedProcessPid managed >>= mapM_ (putMVar leaderPidCollected)
+          -- An injected 2s timeout -- rather than the real one-hour budget
+          -- -- forces the timeout branch deterministically: by then the
+          -- leader has long exited, so 'waitForProcess' itself has already
+          -- returned, but the still-live child holding the pipes open
+          -- means neither capture thread ever reaches EOF, so the whole
+          -- wrapped action never completes on its own.
+          result <- timeout 5000000 (runCanonicalCommandWith 2000000 repository 16 fakeReviewer [] onStarted)
+          case result of
+            Just (Left message) -> message `shouldSatisfy` Data.Text.isInfixOf "timed out"
+            other -> expectationFailure ("expected the timed-out canonical reviewer to report a timeout, got " <> show other)
+          leaderPid <- takeMVar leaderPidCollected
+          let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+          finalSnapshot <- readProcessSnapshot
+          case finalSnapshot of
+            Left message -> expectationFailure (Data.Text.unpack message)
+            Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do

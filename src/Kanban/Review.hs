@@ -41,6 +41,7 @@ module Kanban.Review
     runAuthenticatedClaude,
     runAuthenticatedClaudeWith,
     runCanonicalIssueReview,
+    runCanonicalCommandWith,
     runGitHubIssueTool,
     sendReviewMessage,
     startReviewClient,
@@ -82,7 +83,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, ProcessIdentity, killCensusVerified, managedProcess, watchManagedProcessCensus)
+import Kanban.Process (ManagedProcess, ProcessIdentity, killCensusVerified, killManagedProcess, managedProcess, watchManagedProcessCensus)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -93,12 +94,9 @@ import System.Process
     ProcessHandle,
     StdStream (..),
     createProcess,
-    getPid,
     proc,
-    terminateProcess,
     waitForProcess,
   )
-import System.Posix.Signals (sigKILL, sigTERM, signalProcessGroup)
 import System.Timeout (timeout)
 
 newtype ReviewRequestId = ReviewRequestId Value
@@ -1486,7 +1484,13 @@ runGitHubCommand client threadId ghPath arguments input = do
         }
 
 runCanonicalCommand :: Repository -> Int -> FilePath -> [String] -> (ManagedProcess -> IO ()) -> IO (Either Text Text)
-runCanonicalCommand repository issueNumber executable arguments processStarted = do
+runCanonicalCommand = runCanonicalCommandWith canonicalReviewTimeoutMicros
+
+-- | As 'runCanonicalCommand', but with the overall timeout injectable --
+-- e.g. to deterministically exercise the timeout path in a test without
+-- waiting out the real one-hour budget.
+runCanonicalCommandWith :: Int -> Repository -> Int -> FilePath -> [String] -> (ManagedProcess -> IO ()) -> IO (Either Text Text)
+runCanonicalCommandWith timeoutMicros repository issueNumber executable arguments processStarted = do
   logResult <- openSessionLog repository "issue-canonical-review" issueNumber Nothing
   sessionLog <- case logResult of
     Left _ -> pure Nothing
@@ -1502,13 +1506,20 @@ runCanonicalCommand repository issueNumber executable arguments processStarted =
       errorResult <- newEmptyMVar
       void . forkIO $ captureHandle outputHandle outputResult
       void . forkIO $ captureHandle errorHandle errorResult
-      completed <- timeout canonicalReviewTimeoutMicros $ do
+      completed <- timeout timeoutMicros $ do
         exitCode <- waitForProcess processHandle
         output <- takeMVar outputResult
         errors <- takeMVar errorResult
         pure (exitCode, output, errors)
       case completed of
-        Nothing -> stopOwnedProcess processHandle >> finishLog sessionLog >> pure (Left "Canonical issue review timed out after one hour")
+        -- Uses the already-captured `managed` value, not a fresh
+        -- 'getPid'-based query against `processHandle`: if the leader has
+        -- already exited and been reaped by the time this timeout fires
+        -- (e.g. a same-group child forked earlier is still holding
+        -- inherited stdout/stderr pipes open), a live handle query would
+        -- return 'Nothing' and leave that survivor completely unreachable
+        -- and unowned once this returns.
+        Nothing -> killManagedProcess managed >> finishLog sessionLog >> pure (Left "Canonical issue review timed out after one hour")
         Just (ExitSuccess, Right output, errors) -> do
           logCaptured sessionLog output errors
           finishLog sessionLog
@@ -1668,18 +1679,6 @@ renderClaudeFailureDetails output errors =
 
 decodeClaudeBytes :: ByteString.ByteString -> Text
 decodeClaudeBytes = Text.strip . TextEncoding.decodeUtf8With lenientDecode
-
-stopOwnedProcess :: ProcessHandle -> IO ()
-stopOwnedProcess processHandle = do
-  processId <- getPid processHandle
-  case processId of
-    Just pid -> ignoreIOException (signalProcessGroup sigTERM pid)
-    Nothing -> terminateProcess processHandle
-  stopped <- timeout shutdownTimeoutMicros (waitForProcess processHandle)
-  case (stopped, processId) of
-    (Nothing, Just pid) -> ignoreIOException (signalProcessGroup sigKILL pid)
-    (Nothing, Nothing) -> terminateProcess processHandle
-    _ -> pure ()
 
 sendErrorResponse :: ReviewClient -> Value -> Int -> Text -> IO (Either Text ())
 sendErrorResponse client requestId code message =
@@ -1956,9 +1955,6 @@ finalOutputSchema =
 
 initializationTimeoutMicros :: Int
 initializationTimeoutMicros = 10 * 1000 * 1000
-
-shutdownTimeoutMicros :: Int
-shutdownTimeoutMicros = 2 * 1000 * 1000
 
 claudeReviewerTimeoutMicros :: Int
 claudeReviewerTimeoutMicros = 10 * 60 * 1000 * 1000
