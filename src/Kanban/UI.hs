@@ -47,6 +47,7 @@ module Kanban.UI
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
     reviewSessionReusable,
+    reviewSessionsNeedingArm,
     revisedAttr,
     runDashboard,
     solveSessionAlreadyResolved,
@@ -2064,7 +2065,7 @@ openSelectedAgentSession = do
       PullRequestAgent number -> modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay number), appNotice = Nothing})
       ReviewAgent issueNumber -> do
         modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
-        armReviewTick issueNumber
+        armVisibleReviewTicks
       WorkerAgent _ -> setNotice "This persistent worker is waiting for its issue or PR metadata; press u to refresh the board"
 
 killSelectedAgentSession :: EventM Name AppState ()
@@ -2472,13 +2473,16 @@ cancelCanonicalReviewProcess issueNumber (Just process) = do
   setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
 
 cycleReviewSession :: Int -> EventM Name AppState ()
-cycleReviewSession currentIssue = modify $ \state ->
+cycleReviewSession currentIssue = do
+  state <- get
   let issueNumbers = map fst (sortOn fst (Map.toList state.appReviewSessions))
       currentIndex = fromMaybe 0 (findIndex (== currentIssue) issueNumbers)
       nextIssue = safeIndex ((currentIndex + 1) `mod` max 1 (length issueNumbers)) issueNumbers
-   in case nextIssue of
-        Nothing -> state
-        Just issueNumber -> state {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing}
+  case nextIssue of
+    Nothing -> pure ()
+    Just issueNumber -> do
+      modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
+      armVisibleReviewTicks
 
 modifyReviewSession :: Int -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
 modifyReviewSession issueNumber update =
@@ -2577,12 +2581,14 @@ selectOrOpenCard column row = modify $ \state ->
         }
 
 openRunningProcessOrSelect :: BoardColumn -> Int -> EventM Name AppState ()
-openRunningProcessOrSelect column row =
-  modify $ \state ->
-    let selectedState = selectCardOnly column row state
-     in case safeIndex row (entriesFor state column) >>= runningProcessOverlay state . entryItem of
-          Nothing -> selectedState
-          Just overlay -> selectedState {appOverlay = Just overlay}
+openRunningProcessOrSelect column row = do
+  state <- get
+  let selectedState = selectCardOnly column row state
+  case safeIndex row (entriesFor state column) >>= runningProcessOverlay state . entryItem of
+    Nothing -> put selectedState
+    Just overlay -> do
+      put (selectedState {appOverlay = Just overlay})
+      armVisibleReviewTicks
 
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =
@@ -3351,7 +3357,7 @@ startIssueReview issue = do
     Just session
       | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
-          armReviewTick issue.issueNumber
+          armVisibleReviewTicks
     _ -> do
       let session = newReviewSession issue requestedStage
       modify
@@ -4009,6 +4015,31 @@ armReviewTick issueNumber = do
         scheduleReviewTick issueNumber generation
       ReviewTickAlreadyArmed -> pure ()
       ReviewTickNotEligible -> pure ()
+
+-- | Which sessions are eligible to animate right now but not currently
+-- armed -- e.g. because their chain expired while the review overlay was
+-- hidden, or was never armed for a session that only just became visible
+-- by having a different tab focused. 'armVisibleReviewTicks' arms exactly
+-- these.
+reviewSessionsNeedingArm :: Bool -> Map Int ReviewSession -> [Int]
+reviewSessionsNeedingArm overlayVisible sessions =
+  [ issueNumber
+    | (issueNumber, session) <- Map.toList sessions,
+      reviewTickEligible session.reviewSessionPhase overlayVisible,
+      not session.reviewSessionTickArmed
+  ]
+
+-- | Re-arms every review session that is eligible to animate but not
+-- currently ticking. A session's chain can expire (unarm) while the
+-- review overlay is closed; simply reopening the overlay -- on any tab,
+-- via any of the several paths that can do so -- must resume every
+-- still-running session's spinner, not only the one being focused, so
+-- this sweeps 'armReviewTick' across all of them rather than requiring
+-- every overlay-opening call site to know which sessions might need it.
+armVisibleReviewTicks :: EventM Name AppState ()
+armVisibleReviewTicks = do
+  state <- get
+  mapM_ armReviewTick (reviewSessionsNeedingArm (reviewOverlayVisible state.appOverlay) state.appReviewSessions)
 
 applyReviewAnimationTick :: Int -> Int -> EventM Name AppState ()
 applyReviewAnimationTick issueNumber generation = do

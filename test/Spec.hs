@@ -183,6 +183,7 @@ import Kanban.UI
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
     reviewSessionReusable,
+    reviewSessionsNeedingArm,
     revisedAttr,
     solveSessionAlreadyResolved,
   )
@@ -3554,6 +3555,37 @@ main = hspec $ do
       -- Reopening the overlay re-checks eligibility with armed now False,
       -- arming exactly one fresh chain (generation 2) for the session.
       decideReviewTickArm ReviewRunning True False 1 `shouldBe` ArmReviewTick 2
+
+    -- issue #30 follow-up (round 1 review): reopening the review overlay,
+    -- or Tab-cycling within it, must resume every still-running session's
+    -- spinner, not only the one being explicitly opened or focused next --
+    -- a different session's chain can have expired while the overlay was
+    -- closed. 'reviewSessionsNeedingArm' is what 'armVisibleReviewTicks'
+    -- sweeps across all sessions to find and re-arm exactly those.
+    let tickSession phase armed =
+          ReviewSession
+            { reviewSessionIssue = baseIssue 1 [],
+              reviewSessionStage = InitialReview,
+              reviewSessionThreadId = Nothing,
+              reviewSessionTurnId = Nothing,
+              reviewSessionPhase = phase,
+              reviewSessionActivity = "",
+              reviewSessionTranscript = ChatTranscript "" "" "",
+              reviewSessionPending = Nothing,
+              reviewSessionInput = "",
+              reviewSessionSpinnerFrame = 0,
+              reviewSessionTickGeneration = 1,
+              reviewSessionTickArmed = armed
+            }
+
+    it "finds a still-running session left unarmed behind another tab" $ do
+      let sessions = Map.fromList [(1, tickSession ReviewRunning False), (2, tickSession ReviewRunning True)]
+      reviewSessionsNeedingArm True sessions `shouldBe` [1]
+      reviewSessionsNeedingArm False sessions `shouldBe` []
+
+    it "does not flag a terminal or an already-armed session for arming" $ do
+      reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewFinished False)) `shouldBe` []
+      reviewSessionsNeedingArm True (Map.singleton 1 (tickSession ReviewRunning True)) `shouldBe` []
 
   describe "issue-revision refresh reconciliation" $ do
     -- issue #72: a completed issue-revision that posted its amendment and
