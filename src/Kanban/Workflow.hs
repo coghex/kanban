@@ -31,13 +31,15 @@ deriveBoard config snapshot =
     . Map.fromList
     $ [(column, sortedEntries column) | column <- [minBound .. maxBound]]
   where
-    trackers = mapMaybe (trackerFromIssue config) snapshot.snapshotIssues
+    trackers = map (pruneOffBoardChildren visibleChildNumbers) (mapMaybe (trackerFromIssue config) snapshot.snapshotIssues)
+    -- Every recognized tracker gets exactly one card: either the header
+    -- entry below, or (when at least one child is visible) the group
+    -- header 'sortColumnEntries' builds from its tracked children. A
+    -- tracker with no children at all (trackerTotal == 0) still needs to be
+    -- excluded here, or it would additionally fall through to
+    -- 'ordinaryIssues' and render a second, plain Standalone card.
     structuralTrackerNumbers =
-      Set.fromList
-        [ tracker.trackerIssue.issueNumber
-          | tracker <- trackers,
-            tracker.trackerTotal > 0
-        ]
+      Set.fromList [tracker.trackerIssue.issueNumber | tracker <- trackers]
     membershipsByChild =
       Map.fromListWith (<>)
         [ (child.trackerChildIssueNumber, [TrackerMembership tracker child])
@@ -84,6 +86,29 @@ issueColumn :: Issue -> BoardColumn
 issueColumn issue
   | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = Issues
   | otherwise = Active
+
+-- | A tracker's checklist can reference a child issue that no longer
+-- appears on the live board (closed, merged, or otherwise outside the
+-- current snapshot). Such a child can never be rendered or interacted
+-- with, so it is dropped from 'trackerChildren' and folded into
+-- 'trackerCompleted' instead of staying a permanently unreachable, always-
+-- pending entry -- an off-board reference counts as done, not as blocking
+-- progress forever.
+pruneOffBoardChildren :: Set.Set Int -> Tracker -> Tracker
+pruneOffBoardChildren visibleChildNumbers tracker =
+  tracker
+    { trackerCompleted = tracker.trackerCompleted + newlyCompleted,
+      trackerChildren = Map.filter isVisible tracker.trackerChildren
+    }
+  where
+    isVisible child = child.trackerChildIssueNumber `Set.member` visibleChildNumbers
+    newlyCompleted =
+      length
+        [ child
+          | child <- Map.elems tracker.trackerChildren,
+            not (isVisible child),
+            not child.trackerChildComplete
+        ]
 
 trackedEntry :: [TrackerMembership] -> BoardItem -> ColumnEntry
 trackedEntry rawMemberships item = case uniqueMemberships rawMemberships of
