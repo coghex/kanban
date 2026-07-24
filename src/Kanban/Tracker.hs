@@ -179,17 +179,32 @@ isTrackerHeading additionalHeadings rawHeading =
     || "children" `elem` Text.words normalized
     || normalized == "phase plan"
     || "phase plan " `Text.isPrefixOf` normalized
-    || isNumberedPhase normalized
+    || normalized == "phase"
+    || normalized == "phases"
+    || "phases " `Text.isPrefixOf` normalized
+    || normalized == "phase breakdown"
+    || isNumberedPhase rawHeading
     || normalized `elem` map normalizeHeading additionalHeadings
   where
     normalized = normalizeHeading rawHeading
 
+-- Case is checked against the punctuation-stripped heading rather than
+-- 'normalized', since case-folding would turn the "Phase A" letter suffix
+-- into 'a' before 'isAsciiUpper' ever saw it.
 isNumberedPhase :: Text -> Bool
-isNumberedPhase heading = case Text.stripPrefix "phase " heading of
+isNumberedPhase rawHeading = case stripPrefixCaseFold "phase " (stripHeadingPunctuation rawHeading) of
   Nothing -> False
   Just suffix -> case Text.uncons suffix of
     Just (character, _) -> isDigit character || isAsciiUpper character
     Nothing -> False
+
+stripPrefixCaseFold :: Text -> Text -> Maybe Text
+stripPrefixCaseFold prefix text
+  | Text.toCaseFold prefix `Text.isPrefixOf` Text.toCaseFold text = Just (Text.drop (Text.length prefix) text)
+  | otherwise = Nothing
+
+stripHeadingPunctuation :: Text -> Text
+stripHeadingPunctuation = Text.unwords . Text.words . Text.filter (\character -> character /= ':' && character /= '#')
 
 isExcludedSubsection :: Text -> Bool
 isExcludedSubsection value =
