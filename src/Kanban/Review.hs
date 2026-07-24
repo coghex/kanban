@@ -2,6 +2,7 @@
 
 module Kanban.Review
   ( CanonicalIssueReviewResult (..),
+    CommandBounds (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
     ReviewAnswer (..),
@@ -22,6 +23,7 @@ module Kanban.Review
     approveReviewAction,
     attachToolProcess,
     beginIssueReview,
+    canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     decodeCanonicalIssueReviewResult,
@@ -31,6 +33,7 @@ module Kanban.Review
     decodeReviewResult,
     decodeReviewWireMessage,
     drainToolRegistry,
+    githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
@@ -40,11 +43,13 @@ module Kanban.Review
     killThreadToolProcesses,
     newReviewClientForTesting,
     newToolRegistry,
+    outcomeUnknownDiagnostic,
     releaseToolSlot,
     renderCanonicalIssueReviewResult,
     reserveToolSlot,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
+    runCanonicalCommand,
     runCanonicalIssueReview,
     runGitHubIssueTool,
     sendReviewMessage,
@@ -55,9 +60,10 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent (MVar, ThreadId, forkIO, killThread, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (readMVar, tryReadMVar)
 import Control.Exception (Exception, IOException, displayException, try)
-import Control.Monad (forever, void)
+import Control.Monad (forever, unless, void)
 import Data.Aeson
   ( FromJSON (..),
     Result (..),
@@ -76,7 +82,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -215,6 +221,20 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
   }
   deriving stock (Eq, Show)
 
+-- | The two independent bounds every review subprocess runs under: how long
+-- it may take to *exit*, and how much longer than that its output capture
+-- may lag before the call gives up on a stream something still holds open.
+-- Keeping them separate is what stops an already-observed exit from being
+-- reported as a timeout (issue #15). Production uses 'githubCommandBounds'
+-- and 'canonicalCommandBounds'; tests inject sub-second values so the
+-- deadline and grace paths are reachable without waiting out the real 30 s
+-- and one-hour deadlines.
+data CommandBounds = CommandBounds
+  { commandDeadlineMicros :: Int,
+    commandCaptureGraceMicros :: Int
+  }
+  deriving stock (Eq, Show)
+
 data ReviewClient = ReviewClient
   { reviewInput :: Handle,
     reviewProcess :: ProcessHandle,
@@ -237,7 +257,13 @@ data ReviewClient = ReviewClient
     reviewWorkflowConfig :: WorkflowConfig,
     reviewSessionLog :: Maybe SessionLog,
     reviewOutputDone :: MVar (),
-    reviewErrorDone :: MVar ()
+    reviewErrorDone :: MVar (),
+    -- | The bounds every @gh@ subprocess behind @kanban_github_issue@ runs
+    -- under. Carried on the client rather than passed down, so the
+    -- mutation-specific wrappers above 'runGitHubCommand' -- which is where
+    -- the verify-before-retry guidance is chosen -- are all reachable from a
+    -- test that injects short bounds.
+    reviewCommandBounds :: CommandBounds
   }
 
 -- | Tracks every externally spawned review-tool child process (each
@@ -519,6 +545,7 @@ runCanonicalIssueReview configPath repository issueNumber stage processStarted
             Just pythonPath -> do
               output <-
                 runCanonicalCommand
+                  canonicalCommandBounds
                   repository
                   issueNumber
                   pythonPath
@@ -600,7 +627,8 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewWorkflowConfig = workflowConfig,
                 reviewSessionLog = sessionLog,
                 reviewOutputDone = outputDone,
-                reviewErrorDone = errorDone
+                reviewErrorDone = errorDone,
+                reviewCommandBounds = githubCommandBounds
               }
       initialized <- timeout initializationTimeoutMicros (initializeClient client outputHandle)
       case initialized of
@@ -636,8 +664,8 @@ startReviewClient workflowConfig repository eventSink = do
 -- placeholder process (@git --version@, already an audited invocation of
 -- this codebase's own workflow) so shutdown still has a real, killable
 -- process to operate on.
-newReviewClientForTesting :: FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
-newReviewClientForTesting repositoryRoot repositorySlug eventSink = do
+newReviewClientForTesting :: CommandBounds -> FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
+newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
   (Just inputHandle, Just _outputHandle, Just _errorHandle, processHandle) <-
     createProcess
       (proc "git" ["--version"])
@@ -670,7 +698,8 @@ newReviewClientForTesting repositoryRoot repositorySlug eventSink = do
         reviewWorkflowConfig = defaultWorkflowConfig,
         reviewSessionLog = Nothing,
         reviewOutputDone = outputDone,
-        reviewErrorDone = errorDone
+        reviewErrorDone = errorDone,
+        reviewCommandBounds = bounds
       }
 
 initializeClient :: ReviewClient -> Handle -> IO (Either Text ())
@@ -1087,8 +1116,17 @@ runGitHubIssueTool client key request = do
   case executable of
     Nothing -> pure (Left "GitHub CLI was not found on PATH")
     Just ghPath -> case request.githubToolOperation of
-      GitHubIssueRead -> runGitHubCommand client key ghPath (githubIssueViewArguments client.reviewRepositorySlug request.githubToolIssue) ""
+      GitHubIssueRead -> fmap readOutcome (runGitHubCommand client key ghPath (githubIssueViewArguments client.reviewRepositorySlug request.githubToolIssue) "")
       GitHubIssueUpdate -> runGitHubIssueUpdate client key ghPath request
+  where
+    -- A read has no side effect to reconcile, so an unobserved read is an
+    -- ordinary failure the model may simply reissue -- it must not carry the
+    -- verify-current-state-before-retry instruction the mutations below
+    -- need, which would only tell the model to redo the read it just failed.
+    readOutcome (GitHubCommandSucceeded output) = Right output
+    readOutcome (GitHubCommandFailed message) = Left message
+    readOutcome (GitHubCommandUnobserved observation) =
+      Left (observation <> " while reading issue #" <> Text.pack (show request.githubToolIssue) <> ".")
 
 -- | Explicit --repo on every GitHub CLI invocation below, so the dashboard's
 -- resolved repository identity (which may come from an explicit --repo
@@ -1134,34 +1172,50 @@ githubIssueEditArguments repo request = baseArguments <> addArguments <> removeA
       | null request.githubToolRemoveLabels = []
       | otherwise = ["--remove-label", Text.unpack (Text.intercalate "," request.githubToolRemoveLabels)]
 
+-- | Why one step of a multi-step GitHub update did not complete. The
+-- distinction is the whole point of issue #15: a definite failure did not
+-- mutate anything, whereas an unobserved step may well have landed, so it
+-- must never be described as failed and must always tell the model to check
+-- current state before it retries.
+data MutationFailure
+  = MutationFailed Text
+  | MutationUnobserved Text
+
 runGitHubIssueUpdate :: ReviewClient -> Int -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
 runGitHubIssueUpdate client key ghPath request = do
   commentResult <- case request.githubToolComment of
     Nothing -> pure (Right Nothing)
-    Just comment ->
-      fmap (fmap (Just . Text.strip))
-        (runGitHubCommand client key ghPath (githubIssueCommentArguments client.reviewRepositorySlug request.githubToolIssue) comment)
+    Just comment -> do
+      outcome <- runGitHubCommand client key ghPath (githubIssueCommentArguments client.reviewRepositorySlug request.githubToolIssue) comment
+      pure $ case mutationOutcome outcome of
+        Right commentUrl -> Right (Just (Text.strip commentUrl))
+        Left failure -> Left (renderMutationFailure Nothing "posting the issue comment" failure)
   case commentResult of
     Left message -> pure (Left message)
     Right commentUrl -> do
       labelResult <- ensureRevisedLabel client key ghPath request.githubToolAddLabels
       case labelResult of
-        Left message -> pure (Left (partialUpdateMessage commentUrl message))
+        Left failure -> pure (Left (renderMutationFailure commentUrl "creating the reviewed:revised label" failure))
         Right () -> do
           edited <- applyReviewLabels client key ghPath request
           pure $ case edited of
-            Left message -> Left (partialUpdateMessage commentUrl message)
+            Left failure -> Left (renderMutationFailure commentUrl "updating the issue labels" failure)
             Right _ -> Right (githubUpdateResult commentUrl request)
 
-ensureRevisedLabel :: ReviewClient -> Int -> FilePath -> [Text] -> IO (Either Text ())
+ensureRevisedLabel :: ReviewClient -> Int -> FilePath -> [Text] -> IO (Either MutationFailure ())
 ensureRevisedLabel client key ghPath labels
   | "reviewed:revised" `notElem` labels = pure (Right ())
-  | otherwise = fmap (fmap (const ())) (runGitHubCommand client key ghPath (githubLabelCreateArguments client.reviewRepositorySlug) "")
+  | otherwise = fmap (fmap (const ()) . mutationOutcome) (runGitHubCommand client key ghPath (githubLabelCreateArguments client.reviewRepositorySlug) "")
 
-applyReviewLabels :: ReviewClient -> Int -> FilePath -> GitHubIssueToolRequest -> IO (Either Text Text)
+applyReviewLabels :: ReviewClient -> Int -> FilePath -> GitHubIssueToolRequest -> IO (Either MutationFailure Text)
 applyReviewLabels client key ghPath request
   | null request.githubToolAddLabels && null request.githubToolRemoveLabels = pure (Right "")
-  | otherwise = runGitHubCommand client key ghPath (githubIssueEditArguments client.reviewRepositorySlug request) ""
+  | otherwise = fmap mutationOutcome (runGitHubCommand client key ghPath (githubIssueEditArguments client.reviewRepositorySlug request) "")
+
+mutationOutcome :: GitHubCommandOutcome -> Either MutationFailure Text
+mutationOutcome (GitHubCommandSucceeded output) = Right output
+mutationOutcome (GitHubCommandFailed message) = Left (MutationFailed message)
+mutationOutcome (GitHubCommandUnobserved observation) = Left (MutationUnobserved observation)
 
 githubUpdateResult :: Maybe Text -> GitHubIssueToolRequest -> Text
 githubUpdateResult commentUrl request =
@@ -1175,10 +1229,57 @@ githubUpdateResult commentUrl request =
         "removedLabels" .= request.githubToolRemoveLabels
       ]
 
-partialUpdateMessage :: Maybe Text -> Text -> Text
-partialUpdateMessage Nothing message = message
-partialUpdateMessage (Just commentUrl) message =
-  "The issue comment was posted at " <> commentUrl <> ", but the label update failed: " <> message
+-- | The model-facing message for a GitHub update that did not run to
+-- completion, keeping whatever is already *known* to have landed (the
+-- comment URL) attached so a retry cannot silently repost it.
+--
+-- A definite failure keeps the existing "…, but <step> failed" wording. An
+-- unobserved step deliberately does not: saying it failed would contradict
+-- the very thing the message goes on to state, that the mutation may
+-- already have completed. Those carry 'githubVerificationRemedy' instead,
+-- so the model re-reads the issue through this same tool before deciding
+-- whether there is anything left to retry.
+renderMutationFailure :: Maybe Text -> Text -> MutationFailure -> Text
+renderMutationFailure commentUrl step failure = case (commentUrl, failure) of
+  (Nothing, MutationFailed message) -> message
+  (Nothing, MutationUnobserved observation) -> unobservedDetail observation
+  (Just url, MutationFailed message) ->
+    "The issue comment was posted at " <> url <> ", but " <> step <> " failed: " <> message
+  (Just url, MutationUnobserved observation) ->
+    "The issue comment was posted at " <> url <> ". " <> unobservedDetail observation
+  where
+    unobservedDetail observation = outcomeUnknownMessage (observation <> " while " <> step) githubVerificationRemedy
+
+-- | The shape shared by every "this side effect may already have landed"
+-- diagnostic: what was actually observed, the 'outcomeUnknownMarker' that
+-- makes such a result recognisable as distinct from a definite failure, and
+-- the instruction for confirming real state before anything is retried.
+outcomeUnknownMessage :: Text -> Text -> Text
+outcomeUnknownMessage observation remedy = observation <> outcomeUnknownMarker <> " " <> remedy
+
+outcomeUnknownMarker :: Text
+outcomeUnknownMarker = ", so its outcome is unknown and it may already have completed."
+
+-- | Whether a review diagnostic describes an unobserved outcome rather than
+-- a definite failure, so a caller rendering it (the TUI's canonical-review
+-- projection) never tells the operator that something failed when all that
+-- actually failed was observing it.
+outcomeUnknownDiagnostic :: Text -> Bool
+outcomeUnknownDiagnostic = Text.isInfixOf outcomeUnknownMarker
+
+-- | Remedy for the @kanban_github_issue@ paths, whose diagnostics are read
+-- by the revision agent through the tool protocol: it holds the very tool
+-- that can settle the question, so it is told to use it before retrying.
+githubVerificationRemedy :: Text
+githubVerificationRemedy =
+  "Re-read the issue and its labels with this tool to confirm the current state before retrying anything."
+
+-- | Remedy for the canonical gate, whose results are rendered to the TUI
+-- rather than returned to any tool-calling model. It must not mention
+-- rereading "with this tool": there is no model on that path to do so.
+canonicalVerificationRemedy :: Text
+canonicalVerificationRemedy =
+  "Check the issue's current comments and labels before running the review again."
 
 -- | Spawns one @gh@ invocation and attaches it to the invocation-wide
 -- reservation `key` (see 'withReservedToolSlot'). Regardless of how this
@@ -1188,39 +1289,31 @@ partialUpdateMessage (Just commentUrl) message =
 -- left a same-group child behind, and this is the one point where every
 -- exit path funnels through the same recorded-pgid termination, whether or
 -- not this is the last subprocess of a multi-step update.
-runGitHubCommand :: ReviewClient -> Int -> FilePath -> [String] -> Text -> IO (Either Text Text)
+runGitHubCommand :: ReviewClient -> Int -> FilePath -> [String] -> Text -> IO GitHubCommandOutcome
 runGitHubCommand client key ghPath arguments input = do
   started <- try (createProcess processSpec) :: IO (Either IOException (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle))
   case started of
-    Left exception -> pure (Left ("Could not start GitHub CLI: " <> exceptionText exception))
+    Left exception -> pure (GitHubCommandFailed ("Could not start GitHub CLI: " <> exceptionText exception))
     Right (Just inputHandle, Just outputHandle, Just errorHandle, processHandle) -> do
       (managed, groupLeaderProblem) <- managedProcess processHandle
       mapM_ (\problem -> client.reviewEventSink (ReviewProtocolWarning ("process group leadership: " <> problem))) groupLeaderProblem
       attached <- attachToolProcess client.reviewToolRegistry key managed
       if not attached
-        then killManagedProcess managed >> pure (Left "Review client is shutting down")
+        then killManagedProcess managed >> pure (GitHubCommandFailed "Review client is shutting down")
         else do
-          outputResult <- newEmptyMVar
-          errorResult <- newEmptyMVar
-          void . forkIO $ captureHandle outputHandle outputResult
-          void . forkIO $ captureHandle errorHandle errorResult
+          outputCapture <- startCapture outputHandle
+          errorCapture <- startCapture errorHandle
           written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 input) >> hClose inputHandle) :: IO (Either IOException ())
           result <- case written of
-            Left exception -> pure (Left ("Could not send input to GitHub CLI: " <> exceptionText exception))
-            Right () -> do
-              completed <-
-                timeout githubCommandTimeoutMicros $ do
-                  exitCode <- waitForProcess processHandle
-                  output <- takeMVar outputResult
-                  errors <- takeMVar errorResult
-                  pure (exitCode, output, errors)
-              pure $ case completed of
-                Nothing -> Left "GitHub operation timed out after 30 seconds"
-                Just captured -> renderGitHubCommandResult captured
+            Left exception -> pure (GitHubCommandFailed ("Could not send input to GitHub CLI: " <> exceptionText exception))
+            Right () -> renderGitHubCommandResult bounds <$> awaitCommandOutcome bounds processHandle outputCapture errorCapture
+          releaseCapture outputCapture
+          releaseCapture errorCapture
           killManagedProcess managed
           pure result
-    Right _ -> pure (Left "GitHub CLI did not provide all three standard streams")
+    Right _ -> pure (GitHubCommandFailed "GitHub CLI did not provide all three standard streams")
   where
+    bounds = client.reviewCommandBounds
     processSpec =
       (proc ghPath arguments)
         { cwd = Just client.reviewRepositoryRoot,
@@ -1230,8 +1323,8 @@ runGitHubCommand client key ghPath arguments input = do
           create_group = True
         }
 
-runCanonicalCommand :: Repository -> Int -> FilePath -> [String] -> (ManagedProcess -> IO ()) -> IO (Either Text Text)
-runCanonicalCommand repository issueNumber executable arguments processStarted = do
+runCanonicalCommand :: CommandBounds -> Repository -> Int -> FilePath -> [String] -> (ManagedProcess -> IO ()) -> IO (Either Text Text)
+runCanonicalCommand bounds repository issueNumber executable arguments processStarted = do
   logResult <- openSessionLog repository "issue-canonical-review" issueNumber Nothing
   sessionLog <- case logResult of
     Left _ -> pure Nothing
@@ -1243,34 +1336,59 @@ runCanonicalCommand repository issueNumber executable arguments processStarted =
       (managed, groupLeaderProblem) <- managedProcess processHandle
       mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) sessionLog
       processStarted managed
-      outputResult <- newEmptyMVar
-      errorResult <- newEmptyMVar
-      void . forkIO $ captureHandle outputHandle outputResult
-      void . forkIO $ captureHandle errorHandle errorResult
-      completed <- timeout canonicalReviewTimeoutMicros $ do
-        exitCode <- waitForProcess processHandle
-        output <- takeMVar outputResult
-        errors <- takeMVar errorResult
-        pure (exitCode, output, errors)
-      case completed of
-        Nothing -> killManagedProcess managed >> finishLog sessionLog >> pure (Left "Canonical issue review timed out after one hour")
-        Just (ExitSuccess, Right output, errors) -> do
-          logCaptured sessionLog output errors
-          finishLog sessionLog
-          pure (Right (decodeClaudeBytes output))
-        Just (ExitFailure code, Right output, Right errors) ->
-          logCaptured sessionLog output (Right errors) >> finishLog sessionLog >> pure (Left ("Canonical issue reviewer exited with status " <> Text.pack (show code) <> renderClaudeFailureDetails output errors))
-        Just (_, Left exception, _) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review output: " <> exceptionText exception))
-        Just (_, _, Left exception) -> finishLog sessionLog >> pure (Left ("Could not read canonical issue review diagnostics: " <> exceptionText exception))
+      outputCapture <- startCapture outputHandle
+      errorCapture <- startCapture errorHandle
+      completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
+      releaseCapture outputCapture
+      releaseCapture errorCapture
+      -- Sweeping the recorded process group is what makes the two giving-up
+      -- paths actually bounded: a still-running reviewer, or a descendant
+      -- that outlived it still holding a capture pipe, would otherwise be
+      -- left behind once this call returns.
+      unless (commandRanToCompletion completed) (killManagedProcess managed)
+      result <- case completed of
+        CommandUnfinished ->
+          pure
+            ( Left
+                ( outcomeUnknownMessage
+                    ("The canonical issue review did not exit within " <> renderWindow bounds.commandDeadlineMicros)
+                    canonicalVerificationRemedy
+                )
+            )
+        CommandExited exitCode output errors -> case (exitCode, output, errors) of
+          (_, StreamUnreadable exception, _) -> pure (Left ("Could not read canonical issue review output: " <> exceptionText exception))
+          -- A canonical run that exited cleanly with fully captured output
+          -- has always been reported as a success even when its diagnostics
+          -- could not be read; only a *failing* exit needs them.
+          (ExitSuccess, StreamComplete outputBytes, _) -> do
+            logCaptured sessionLog outputBytes (capturedBytes errors)
+            pure (Right (decodeClaudeBytes outputBytes))
+          -- Exited zero, but a surviving pipe holder kept stdout from ever
+          -- reaching EOF: the prefix may look like complete JSON and still
+          -- be a truncated verdict, so this is outcome-unknown rather than a
+          -- success -- and, crucially, never a timeout.
+          (ExitSuccess, StreamTruncated outputBytes, _) -> do
+            logCaptured sessionLog outputBytes (capturedBytes errors)
+            pure
+              ( Left
+                  ( outcomeUnknownMessage
+                      ("The canonical issue review exited but its output was still incomplete after " <> renderWindow bounds.commandCaptureGraceMicros)
+                      canonicalVerificationRemedy
+                  )
+              )
+          (_, _, StreamUnreadable exception) -> pure (Left ("Could not read canonical issue review diagnostics: " <> exceptionText exception))
+          (ExitFailure code, _, _) -> do
+            logCaptured sessionLog (capturedBytes output) (capturedBytes errors)
+            pure (Left ("Canonical issue reviewer exited with status " <> Text.pack (show code) <> renderClaudeFailureDetails (capturedBytes output) (capturedBytes errors)))
+      finishLog sessionLog
+      pure result
     Right _ -> finishLog sessionLog >> pure (Left "Canonical issue reviewer did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot
     finishLog sessionLog = mapM_ (\value -> logMessage value "command-finished" "canonical issue review" >> closeSessionLog value) sessionLog
     logCaptured sessionLog output errors = do
       mapM_ (\value -> mapM_ (logRawLine value "stdout") (ByteString.split '\n' output)) sessionLog
-      case errors of
-        Right errorBytes -> mapM_ (\value -> mapM_ (logRawLine value "stderr") (ByteString.split '\n' errorBytes)) sessionLog
-        Left _ -> pure ()
+      mapM_ (\value -> mapM_ (logRawLine value "stderr") (ByteString.split '\n' errors)) sessionLog
     processSpec =
       (proc executable arguments)
         { cwd = Just repositoryRoot,
@@ -1280,17 +1398,148 @@ runCanonicalCommand repository issueNumber executable arguments processStarted =
           create_group = True
         }
 
-renderGitHubCommandResult :: (ExitCode, Either IOException ByteString.ByteString, Either IOException ByteString.ByteString) -> Either Text Text
-renderGitHubCommandResult (exitCode, outputResult, errorResult) = case (exitCode, outputResult, errorResult) of
-  (_, Left exception, _) -> Left ("Could not read GitHub CLI output: " <> exceptionText exception)
-  (_, _, Left exception) -> Left ("Could not read GitHub CLI diagnostics: " <> exceptionText exception)
-  (ExitSuccess, Right output, Right _) -> Right (decodeClaudeBytes output)
-  (ExitFailure code, Right output, Right errors) ->
-    Left
-      ( "GitHub CLI exited with status "
-          <> Text.pack (show code)
-          <> renderClaudeFailureDetails output errors
-      )
+-- | How one @gh@ invocation actually ended. 'GitHubCommandUnobserved'
+-- carries only the neutral *observation* -- what the runner saw -- because
+-- the runner alone cannot tell a harmless read from a mutation; the
+-- verify-before-retry remedy is chosen by the callers above it.
+data GitHubCommandOutcome
+  = GitHubCommandSucceeded Text
+  | GitHubCommandFailed Text
+  | GitHubCommandUnobserved Text
+
+renderGitHubCommandResult :: CommandBounds -> CommandOutcome -> GitHubCommandOutcome
+renderGitHubCommandResult bounds outcome = case outcome of
+  CommandUnfinished ->
+    GitHubCommandUnobserved ("The GitHub CLI did not exit within " <> renderWindow bounds.commandDeadlineMicros)
+  CommandExited exitCode output errors -> case (exitCode, output, errors) of
+    (_, StreamUnreadable exception, _) -> GitHubCommandFailed ("Could not read GitHub CLI output: " <> exceptionText exception)
+    (_, _, StreamUnreadable exception) -> GitHubCommandFailed ("Could not read GitHub CLI diagnostics: " <> exceptionText exception)
+    -- An *observed* nonzero exit stays a nonzero-exit failure whatever the
+    -- capture did: the command definitely did not do what was asked, so
+    -- there is nothing unknown about its outcome.
+    (ExitFailure code, _, _) ->
+      GitHubCommandFailed
+        ( "GitHub CLI exited with status "
+            <> Text.pack (show code)
+            <> renderClaudeFailureDetails (capturedBytes output) (capturedBytes errors)
+        )
+    -- Incomplete stdout is unknown even when the captured prefix happens to
+    -- parse -- callers read it as a comment URL or a JSON verdict, and a
+    -- truncated one of either is worse than no answer. Incomplete *stderr*
+    -- alone never invalidates a clean exit with complete stdout.
+    (ExitSuccess, StreamTruncated _, _) ->
+      GitHubCommandUnobserved ("The GitHub CLI exited but its output was still incomplete after " <> renderWindow bounds.commandCaptureGraceMicros)
+    (ExitSuccess, StreamComplete outputBytes, _) -> GitHubCommandSucceeded (decodeClaudeBytes outputBytes)
+
+-- | The result of running one review subprocess under 'CommandBounds':
+-- either it exited (with each stream's capture flagged complete, truncated
+-- or unreadable *independently*) or it outlived its deadline entirely.
+data CommandOutcome
+  = CommandExited ExitCode StreamCaptureResult StreamCaptureResult
+  | CommandUnfinished
+
+commandRanToCompletion :: CommandOutcome -> Bool
+commandRanToCompletion (CommandExited _ StreamComplete {} StreamComplete {}) = True
+commandRanToCompletion _ = False
+
+data StreamCaptureResult
+  = StreamComplete ByteString.ByteString
+  | StreamTruncated ByteString.ByteString
+  | StreamUnreadable IOException
+
+capturedBytes :: StreamCaptureResult -> ByteString.ByteString
+capturedBytes (StreamComplete bytes) = bytes
+capturedBytes (StreamTruncated bytes) = bytes
+capturedBytes (StreamUnreadable _) = ByteString.empty
+
+-- | Bounds process exit and output capture *separately*. Once the process
+-- has exited within its deadline its status is a fact, so a capture that
+-- cannot finish only downgrades that call's *output* -- after a short
+-- grace, whatever arrived is returned flagged truncated. This is the whole
+-- fix for issue #15: a mutation that demonstrably ran can no longer be
+-- reported as having timed out just because a descendant it spawned still
+-- holds the pipe open.
+--
+-- Both graces are awaited under one 'timeout', and with 'readMVar' rather
+-- than 'takeMVar', so a stream that did finish is still recognised as
+-- complete when the other one is what ran out the clock.
+awaitCommandOutcome :: CommandBounds -> ProcessHandle -> StreamCapture -> StreamCapture -> IO CommandOutcome
+awaitCommandOutcome bounds processHandle outputCapture errorCapture = do
+  exited <- timeout bounds.commandDeadlineMicros (waitForProcess processHandle)
+  case exited of
+    Nothing -> pure CommandUnfinished
+    Just exitCode -> do
+      void . timeout bounds.commandCaptureGraceMicros $ do
+        void (readMVar outputCapture.streamCaptureDone)
+        void (readMVar errorCapture.streamCaptureDone)
+      CommandExited exitCode <$> streamCaptureResult outputCapture <*> streamCaptureResult errorCapture
+
+-- | One subprocess stream's capture worker, plus everything needed to give
+-- up on it. The bytes accumulate into an 'IORef' that stays readable while
+-- the worker is still blocked, and completion is signalled separately --
+-- 'ByteString.hGetContents' publishes only at EOF, which never arrives
+-- while a descendant that inherited the pipe holds its write end, so a
+-- grace period that had to @takeMVar@ the worker's result would hang
+-- exactly where it is supposed to give up.
+data StreamCapture = StreamCapture
+  { streamCaptureChunks :: IORef [ByteString.ByteString],
+    streamCaptureDone :: MVar (Either IOException ()),
+    streamCaptureThread :: ThreadId,
+    streamCaptureHandle :: Handle
+  }
+
+startCapture :: Handle -> IO StreamCapture
+startCapture handle = do
+  chunks <- newIORef []
+  done <- newEmptyMVar
+  threadId <- forkIO $ do
+    outcome <- try (readChunks chunks)
+    putMVar done outcome
+  pure
+    StreamCapture
+      { streamCaptureChunks = chunks,
+        streamCaptureDone = done,
+        streamCaptureThread = threadId,
+        streamCaptureHandle = handle
+      }
+  where
+    readChunks chunks = do
+      chunk <- ByteString.hGetSome handle captureChunkBytes
+      if ByteString.null chunk
+        then pure ()
+        else atomicModifyIORef' chunks (\previous -> (chunk : previous, ())) >> readChunks chunks
+
+streamCaptureResult :: StreamCapture -> IO StreamCaptureResult
+streamCaptureResult capture = do
+  finished <- tryReadMVar capture.streamCaptureDone
+  captured <- ByteString.concat . reverse <$> readIORef capture.streamCaptureChunks
+  pure $ case finished of
+    Nothing -> StreamTruncated captured
+    Just (Left exception) -> StreamUnreadable exception
+    Just (Right ()) -> StreamComplete captured
+
+-- | Retires a capture worker: a finished one only needs its pipe closed,
+-- and a still-blocked one is killed first, since nothing else will ever
+-- unblock a read on a pipe another process is holding open. Killing before
+-- closing matters -- a blocked reader holds the handle's lock, so a close
+-- attempted first would block right behind it.
+releaseCapture :: StreamCapture -> IO ()
+releaseCapture capture = do
+  finished <- tryReadMVar capture.streamCaptureDone
+  case finished of
+    Just _ -> pure ()
+    Nothing -> killThread capture.streamCaptureThread
+  void (try (hClose capture.streamCaptureHandle) :: IO (Either IOException ()))
+
+-- | Renders a bound for a diagnostic. Sub-second bounds only ever come from
+-- tests, but they are rendered honestly rather than rounded to \"0 seconds\".
+renderWindow :: Int -> Text
+renderWindow micros
+  | micros >= 1000000 && micros `mod` 1000000 == 0 = Text.pack (show (micros `div` 1000000)) <> unit (micros `div` 1000000) " second"
+  | otherwise = Text.pack (show (micros `div` 1000)) <> " ms"
+  where
+    unit 1 singular = singular
+    unit _ singular = singular <> "s"
 
 -- | Spawns the authenticated Claude CLI and attaches it to the
 -- invocation-wide reservation `key` (see 'withReservedToolSlot'). As in
@@ -1665,8 +1914,23 @@ initializationTimeoutMicros = 10 * 1000 * 1000
 claudeReviewerTimeoutMicros :: Int
 claudeReviewerTimeoutMicros = 10 * 60 * 1000 * 1000
 
-canonicalReviewTimeoutMicros :: Int
-canonicalReviewTimeoutMicros = 60 * 60 * 1000 * 1000
+-- | Production bounds for the canonical gate: the same one-hour process
+-- deadline as before, now with capture bounded separately behind it.
+canonicalCommandBounds :: CommandBounds
+canonicalCommandBounds =
+  CommandBounds
+    { commandDeadlineMicros = 60 * 60 * 1000 * 1000,
+      commandCaptureGraceMicros = captureGraceMicros
+    }
+
+-- | How much longer than the process itself its output capture may take.
+-- Long enough that an ordinary pipe drain always finishes inside it, short
+-- enough that a descendant holding the pipe open cannot stall the caller.
+captureGraceMicros :: Int
+captureGraceMicros = 2 * 1000 * 1000
+
+captureChunkBytes :: Int
+captureChunkBytes = 65536
 
 claudePromptLimit :: Int
 claudePromptLimit = 100000
@@ -1674,8 +1938,14 @@ claudePromptLimit = 100000
 claudeDiagnosticLimit :: Int
 claudeDiagnosticLimit = 4000
 
-githubCommandTimeoutMicros :: Int
-githubCommandTimeoutMicros = 30 * 1000 * 1000
+-- | Production bounds for every @gh@ invocation: the same 30-second process
+-- deadline as before, with capture bounded separately behind it.
+githubCommandBounds :: CommandBounds
+githubCommandBounds =
+  CommandBounds
+    { commandDeadlineMicros = 30 * 1000 * 1000,
+      commandCaptureGraceMicros = captureGraceMicros
+    }
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000

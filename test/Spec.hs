@@ -74,8 +74,10 @@ import Kanban.PullRequestFlow
   )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
+    CommandBounds (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    ReviewClient,
     ReviewApproval (..),
     ReviewChoice (..),
     ReviewQuestion (..),
@@ -104,7 +106,9 @@ import Kanban.Review
     releaseToolSlot,
     reserveToolSlot,
     resolveCanonicalIssueReviewer,
+    githubCommandBounds,
     reviewStageForLabels,
+    runCanonicalCommand,
     runGitHubIssueTool,
     stopReviewClient,
     renderCanonicalIssueReviewResult,
@@ -162,9 +166,11 @@ import Kanban.UI
     ReviewTickFireOutcome (..),
     SolvePhase (..),
     SolveSession (..),
+    canonicalReviewActivity,
     TranscriptGeometry (..),
     TranscriptSession (..),
     canonicalReviewCompletionSuperseded,
+    canonicalReviewNotice,
     decideReviewTickArm,
     decideReviewTickFire,
     displayedTranscript,
@@ -243,7 +249,7 @@ import Kanban.Worker
     waitForWorkerStart,
     workerDeadlineReason,
   )
-import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, removeFile, removePathForcibly, setModificationTime)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, (</>))
@@ -2484,7 +2490,7 @@ main = hspec $ do
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
           withEnvironmentValue "STARTED_MARKER" markerPath $ do
-            client <- newReviewClientForTesting repositoryRoot "coghex/kanban" (const (pure ()))
+            client <- newReviewClientForTesting githubCommandBounds repositoryRoot "coghex/kanban" (const (pure ()))
             finished <- newEmptyMVar
             let request = GitHubIssueToolRequest GitHubIssueRead 844 Nothing [] []
             void . forkIO $ withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request) >>= putMVar finished
@@ -2494,6 +2500,141 @@ main = hspec $ do
             case result of
               Just (Left _) -> pure ()
               other -> expectationFailure ("expected the in-flight gh call to fail once the client shut down, got " <> show other)
+
+  describe "review subprocess deadline and capture bounds" $ do
+    let injectedBounds = CommandBounds {commandDeadlineMicros = 400000, commandCaptureGraceMicros = 400000}
+        -- Every call below runs under this bound. It is generous next to
+        -- what these calls actually cost -- the injected deadline plus the
+        -- injected capture grace plus 'killManagedProcess'' own 750 ms
+        -- termination grace, twice over for the two-subprocess updates --
+        -- so a loaded CI runner cannot trip it. What matters is that it
+        -- stays far under the 30 s the pipe-holding children in these
+        -- fixtures live for: a runner that still waited on a capture worker
+        -- it cannot unblock would hang until then, and so trips this bound
+        -- instead of quietly passing once the child finally exits.
+        boundedCallMicros = 10000000
+        commentUrl = "https://example.invalid/coghex/kanban/issues/15#issuecomment-7"
+        postComment = "printf '%s\\n' '" <> ByteString.pack (Data.Text.unpack commentUrl) <> "'"
+
+    it "round-trips an ordinary fast gh read unchanged" $
+      withFakeGitHubCli ["printf '%s' '{\"number\":15}'"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueRead 15 Nothing [] [])
+        result `shouldBe` Right "{\"number\":15}"
+
+    it "reports a mutation whose stdout a forked child holds open past the deadline as outcome-unknown, never as a timeout" $
+      withFakeGitHubCli ["sleep 30 &", postComment, "exit 0"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueUpdate 15 (Just "body") [] [])
+        message <- requireLeft "expected the truncated comment post to be reported as outcome-unknown" result
+        message `shouldMention` "outcome is unknown"
+        message `shouldMention` "may already have completed"
+        message `shouldMention` "posting the issue comment"
+        message `shouldMention` "with this tool"
+        message `shouldNotMention` "timed out"
+
+    it "still succeeds when only stderr is held open past the deadline and stdout arrived complete" $
+      withFakeGitHubCli ["sleep 30 >/dev/null &", postComment, "exit 0"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueUpdate 15 (Just "body") [] [])
+        output <- requireRight "expected a clean exit with complete stdout to succeed despite unfinished stderr capture" result
+        output `shouldMention` commentUrl
+
+    it "keeps an observed nonzero exit a nonzero-exit failure even when capture is still held open" $
+      withFakeGitHubCli ["sleep 30 &", "printf 'boom\\n' >&2", "exit 3"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueRead 15 Nothing [] [])
+        message <- requireLeft "expected a nonzero exit to stay a nonzero-exit failure" result
+        message `shouldMention` "exited with status 3"
+        message `shouldNotMention` "outcome is unknown"
+
+    it "tells the model to verify current state before retrying when a comment post outlives the deadline" $
+      withFakeGitHubCli ["sleep 30"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueUpdate 15 (Just "body") [] [])
+        message <- requireLeft "expected an unfinished comment post to be reported as outcome-unknown" result
+        message `shouldMention` "did not exit within"
+        message `shouldMention` "outcome is unknown"
+        message `shouldMention` "Re-read the issue and its labels with this tool"
+
+    it "leaves an ordinary read unaffected, reporting a plain failure with no verify-before-retry instruction" $
+      withFakeGitHubCli ["sleep 30"] injectedBounds $ \client -> do
+        result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueRead 15 Nothing [] [])
+        message <- requireLeft "expected an unfinished read to fail" result
+        message `shouldMention` "reading issue #15"
+        message `shouldNotMention` "with this tool"
+        message `shouldNotMention` "may already have completed"
+
+    it "preserves a known-successful comment when the following label edit's outcome is unknown, without calling it failed" $
+      withFakeGitHubCli
+        [ "if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"comment\" ]; then",
+          postComment,
+          "exit 0",
+          "fi",
+          "sleep 30"
+        ]
+        injectedBounds
+        $ \client -> do
+          result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueUpdate 15 (Just "body") ["reviewed:approve"] ["reviewed:changes"])
+          message <- requireLeft "expected the unfinished label edit to be reported as outcome-unknown" result
+          message `shouldMention` ("The issue comment was posted at " <> commentUrl)
+          message `shouldMention` "updating the issue labels"
+          message `shouldMention` "outcome is unknown"
+          message `shouldMention` "with this tool"
+          message `shouldNotMention` "failed"
+
+    it "reports the forced reviewed:revised label creation as outcome-unknown when it outlives the deadline" $
+      withFakeGitHubCli
+        [ "if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"comment\" ]; then",
+          postComment,
+          "exit 0",
+          "fi",
+          "sleep 30"
+        ]
+        injectedBounds
+        $ \client -> do
+          result <- runBoundedGitHubTool boundedCallMicros client (GitHubIssueToolRequest GitHubIssueUpdate 15 (Just "body") ["reviewed:revised"] [])
+          message <- requireLeft "expected the unfinished label creation to be reported as outcome-unknown" result
+          message `shouldMention` ("The issue comment was posted at " <> commentUrl)
+          message `shouldMention` "creating the reviewed:revised label"
+          message `shouldMention` "outcome is unknown"
+          message `shouldNotMention` "failed"
+
+    it "round-trips a fast canonical review unchanged, still logging both captured streams" $
+      withFakeCanonicalReviewer ["printf '%s' '{\"approved\":true}'", "printf 'reviewer diagnostic\\n' >&2"] $ \cacheRoot repository reviewerPath -> do
+        result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+        result `shouldBe` Right "{\"approved\":true}"
+        logged <- canonicalSessionLogText cacheRoot
+        logged `shouldSatisfy` isInfixOf "{\\\"approved\\\":true}"
+        logged `shouldSatisfy` isInfixOf "reviewer diagnostic"
+
+    it "reports a canonical review whose stdout a forked child holds open as outcome-unknown, never as a timeout" $
+      withFakeCanonicalReviewer ["sleep 30 &", "printf '%s' '{\"approved\":true}'"] $ \_ repository reviewerPath -> do
+        result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+        message <- requireLeft "expected truncated canonical stdout to be reported as outcome-unknown" result
+        message `shouldMention` "still incomplete after"
+        message `shouldMention` "outcome is unknown"
+        message `shouldNotMention` "timed out"
+
+    it "still decodes a canonical review whose stderr alone is held open past the deadline" $
+      withFakeCanonicalReviewer ["sleep 30 >/dev/null &", "printf '%s' '{\"approved\":true}'"] $ \_ repository reviewerPath -> do
+        result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+        result `shouldBe` Right "{\"approved\":true}"
+
+    it "gives canonical outcome-unknown guidance without any same-tool reread instruction" $
+      withFakeCanonicalReviewer ["sleep 30"] $ \_ repository reviewerPath -> do
+        result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+        message <- requireLeft "expected an unfinished canonical review to be reported as outcome-unknown" result
+        message `shouldMention` "did not exit within"
+        message `shouldMention` "outcome is unknown"
+        message `shouldMention` "Check the issue's current comments and labels"
+        message `shouldNotMention` "this tool"
+
+    it "renders a canonical outcome-unknown result to the operator without claiming the review failed" $ do
+      unknown <-
+        withFakeCanonicalReviewer ["sleep 30"] $ \_ repository reviewerPath ->
+          requireLeft "expected an unfinished canonical review to be reported as outcome-unknown"
+            =<< runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+      canonicalReviewActivity unknown `shouldBe` "outcome unknown"
+      canonicalReviewNotice unknown `shouldNotMention` "failed"
+      canonicalReviewNotice unknown `shouldMention` "could not be observed"
+      canonicalReviewActivity "python3 was not found on PATH" `shouldBe` "failed"
+      canonicalReviewNotice "python3 was not found on PATH" `shouldBe` "Canonical issue review failed: python3 was not found on PATH"
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do
@@ -5484,6 +5625,79 @@ waitForWorkerState path predicate attempts = do
 
 requireJust :: String -> Maybe value -> IO value
 requireJust message = maybe (fail message) pure
+
+requireLeft :: String -> Either Text value -> IO Text
+requireLeft message = either pure (const (fail message))
+
+requireRight :: String -> Either Text value -> IO value
+requireRight message = either (\failure -> fail (message <> ": " <> Data.Text.unpack failure)) pure
+
+shouldMention :: Text -> Text -> Expectation
+shouldMention haystack needle
+  | Data.Text.isInfixOf needle haystack = pure ()
+  | otherwise = expectationFailure ("expected " <> show haystack <> " to mention " <> show needle)
+
+shouldNotMention :: Text -> Text -> Expectation
+shouldNotMention haystack needle
+  | Data.Text.isInfixOf needle haystack = expectationFailure ("expected " <> show haystack <> " not to mention " <> show needle)
+  | otherwise = pure ()
+
+-- | A fake @gh@ on a temporary PATH plus a review client wired to the given
+-- 'CommandBounds', so the deadline and capture-grace paths are reachable in
+-- well under a second instead of the production 30 s.
+withFakeGitHubCli :: [ByteString.ByteString] -> CommandBounds -> (ReviewClient -> IO result) -> IO result
+withFakeGitHubCli scriptLines bounds action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+        binaryRoot = temporaryRoot </> "bin"
+        fakeGh = binaryRoot </> "gh"
+    createDirectory repositoryRoot
+    createDirectory binaryRoot
+    -- Drain stdin first, as the real `gh issue comment --body-file -` does.
+    -- 'runGitHubCommand' always writes the request body and closes its end,
+    -- so a fake that exited without reading would leave that write to fail
+    -- with EPIPE at the flush -- a fixture artifact that says nothing about
+    -- the capture bounds under test, and one whose timing differs by
+    -- platform.
+    ByteString.writeFile fakeGh (ByteString.unlines ("#!/bin/sh" : "cat >/dev/null" : scriptLines))
+    setFileMode fakeGh 0o700
+    originalPath <- maybe "" id <$> lookupEnv "PATH"
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
+      bracket
+        (newReviewClientForTesting bounds repositoryRoot "coghex/kanban" (const (pure ())))
+        stopReviewClient
+        action
+
+runBoundedGitHubTool :: Int -> ReviewClient -> GitHubIssueToolRequest -> IO (Either Text Text)
+runBoundedGitHubTool boundMicros client request = do
+  outcome <- timeout boundMicros (withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request))
+  requireJust "the GitHub tool call did not return within its bounded window" outcome
+
+-- | A fake canonical reviewer executable, with @XDG_CACHE_HOME@ pointed at
+-- the temporary root so the run's session log lands somewhere inspectable.
+withFakeCanonicalReviewer :: [ByteString.ByteString] -> (FilePath -> Repository -> FilePath -> IO result) -> IO result
+withFakeCanonicalReviewer scriptLines action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+        binaryRoot = temporaryRoot </> "bin"
+        fakeReviewer = binaryRoot </> "approve-issues"
+    createDirectory repositoryRoot
+    createDirectory binaryRoot
+    ByteString.writeFile fakeReviewer (ByteString.unlines ("#!/bin/sh" : scriptLines))
+    setFileMode fakeReviewer 0o700
+    withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+      action temporaryRoot (Repository repositoryRoot "coghex" "kanban") fakeReviewer
+
+runBoundedCanonicalCommand :: Int -> CommandBounds -> Repository -> FilePath -> IO (Either Text Text)
+runBoundedCanonicalCommand boundMicros bounds repository executable = do
+  outcome <- timeout boundMicros (runCanonicalCommand bounds repository 15 executable [] (const (pure ())))
+  requireJust "the canonical review call did not return within its bounded window" outcome
+
+canonicalSessionLogText :: FilePath -> IO String
+canonicalSessionLogText cacheRoot = do
+  let logDirectory = cacheRoot </> "kanban" </> "logs" </> "coghex-kanban"
+  entries <- listDirectory logDirectory
+  concat <$> mapM (readFile . (logDirectory </>)) entries
 
 waitForFileToExist :: FilePath -> Int -> IO ()
 waitForFileToExist path attempts = do

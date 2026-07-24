@@ -25,7 +25,9 @@ module Kanban.UI
     approvedInteriorAttr,
     autoSolveRevisionPrompt,
     cacheEnabled,
+    canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
+    canonicalReviewNotice,
     cardExcerptLimit,
     cardInteriorAttribute,
     claudeRefreshTimeoutMicros,
@@ -155,6 +157,7 @@ import Kanban.Review
     beginIssueReview,
     interruptReview,
     killReviewTools,
+    outcomeUnknownDiagnostic,
     reviewStageForLabels,
     renderCanonicalIssueReviewResult,
     runCanonicalIssueReview,
@@ -3912,7 +3915,7 @@ applyCanonicalIssueReview issueNumber stage result = do
   let superseded = maybe False (canonicalReviewCompletionSuperseded . (.reviewSessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
   unless superseded $ do
     appendToReviewSession issueNumber $ \session -> case result of
-      Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = "failed", reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
+      Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = canonicalReviewActivity message, reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
       Right canonicalResult ->
         session
           { reviewSessionPhase = if canonicalResult.canonicalReviewApproved then ReviewFinished else ReviewNeedsChanges,
@@ -3920,11 +3923,28 @@ applyCanonicalIssueReview issueNumber stage result = do
             reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> renderCanonicalIssueReviewResult stage canonicalResult)
           }
     startBoardRefresh
-    setNotice (case result of Left message -> "Canonical issue review failed: " <> sanitizeText message; Right _ -> stageActivity stage <> " completed with issue-review:v2 state")
+    setNotice (case result of Left message -> canonicalReviewNotice message; Right _ -> stageActivity stage <> " completed with issue-review:v2 state")
   where
     stageActivity InitialReview = "Issue review"
     stageActivity IssueRereview = "Issue rereview"
     stageActivity IssueRevision = "Issue revision"
+
+-- | The activity and notice text for a canonical review that produced no
+-- usable result. A run whose GitHub-side outcome was simply never observed
+-- (its process outlived the deadline, or its output never finished
+-- arriving) may well have posted its verdict comment and moved the labels,
+-- so neither line may claim the review failed -- only that this end of it
+-- could not see what happened. The invocation itself is still terminal, so
+-- the session phase stays 'ReviewFailed' either way.
+canonicalReviewActivity :: Text -> Text
+canonicalReviewActivity message
+  | outcomeUnknownDiagnostic message = "outcome unknown"
+  | otherwise = "failed"
+
+canonicalReviewNotice :: Text -> Text
+canonicalReviewNotice message
+  | outcomeUnknownDiagnostic message = "Canonical issue review outcome could not be observed; check the issue before running it again"
+  | otherwise = "Canonical issue review failed: " <> sanitizeText message
 
 selectedReviewIssue :: AppState -> Maybe Issue
 selectedReviewIssue state = selectedReviewItem state >>= boardItemIssue
