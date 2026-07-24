@@ -83,14 +83,23 @@ import Kanban.Review
     decodeReviewQuestion,
     decodeReviewResult,
     decodeReviewWireMessage,
+    attachToolProcess,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    drainToolRegistry,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    killThreadToolProcesses,
+    newReviewClientForTesting,
+    newToolRegistry,
+    releaseToolSlot,
+    reserveToolSlot,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
+    runGitHubIssueTool,
+    stopReviewClient,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
   )
@@ -262,6 +271,27 @@ main = hspec $ do
         case snapshot of
           Left message -> expectationFailure (Data.Text.unpack message)
           Right identities -> identityForPid identity.processIdentityPid identities `shouldBe` Nothing
+
+    it "still reaches a surviving group member after its own leader has already exited and been reaped (issue #16: the review client's tool calls and its own app-server shutdown share this primitive)" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let markerPath = temporaryRoot </> "child.pid"
+        (_, _, _, leader) <-
+          createProcess
+            (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 & echo $! > " <> markerPath <> "; exit 0"])
+              { create_group = True }
+        managed <- managedProcessFor leader
+        -- The leader exits (and this waitForProcess reaps its handle) well
+        -- before we ever signal it: `getPid`/`getProcessExitCode` on `leader`
+        -- would now report it gone, which is exactly the state that used to
+        -- make the old, handle-driven kill a no-op.
+        timeout 3000000 (waitForProcess leader) `shouldReturn` Just ExitSuccess
+        childPidText <- readFile markerPath
+        let childPid = read (filter (`notElem` (" \n" :: String)) childPidText) :: Int
+        killManagedProcess managed
+        snapshot <- readProcessSnapshot
+        case snapshot of
+          Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+          Right identities -> identityForPid childPid identities `shouldBe` Nothing
 
     it "round-trips the durable worker protocol including autosolve parent identity" $ do
       let parent =
@@ -2284,6 +2314,147 @@ main = hspec $ do
         wonLease `shouldBe` True
         emitted <- readIORef emittedRef
         emitted `shouldBe` [WorkerFinished (SolveFailed workerDeadlineReason)]
+
+  describe "review tool process ownership" $ do
+    it "keeps two overlapping same-thread invocations independently killable" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processA ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processB -> do
+          registry <- newToolRegistry
+          keyA <- requireJust "expected a reservation for invocation A" =<< reserveToolSlot registry "thread-1"
+          keyB <- requireJust "expected a reservation for invocation B" =<< reserveToolSlot registry "thread-1"
+          managedA <- managedProcessFor processA
+          managedB <- managedProcessFor processB
+          -- Under the old threadId-keyed map, the second `insert` here would
+          -- have overwritten the first entry, leaving invocation A unkillable.
+          attachToolProcess registry keyA managedA `shouldReturn` True
+          attachToolProcess registry keyB managedB `shouldReturn` True
+          killThreadToolProcesses registry "thread-1"
+          timeout 3000000 (waitForProcess processA) `shouldReturn` Just (ExitFailure (-9))
+          timeout 3000000 (waitForProcess processB) `shouldReturn` Just (ExitFailure (-9))
+
+    it "leaves a same-thread sibling registered once one overlapping invocation completes" $
+      withManagedShell "true" $ \quickProcess ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \longProcess -> do
+          registry <- newToolRegistry
+          keyA <- requireJust "expected a reservation for the quick invocation" =<< reserveToolSlot registry "thread-1"
+          keyB <- requireJust "expected a reservation for the long invocation" =<< reserveToolSlot registry "thread-1"
+          quickManaged <- managedProcessFor quickProcess
+          longManaged <- managedProcessFor longProcess
+          attachToolProcess registry keyA quickManaged `shouldReturn` True
+          attachToolProcess registry keyB longManaged `shouldReturn` True
+          -- Invocation A completes naturally and deregisters itself, exactly
+          -- as 'runAuthenticatedClaude'/'runGitHubCommand' do after success --
+          -- under the old threadId-keyed map this `delete` would have
+          -- untracked invocation B too.
+          timeout 3000000 (waitForProcess quickProcess) `shouldReturn` Just ExitSuccess
+          releaseToolSlot registry keyA
+          remaining <- drainToolRegistry registry
+          length remaining `shouldBe` 1
+          mapM_ killManagedProcess remaining
+          timeout 3000000 (waitForProcess longProcess) `shouldReturn` Just (ExitFailure (-9))
+
+    it "kills every invocation owned by a thread without disturbing another thread's entry" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processA ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \processB ->
+          withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \otherThreadProcess -> do
+            registry <- newToolRegistry
+            keyA <- requireJust "expected a reservation for thread-1's first invocation" =<< reserveToolSlot registry "thread-1"
+            keyB <- requireJust "expected a reservation for thread-1's second invocation" =<< reserveToolSlot registry "thread-1"
+            otherKey <- requireJust "expected a reservation for thread-2" =<< reserveToolSlot registry "thread-2"
+            managedA <- managedProcessFor processA
+            managedB <- managedProcessFor processB
+            otherManaged <- managedProcessFor otherThreadProcess
+            attachToolProcess registry keyA managedA `shouldReturn` True
+            attachToolProcess registry keyB managedB `shouldReturn` True
+            attachToolProcess registry otherKey otherManaged `shouldReturn` True
+            killThreadToolProcesses registry "thread-1"
+            timeout 3000000 (waitForProcess processA) `shouldReturn` Just (ExitFailure (-9))
+            timeout 3000000 (waitForProcess processB) `shouldReturn` Just (ExitFailure (-9))
+            getProcessExitCode otherThreadProcess `shouldReturn` Nothing
+            remaining <- drainToolRegistry registry
+            length remaining `shouldBe` 1
+
+    it "never lets a spawn that races full client shutdown escape the shutdown drain" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        registry <- newToolRegistry
+        key <- requireJust "expected a reservation before shutdown begins" =<< reserveToolSlot registry "thread-1"
+        -- Shutdown begins (and finds nothing to drain yet, since the process
+        -- has not spawned/attached) while the reservation is still pending.
+        drained <- drainToolRegistry registry
+        length drained `shouldBe` 0
+        managed <- managedProcessFor process
+        -- The spawn that raced shutdown discovers its reservation is gone
+        -- and must kill what it just started itself.
+        attachToolProcess registry key managed `shouldReturn` False
+        killManagedProcess managed
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+        -- The registry stays closed: no later invocation can register either.
+        reserveToolSlot registry "thread-1" `shouldReturn` Nothing
+
+    it "never lets a spawn that races same-thread cancellation escape, while leaving the registry open for later work" $
+      withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+        registry <- newToolRegistry
+        key <- requireJust "expected a reservation before the cancellation lands" =<< reserveToolSlot registry "thread-1"
+        killThreadToolProcesses registry "thread-1"
+        managed <- managedProcessFor process
+        attachToolProcess registry key managed `shouldReturn` False
+        killManagedProcess managed
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+        -- Unlike full shutdown, a per-thread cancellation does not close the
+        -- registry: later work on the same thread still registers normally.
+        laterReservation <- reserveToolSlot registry "thread-1"
+        laterReservation `shouldSatisfy` isJust
+
+    it "still fences a same-thread cancellation landing between the sequential gh subprocesses of one GitHub update" $
+      withManagedShell "true" $ \firstProcess ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \secondProcess -> do
+          registry <- newToolRegistry
+          -- Subprocess 1 (e.g. the issue comment) runs to completion normally.
+          keyOne <- requireJust "expected a reservation for the first gh subprocess" =<< reserveToolSlot registry "thread-1"
+          managedOne <- managedProcessFor firstProcess
+          attachToolProcess registry keyOne managedOne `shouldReturn` True
+          timeout 3000000 (waitForProcess firstProcess) `shouldReturn` Just ExitSuccess
+          releaseToolSlot registry keyOne
+          -- Subprocess 2 (e.g. the label edit) has already reserved its slot
+          -- in the gap before a same-thread cancellation lands.
+          keyTwo <- requireJust "expected a reservation for the second gh subprocess" =<< reserveToolSlot registry "thread-1"
+          killThreadToolProcesses registry "thread-1"
+          managedTwo <- managedProcessFor secondProcess
+          attachToolProcess registry keyTwo managedTwo `shouldReturn` False
+          killManagedProcess managedTwo
+          timeout 3000000 (waitForProcess secondProcess) `shouldReturn` Just (ExitFailure (-9))
+
+    it "terminates a fake gh invocation that is still in flight when the client shuts down" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeGh = binaryRoot </> "gh"
+            markerPath = temporaryRoot </> "gh-started"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile
+          fakeGh
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "touch \"$STARTED_MARKER\"",
+                "trap '' TERM",
+                "while :; do sleep 1; done"
+              ]
+          )
+        setFileMode fakeGh 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
+          withEnvironmentValue "STARTED_MARKER" markerPath $ do
+            client <- newReviewClientForTesting repositoryRoot "coghex/kanban" (const (pure ()))
+            finished <- newEmptyMVar
+            let request = GitHubIssueToolRequest GitHubIssueRead 844 Nothing [] []
+            void . forkIO $ runGitHubIssueTool client "thread-1" request >>= putMVar finished
+            waitForFileToExist markerPath 50
+            stopReviewClient client
+            result <- timeout 5000000 (takeMVar finished)
+            case result of
+              Just (Left _) -> pure ()
+              other -> expectationFailure ("expected the in-flight gh call to fail once the client shut down, got " <> show other)
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do
@@ -4368,6 +4539,19 @@ waitForWorkerState path predicate attempts = do
     _
       | attempts <= 0 -> fail ("worker state did not reach the expected condition: " <> show decoded)
       | otherwise -> threadDelay 100000 >> waitForWorkerState path predicate (attempts - 1)
+
+requireJust :: String -> Maybe value -> IO value
+requireJust message = maybe (fail message) pure
+
+waitForFileToExist :: FilePath -> Int -> IO ()
+waitForFileToExist path attempts = do
+  exists <- doesFileExist path
+  if exists
+    then pure ()
+    else
+      if attempts <= 0
+        then fail ("expected " <> path <> " to exist")
+        else threadDelay 100000 >> waitForFileToExist path (attempts - 1)
 
 isOrphaned :: WorkerState -> Bool
 isOrphaned state = case state.workerStateStatus of
