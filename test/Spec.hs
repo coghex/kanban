@@ -313,6 +313,39 @@ main = hspec $ do
           Left message -> expectationFailure (Data.Text.unpack message)
           Right snapshot -> membersOfGroup snapshot `shouldBe` []
 
+    it "the census's initial rapid tick burst still catches a same-group child even when the leader exits well inside the old steady-state tick interval" $ do
+      -- Lingers only 150ms past forking the child before exiting -- far
+      -- less than the steady-state censusIntervalMicros (500ms), and
+      -- deliberately within the initial rapid burst window (see
+      -- bootstrapBurstTicks/bootstrapBurstIntervalMicros in
+      -- "Kanban.Process"). Before that burst existed, the census's first
+      -- independent tick would not have landed until well after this
+      -- leader was already gone, permanently missing the child (nothing
+      -- would ever again overlap the by-then-vanished leader-only seed).
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 0.15; exit 0"]) {create_group = True}
+      (managed, groupLeaderProblem) <- managedProcess process
+      Just leaderPid <- managedProcessPid managed
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        groupLeaderProblem `shouldBe` Nothing
+        timeout 3000000 (waitForProcess process) `shouldReturn` Just ExitSuccess
+        let membersOfGroup snapshot = filter ((== fromIntegral leaderPid) . processIdentityGroupPid) snapshot
+            waitForMember attempts = do
+              snapshotResult <- readProcessSnapshot
+              case snapshotResult of
+                Right snapshot | not (null (membersOfGroup snapshot)) -> pure ()
+                _
+                  | attempts <= (0 :: Int) -> expectationFailure "detached group member never appeared in a process snapshot"
+                  | otherwise -> threadDelay 100000 >> waitForMember (attempts - 1)
+        waitForMember 50
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> membersOfGroup snapshot `shouldBe` []
+
     it "watchManagedProcessCensus records a live descendant via parent-chain evidence, and killCensusVerified uses it to kill the group after the leader exits" $ do
       -- The leader stays alive for 2s (long enough for several census
       -- ticks, given the ~500ms interval) after backgrounding a
