@@ -752,7 +752,10 @@ drawColumn state columnWidth column =
 
 drawColumnEntries :: AppState -> BoardColumn -> [(Int, ColumnEntry)] -> [Widget Name]
 drawColumnEntries _ _ [] = []
-drawColumnEntries state column indexedEntries@((row, entry) : _) = case entry of
+drawColumnEntries state column indexedEntries@((row, entry) : remainingEntries) = case entry of
+  TrackerHeader tracker ->
+    let expanded = tracker.trackerIssue.issueNumber `Set.member` state.appExpandedTrackers
+     in drawTrackerHeader state column row tracker expanded : drawColumnEntries state column remainingEntries
   Tracked trackingContext _ ->
     let trackerNumber = primaryTrackerNumber trackingContext
         (groupEntries, remaining) = span ((== Just trackerNumber) . entryPrimaryTrackerNumber . snd) indexedEntries
@@ -820,6 +823,7 @@ drawCardFrame state selected entry contents =
     middleHeight = baseHeight + case entry of
       Standalone _ -> 0
       Tracked _ _ -> 1
+      TrackerHeader _ -> 0
     baseHeight = case item of
       IssueItem _ -> 7
       PullRequestItem _ -> 8
@@ -843,6 +847,7 @@ cardLines state selected entry =
     trackingLine = case entry of
       Standalone _ -> []
       Tracked context _ -> [drawTrackingLine context]
+      TrackerHeader _ -> []
     statusLine = case item of
       IssueItem issue -> case trackerDiagnosticsForIssue state.appConfig.resolvedWorkflow issue of
         [] -> []
@@ -900,6 +905,7 @@ branchPrefix :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
 branchPrefix state column row entry = case entry of
   Standalone _ -> emptyWidget
   Tracked _ _ -> withAttr trackerAttr (txt branch)
+  TrackerHeader _ -> emptyWidget
   where
     branch
       | state.appOptions.optionAscii = if isLastInTracker then "`- " else "+- "
@@ -910,6 +916,7 @@ branchPrefix state column row entry = case entry of
 entryPrimaryTrackerNumber :: ColumnEntry -> Maybe Int
 entryPrimaryTrackerNumber (Standalone _) = Nothing
 entryPrimaryTrackerNumber (Tracked context _) = Just (primaryTrackerNumber context)
+entryPrimaryTrackerNumber (TrackerHeader tracker) = Just tracker.trackerIssue.issueNumber
 
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
@@ -3446,6 +3453,7 @@ selectedReviewItem state = case selectedEntry state of
         Just (IssueItem context.trackingPrimary.membershipTracker.trackerIssue)
     | otherwise -> Just item
   Just (Standalone item) -> Just item
+  Just (TrackerHeader tracker) -> Just (IssueItem tracker.trackerIssue)
   Nothing -> Nothing
 
 startPullRequestReview :: PullRequest -> EventM Name AppState ()

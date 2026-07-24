@@ -3485,10 +3485,29 @@ main = hspec $ do
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
       length (Map.findWithDefault [] Done columns) `shouldBe` 1
 
-    it "keeps tracker issues visible as standalone cards before hierarchy is applied" $ do
+    it "shows labeled trackers without children as empty headers" $ do
       let tracker = (baseIssue 12 []) {issueLabels = [Label "epic" "5319e7"]}
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
-      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [12]
+      case Map.findWithDefault [] Issues columns of
+        [TrackerHeader rendered] -> do
+          rendered.trackerIssue.issueNumber `shouldBe` 12
+          rendered.trackerTotal `shouldBe` 0
+          rendered.trackerDiagnostics `shouldBe` [TrackerSectionMissing]
+        entries -> expectationFailure ("unexpected issue entries: " <> show entries)
+
+    it "uses an Epic: title as a tracker fallback when the issue has no labels" $ do
+      let tracker = (baseIssue 12 []) {issueTitle = "Epic: Legacy tracker"}
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+      Map.findWithDefault [] Issues columns `shouldSatisfy` \case [TrackerHeader _] -> True; _ -> False
+
+    it "keeps an open tracker visible as a header when none of its children are on the live board" $ do
+      let tracker =
+            (baseIssue 12 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #2 — A1: Child outside the live board"
+              }
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+      Map.findWithDefault [] Issues columns `shouldBe` [TrackerHeader (Tracker tracker 1 1 Map.empty [])]
 
     it "sorts standalone issues awaiting rereview ahead of tracker groups and problems" $ do
       let tracker =
@@ -3623,6 +3642,10 @@ main = hspec $ do
       snd (parseTrackerBody ["Milestones"] body) `shouldBe` []
       map (.trackerChildIssueNumber) (parseTrackerChildren ["Milestones"] body) `shouldBe` [2]
       map (.trackerChildIssueNumber) (parseTrackerChildren [] body) `shouldBe` []
+
+    it "recognizes a tracker heading that explicitly names children" $ do
+      let body = "## Remaining core work — children filed\n- [ ] #2 — A1: Valid"
+      map (.trackerChildIssueNumber) (parseTrackerChildren [] body) `shouldBe` [2]
 
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
@@ -4073,6 +4096,7 @@ isStandaloneIssue _ _ = False
 entryImplementationKey :: ColumnEntry -> Maybe Text
 entryImplementationKey (Tracked trackingContext _) = trackingContext.trackingPrimary.membershipChild.trackerChildImplementationKey
 entryImplementationKey (Standalone _) = Nothing
+entryImplementationKey (TrackerHeader _) = Nothing
 
 showText :: Show value => value -> Text
 showText = Data.Text.pack . show

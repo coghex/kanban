@@ -27,7 +27,7 @@ data ParseState = ParseState
 
 trackerFromIssue :: WorkflowConfig -> Issue -> Maybe Tracker
 trackerFromIssue config issue
-  | not (hasTrackerLabel config issue.issueLabels) = Nothing
+  | not (isTrackerIssue config issue) = Nothing
   | otherwise =
       let (children, diagnostics) = parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody
           childMap = Map.fromList [(child.trackerChildIssueNumber, child) | child <- children]
@@ -176,6 +176,7 @@ isTrackerHeading :: [Text] -> Text -> Bool
 isTrackerHeading additionalHeadings rawHeading =
   normalized == "children"
     || "children " `Text.isPrefixOf` normalized
+    || "children" `elem` Text.words normalized
     || normalized == "phase plan"
     || "phase plan " `Text.isPrefixOf` normalized
     || isNumberedPhase normalized
@@ -205,9 +206,21 @@ hasTrackerLabel config labels =
       (Set.map Text.toCaseFold config.trackerLabels)
       (Set.fromList (map (Text.toCaseFold . (.labelName)) labels))
 
+isTrackerIssue :: WorkflowConfig -> Issue -> Bool
+isTrackerIssue config issue =
+  hasTrackerLabel config issue.issueLabels
+    || (null issue.issueLabels && hasTrackerTitleHint issue.issueTitle)
+
+hasTrackerTitleHint :: Text -> Bool
+hasTrackerTitleHint title =
+  "epic:" `Text.isPrefixOf` normalized
+    || "[epic]" `Text.isPrefixOf` normalized
+  where
+    normalized = Text.toCaseFold (Text.stripStart title)
+
 trackerDiagnosticsForIssue :: WorkflowConfig -> Issue -> [TrackerDiagnostic]
 trackerDiagnosticsForIssue config issue
-  | hasTrackerLabel config issue.issueLabels = snd (parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody)
+  | isTrackerIssue config issue = snd (parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody)
   | otherwise = []
 
 renderTrackerDiagnostic :: TrackerDiagnostic -> Text

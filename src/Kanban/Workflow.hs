@@ -44,15 +44,30 @@ deriveBoard config snapshot =
           | tracker <- trackers,
             child <- Map.elems tracker.trackerChildren
         ]
+    visibleTrackerNumbers =
+      Set.fromList
+        [ tracker.trackerIssue.issueNumber
+          | tracker <- trackers,
+            child <- Map.elems tracker.trackerChildren,
+            child.trackerChildIssueNumber `Set.member` visibleChildNumbers
+        ]
+    visibleChildNumbers =
+      Set.fromList (map (.issueNumber) snapshot.snapshotIssues)
+        <> Set.fromList (concatMap (.pullRequestLinkedIssues) snapshot.snapshotPullRequests)
     ordinaryIssues =
       filter
         (\issue -> issue.issueNumber `Set.notMember` structuralTrackerNumbers)
         snapshot.snapshotIssues
     issueEntries =
-      [ ( if null issue.issueAssignees && issue.issueAssigneeOverflow == 0 then Issues else Active,
+      [ ( issueColumn issue,
           trackedEntry (Map.findWithDefault [] issue.issueNumber membershipsByChild) (IssueItem issue)
         )
         | issue <- ordinaryIssues
+      ]
+    trackerHeaderEntries =
+      [ (issueColumn tracker.trackerIssue, TrackerHeader tracker)
+        | tracker <- trackers,
+          tracker.trackerIssue.issueNumber `Set.notMember` visibleTrackerNumbers
       ]
     pullRequestEntries =
       [ ( classifyPullRequest config pullRequest,
@@ -62,8 +77,13 @@ deriveBoard config snapshot =
         )
         | pullRequest <- snapshot.snapshotPullRequests
       ]
-    entries = issueEntries <> pullRequestEntries
+    entries = trackerHeaderEntries <> issueEntries <> pullRequestEntries
     sortedEntries column = sortColumnEntries config [entry | (entryColumn, entry) <- entries, entryColumn == column]
+
+issueColumn :: Issue -> BoardColumn
+issueColumn issue
+  | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = Issues
+  | otherwise = Active
 
 trackedEntry :: [TrackerMembership] -> BoardItem -> ColumnEntry
 trackedEntry rawMemberships item = case uniqueMemberships rawMemberships of
@@ -84,12 +104,16 @@ sortColumnEntries config entries =
     <> concatMap snd ordinaryGroups
     <> ordinaryStandalone
   where
-    (tracked, standalone) = partitionEntries entries
+    (tracked, trackerHeaders, standalone) = partitionEntries entries
     grouped =
       Map.fromListWith combineGroup
-        [ (primaryTrackerNumber context, (context.trackingPrimary.membershipTracker, [entry]))
-          | entry@(Tracked context _) <- tracked
-        ]
+        ( [ (primaryTrackerNumber context, (context.trackingPrimary.membershipTracker, [entry]))
+            | entry@(Tracked context _) <- tracked
+          ]
+            <> [ (tracker.trackerIssue.issueNumber, (tracker, [TrackerHeader tracker]))
+                 | tracker <- trackerHeaders
+               ]
+        )
     sortedGroups =
       sortOn (\(tracker, groupEntries) -> trackerGroupKey config tracker groupEntries)
         [ (tracker, sortOn trackedChildKey groupEntries)
@@ -101,11 +125,12 @@ sortColumnEntries config entries =
     ordinaryStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) standalone)
     combineGroup (_, newEntries) (tracker, existingEntries) = (tracker, newEntries <> existingEntries)
 
-partitionEntries :: [ColumnEntry] -> ([ColumnEntry], [ColumnEntry])
-partitionEntries = foldr split ([], [])
+partitionEntries :: [ColumnEntry] -> ([ColumnEntry], [Tracker], [ColumnEntry])
+partitionEntries = foldr split ([], [], [])
   where
-    split entry@(Tracked _ _) (tracked, standalone) = (entry : tracked, standalone)
-    split entry@(Standalone _) (tracked, standalone) = (tracked, entry : standalone)
+    split entry@(Tracked _ _) (tracked, trackerHeaders, standalone) = (entry : tracked, trackerHeaders, standalone)
+    split (TrackerHeader tracker) (tracked, trackerHeaders, standalone) = (tracked, tracker : trackerHeaders, standalone)
+    split entry@(Standalone _) (tracked, trackerHeaders, standalone) = (tracked, trackerHeaders, entry : standalone)
 
 primaryTrackerNumber :: TrackingContext -> Int
 primaryTrackerNumber context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
@@ -120,6 +145,7 @@ trackedChildKey entry@(Tracked context _) =
   let (kind, natural, number, order) = implementationSortKey context.trackingPrimary.membershipChild
    in (if needsRereview (entryItem entry) then 0 else 1, kind, natural, number, order)
 trackedChildKey (Standalone _) = (1, 1, "", 0, 0)
+trackedChildKey (TrackerHeader _) = (1, 1, "", 0, 0)
 
 trackerGroupKey :: WorkflowConfig -> Tracker -> [ColumnEntry] -> (Int, Int, UTCTime, Int)
 trackerGroupKey config tracker entries =
@@ -220,3 +246,4 @@ mergeStateReady _ = False
 entryItem :: ColumnEntry -> BoardItem
 entryItem (Standalone item) = item
 entryItem (Tracked _ item) = item
+entryItem (TrackerHeader tracker) = IssueItem tracker.trackerIssue

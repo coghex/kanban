@@ -186,6 +186,7 @@ data TrackingContext = TrackingContext
 data ColumnEntry
   = Standalone BoardItem
   | Tracked TrackingContext BoardItem
+  | TrackerHeader Tracker
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 

@@ -570,8 +570,9 @@ Defaults:
 
 - An open issue carrying the `epic` label is a tracker.
 - Additional configurable tracker labels may be added, such as `tracker`.
-- A title beginning with `Epic:` or `[epic]` is a fallback hint, not sufficient
-  by itself when an explicit label is available.
+- A title beginning with `Epic:` or `[epic]` is a fallback hint when the issue
+  has no labels; an explicitly labelled issue uses labels as the source of
+  truth.
 
 ### Membership and order
 
@@ -631,7 +632,11 @@ network requests solely to reconcile progress text.
 
 The same tracker header may appear in more than one column when its children
 are split across Issues, Active, Reviewing, and Done. This repetition provides
-context; it does not duplicate or change the underlying work item.
+context; it does not duplicate or change the underlying work item. An open
+tracker with no children on the live board remains visible as a header in its
+own issue column, so it can still be expanded and inspected. A labeled or
+legacy-title tracker with no recognized child list is also shown as an empty
+header with its tracker diagnostic.
 
 A PR inherits tracker membership from its explicitly linked child issues. If a
 PR links children from more than one tracker, it receives an amber
