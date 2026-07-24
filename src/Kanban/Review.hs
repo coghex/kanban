@@ -1246,9 +1246,23 @@ confirmToolProcessTerminatedOrKeepTryingWith backgroundRetryDelay client managed
 -- already-running 'watchServerProcess' on the normal quit path, since the
 -- @process@ library documents @waitForProcess@ as safe to call for the
 -- same process from multiple threads at once.
+--
+-- 'forceCensusTick' runs immediately before that reaper thread's own
+-- 'waitForProcess' call, for exactly the same reason it runs before every
+-- other real reap of a managed leader's handle in this module (see
+-- 'watchServerProcess', 'runGitHubCommand', 'runCanonicalCommandWith',
+-- 'runAuthenticatedClaudeWith'): without it, a same-group child forked
+-- after the census's last observation, with the leader then reaped by
+-- *this exact reaper thread* before the background watcher's next
+-- scheduled tick, would never be witnessed while
+-- 'Kanban.Process.managedProcessHandleStillOpen' could still vouch for
+-- it -- permanently losing the not-yet-reaped proof for it, with no
+-- amount of background retrying in 'confirmToolProcessTerminatedOrKeepTrying'
+-- ever able to recover a child that was never recorded in the first
+-- place.
 stopReviewClient :: ReviewClient -> IO ()
 stopReviewClient client = do
-  void (forkIO (void (waitForProcess client.reviewProcess)))
+  void (forkIO (forceCensusTick client.reviewProcessManaged >> void (waitForProcess client.reviewProcess)))
   drainToolProcesses client
   confirmed <- confirmToolProcessTerminatedOrKeepTrying client client.reviewProcessManaged client.reviewProcessCensusPeek client.reviewProcessCensusStop
   unless confirmed $ do

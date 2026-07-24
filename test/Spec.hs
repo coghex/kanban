@@ -40,6 +40,7 @@ import Kanban.Process
     checkGroupMembershipWith,
     defaultProcessSnapshot,
     descendantProcesses,
+    forceCensusTick,
     identityForPid,
     interruptManagedProcess,
     interruptManagedProcessWith,
@@ -927,6 +928,63 @@ main = hspec $ do
         writeIORef revealChild False
         afterForce <- peekCensus
         afterForce `shouldSatisfy` any isChildOfLeader
+        confirmed <- killManagedProcessVerified managed
+        confirmed `shouldBe` True
+        finalSnapshot <- readProcessSnapshot
+        case finalSnapshot of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right snapshot -> filter isChildOfLeader snapshot `shouldBe` []
+
+    it "stopReviewClient's forceCensusTick-then-waitForProcess reaper composition still catches a hidden child, even though this same call reaps the leader" $ do
+      (_, _, _, process) <-
+        createProcess (proc "sh" ["-c", "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & sleep 100"]) {create_group = True}
+      Just leaderPid <- getPid process
+      let cleanup = void (try (signalProcessGroup sigKILL leaderPid) :: IO (Either IOException ()))
+      flip finally cleanup $ do
+        let isLeaderIdentity identity = identity.processIdentityPid == fromIntegral leaderPid
+            isChildOfLeader identity = identity.processIdentityGroupPid == fromIntegral leaderPid && not (isLeaderIdentity identity)
+        revealChild <- newIORef False
+        let -- Verification (and every scheduled tick) always sees the
+            -- leader -- this is a *confirmed* leader, not a presumed one,
+            -- so its seed alone would already, trivially, overlap itself
+            -- forever if that were the only thing being tested. The
+            -- child stays hidden from every snapshot except while
+            -- `revealChild` is briefly true, isolating whether it is
+            -- specifically the forced tick -- run in the exact position
+            -- stopReviewClient's reaper thread now runs it, immediately
+            -- before the real reap -- that catches it, not some
+            -- already-existing mechanism (the synchronous first tick, or
+            -- a coincidentally-landing scheduled one).
+            stubSnapshot = do
+              reveal <- readIORef revealChild
+              real <- readProcessSnapshot
+              pure (fmap (filter (\identity -> reveal || isLeaderIdentity identity)) real)
+        (managed, groupLeaderProblem) <- managedProcessWith stubSnapshot process
+        groupLeaderProblem `shouldBe` Nothing
+        -- Give the real child every chance to exist, and several
+        -- scheduled bootstrap-burst ticks every chance to run against the
+        -- still-hidden stub, before anything is revealed or reaped.
+        threadDelay 300000
+        -- Kills only the leader itself (not the group), so the real
+        -- child survives untouched -- simulating the leader exiting on
+        -- its own moments after forking it. The underlying OS process is
+        -- now dead, but this program's own ProcessHandle for it remains
+        -- open (not yet reaped) until the waitForProcess call below.
+        void (try (signalProcess sigKILL leaderPid) :: IO (Either IOException ()))
+        -- Mirrors stopReviewClient's own reaper thread exactly: reveal
+        -- the child for exactly the duration of the forced tick, force
+        -- it *immediately before* the real waitForProcess call that
+        -- reaps this leader, in the same thread, with nothing in
+        -- between -- proving this composition (not forceCensusTick in
+        -- isolation, and not merely calling it at some point) is what
+        -- stopReviewClient now relies on to avoid the round-29
+        -- regression, where the reaper thread's own waitForProcess could
+        -- close the not-yet-reaped window before any scheduled tick, or
+        -- a misordered forced one, ever ran.
+        writeIORef revealChild True
+        forceCensusTick managed
+        writeIORef revealChild False
+        void (waitForProcess process)
         confirmed <- killManagedProcessVerified managed
         confirmed `shouldBe` True
         finalSnapshot <- readProcessSnapshot
