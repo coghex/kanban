@@ -116,7 +116,7 @@ codexReviewerModel :: Text
 codexReviewerModel = "GPT-5.6-Terra xhigh"
 
 claudeReviewerModel :: Text
-claudeReviewerModel = "Opus 4.8 xhigh"
+claudeReviewerModel = "Opus 5 xhigh"
 
 solverLabel :: SolverBrand -> Text
 solverLabel CodexSolver = "codex · " <> codexSolverModel

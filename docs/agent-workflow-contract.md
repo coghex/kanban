@@ -101,7 +101,7 @@ manages or something I must set up myself."
   (`claude-plugin/plugins/kanban/scripts/review_pr.py`) is a deliberate,
   reviewed exception to this one nested-call policy: unlike the Codex
   plugin's otherwise-identical coordinator copy, it pins and verifies that
-  nested reviewer to the exact `gpt-5.6-terra`/`claude-opus-4-8` at `xhigh`
+  nested reviewer to the exact `gpt-5.6-terra`/`claude-opus-5` at `xhigh`
   values `codexModel`/`claudeModel`/`codexEffort`/`claudeEffort` already use
   for `PullRequestReview`/`PullRequestRereview`, and binds the verified
   model in the published `pr-review:v2` marker instead of `unspecified`.

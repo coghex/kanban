@@ -268,7 +268,7 @@ separate:
    unification) routes to the opposite brand for `pr-rereview` only, without
    editing the PR again, and removes the stale label once it publishes.
 
-Codex-origin PRs use Opus 4.8 xhigh for review and GPT-5.4 high for revision;
+Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision;
 Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
 revision. A missing or contradictory `pr-origin` marker fails visibly rather
 than guessing.
@@ -285,7 +285,7 @@ Each `r` invocation advances exactly one durable label-driven stage:
 1. With neither workflow label, the opposite brand performs the initial review.
    Claude-origin issues route to GPT-5.6-Sol xhigh, Codex-origin issues route
    to Claude Fable 5 xhigh, and unmarked issues require both. GPT-5.6-Terra and
-   Claude Opus 4.8 remain sanctioned fallback models
+   Claude Opus 5 remain sanctioned fallback models
    (`tools/approve_issues.py`) so historical review markers keep validating
    after either default changes.
 2. `reviewed:changes` switches back to the author brand for revision:
@@ -1115,7 +1115,7 @@ The first solve/autosolve-compatible slice is implemented.
   that ordinary solve workflow while Kanban owns the subsequent bounded
   review/fix loop. Escape cancels either chooser.
 - Canonical solvers are GPT-5.4 high and Sonnet 5 high.
-- Canonical opposite-brand PR reviewers are Opus 4.8 xhigh for Codex-origin
+- Canonical opposite-brand PR reviewers are Opus 5 xhigh for Codex-origin
   work and GPT-5.6-Terra xhigh for Claude-origin work.
 - Solver processes stream structured CLI output into a bounded, hideable
   overlay, retain their resumable session identifiers, and run as owned process

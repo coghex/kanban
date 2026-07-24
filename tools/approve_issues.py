@@ -38,11 +38,11 @@ DEFAULT_INTERVAL_SECONDS = 60
 PRIMARY_CODEX_MODEL = "gpt-5.6-sol"
 LEGACY_CODEX_MODEL = "gpt-5.6-terra"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
-# Claude Fable 5 is the canonical Claude-side issue reviewer. Claude Opus 4.8
+# Claude Fable 5 is the canonical Claude-side issue reviewer. Claude Opus 5
 # remains a sanctioned fallback and is retained below so historical review
 # markers continue to validate after this default changes.
 PRIMARY_CLAUDE_MODEL = "claude-fable-5"
-FALLBACK_CLAUDE_MODEL = "claude-opus-4-8"
+FALLBACK_CLAUDE_MODEL = "claude-opus-5"
 CODEX_MODEL = os.environ.get("APPROVE_ISSUES_CODEX_MODEL", PRIMARY_CODEX_MODEL)
 CODEX_EFFORT = "xhigh"
 CLAUDE_MODEL = os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)
@@ -548,8 +548,8 @@ def reviewer_display_names(key: str) -> list[str]:
     if key == CODEX_REVIEWER.key and "GPT-5.6-Terra" not in names:
         names.append("GPT-5.6-Terra")
     # Opus-authored markers remain parseable after Fable became canonical.
-    if key == CLAUDE_REVIEWER.key and "Claude Opus 4.8" not in names:
-        names.append("Claude Opus 4.8")
+    if key == CLAUDE_REVIEWER.key and "Claude Opus 5" not in names:
+        names.append("Claude Opus 5")
     return names
 
 

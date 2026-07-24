@@ -40,7 +40,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # the self-reviewed known-origin case, invoke_codex/invoke_claude below
 # fully construct the subprocess they spawn, so — for this plugin's
 # bundled coordinator only — they pin it and can therefore verify and
-# publish it, matching the exact gpt-5.6-terra/claude-opus-4-8 at xhigh
+# publish it, matching the exact gpt-5.6-terra/claude-opus-5 at xhigh
 # values src/Kanban/PullRequestFlow.hs's codexModel/claudeModel/
 # codexEffort/claudeEffort already use for PullRequestReview/
 # PullRequestRereview. This is a deliberate, reviewed divergence from
@@ -52,7 +52,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # visibility — is what pins that one.
 CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"
 CODEX_NESTED_REVIEW_EFFORT = "xhigh"
-CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-4-8"
+CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
 
 REVIEW_SCHEMA: dict[str, Any] = {

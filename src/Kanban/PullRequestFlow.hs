@@ -215,7 +215,7 @@ codexEffort _ = "xhigh"
 
 claudeModel :: PullRequestAction -> String
 claudeModel PullRequestRevision = "claude-sonnet-5"
-claudeModel _ = "claude-opus-4-8"
+claudeModel _ = "claude-opus-5"
 
 claudeEffort :: PullRequestAction -> String
 claudeEffort _ = "xhigh"

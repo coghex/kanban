@@ -2601,14 +2601,14 @@ main = hspec $ do
 
     it "decodes and presents the final structured result as readable review metadata" $ do
       let payload =
-            "{\"issue\":844,\"stage\":\"review\",\"approved\":false,\"reviewerRoute\":\"codex-origin → Opus 4.8\",\"models\":[\"Opus 4.8 xhigh\"],\"commentUrl\":\"https://example.test/issues/844#issuecomment-1\",\"blockingReasons\":[\"Clarify the save-version migration.\",\"Name the regression probe.\"]}"
+            "{\"issue\":844,\"stage\":\"review\",\"approved\":false,\"reviewerRoute\":\"codex-origin → Opus 5\",\"models\":[\"Opus 5 xhigh\"],\"commentUrl\":\"https://example.test/issues/844#issuecomment-1\",\"blockingReasons\":[\"Clarify the save-version migration.\",\"Name the regression probe.\"]}"
           expected =
             ReviewResult
               { reviewResultIssue = 844,
                 reviewResultStage = InitialReview,
                 reviewResultApproved = False,
-                reviewResultReviewerRoute = "codex-origin → Opus 4.8",
-                reviewResultModels = ["Opus 4.8 xhigh"],
+                reviewResultReviewerRoute = "codex-origin → Opus 5",
+                reviewResultModels = ["Opus 5 xhigh"],
                 reviewResultCommentUrl = Just "https://example.test/issues/844#issuecomment-1",
                 reviewResultBlockingReasons = ["Clarify the save-version migration.", "Name the regression probe."]
               }
@@ -2617,8 +2617,8 @@ main = hspec $ do
         `shouldBe` Data.Text.unlines
           [ "Review result",
             "  Outcome: CHANGES REQUESTED",
-            "  Reviewer route: codex-origin → Opus 4.8",
-            "  Models: Opus 4.8 xhigh",
+            "  Reviewer route: codex-origin → Opus 5",
+            "  Models: Opus 5 xhigh",
             "  Comment: https://example.test/issues/844#issuecomment-1",
             "  Blocking reasons:",
             "    • Clarify the save-version migration.",
@@ -2635,14 +2635,14 @@ main = hspec $ do
 
     it "formats the canonical v2 gate without exposing raw JSON" $ do
       let payload =
-            "{\"approved\":false,\"issue\":844,\"origin\":\"codex\",\"required_reviewers\":\"claude\",\"required_models\":\"claude-opus-4-8@xhigh\",\"reasons\":[\"latest current review verdict is CHANGES_REQUESTED\"]}"
+            "{\"approved\":false,\"issue\":844,\"origin\":\"codex\",\"required_reviewers\":\"claude\",\"required_models\":\"claude-opus-5@xhigh\",\"reasons\":[\"latest current review verdict is CHANGES_REQUESTED\"]}"
           expected =
             CanonicalIssueReviewResult
               { canonicalReviewApproved = False,
                 canonicalReviewIssue = 844,
                 canonicalReviewOrigin = "codex",
                 canonicalReviewRequiredReviewers = Just "claude",
-                canonicalReviewRequiredModels = Just "claude-opus-4-8@xhigh",
+                canonicalReviewRequiredModels = Just "claude-opus-5@xhigh",
                 canonicalReviewReasons = ["latest current review verdict is CHANGES_REQUESTED"]
               }
       decodeCanonicalIssueReviewResult payload `shouldBe` Right expected
@@ -2652,7 +2652,7 @@ main = hspec $ do
             "  Outcome: CHANGES REQUESTED",
             "  Origin: codex",
             "  Reviewer route: claude",
-            "  Models: claude-opus-4-8@xhigh",
+            "  Models: claude-opus-5@xhigh",
             "  Blocking reasons:",
             "    • latest current review verdict is CHANGES_REQUESTED"
           ]
@@ -2858,7 +2858,7 @@ main = hspec $ do
       codexSolverModel `shouldBe` "gpt-5.4 high"
       claudeSolverModel `shouldBe` "Sonnet 5 high"
       codexReviewerModel `shouldBe` "GPT-5.6-Terra xhigh"
-      claudeReviewerModel `shouldBe` "Opus 4.8 xhigh"
+      claudeReviewerModel `shouldBe` "Opus 5 xhigh"
 
     it "launches each solver with its pinned model and effort" $ do
       let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
@@ -3132,7 +3132,7 @@ main = hspec $ do
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
 
     it "pins canonical reviewer and reviser models" $ do
-      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-4-8", "--effort", "xhigh"]
+      pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-5", "--effort", "xhigh"]
       pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
       pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
       pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]

@@ -129,7 +129,7 @@ triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
 self-reviewed path, this coordinator fully constructs that nested
 subprocess call itself, so — for this plugin's bundled coordinator only,
 per a round-2 review finding on issue #77 — it pins that nested reviewer to
-the same canonical `gpt-5.6-terra`/`claude-opus-4-8` at `xhigh` values
+the same canonical `gpt-5.6-terra`/`claude-opus-5` at `xhigh` values
 `src/Kanban/PullRequestFlow.hs` already uses for Kanban's own top-level
 review invocation, and binds the verified model in the published
 `pr-review:v2` marker instead of `unspecified`. This is a deliberate,

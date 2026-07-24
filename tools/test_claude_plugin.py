@@ -570,13 +570,13 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         pr_flow_source = PR_FLOW_HS.read_text(encoding="utf-8")
         self.assertIn('codexModel _ = "gpt-5.6-terra"', pr_flow_source)
         self.assertIn('codexEffort _ = "xhigh"', pr_flow_source)
-        self.assertIn('claudeModel _ = "claude-opus-4-8"', pr_flow_source)
+        self.assertIn('claudeModel _ = "claude-opus-5"', pr_flow_source)
         self.assertIn('claudeEffort _ = "xhigh"', pr_flow_source)
 
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"', coordinator_source)
         self.assertIn('CODEX_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
-        self.assertIn('CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-4-8"', coordinator_source)
+        self.assertIn('CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"', coordinator_source)
         self.assertIn('CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"', coordinator_source)
 
     def test_invoke_codex_and_invoke_claude_pass_the_pinned_model_flags(self):
