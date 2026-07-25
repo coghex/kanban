@@ -213,7 +213,12 @@ commands against the responsibility matrix in
 every declared asset must exist, no undeclared drafting command may appear,
 the exact `<!-- issue-origin:claude -->` marker literal must be present in each
 issue-creating command, and the Claude-only `/draft-issues` and unpackaged
-`/epic` boundaries must remain stated.
+`/epic` boundaries must remain stated. It also pins the optional scope gate
+([docs/drafting-workflow-contract.md §4](../docs/drafting-workflow-contract.md#4-scope-gate)):
+`/issue`, `/draft-issues`, and `/autoissue` must state the same gate and
+exemption rules as the document, each gate instruction must follow the guard
+that makes it apply only when the consuming repo declares a gate, and
+`/issue-review` must stay free of gate language.
 
 ## Project-scoped locations
 

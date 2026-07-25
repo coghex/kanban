@@ -20,9 +20,10 @@ Scope boundaries:
   `tools/test_codex_plugin.py`. See
   [agent-workflow-contract.md](agent-workflow-contract.md) for the workflows
   Kanban does invoke by name.
-- This document defines responsibilities and boundaries only. It does not
-  define scope or priority gating for candidate selection; that remains
-  future work tracked separately.
+- This document defines responsibilities, boundaries, and the scope gate
+  (§4) that a consuming project may declare to narrow which discretionary
+  candidates the hunters propose. It does not define any project's gate; that
+  content belongs in that project's own agent instructions.
 
 ## 2. Declared assets
 
@@ -41,7 +42,7 @@ codex | $issue-review | codex-plugin/plugins/kanban/skills/issue-review/SKILL.md
 ```
 
 The list above is exhaustive. A drafting or issue-review asset that exists in
-either plugin without a row here fails the completeness check in §7, and so
+either plugin without a row here fails the completeness check in §8, and so
 does a row whose path is missing from the tracked tree.
 
 ## 3. Responsibility matrix
@@ -98,14 +99,14 @@ neither. Each:
 
 The full sequence is therefore draft → signoff → create → canonical review.
 Each `autoissue` workflow preserves whichever origin marker its delegated
-drafting workflow produced (§4); it never rewrites or substitutes one.
+drafting workflow produced (§5); it never rewrites or substitutes one.
 
 ### 3.4 The readiness gate: `/issue-review` and `$issue-review`
 
 `/issue-review` and `$issue-review` are the **direct** canonical
 readiness-gate workflows for one numbered issue. They do not hunt for, draft,
 or create issues. Each delegates the whole verdict to the canonical backend
-(§5) so that a manual review and the managed daemon produce identical
+(§6) so that a manual review and the managed daemon produce identical
 provenance, structured comment, fingerprint, and labels; neither may post a
 competing review or set a verdict label itself. On `CHANGES_REQUESTED` they
 report and route the issue to the separate `issue-rereview` repair workflow,
@@ -122,7 +123,72 @@ doing, so it does not belong to this drafting contract and is deliberately
 are the discretionary hunters; `/epic` only decomposes an arc the user
 supplied.
 
-## 4. Origin markers
+## 4. Scope gate
+
+Candidate selection is **ungated by default**. A consuming project that is in
+a declared phase can narrow the discretionary work the hunters propose by
+stating that phase in its own agent instructions. Nothing in this repository
+defines any project's gate, and no gate is machine-parsed: prose agent
+instructions are the whole interface.
+
+The rules in §4.1–§4.5 are carried by every asset that performs or drives
+discretionary candidate discovery — `/issue`, `$issue`, `/draft-issues`,
+`/autoissue`, and `$autoissue`. The `autoissue` workflows carry them because
+they drive discovery through their delegate (§3.3); each must surface the
+deferrals its delegate reports and pass a user override back to it rather
+than resolving one itself. `/issue-review` and `$issue-review` judge an
+already-filed issue instead of hunting candidates, so the gate does not reach
+them, and `/epic` is excluded for the same reason it is unpackaged (§3.5): it
+decomposes a user-supplied arc rather than independently selecting what work
+is worth doing.
+
+### 4.1 What counts as a gate
+
+Treat only an explicit, current, normative scope or priority instruction in
+the repo's agent instructions (`CLAUDE.md`, `AGENTS.md`, or whichever
+equivalent that workflow consulted) as a scope gate. Descriptive roadmap or
+project-status prose is not a gate: a section narrating what a project has
+built, or hopes to build someday, states no current instruction and must not
+change selection.
+
+### 4.2 No gate: unchanged behavior
+
+If no such instruction is present, there is no gate: candidate selection,
+hunting sources, and reporting stay exactly as each workflow otherwise
+specifies. Every gate instruction in this section is conditional on a gate
+being present, which is what makes the absent-gate case a genuine no-op. That
+conditionality — not output comparison — is the reviewable property, because
+agent runs are nondeterministic: this contract guarantees unchanged policy,
+sources, and reporting behavior, never an identical candidate list across
+runs.
+
+### 4.3 Exemptions
+
+A gate constrains discretionary new work only. Crashes, regressions, data
+loss or corruption, broken CI gates, and security issues remain eligible
+regardless of any gate. A declared phase states which improvements a project
+wants pursued; it is never permission to leave that project broken, losing
+data, or exploitable.
+
+### 4.4 Deferred candidates are reported, not dropped
+
+When a gate defers a discretionary candidate, report it rather than dropping
+it: identify the candidate with enough evidence to recognize it, name the
+gate that defers it, and say it was deferred by that gate. The user may
+override the deferral at signoff, and an overridden candidate becomes
+eligible again. The stop-and-ask interaction each hunting workflow already
+performs (§3.1, §3.2) is that override surface; the gate must not bypass,
+replace, or add a confirmation step to it.
+
+### 4.5 Selection only
+
+A discretionary candidate that falls inside a declared scope stays eligible.
+The gate changes selection only — a candidate that passes it is verified,
+deduplicated, and drafted to exactly the same hand-off bar as any other
+candidate, through the same hunting sources, the same deduplication, the same
+body template, and the same signoff flow.
+
+## 5. Origin markers
 
 Every issue a packaged drafting workflow creates ends its body with an
 origin marker. `tools/approve_issues.py` (`ORIGIN_RE`) parses it to route the
@@ -139,7 +205,7 @@ requirement of the issue itself. `tools/test_drafting_workflow_contract.py`
 asserts these exact literals appear in the packaged assets of the matching
 brand, so drift from the parser's accepted format fails CI.
 
-## 5. Portable canonical backend
+## 6. Portable canonical backend
 
 The packaged issue-review workflows — including `autoissue`'s immediate
 review handoff — resolve the canonical backend the same way
@@ -164,7 +230,7 @@ pins carried by the pre-vendoring sources were dropped on purpose, matching
 and the forbidden-frontmatter/forbidden-manifest policies in
 `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py`.
 
-## 6. Project-scoped locations
+## 7. Project-scoped locations
 
 The declared assets in §2 live inside each plugin's own tracked tree:
 
@@ -183,7 +249,7 @@ planned opt-in cross-project setup work (issue #78) installs or links for
 other repositories. This document is the inventory that flow consumes; it is
 not itself an installer.
 
-## 7. Completeness check
+## 8. Completeness check
 
 `tools/test_drafting_workflow_contract.py` (discovered by
 `python3 -m unittest discover -s tools -p 'test_*.py'`, which CI already
@@ -192,15 +258,26 @@ runs) parses §2 and fails if:
 - a declared asset path is absent from the tracked tree;
 - a drafting or issue-review asset exists under either plugin that §2 does
   not declare;
-- a required origin-marker literal (§4) is missing from this document or from
+- a required origin-marker literal (§5) is missing from this document or from
   a packaged asset of the matching brand;
 - this document no longer states the Claude-only `/draft-issues` boundary
   (§3.2) or the non-hunting, unpackaged `/epic` boundary (§3.5);
 - the packaged `autoissue` assets no longer describe delegating drafting,
   stopping without review before creation, creating after signoff, and
   immediately running the canonical review without a second confirmation;
+- this document or any of the five discretionary-discovery assets drops a
+  scope-gate rule from §4 — what counts as a gate, the absent-gate no-op, the
+  correctness/stability/data-integrity/broken-CI/security exemptions, the
+  overridable deferral report, or selection-only — so the document and those
+  five assets cannot state different gate or exemption rules;
+- a discretionary-discovery asset states a gate instruction ahead of the
+  absent-gate guard that conditions it, which is the mechanical form of §4.2's
+  requirement that every gate instruction be conditional on a gate;
+- an `issue-review` asset grows scope-gate language, which would mean the gate
+  had leaked into a workflow that judges filed issues rather than hunting
+  candidates (§4);
 - a packaged issue-review or `autoissue` asset resolves the backend anywhere
-  other than the documented Kanban-managed install path (§5).
+  other than the documented Kanban-managed install path (§6).
 
 The discovery, frontmatter, and no-personal-path coverage for these assets
 lives with the rest of each plugin's structural coverage in

@@ -13,6 +13,12 @@ origin-marker literal cannot drift from what tools/approve_issues.py parses,
 and the document cannot silently drop the Claude-only /draft-issues boundary
 or the non-hunting, unpackaged /epic boundary.
 
+Also guards issue #116's scope gate: the canonical document and the five
+assets that perform or drive discretionary candidate discovery must state the
+same gate and exemption rules, every gate instruction must be conditional on
+a gate being present, and the gate must stay out of the issue-review
+workflows.
+
 Discovery, frontmatter, and no-personal-path coverage for the same assets
 lives in tools/test_claude_plugin.py and tools/test_codex_plugin.py; their
 external-command and user-scoped-path surface is reconciled against the §4
@@ -75,6 +81,52 @@ ISSUE_REVIEW_BACKEND_ASSETS = (
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
 )
 
+# Issue #116: the assets that perform or drive discretionary candidate
+# discovery, and therefore carry the §4 scope gate. The autoissue assets are
+# included because they drive discovery through their delegate.
+SCOPE_GATE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "claude-plugin/plugins/kanban/commands/draft-issues.md",
+    "claude-plugin/plugins/kanban/commands/autoissue.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+)
+
+# The issue-review workflows judge an already-filed issue rather than hunting
+# candidates, so the gate must not reach them (§4).
+SCOPE_GATE_FREE_ASSETS = ISSUE_REVIEW_BACKEND_ASSETS
+
+# One rule per requirement of issue #116, asserted against every scope-gate
+# asset AND the document, so the two can never state different gate or
+# exemption rules. Lowercase: compared against canonical() output.
+SCOPE_GATE_RULES = (
+    # R1: what is and is not a gate.
+    "only an explicit, current, normative scope or priority instruction",
+    "descriptive roadmap or project-status prose is not a gate",
+    # R2: absent-gate behavior is unchanged.
+    "if no such instruction is present, there is no gate",
+    "candidate selection, hunting sources, and reporting stay exactly as",
+    # R3: the exemptions a gate never overrides.
+    "crashes, regressions, data loss or corruption, broken ci gates, "
+    "and security issues remain eligible",
+    # R4: deferrals are reported, recognizable, attributed, and overridable.
+    "report it rather than dropping it",
+    "name the gate that defers it",
+    "may override the deferral at signoff",
+    # R5: the gate changes selection, not drafting quality.
+    "the gate changes selection only",
+)
+
+# The absent-gate guard, and the instructions that only make sense once a
+# gate exists. Requirement 2 says every gate instruction must be conditional
+# on a gate being present; stating the guard ahead of both is the mechanical
+# form of that review criterion.
+SCOPE_GATE_GUARD = "if no such instruction is present, there is no gate"
+GATE_CONDITIONED_INSTRUCTIONS = (
+    "a gate constrains discretionary new work only",
+    "when a gate defers a discretionary candidate",
+)
+
 # The Kanban-managed install path every packaged issue-review surface must
 # resolve (docs/agent-workflow-contract.md §3), and the pre-migration
 # compatibility launcher none of them may reference.
@@ -100,6 +152,13 @@ def normalized(text: str) -> str:
     """Collapse whitespace and drop markdown emphasis so an assertion on a
     documented boundary survives reflowing a paragraph or bolding a word."""
     return re.sub(r"\s+", " ", text.replace("*", "").replace("`", ""))
+
+
+def canonical(text: str) -> str:
+    """normalized() plus case folding, for prose asserted across six files
+    where the same rule legitimately starts a sentence in one and appears
+    mid-sentence in another."""
+    return normalized(text).lower()
 
 
 def parse_declared_assets():
@@ -285,6 +344,90 @@ class DocumentedBoundaryTests(unittest.TestCase):
 
     def test_document_states_the_haskell_parity_exclusion(self):
         self.assertIn("user- or daemon-invoked, never spawned by Kanban's own CLI", self.text)
+
+
+class ScopeGateTests(unittest.TestCase):
+    """Issue #116's scope gate. There is no behavioral prompt-testing harness
+    here, so the reviewable property is the contract text itself: the document
+    and all five discretionary-discovery assets must state the same gate and
+    exemption rules, every gate instruction must be conditional on a gate
+    being present, and the gate must not leak into the issue-review workflows
+    that judge filed issues rather than hunting candidates."""
+
+    def setUp(self):
+        self.document = canonical(contract_text())
+        self.assets = {
+            path: canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            for path in SCOPE_GATE_ASSETS
+        }
+
+    def test_document_states_every_scope_gate_rule(self):
+        for rule in SCOPE_GATE_RULES:
+            self.assertIn(
+                rule,
+                self.document,
+                f"docs/drafting-workflow-contract.md §4 no longer states: {rule!r}",
+            )
+
+    def test_every_discretionary_asset_states_every_scope_gate_rule(self):
+        missing = []
+        for path in SCOPE_GATE_ASSETS:
+            for rule in SCOPE_GATE_RULES:
+                if rule not in self.assets[path]:
+                    missing.append(f"{path}: missing scope-gate rule {rule!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_every_gate_instruction_is_conditioned_on_a_gate_being_present(self):
+        # The document and each asset must state the absent-gate guard before
+        # any instruction that constrains or defers, so no reader reaches a
+        # gate instruction without having been told it applies only when a
+        # gate exists.
+        sources = dict(self.assets)
+        sources["docs/drafting-workflow-contract.md"] = self.document
+        offenders = []
+        for path, text in sorted(sources.items()):
+            guard_at = text.find(SCOPE_GATE_GUARD)
+            if guard_at == -1:
+                offenders.append(f"{path}: states no absent-gate guard")
+                continue
+            for instruction in GATE_CONDITIONED_INSTRUCTIONS:
+                at = text.find(instruction)
+                if at == -1:
+                    offenders.append(f"{path}: missing gate instruction {instruction!r}")
+                elif at < guard_at:
+                    offenders.append(
+                        f"{path}: states {instruction!r} before the absent-gate guard, "
+                        "so the instruction reads as unconditional"
+                    )
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_document_refuses_to_promise_identical_candidate_output(self):
+        # Requirement 2 preserves policy, sources, and reporting behavior —
+        # not an identical candidate list, which nondeterministic agent runs
+        # cannot deliver and this contract must not claim.
+        self.assertIn("agent runs are nondeterministic", self.document)
+        self.assertIn("never an identical candidate list across runs", self.document)
+
+    def test_scope_gate_does_not_reach_the_issue_review_workflows(self):
+        for path in SCOPE_GATE_FREE_ASSETS:
+            text = canonical((REPO_ROOT / path).read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "scope gate",
+                text,
+                f"{path} judges a filed issue rather than hunting candidates; "
+                "the scope gate must not reach it",
+            )
+
+    def test_document_scopes_the_gate_to_discovery_and_excludes_epic(self):
+        self.assertIn("candidate selection is ungated by default", self.document)
+        self.assertIn(
+            "nothing in this repository defines any project's gate", self.document
+        )
+        # /epic is excluded on the same behavioral rationale as §3.5.
+        self.assertIn(
+            "decomposes a user-supplied arc rather than independently selecting",
+            self.document,
+        )
 
 
 class AutoissueSequenceTests(unittest.TestCase):
