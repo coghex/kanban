@@ -59,9 +59,9 @@ import Control.Exception (IOException, try)
 import Data.Aeson (Value (..), eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
-import Data.Char (isDigit)
+import Data.Char (isDigit, isSpace)
 import Data.Foldable (toList)
-import Data.List (find)
+import Data.List (find, nub)
 import Data.Maybe (isNothing, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -176,15 +176,20 @@ data PreflightCheck = PreflightCheck
   }
   deriving stock (Eq, Show)
 
+-- | Which agent authored an issue, since both issue-side actions route
+-- their provider work by it. 'IssueOriginConflicting' mirrors the backend's
+-- own error case: a body declaring both origins.
+data IssueOrigin
+  = IssueOriginCodex
+  | IssueOriginClaude
+  | IssueOriginUnmarked
+  | IssueOriginConflicting
+  deriving stock (Eq, Show)
+
 -- | The in-app AI actions launched from the board, each reported
 -- separately: an action is only as ready as the dependencies it actually
 -- reaches for. The PR drainer is deliberately absent — it keeps its own
 -- dedicated install and status flow.
--- | Which agent authored an issue, since both issue-side actions route
--- their provider work by it.
-data IssueOrigin = IssueOriginCodex | IssueOriginClaude | IssueOriginUnmarked
-  deriving stock (Eq, Show)
-
 data PreflightAction
   = ActionIssueReview IssueOrigin
   | ActionIssueRevision IssueOrigin
@@ -193,11 +198,37 @@ data PreflightAction
   | ActionPullRequestFlow PullRequestOrigin PullRequestAction
   deriving stock (Eq, Show)
 
+-- | Read an issue's origin the way the backend that routes on it does.
+-- Disagreeing here would be worse than not checking at all: a marker the
+-- backend honours but this missed would make preflight demand a provider
+-- the review is never going to spawn, and block an action that would have
+-- worked.
 issueOriginFromBody :: Text -> IssueOrigin
-issueOriginFromBody body
-  | "<!-- issue-origin:claude -->" `Text.isInfixOf` body = IssueOriginClaude
-  | "<!-- issue-origin:codex -->" `Text.isInfixOf` body = IssueOriginCodex
-  | otherwise = IssueOriginUnmarked
+issueOriginFromBody body = case declaredIssueOrigins body of
+  [] -> IssueOriginUnmarked
+  [single]
+    | single == "claude" -> IssueOriginClaude
+    | single == "codex" -> IssueOriginCodex
+  _ -> IssueOriginConflicting
+
+-- | Every distinct origin a body declares, parsed exactly as
+-- @ORIGIN_RE@/@issue_origin@ in @tools\/approve_issues.py@ do:
+-- @\<!--\\s*issue-origin:(claude|codex)\\s*--\>@, matched case-insensitively.
+declaredIssueOrigins :: Text -> [Text]
+declaredIssueOrigins = nub . scan . Text.toLower
+  where
+    scan remaining =
+      let (_, rest) = Text.breakOn "<!--" remaining
+       in if Text.null rest
+            then []
+            else
+              let body = Text.drop 4 rest
+               in maybe id (:) (markerOrigin body) (scan body)
+    markerOrigin body = do
+      value <- Text.stripPrefix "issue-origin:" (Text.dropWhile isSpace body)
+      origin <- find (`Text.isPrefixOf` value) ["claude", "codex"]
+      let closing = Text.dropWhile isSpace (Text.drop (Text.length origin) value)
+      if "-->" `Text.isPrefixOf` closing then Just origin else Nothing
 
 -- | The provider CLIs the canonical backend actually spawns for a review or
 -- rereview of this issue: the opposite brand from its origin, or — under
@@ -209,6 +240,10 @@ canonicalReviewBrands :: IssueOrigin -> [SolverBrand]
 canonicalReviewBrands IssueOriginClaude = [CodexSolver]
 canonicalReviewBrands IssueOriginCodex = [ClaudeSolver]
 canonicalReviewBrands IssueOriginUnmarked = [CodexSolver, ClaudeSolver]
+-- The backend rejects a body declaring both origins before it reaches any
+-- reviewer, so no provider is required. Its own error names the real
+-- problem, which is a malformed issue rather than missing setup.
+canonicalReviewBrands IssueOriginConflicting = []
 
 -- | Which brand authors a revision's amendment content. A Claude-origin
 -- issue routes that authoring through @kanban_run_claude@, so its revision
@@ -263,6 +298,7 @@ originLabel :: IssueOrigin -> Text
 originLabel IssueOriginCodex = "codex-origin"
 originLabel IssueOriginClaude = "claude-origin"
 originLabel IssueOriginUnmarked = "unmarked"
+originLabel IssueOriginConflicting = "conflicting-origin"
 
 -- | The versions the tracked plugin bundles were verified against
 -- (@codex-plugin\/README.md@, @claude-plugin\/README.md@); older releases

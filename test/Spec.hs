@@ -5630,6 +5630,34 @@ main = hspec $ do
         issueOriginFromBody "Body\n\n<!-- issue-origin:claude -->" `shouldBe` IssueOriginClaude
         issueOriginFromBody "Body\n\n<!-- issue-origin:codex -->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "Body with no marker" `shouldBe` IssueOriginUnmarked
+      -- The backend routes on ORIGIN_RE, which is case-insensitive and
+      -- allows whitespace on both sides of the value. Reading it more
+      -- strictly here would demand a provider the review never spawns.
+      it "accepts every marker spelling the backend accepts" $ do
+        issueOriginFromBody "<!-- issue-origin:CLAUDE -->" `shouldBe` IssueOriginClaude
+        issueOriginFromBody "<!-- ISSUE-ORIGIN:Claude -->" `shouldBe` IssueOriginClaude
+        issueOriginFromBody "<!--issue-origin:codex-->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "<!--   issue-origin:codex   -->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "<!--\n  issue-origin:codex\n-->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "a <!-- issue-origin:codex --> b <!-- issue-origin:CODEX -->"
+          `shouldBe` IssueOriginCodex
+      it "rejects text that only looks like a marker" $ do
+        issueOriginFromBody "issue-origin:claude" `shouldBe` IssueOriginUnmarked
+        issueOriginFromBody "<!-- issue-origin:claudex -->" `shouldBe` IssueOriginUnmarked
+        issueOriginFromBody "<!-- issue-origin: claude -->" `shouldBe` IssueOriginUnmarked
+        issueOriginFromBody "<!-- issue-origin:claude" `shouldBe` IssueOriginUnmarked
+      -- The backend raises on a body declaring both, before reaching any
+      -- reviewer, so preflight must not demand a provider for it either.
+      it "mirrors the backend's conflicting-marker case" $ do
+        let conflicting = "<!-- issue-origin:claude -->\n<!-- issue-origin:codex -->"
+        issueOriginFromBody conflicting `shouldBe` IssueOriginConflicting
+        canonicalReviewBrands IssueOriginConflicting `shouldBe` []
+        blockedProblems readyPreflightEnvironment (ActionIssueReview IssueOriginConflicting)
+          `shouldBe` []
+        blockedProblems
+          (withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing})
+          (ActionIssueReview IssueOriginConflicting)
+          `shouldBe` []
       it "routes the revision amendment author by that origin" $ do
         revisionAuthorBrand IssueOriginClaude `shouldBe` ClaudeSolver
         revisionAuthorBrand IssueOriginCodex `shouldBe` CodexSolver
