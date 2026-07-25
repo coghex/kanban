@@ -5338,6 +5338,48 @@ main = hspec $ do
             Right identities -> identityForPid descendantPid identities `shouldBe` Nothing
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
+    it "does not mistake a gh that is still exiting for a group it leaked" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+        -- Closing the output is not exiting. This gh answers, closes both
+        -- streams so the drain sees EOF, and only then takes its time going
+        -- away. Censusing at EOF would find the leader itself still sitting
+        -- in the group and refuse a perfectly good fetch -- which is why the
+        -- census waits for the leader to leave the table first.
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s' '" <> emptyGraphqlPage <> "'",
+              "exec 1>&- 2>&-",
+              "sleep 0.4",
+              "exit 0"
+            ]
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Right _) -> pure ()
+                other -> expectationFailure ("expected the slow-exiting gh to be accepted, got " <> show other)
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
+    it "keeps the record when it cannot census the group of a gh that exited normally" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- gh answers and exits perfectly, but ps is unavailable, so nothing
+        -- can establish that the group it led is empty. Reading "no census"
+        -- as "nothing there" is what would drop the guard here.
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
+            createDirectoryIfMissing True binaryRoot
+            ByteString.writeFile (binaryRoot </> "ps") (ByteString.unlines ["#!/bin/sh", "exit 1"])
+            setFileMode (binaryRoot </> "ps") 0o700
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Left providerError) ->
+                providerError.providerErrorMessage `shouldMention` "could not confirm stopped"
+              other -> expectationFailure ("expected the uncensusable group to be reported, got " <> show other)
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+
     it "resolves each page's group before the next page starts, so a paginated fetch never guards two at once" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"

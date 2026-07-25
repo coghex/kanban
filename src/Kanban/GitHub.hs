@@ -19,7 +19,7 @@ module Kanban.GitHub
   )
 where
 
-import Control.Concurrent (forkIO, forkIOWithUnmask)
+import Control.Concurrent (forkIO, forkIOWithUnmask, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
 import Control.Monad (unless, void)
@@ -297,13 +297,8 @@ runGh guard repository arguments = do
       -- yet.
       capturedOutput <- takeMVar standardOutput >>= either throwIO pure
       capturedError <- takeMVar standardError >>= either throwIO pure
-      -- Censused before the handle is reaped. Until then the leader's PID is
-      -- still allocated, so the pgid cannot have been reissued and everything
-      -- in it is genuinely this fetch's -- which is what makes these
-      -- identities safe to judge by afterwards.
-      inFlight <- membersBeforeReap groupPid
+      settled <- settleGroup groupPid
       exitCode <- waitForProcess processHandle
-      settled <- groupSettledAfterExit groupPid inFlight
       case settled of
         -- gh has exited and nothing it led is left, so the guard covering it
         -- has nothing left to cover.
@@ -312,38 +307,55 @@ runGh guard repository arguments = do
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
         -- not exiting, and a descendant can do the first without the second.
-        -- The record stays, so the next fetch reclaims it with the full
-        -- ownership machinery instead of starting a gh beside it.
-        Left message -> do
-          void (recordGhGroup repository (OwnedProcessGroup groupPid inFlight True))
+        -- The record stays, naming what is left, so the next fetch reclaims
+        -- it with the full ownership machinery instead of starting a gh
+        -- beside it.
+        Left (message, survivors) -> do
+          void (recordGhGroup repository (OwnedProcessGroup groupPid survivors True))
           throwIO (GhGroupUnresolved message)
 
-    -- A snapshot failure is not an empty group: with no census there is
-    -- nothing to judge the group by later, so the members are recorded as
-    -- unknown and the caller treats the group as unresolved.
-    membersBeforeReap groupPid = do
-      snapshot <- defaultProcessSnapshot
-      pure $ case snapshot of
-        Left _ -> []
-        Right processes -> groupMembers groupPid processes
+    -- Establishes what became of the group, entirely before the handle is
+    -- reaped. That ordering is the whole argument: until the leader is waited
+    -- on, its PID stays allocated, so the pgid cannot be reissued and
+    -- everything the census finds in it is genuinely this fetch's.
+    --
+    -- Waiting for the leader to leave the live process table first matters
+    -- just as much as the census that follows. A leader that is still running
+    -- can still fork, so a census taken while it lives says nothing about a
+    -- descendant appearing a moment later; one taken after it has exited --
+    -- but before it is reaped -- cannot be overtaken that way. A zombie is
+    -- excluded from the table yet still holds its PID, which is exactly the
+    -- window this needs.
+    settleGroup groupPid = do
+      departed <- awaitLeaderDeparture groupPid leaderDeparturePolls
+      case departed of
+        Left message -> pure (Left (message, []))
+        Right () -> do
+          snapshot <- defaultProcessSnapshot
+          pure $ case snapshot of
+            -- No census is not an empty group. Refusing here costs a refresh;
+            -- assuming would cost the guarantee.
+            Left message -> Left ("could not confirm gh's process group was empty: " <> message, [])
+            Right processes -> case groupMembers groupPid processes of
+              [] -> Right ()
+              survivors ->
+                Left
+                  ( "gh exited but "
+                      <> Text.pack (show (length survivors))
+                      <> " process(es) it led (pgid "
+                      <> Text.pack (show groupPid)
+                      <> ") are still running",
+                    survivors
+                  )
 
-    -- Judged by identity rather than by the pgid, because the leader has now
-    -- been reaped: its PID is free, and anything that took it would make an
-    -- innocent group look like this one.
-    groupSettledAfterExit groupPid inFlight = do
+    awaitLeaderDeparture groupPid pollsLeft = do
       snapshot <- defaultProcessSnapshot
-      pure $ case snapshot of
-        Left message -> Left ("could not confirm gh's process group was empty: " <> message)
-        Right processes -> case matchingIdentities processes inFlight of
-          [] -> Right ()
-          survivors ->
-            Left
-              ( "gh exited but "
-                  <> Text.pack (show (length survivors))
-                  <> " process(es) it led (pgid "
-                  <> Text.pack (show groupPid)
-                  <> ") are still running"
-              )
+      case snapshot of
+        Left message -> pure (Left ("could not watch for gh's exit: " <> message))
+        Right processes
+          | identityForPid groupPid processes == Nothing -> pure (Right ())
+          | pollsLeft <= (0 :: Int) -> pure (Left "gh closed its output but was still running when its process group had to be settled")
+          | otherwise -> threadDelay leaderDeparturePollMicros >> awaitLeaderDeparture groupPid (pollsLeft - 1)
 
     -- Each reader owns its handle for the handle's whole life, including
     -- closing it. Closing from here instead would mean closing a handle a
@@ -443,6 +455,15 @@ uninterruptibleCleanup cleanup = do
 -- unexpected cannot hold the refresh thread indefinitely.
 cleanupBudgetMicros :: Int
 cleanupBudgetMicros = 30 * 1000 * 1000
+
+-- | How long a gh that has closed its output gets to actually exit before its
+-- group is called unsettled. Draining to EOF normally means it is already
+-- gone, so this is a margin rather than a wait.
+leaderDeparturePolls :: Int
+leaderDeparturePolls = 20
+
+leaderDeparturePollMicros :: Int
+leaderDeparturePollMicros = 50 * 1000
 
 ghGroupIsRecorded :: Repository -> Int -> IO Bool
 ghGroupIsRecorded repository groupPid =
