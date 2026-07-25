@@ -32,6 +32,10 @@ MAX_AUTO_REPAIR_CONFLICT_FILES = 2
 MAX_CONFLICT_REVIEW_ROUNDS = 5
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
+# GitHub's read-after-write lag can hide a push that already landed, so the
+# "did the agent push?" check polls briefly instead of reading once.
+PUSH_VISIBILITY_WAIT_SECONDS = 30
+PUSH_VISIBILITY_POLL_SECONDS = 3
 MODEL_TIMEOUT_SECONDS = 60 * 60
 STATE_VERSION = 2
 FAILURES_BEFORE_BACKOFF = 2
@@ -600,22 +604,30 @@ def parse_review_marker(body: str) -> tuple[str, str] | None:
 def latest_review_details(
     ctx: RepoContext, number: int
 ) -> tuple[str, str, str] | None:
-    data = run_json(
+    # `gh pr view --json comments` returns a bounded window, so on a long PR
+    # the newest marker can fall outside it -- verification then fails, or an
+    # older marker wins and a stale verdict is treated as current. Page the
+    # whole feed in so the marker chosen is the globally newest one.
+    pages = run_json(
         [
             "gh",
-            "pr",
-            "view",
-            str(number),
-            "--repo",
-            ctx.repo_slug,
-            "--json",
-            "comments",
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{ctx.repo_slug}/issues/{number}/comments?per_page=100",
         ],
         cwd=ctx.path,
     )
+    if not isinstance(pages, list):
+        raise DrainError(f"Unexpected comments response for PR #{number}")
+    all_comments: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise DrainError(f"Unexpected comments page for PR #{number}")
+        all_comments.extend(page)
     comments = sorted(
-        data.get("comments", []),
-        key=lambda comment: comment.get("createdAt") or "",
+        all_comments,
+        key=lambda comment: (comment.get("created_at") or "", comment.get("id") or 0),
         reverse=True,
     )
     for comment in comments:
@@ -777,6 +789,31 @@ def render_check_gate(kind: str, name: str | None, state: str) -> str:
     if name is None:
         return f"{kind}=disabled"
     return f"{name}={state}"
+
+
+def wait_for_new_head(
+    ctx: RepoContext,
+    number: int,
+    previous_head: str,
+    *,
+    timeout_seconds: int,
+    poll_seconds: int,
+    action: str,
+) -> dict[str, Any]:
+    # A single read here races GitHub's read-after-write lag: a head that was
+    # genuinely pushed can still come back stale, and treating that as "the
+    # agent never pushed" marks a valid repair as failed. Poll until the new
+    # head becomes visible, then let the caller's stricter checks run.
+    deadline = time.time() + timeout_seconds
+    while True:
+        pr = get_pr(ctx, number)
+        if pr["headRefOid"] != previous_head:
+            return pr
+        if time.time() >= deadline:
+            raise DrainError(
+                f"PR #{number}: Codex {action} finished without pushing a new head."
+            )
+        time.sleep(poll_seconds)
 
 
 def wait_for_branch_update_policy(
@@ -1299,6 +1336,10 @@ def recover_stale_approval(
     *,
     dry_run: bool,
 ) -> bool:
+    # Entries needing only forget_pr() bookkeeping are swept in full here and
+    # never report recovery work: returning early for each one cost a whole
+    # cycle per stale entry, so N departed PRs blocked merges for N intervals.
+    # Only genuine rereview work stays serialized one PR per cycle.
     for key in sorted(state["prs"], key=int):
         number = int(key)
         entry = state["prs"][key]
@@ -1306,7 +1347,7 @@ def recover_stale_approval(
 
         if pr["state"] != "OPEN":
             forget_pr(state, number)
-            return True
+            continue
 
         approved_head = entry["approved_head"]
         current_head = pr["headRefOid"]
@@ -1315,7 +1356,6 @@ def recover_stale_approval(
                 # A label removed without a new commit is a deliberate revocation,
                 # not a stale review that the drain queue should restore.
                 forget_pr(state, number)
-                return True
             continue
 
         if has_label(pr, APPROVE_LABEL):
@@ -1327,11 +1367,13 @@ def recover_stale_approval(
                 )
                 remember_approved_head(state, number, current_head)
                 return True
+            # No recovery work to report, and nothing was mutated -- keep
+            # sweeping so a later entry's bookkeeping is not deferred a cycle.
             log(
                 f"PR #{number}: head changed from {approved_head[:12]} to "
                 f"{current_head[:12]}; waiting for stale approval removal"
             )
-            return False
+            continue
 
         if has_label(pr, CHANGES_LABEL):
             entry["last_rereviewed_head"] = current_head
@@ -1989,11 +2031,14 @@ def verify_codex_conflict_push(
     previous_head: str,
     action: str,
 ) -> dict[str, Any]:
-    refreshed = get_pr(ctx, pr["number"])
-    if refreshed["headRefOid"] == previous_head:
-        raise DrainError(
-            f"PR #{pr['number']}: Codex {action} finished without pushing a new head."
-        )
+    wait_for_new_head(
+        ctx,
+        pr["number"],
+        previous_head,
+        timeout_seconds=PUSH_VISIBILITY_WAIT_SECONDS,
+        poll_seconds=PUSH_VISIBILITY_POLL_SECONDS,
+        action=action,
+    )
     refreshed = wait_for_branch_update_policy(
         ctx,
         pr["number"],
@@ -2252,13 +2297,19 @@ def process_pr(
 
 def acquire_lock(ctx: RepoContext):
     lock_path = ctx.path / ".git" / "drain_prs.lock"
-    handle = open(lock_path, "w", encoding="utf-8")
+    # Never truncate before flock: mode "w" erased the running instance's
+    # recorded PID as soon as a second instance tried, destroying the only
+    # record of who holds the lock the failed contender is reporting.
+    handle = open(lock_path, "a+", encoding="utf-8")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
+        handle.close()
         raise DrainError(
             f"Another drain_prs.py instance is already running for {ctx.path}."
         ) from exc
+    handle.seek(0)
+    handle.truncate()
     handle.write(str(os.getpid()))
     handle.flush()
     return handle
