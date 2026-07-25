@@ -44,7 +44,7 @@ import Data.Time (getCurrentTime)
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
-import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup)
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, matchingIdentities)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
@@ -272,7 +272,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
 -- the group, and cleanup tracking only the leader would call the group dead
 -- while a descendant kept running. A failure carries the group it could not
 -- account for, so the caller can hand exactly that to the durable record.
-killGhGroup :: ProcessHandle -> IO (Either (Text, Maybe OwnedProcessGroup) ())
+killGhGroup :: ProcessHandle -> IO (Either (Text, OwnedProcessGroup) ())
 killGhGroup processHandle = do
   spawnedPid <- getPid processHandle
   case spawnedPid of
@@ -283,33 +283,39 @@ killGhGroup processHandle = do
       let groupPid = fromIntegral pid
       snapshot <- defaultProcessSnapshot
       case snapshot of
-        -- Without a snapshot the membership is unknown, so there is no
-        -- member list to record -- only the group id, which is still enough
-        -- for a later attempt to census and clean it.
-        Left message -> pure (Left (message, Just (OwnedProcessGroup groupPid [])))
+        -- Without a snapshot nothing pins these PIDs, so the group is
+        -- recorded uncensused: a later run may watch that pgid until it is
+        -- empty, but must never signal it, because by then the PIDs could
+        -- belong to anything.
+        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False))
         Right processes -> case identityForPid groupPid processes of
           -- A live gh that is not its own group leader means @create_group@
-          -- did not take effect, and signalling its pgid would reach
-          -- processes this fetch never spawned. Refusing is the only safe
-          -- answer, and it is loud rather than silent.
+          -- did not take effect, and its pgid now names processes this fetch
+          -- never spawned -- so it must not be signalled. Its own identity is
+          -- known and exact, though, so it is recorded uncensused and watched
+          -- until that identity is gone.
           Just leader
             | leader.processIdentityGroupPid /= groupPid ->
-                pure (Left ("gh is not the leader of its own process group, so its group cannot be terminated safely", Nothing))
+                pure
+                  ( Left
+                      ( "gh is not the leader of its own process group, so its group cannot be terminated safely",
+                        OwnedProcessGroup groupPid [leader] False
+                      )
+                  )
           _ -> do
             let members = groupMembers groupPid processes
             result <- killVerifiedGroup groupPid members
-            pure (first (,Just (OwnedProcessGroup groupPid members)) result)
+            pure (first (,OwnedProcessGroup groupPid members True) result)
 
 groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
 groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
 
 -- | Adds a group that could not be confirmed dead to the durable record,
--- reporting whether it actually landed there. A group whose identity cannot
--- be signalled safely at all ('Nothing') is not recorded, since re-running
--- the same refusal later would block every future fetch forever.
-recordUnconfirmedGhGroup :: Repository -> Maybe OwnedProcessGroup -> IO Bool
-recordUnconfirmedGhGroup _ Nothing = pure False
-recordUnconfirmedGhGroup repository (Just group) = do
+-- reporting whether it actually landed there. Every unconfirmed group is
+-- recorded, signallable or not: one that cannot be signalled is exactly the
+-- one a later run must not assume away.
+recordUnconfirmedGhGroup :: Repository -> OwnedProcessGroup -> IO Bool
+recordUnconfirmedGhGroup repository group = do
   existing <- loadGhGroupRecord repository
   let alreadyRecorded = case existing of
         GhGroupRecordLoaded groups -> groups
@@ -317,12 +323,12 @@ recordUnconfirmedGhGroup repository (Just group) = do
   written <- writeGhGroupRecord repository (group : filter (/= group) alreadyRecorded)
   pure (either (const False) (const True) written)
 
--- | Re-verifies, and if necessary re-kills, every @gh@ group a previous
--- fetch failed to confirm dead — including ones recorded by an earlier run
--- of the dashboard, which is the whole reason the record is on disk. Only a
--- record that is now provably empty is cleared; anything else refuses the
--- fetch outright, so a new @gh@ is never spawned alongside one that may
--- still be running.
+-- | Re-verifies, and where it is safe to do so re-kills, every @gh@ group a
+-- previous fetch failed to confirm dead — including ones recorded by an
+-- earlier run of the dashboard, which is the whole reason the record is on
+-- disk. The record is cleared only once every entry is provably accounted
+-- for; anything else refuses the fetch outright, so a new @gh@ is never
+-- spawned alongside one that may still be running.
 reclaimRecordedGhGroups :: Repository -> IO (Either Text ())
 reclaimRecordedGhGroups repository = do
   recordLoad <- loadGhGroupRecord repository
@@ -330,7 +336,7 @@ reclaimRecordedGhGroups repository = do
     GhGroupRecordAbsent -> pure (Right ())
     GhGroupRecordUnusable message -> pure (Left (refusal message))
     GhGroupRecordLoaded groups -> do
-      outcomes <- traverse (\group -> killVerifiedGroup group.ownedProcessGroupPid group.ownedProcessGroupMembers) groups
+      outcomes <- traverse reclaimGhGroup groups
       case [message | Left message <- outcomes] of
         [] -> do
           cleared <- removeGhGroupRecord repository
@@ -338,6 +344,40 @@ reclaimRecordedGhGroups repository = do
         message : _ -> pure (Left (refusal message))
   where
     refusal message = "a gh process from an earlier GitHub refresh could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
+
+-- | One recorded group's second chance.
+--
+-- A censused group is identity-pinned and this dashboard's to signal, so it
+-- gets the same verified TERM-then-KILL escalation again. An uncensused one
+-- never can be, so it is only ever observed: whatever still matches it
+-- refuses the fetch instead of being signalled blind, and — crucially — an
+-- uncensused entry is never handed to the group check, whose empty
+-- membership would read as vacuously absent and clear a live survivor.
+reclaimGhGroup :: OwnedProcessGroup -> IO (Either Text ())
+reclaimGhGroup group
+  | group.ownedProcessGroupCensused =
+      killVerifiedGroup group.ownedProcessGroupPid group.ownedProcessGroupMembers
+  | otherwise = do
+      snapshot <- defaultProcessSnapshot
+      pure $ case snapshot of
+        Left message -> Left message
+        Right processes
+          | null (survivors processes) -> Right ()
+          | otherwise ->
+              Left
+                ( "a gh process (pgid "
+                    <> Text.pack (show group.ownedProcessGroupPid)
+                    <> ") was never safely identified and something matching it is still running; it cannot be signalled from here"
+                )
+  where
+    -- With identities recorded, those exact processes are the question, PIDs
+    -- pinned to start times. Without any, the only available question is
+    -- whether that pgid is occupied at all, which is deliberately the
+    -- broadest reading: refusing on an unrelated squatter merely blocks
+    -- refreshing, while clearing on a survivor is the overlap itself.
+    survivors processes = case group.ownedProcessGroupMembers of
+      [] -> groupMembers group.ownedProcessGroupPid processes
+      members -> matchingIdentities processes members
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)

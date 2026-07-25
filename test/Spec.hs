@@ -4960,7 +4960,7 @@ main = hspec $ do
               Right identities -> do
                 let members = filter ((== survivorPid) . processIdentityGroupPid) identities
                 members `shouldNotBe` []
-                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members] `shouldReturn` Right ()
+                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -4979,6 +4979,79 @@ main = hspec $ do
               Right identities -> identityForPid survivorPid identities `shouldBe` Nothing
             doesFileExist ranMarker `shouldReturn` True
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
+    it "refuses to spawn gh while an uncensused record's pgid is still occupied, rather than reading its empty membership as absent" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- What 'abandonGh' records when the process snapshot itself failed:
+        -- the pgid and nothing else. Handing that to a group membership check
+        -- would find no recorded members present and call the group gone --
+        -- vacuously, while it is plainly still running.
+        withSurvivingGroupLeader $ \survivorPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            writeGhGroupRecord repository [OwnedProcessGroup survivorPid [] False] `shouldReturn` Right ()
+            withFakeGh
+              temporaryRoot
+              [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+                "printf '%s' '" <> emptyGraphqlPage <> "'"
+              ]
+              $ do
+                (outcome, _) <- captureBoardRefresh temporaryRoot 30
+                case outcome of
+                  BoardRefreshCompleted (Left providerError) ->
+                    providerError.providerErrorMessage `shouldMention` "never safely identified"
+                  other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+            doesFileExist ranMarker `shouldReturn` False
+            -- The record survives the refusal: nothing about this attempt
+            -- made the survivor any more accounted for.
+            (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+
+    it "refuses to spawn gh while an uncensused record's own identity is still alive, then proceeds once it exits" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- What 'abandonGh' records when gh turned out not to lead its own
+        -- group: the identity is exact, but its pgid covers processes this
+        -- dashboard never spawned, so it may be watched and never signalled.
+        survivorIdentity <-
+          withSurvivingGroupLeader $ \survivorPid -> do
+            snapshot <- readProcessSnapshot
+            case snapshot >>= maybe (Left "fixture absent from snapshot") Right . identityForPid survivorPid of
+              Left message -> fail (Data.Text.unpack message)
+              Right identity -> do
+                withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+                  writeGhGroupRecord repository [OwnedProcessGroup survivorPid [identity] False] `shouldReturn` Right ()
+                  withFakeGh
+                    temporaryRoot
+                    [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+                      "printf '%s' '" <> emptyGraphqlPage <> "'"
+                    ]
+                    $ do
+                      (outcome, _) <- captureBoardRefresh temporaryRoot 30
+                      case outcome of
+                        BoardRefreshCompleted (Left providerError) ->
+                          providerError.providerErrorMessage `shouldMention` "never safely identified"
+                        other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+                  doesFileExist ranMarker `shouldReturn` False
+                pure identity
+        -- 'withSurvivingGroupLeader' has now killed it, so the very same
+        -- record clears itself: the guard is fail-closed, not a permanent
+        -- wedge.
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          survivorIdentity.processIdentityCommand `shouldMention` "TERM"
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Right _) -> pure ()
+                other -> expectationFailure ("expected the refresh to proceed once the survivor exited, got " <> show other)
+          doesFileExist ranMarker `shouldReturn` True
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "refuses to spawn gh at all while a recorded group cannot be read back" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

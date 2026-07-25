@@ -58,14 +58,27 @@ data ProcessIdentity = ProcessIdentity
   deriving anyclass (FromJSON, ToJSON)
 
 -- | A process group whose termination a spawner could not confirm, captured
--- in full so the check can be repeated later — including from a freshly
--- started process, which is why this is serialisable and carries the member
--- identities rather than the group id alone. 'matchingIdentities' pins each
--- member to its start time, so a recorded group can never be confused with
--- an unrelated process that later inherits one of its PIDs.
+-- so the check can be repeated later — including from a freshly started
+-- process, which is why this is serialisable and carries member identities
+-- rather than the group id alone. 'matchingIdentities' pins each member to
+-- its start time, so a recorded group can never be confused with an
+-- unrelated process that later inherits one of its PIDs.
 data OwnedProcessGroup = OwnedProcessGroup
   { ownedProcessGroupPid :: Int,
-    ownedProcessGroupMembers :: [ProcessIdentity]
+    ownedProcessGroupMembers :: [ProcessIdentity],
+    -- | Whether 'ownedProcessGroupMembers' is a complete, identity-pinned
+    -- census of the group — which is exactly what makes it safe to signal
+    -- 'ownedProcessGroupPid' as a group again later.
+    --
+    -- 'False' says the opposite, and it is not a detail: either no snapshot
+    -- ever pinned the PIDs, so signalling could hit whatever inherited them,
+    -- or the process was not its own group leader, so its pgid names
+    -- processes the spawner never started. Such a record can only ever be
+    -- watched until nothing matches it; it must never be signalled blind,
+    -- and — the failure mode this flag exists to prevent — must never be
+    -- handed to a group check that would find its empty membership
+    -- vacuously absent and call the survivor reclaimed.
+    ownedProcessGroupCensused :: Bool
   }
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
