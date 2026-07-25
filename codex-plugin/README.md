@@ -160,7 +160,12 @@ against the responsibility matrix in
 every declared asset must exist, no undeclared drafting skill may appear, the
 exact `<!-- issue-origin:codex -->` marker literal must be present in each
 issue-creating skill, and the Claude-only `draft-issues` and unpackaged `epic`
-boundaries must remain stated.
+boundaries must remain stated. It also pins the optional scope gate
+([docs/drafting-workflow-contract.md §4](../docs/drafting-workflow-contract.md#4-scope-gate)):
+`$issue` and `$autoissue` must state the same gate and exemption rules as the
+document, each gate instruction must follow the guard that makes it apply only
+when the consuming repo declares a gate, and `$issue-review` must stay free of
+gate language.
 
 ## Project-scoped locations
 
