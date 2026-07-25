@@ -32,6 +32,9 @@ module Kanban.Worker
     runWorker,
     runWorkerWith,
     runWorkerWithTask,
+    -- | Exported so the suite can observe the descriptors a detached
+    -- supervisor is actually launched with.
+    spawnDetachedSupervisor,
     terminateProviderRefWith,
     terminateRecordedStateProcessesWith,
     terminateWorker,
@@ -44,7 +47,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
-import Control.Exception (Exception, IOException, SomeException, mask, throwIO, try, uninterruptibleMask_)
+import Control.Exception (Exception, IOException, SomeException, bracket, mask, throwIO, try, uninterruptibleMask_)
 import Control.Monad (filterM, unless, void, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeStrict', encode, withObject, (.:), (.:?), (.!=))
 import qualified Data.ByteString as ByteString
@@ -95,11 +98,11 @@ import System.Directory
   )
 import System.FilePath (takeDirectory, (</>))
 import System.Environment (getExecutablePath)
-import System.IO (BufferMode (LineBuffering), IOMode (AppendMode), hClose, hSetBuffering, openBinaryFile)
+import System.IO (BufferMode (LineBuffering), IOMode (AppendMode, ReadMode, WriteMode), hClose, hSetBuffering, openBinaryFile, openFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (Handler (Catch), installHandler, sigINT, sigKILL, sigTERM, signalProcessGroup)
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream), createProcess, getPid, getProcessExitCode, proc)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, getPid, getProcessExitCode, proc)
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
@@ -315,6 +318,49 @@ launchPullRequestWorker repository number origin action existingSession existing
         workerWorkflowConfig = workflowConfig
       }
 
+-- | Spawns a detached supervisor in its own session with fds 0, 1, and 2
+-- attached to @\/dev\/null@ rather than closed.
+--
+-- 'NoStream' closes the child's descriptor outright, which leaves 0-2
+-- unallocated in the supervisor: the first files it opens -- the event
+-- journal, a state temp file, a session log -- receive exactly those
+-- numbers, and any later write to stdout or stderr (an RTS report from one
+-- of the forked loops, a library diagnostic) is appended straight into the
+-- JSONL that 'monitorWorker' and 'leaseIsActive' parse. Holding all three
+-- open on @\/dev\/null@ discards stray writes harmlessly and keeps newly
+-- opened files off descriptors 0-2 for the process's whole life.
+--
+-- Only this supervisor spawn is configured here. Provider processes carry
+-- their own explicit pipes (see "Kanban.Solve" and "Kanban.PullRequestFlow")
+-- and are unaffected.
+--
+-- 'createProcess' closes a 'UseHandle' in the parent itself once the child
+-- mapping is established, so the bracket matters only when the spawn throws;
+-- 'hClose' on an already-closed handle is a no-op, which keeps both paths
+-- leak-free.
+spawnDetachedSupervisor :: FilePath -> [String] -> IO (Either IOException ProcessHandle)
+spawnDetachedSupervisor executable arguments =
+  bracket openNullStreams closeNullStreams $ \(inHandle, outHandle, errHandle) -> do
+    started <-
+      try @IOException $
+        createProcess
+          (proc executable arguments)
+            { std_in = UseHandle inHandle,
+              std_out = UseHandle outHandle,
+              std_err = UseHandle errHandle,
+              close_fds = True,
+              new_session = True
+            }
+    pure (fmap (\(_, _, _, processHandle) -> processHandle) started)
+  where
+    openNullStreams =
+      (,,)
+        <$> openFile "/dev/null" ReadMode
+        <*> openFile "/dev/null" WriteMode
+        <*> openFile "/dev/null" WriteMode
+    closeNullStreams (inHandle, outHandle, errHandle) =
+      mapM_ (void . try @IOException . hClose) [inHandle, outHandle, errHandle]
+
 launchWorker :: WorkerSpec -> IO (Either Text WorkerDescriptor)
 launchWorker spec = do
   descriptor <- descriptorForSpec spec
@@ -330,20 +376,13 @@ launchWorker spec = do
         Left message -> releaseWorkerLease descriptor >> pure (Left message)
         Right () -> do
           executable <- getExecutablePath
-          started <- try @IOException $ createProcess
-            (proc executable ["--worker-spec", descriptor.workerDescriptorSpecPath])
-              { std_in = NoStream,
-                std_out = NoStream,
-                std_err = NoStream,
-                close_fds = True,
-                new_session = True
-              }
+          started <- spawnDetachedSupervisor executable ["--worker-spec", descriptor.workerDescriptorSpecPath]
           case started of
             Left exception -> do
               acknowledgeWorker descriptor
               releaseWorkerLease descriptor
               pure (Left ("could not start persistent worker: " <> Text.pack (show exception)))
-            Right (_, _, _, processHandle) -> do
+            Right processHandle -> do
               recordLaunchedSupervisorIdentity descriptor processHandle
               result <- waitForWorkerStart descriptor processHandle workerStartupAttempts
               case result of
@@ -616,6 +655,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       signalShutdownRef <- newIORef False
       pendingOutcomeRef <- newIORef Nothing
       completedRef <- newIORef False
+      outcomeCommittedRef <- newIORef False
       forcedOutcomeRef <- newIORef Nothing
       taskThreadIdRef <- newIORef Nothing
       taskResultVar <- newEmptyMVar
@@ -677,6 +717,12 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- carried forward so the orphan-resolution poll below cannot
           -- treat a merely-empty recorded census as equivalent to an
           -- actually-confirmed one (see 'waitForOrphanResolution').
+          -- 'outcomeCommittedRef' records that this ran all the way to an
+          -- emitted outcome -- terminal or orphan-pending, both of which are
+          -- genuine commitments. It stays False when the body itself throws
+          -- (a snapshot that raises rather than returning 'Left' leaves
+          -- 'claimCompletion' spent but nothing recorded), which is exactly
+          -- the case 'finalizeSupervisorFailure' has to finish off.
           completeBody verified outcome = uninterruptibleMask_ $ do
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
@@ -697,6 +743,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                 | otherwise -> do
                     writeIORef pendingOutcomeRef (Just (not verified, outcome))
                     emitRaw (WorkerOrphansDetected outcome survivors)
+            writeIORef outcomeCommittedRef True
           -- Claiming and running the completion body happen under the same
           -- mask: without it, an async exception (the watchdog's own
           -- 'killThread', losing the race to claim completion itself) could
@@ -827,97 +874,141 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       -- here specifically because `taskResultVar` is always empty at this
       -- point (this is its one and only producer), so `putMVar` cannot
       -- itself actually block.
-      taskThreadId <- forkIO $ mask $ \restore -> do
-        result <- try @SomeException (restore runTask)
-        uninterruptibleMask_ (putMVar taskResultVar result)
-      writeIORef taskThreadIdRef (Just taskThreadId)
-      void . forkIO $ watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar
-      taskResult <- takeMVar taskResultVar
-      forcedOutcome <- readIORef forcedOutcomeRef
-      case forcedOutcome of
-        -- 'forcedOutcomeRef' is only consulted here to skip the redundant
-        -- fallback completion below — it can still be stale (the deadline
-        -- can fire after this exact read), which is harmless for that one
-        -- decision: the fallback goes through the same atomic
-        -- 'claimCompletion' either way, so at worst this attempts it
-        -- pointlessly. Whether it is safe to actually release the lease
-        -- below is decided separately, immediately before doing so, via
-        -- 'claimLeaseRelease' — a real, race-free arbitration rather than a
-        -- one-time snapshot like this one.
-        Just _ -> pure ()
-        Nothing -> case taskResult of
-          Right () -> do
-            stopped <- readIORef stoppedRef
-            pending <- readIORef pendingOutcomeRef
-            if stopped || pending /= Nothing
-              then pure ()
-              else complete (SolveFailed "persistent worker task ended without a terminal provider event")
-          Left exception -> do
-            refreshProcessCensus descriptor stateLock
-            readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
-            let message = "persistent worker failed: " <> Text.pack (show exception)
-            void . try @SomeException $ do
-              emitRaw (WorkerDiagnostic message)
-              complete (SolveFailed message)
-      pending <- readIORef pendingOutcomeRef
-      -- Verification always runs to a real conclusion here regardless of
-      -- `stoppedRef`: a signal-triggered shutdown already set that flag
-      -- true (to stop the heartbeat/census loops), and gating this wait on
-      -- it too would let the lease below release on an unverified kill.
-      -- 'waitForOrphanResolution' re-reads `pendingOutcomeRef` itself on
-      -- every poll rather than trusting this one-time snapshot, since the
-      -- deadline watchdog can still take over that same ref after this
-      -- point (see 'watchdogLoop'); this read only decides whether to
-      -- enter the wait at all. When it does, its own return value settles
-      -- whether this has already won 'claimLeaseRelease' for itself (see
-      -- its own documentation for why re-attempting the claim below in
-      -- that case would be actively harmful, not merely redundant) —
-      -- 'Nothing' here means the wait was never entered at all, in which
-      -- case the claim below still needs to be attempted fresh.
-      alreadyWonLeaseRelease <-
-        if pending /= Nothing
-          then Just <$> waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
-          else pure Nothing
-      writeIORef stoppedRef True
-      -- Whether it is safe to release the lease now without waiting for the
-      -- watchdog is decided by a genuine race against it, claimed as late
-      -- as possible (right here) rather than inferred from any earlier,
-      -- necessarily stale snapshot: everything above (fallback completion,
-      -- orphan resolution) can finish before the deadline ever fires, so an
-      -- early check has no way to know whether the watchdog will still act
-      -- later. Winning this claim means the watchdog's own 'threadDelay'
-      -- has not elapsed yet (or, if it does later, 'watchdogLoop' will find
-      -- this already claimed and do nothing) — safe to proceed directly.
-      -- Losing it means the watchdog already committed to firing and may
-      -- still be mid-sequence (its own bounded termination-grace waits);
-      -- 'watchdogDoneVar' blocks until that has genuinely finished.
+      -- Everything below runs after the descriptor, journal, and state
+      -- facilities exist, so a synchronous failure here can still be
+      -- recorded durably. Without this guard such a failure kills the
+      -- supervisor with no terminal event at all: the death is only noticed
+      -- much later, by the stale-heartbeat path. Task exceptions are already
+      -- caught around 'runTask' below; this covers the orchestration outside
+      -- that boundary, including the reporting and cleanup path itself.
       --
-      -- The atomic race alone is not sufficient for an already-overdue
-      -- spec: 'watchdogLoop' is forked after the task thread, and for a
-      -- trivially fast task there is no guarantee the watchdog thread ever
-      -- gets scheduled — let alone reaches its own 'claimLeaseRelease' —
-      -- before this point, even though its delay is already zero and it is
-      -- entitled to fire immediately. Thread scheduling order has no
-      -- relationship to wall-clock deadline elapsed-ness, so this
-      -- independently rechecks the deadline directly against the current
-      -- time: if it has already passed, this treats itself as having lost
-      -- regardless of what the atomic race would otherwise say, leaving
-      -- 'claimLeaseRelease' unclaimed for the watchdog (whenever it
-      -- eventually runs) to win outright. Only reached when
-      -- 'alreadyWonLeaseRelease' is 'Nothing' — 'waitForOrphanResolution'
-      -- already settled this exact question, via the same claim, whenever
-      -- it ran at all.
-      wonLeaseRelease <- case alreadyWonLeaseRelease of
-        Just settled -> pure settled
-        Nothing -> do
-          releaseCheckNow <- getCurrentTime
-          let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
-          if releaseCheckNow >= deadline then pure False else claimLeaseRelease
-      unless wonLeaseRelease (takeMVar watchdogDoneVar)
-      releaseWorkerLease descriptor
+      -- Exceptions raised inside the three forked loops are deliberately out
+      -- of reach here -- they are unlinked, so they never reach this thread.
+      -- Discarding stray stderr (see 'spawnDetachedSupervisor') is what keeps
+      -- those from corrupting the journal.
+      let finalizeSupervisorFailure exception = do
+            let message = "persistent worker supervisor failed: " <> Text.pack (show exception)
+            -- Best effort throughout: the storage this wants to write to may
+            -- be exactly what failed, and a raise here would defeat the
+            -- purpose of the guard.
+            void . try @SomeException $ do
+              -- Stop owned work first, then let 'completeBody' do the
+              -- verification: it emits 'WorkerFinished' only once the
+              -- recorded descendants are confirmed gone, and otherwise
+              -- records the orphan outcome and leaves the lease in place.
+              writeIORef stoppedRef True
+              readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
+              terminateRecordedProcesses stateLock
+              emitRaw (WorkerDiagnostic message)
+              -- A completion already committed by the task or the watchdog
+              -- stands; this only finishes off a claim that was spent
+              -- without ever recording an outcome.
+              committed <- readIORef outcomeCommittedRef
+              unless committed (completeBody True (SolveFailed message))
+              -- The lease follows the same rule as the normal path: release
+              -- it only when no orphan outcome is pending and the watchdog
+              -- has not claimed the release for itself.
+              stillPending <- readIORef pendingOutcomeRef
+              when (stillPending == Nothing) $ do
+                wonRelease <- claimLeaseRelease
+                when wonRelease (releaseWorkerLease descriptor)
+            pure (Left message)
+      orchestrated <- try @SomeException $ do
+        taskThreadId <- forkIO $ mask $ \restore -> do
+          result <- try @SomeException (restore runTask)
+          uninterruptibleMask_ (putMVar taskResultVar result)
+        writeIORef taskThreadIdRef (Just taskThreadId)
+        void . forkIO $ watchdogLoop takeSnapshot spec providerSlotRef stoppedRef stateLock taskThreadIdRef pendingOutcomeRef forcedOutcomeRef claimCompletion completeBody emitRaw claimLeaseRelease watchdogDoneVar watchdogAdjudicatedVar
+        taskResult <- takeMVar taskResultVar
+        forcedOutcome <- readIORef forcedOutcomeRef
+        case forcedOutcome of
+          -- 'forcedOutcomeRef' is only consulted here to skip the redundant
+          -- fallback completion below — it can still be stale (the deadline
+          -- can fire after this exact read), which is harmless for that one
+          -- decision: the fallback goes through the same atomic
+          -- 'claimCompletion' either way, so at worst this attempts it
+          -- pointlessly. Whether it is safe to actually release the lease
+          -- below is decided separately, immediately before doing so, via
+          -- 'claimLeaseRelease' — a real, race-free arbitration rather than a
+          -- one-time snapshot like this one.
+          Just _ -> pure ()
+          Nothing -> case taskResult of
+            Right () -> do
+              stopped <- readIORef stoppedRef
+              pending <- readIORef pendingOutcomeRef
+              if stopped || pending /= Nothing
+                then pure ()
+                else complete (SolveFailed "persistent worker task ended without a terminal provider event")
+            Left exception -> do
+              refreshProcessCensus descriptor stateLock
+              readIORef providerSlotRef >>= mapM_ killManagedProcess . registeredProvider
+              let message = "persistent worker failed: " <> Text.pack (show exception)
+              void . try @SomeException $ do
+                emitRaw (WorkerDiagnostic message)
+                complete (SolveFailed message)
+        pending <- readIORef pendingOutcomeRef
+        -- Verification always runs to a real conclusion here regardless of
+        -- `stoppedRef`: a signal-triggered shutdown already set that flag
+        -- true (to stop the heartbeat/census loops), and gating this wait on
+        -- it too would let the lease below release on an unverified kill.
+        -- 'waitForOrphanResolution' re-reads `pendingOutcomeRef` itself on
+        -- every poll rather than trusting this one-time snapshot, since the
+        -- deadline watchdog can still take over that same ref after this
+        -- point (see 'watchdogLoop'); this read only decides whether to
+        -- enter the wait at all. When it does, its own return value settles
+        -- whether this has already won 'claimLeaseRelease' for itself (see
+        -- its own documentation for why re-attempting the claim below in
+        -- that case would be actively harmful, not merely redundant) —
+        -- 'Nothing' here means the wait was never entered at all, in which
+        -- case the claim below still needs to be attempted fresh.
+        alreadyWonLeaseRelease <-
+          if pending /= Nothing
+            then Just <$> waitForOrphanResolution descriptor spec stateLock takeSnapshot signalShutdownRef emitRaw pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
+            else pure Nothing
+        writeIORef stoppedRef True
+        -- Whether it is safe to release the lease now without waiting for the
+        -- watchdog is decided by a genuine race against it, claimed as late
+        -- as possible (right here) rather than inferred from any earlier,
+        -- necessarily stale snapshot: everything above (fallback completion,
+        -- orphan resolution) can finish before the deadline ever fires, so an
+        -- early check has no way to know whether the watchdog will still act
+        -- later. Winning this claim means the watchdog's own 'threadDelay'
+        -- has not elapsed yet (or, if it does later, 'watchdogLoop' will find
+        -- this already claimed and do nothing) — safe to proceed directly.
+        -- Losing it means the watchdog already committed to firing and may
+        -- still be mid-sequence (its own bounded termination-grace waits);
+        -- 'watchdogDoneVar' blocks until that has genuinely finished.
+        --
+        -- The atomic race alone is not sufficient for an already-overdue
+        -- spec: 'watchdogLoop' is forked after the task thread, and for a
+        -- trivially fast task there is no guarantee the watchdog thread ever
+        -- gets scheduled — let alone reaches its own 'claimLeaseRelease' —
+        -- before this point, even though its delay is already zero and it is
+        -- entitled to fire immediately. Thread scheduling order has no
+        -- relationship to wall-clock deadline elapsed-ness, so this
+        -- independently rechecks the deadline directly against the current
+        -- time: if it has already passed, this treats itself as having lost
+        -- regardless of what the atomic race would otherwise say, leaving
+        -- 'claimLeaseRelease' unclaimed for the watchdog (whenever it
+        -- eventually runs) to win outright. Only reached when
+        -- 'alreadyWonLeaseRelease' is 'Nothing' — 'waitForOrphanResolution'
+        -- already settled this exact question, via the same claim, whenever
+        -- it ran at all.
+        wonLeaseRelease <- case alreadyWonLeaseRelease of
+          Just settled -> pure settled
+          Nothing -> do
+            releaseCheckNow <- getCurrentTime
+            let deadline = addUTCTime (fromIntegral spec.workerMaxRuntimeSeconds) spec.workerCreatedAt
+            if releaseCheckNow >= deadline then pure False else claimLeaseRelease
+        unless wonLeaseRelease (takeMVar watchdogDoneVar)
+        releaseWorkerLease descriptor
+      -- Restored on both paths so an in-process caller does not inherit the
+      -- supervisor's signal handlers.
       void (installHandler sigTERM previousTermHandler Nothing)
       void (installHandler sigINT previousInterruptHandler Nothing)
-      pure (Right ())
+      case orchestrated of
+        Right () -> pure (Right ())
+        Left exception -> finalizeSupervisorFailure exception
 
 translateSolveEvent :: (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> SolveEvent -> IO ()
 translateSolveEvent rememberProvider emit solveEvent = case solveEvent of

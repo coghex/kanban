@@ -4,7 +4,7 @@ import Brick (AttrMap, BrickEvent (..), Location (..), Widget, hLimit)
 import Brick.Main (renderWidget)
 import Control.Concurrent (forkIO, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, SomeException, bracket, finally, throwIO, throwTo, try, uninterruptibleMask_)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -242,6 +242,7 @@ import Kanban.Worker
     runWorker,
     runWorkerWith,
     runWorkerWithTask,
+    spawnDetachedSupervisor,
     terminateProviderRefWith,
     terminateRecordedStateProcessesWith,
     terminateWorkerWith,
@@ -2351,6 +2352,99 @@ main = hspec $ do
         wonLease `shouldBe` True
         emitted <- readIORef emittedRef
         emitted `shouldBe` [WorkerFinished (SolveFailed workerDeadlineReason)]
+
+    it "attaches a detached supervisor's standard descriptors to /dev/null instead of closing them" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- Closing fds 0-2 (the old 'NoStream' spawn) leaves them unallocated,
+        -- so the journal and state files the supervisor opens land on those
+        -- numbers and any stray write to stdout or stderr is appended into
+        -- the JSONL the dashboard parses. The identity checks below run
+        -- before the probe opens any file of its own, so a probe can never
+        -- take a free descriptor and then report it as /dev/null.
+        let reportPath = temporaryRoot </> "descriptors.txt"
+            probe =
+              unlines
+                [ "r=\"\"",
+                  "if [ /dev/null -ef /dev/null ]; then r=\"control=ok\"; else r=\"control=unsupported\"; fi",
+                  "for fd in 0 1 2; do",
+                  "  if [ \"/dev/fd/$fd\" -ef /dev/null ]; then r=\"$r fd$fd=null\"; else r=\"$r fd$fd=other\"; fi",
+                  "done",
+                  "if cat <&0 >/dev/null 2>/dev/null; then r=\"$r stdin=readable\"; else r=\"$r stdin=unreadable\"; fi",
+                  "if echo probe >&1 2>/dev/null; then r=\"$r stdout=writable\"; else r=\"$r stdout=unwritable\"; fi",
+                  "if echo probe >&2 2>/dev/null; then r=\"$r stderr=writable\"; else r=\"$r stderr=unwritable\"; fi",
+                  "printf '%s\\n' \"$r\" > " <> show reportPath
+                ]
+        spawned <- spawnDetachedSupervisor "/bin/sh" ["-c", probe]
+        case spawned of
+          Left exception -> expectationFailure ("could not spawn the descriptor probe: " <> show exception)
+          Right processHandle -> do
+            waitForProcess processHandle `shouldReturn` ExitSuccess
+            report <- readFile reportPath
+            words report
+              `shouldBe` [ "control=ok",
+                           "fd0=null",
+                           "fd1=null",
+                           "fd2=null",
+                           "stdin=readable",
+                           "stdout=writable",
+                           "stderr=writable"
+                         ]
+
+    it "records a terminal outcome when the supervisor fails outside the task's own exception boundary" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "sleep 30" $ \providerProcess -> do
+          now <- getCurrentTime
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              -- A long deadline keeps the watchdog out of this entirely: the
+              -- only failure under test is the supervisor's own.
+              spec = deadlineFixtureSpec repository (WorkerId "solve-814-supervisor-failure") 814 now 600
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              specPath = workerRoot </> "solve-814-supervisor-failure.spec.json"
+              statePath = workerRoot </> "solve-814-supervisor-failure.state.json"
+              eventPath = workerRoot </> "solve-814-supervisor-failure.events.jsonl"
+              leasePath = workerRoot </> "issue-814.lease"
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          LazyByteString.writeFile specPath (encode spec)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            descriptors <- discoverWorkerHistory repository
+            case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+              Nothing -> expectationFailure "worker fixture was not discoverable"
+              Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+            -- The task itself succeeds, so nothing reaches the 'try' around
+            -- 'runTask'. The supervisor's own fallback completion then raises
+            -- on the main thread, past that boundary: the snapshot throws
+            -- rather than returning 'Left', a shape the existing handling
+            -- does not model. Registering a real provider first is what makes
+            -- the census non-empty, so the failing snapshot is actually
+            -- consulted instead of short-circuited.
+            managed <- managedProcessFor providerProcess
+            armedRef <- newIORef True
+            let explodingSnapshot = do
+                  -- Only the first call throws, so the guard's own
+                  -- finalization can still verify nothing survives and commit
+                  -- a terminal outcome -- the behaviour under test.
+                  armed <- atomicModifyIORef' armedRef (\wasArmed -> (False, wasArmed))
+                  when armed (throwIO (userError "process snapshot exploded"))
+                  pure (Right [])
+                registerThenReturn _spec rememberProvider _emit = rememberProvider managed
+            result <- timeout 15000000 (runWorkerWithTask explodingSnapshot registerThenReturn specPath)
+            -- The supervisor reports the failure instead of dying silently.
+            failure <- requireJust "supervisor did not return" result >>= requireLeft "supervisor hid its own failure"
+            failure `shouldSatisfy` Data.Text.isInfixOf "persistent worker supervisor failed"
+            -- ...and the failure is durable: decodable terminal state plus the
+            -- journal record, neither of which the old code produced.
+            terminalState <- waitForWorkerState statePath isTerminal 10
+            case terminalState.workerStateStatus of
+              WorkerTerminal (SolveFailed message) ->
+                message `shouldSatisfy` Data.Text.isInfixOf "persistent worker supervisor failed"
+              status -> expectationFailure ("unexpected terminal status: " <> show status)
+            journal <- ByteString.readFile eventPath
+            journal `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+            journal `shouldSatisfy` ByteString.isInfixOf "SolveFailed"
+            -- Absence was verified, so the lease is released rather than left
+            -- behind for stale-lease recovery.
+            doesDirectoryExist leasePath `shouldReturn` False
 
   describe "review tool process ownership" $ do
     it "keeps two overlapping same-thread invocations independently killable" $
