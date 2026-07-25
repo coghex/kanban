@@ -2,17 +2,22 @@ module Kanban.GitHub
   ( -- 'FetchState' and 'graphqlArguments' are internal, exported so the
     -- suite can assert the exact argv handed to gh without a live request.
     FetchState (..),
+    GhFetchGuard,
     GitHubResult (..),
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    ghFetchCleanupFailure,
     graphqlArguments,
+    newGhFetchGuard,
     paginationDecision,
     snapshotWarnings,
   )
 where
 
-import Control.Exception (IOException, try)
-import Control.Monad (unless)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (IOException, bracketOnError, throwIO, try)
+import Control.Monad (unless, void)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -26,6 +31,7 @@ import Data.Aeson
 import Data.Aeson.Key (Key)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -34,10 +40,20 @@ import qualified Data.Text.Lazy.Encoding as LazyTextEncoding
 import Data.Time (getCurrentTime)
 import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
+import System.IO (Handle, hClose, hGetContents')
+import System.Process
+  ( CreateProcess (..),
+    ProcessHandle,
+    StdStream (CreatePipe),
+    createProcess,
+    getPid,
+    proc,
+    waitForProcess,
+  )
 
 data GitHubResult = GitHubResult
   { githubSnapshot :: RepoSnapshot,
@@ -89,8 +105,26 @@ data CheckContext = CheckContext
 pageLimit :: Int
 pageLimit = 100
 
-fetchGitHubSnapshot :: LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
-fetchGitHubSnapshot limits workflowConfig repository = fetchPages initialState
+-- | Records whether the @gh@ process group an abandoned board fetch left
+-- running could actually be confirmed dead.
+--
+-- 'fetchGitHubSnapshot' is meant to be run under 'System.Timeout.timeout',
+-- so it is abandoned by an asynchronous exception rather than by returning a
+-- value: the unwinding is where the still-running @gh@ gets cleaned up, and
+-- this is the only channel through which the outcome of that cleanup can
+-- reach the caller. 'Just' means the group may still be live — a caller must
+-- then neither report an ordinary clean timeout nor start a fetch that could
+-- overlap it.
+newtype GhFetchGuard = GhFetchGuard (IORef (Maybe Text))
+
+newGhFetchGuard :: IO GhFetchGuard
+newGhFetchGuard = GhFetchGuard <$> newIORef Nothing
+
+ghFetchCleanupFailure :: GhFetchGuard -> IO (Maybe Text)
+ghFetchCleanupFailure (GhFetchGuard cleanupFailure) = readIORef cleanupFailure
+
+fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
+fetchGitHubSnapshot guard limits workflowConfig repository = fetchPages initialState
   where
     initialState = FetchState [] [] Nothing Nothing True True False False
 
@@ -106,7 +140,7 @@ fetchGitHubSnapshot limits workflowConfig repository = fetchPages initialState
                   state.pullRequestsTruncated
           pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot)))
       | otherwise = do
-          pageResult <- fetchPage limits repository state
+          pageResult <- fetchPage guard limits repository state
           case pageResult of
             Left providerError -> pure (Left providerError)
             Right page -> case advanceState limits state page of
@@ -121,15 +155,9 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage limits repository state = do
-  processResult <-
-    try @IOException
-      ( readProcessWithExitCode
-          "gh"
-          (graphqlArguments limits repository state)
-          ""
-      )
+fetchPage :: GhFetchGuard -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
+fetchPage guard limits repository state = do
+  processResult <- try @IOException (runGh guard (graphqlArguments limits repository state))
   pure $ case processResult of
     Left exception ->
       Left
@@ -152,6 +180,101 @@ fetchPage limits repository state = do
                 providerErrorMessage = "GitHub returned invalid JSON: " <> Text.pack message
               }
         Right page -> Right page
+
+-- | Runs one page's @gh@ as the leader of its own process group, so a fetch
+-- that gets abandoned can be cleaned up as a group rather than as a lone
+-- child. 'readProcessWithExitCode', which this replaces, terminates only the
+-- direct child and never confirms it exited: a @gh@ wedged on network I\/O
+-- and ignoring TERM, or one that has spawned a credential helper, could
+-- outlive the timeout that reported it dead and still be running when the
+-- next refresh starts another one.
+runGh :: GhFetchGuard -> [String] -> IO (ExitCode, String, String)
+runGh guard arguments = bracketOnError (createProcess ghProcess) (abandonGh guard) collect
+  where
+    ghProcess =
+      (proc "gh" arguments)
+        { std_in = CreatePipe,
+          std_out = CreatePipe,
+          std_err = CreatePipe,
+          create_group = True
+        }
+
+    collect (input, output, errors, processHandle) = do
+      mapM_ (ignoreIOException . hClose) input
+      standardOutput <- drain output
+      standardError <- drain errors
+      -- Both pipes are drained to EOF before the exit status is collected,
+      -- exactly as 'readProcessWithExitCode' did, so a response larger than
+      -- the pipe buffer cannot deadlock gh against a reader that has not run
+      -- yet.
+      capturedOutput <- takeMVar standardOutput >>= either throwIO pure
+      capturedError <- takeMVar standardError >>= either throwIO pure
+      exitCode <- waitForProcess processHandle
+      pure (exitCode, capturedOutput, capturedError)
+
+    -- Each reader owns its handle for the handle's whole life, including
+    -- closing it. Closing from here instead would mean closing a handle a
+    -- reader thread may still be blocked on, which takes the handle's lock
+    -- and would hang the very cleanup that has to finish promptly.
+    drain Nothing = newEmptyMVar >>= \captured -> putMVar captured (Right "") >> pure captured
+    drain (Just handle) = do
+      captured <- newEmptyMVar
+      void . forkIO $ do
+        text <- try @IOException (hGetContents' handle)
+        ignoreIOException (hClose handle)
+        putMVar captured text
+      pure captured
+
+-- | Cleans up the @gh@ an abandoned fetch walked away from: TERM, then KILL,
+-- the whole process group it leads, confirmed against a fresh process
+-- snapshot rather than assumed from the act of signalling. A group that
+-- could not be terminated or could not be confirmed gone is recorded on the
+-- guard, because a possibly-live @gh@ is not the same thing as a clean
+-- timeout and must not be reported as one.
+abandonGh :: GhFetchGuard -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
+abandonGh (GhFetchGuard cleanupFailure) (input, _, _, processHandle) = do
+  outcome <- killGhGroup processHandle
+  case outcome of
+    Left message -> writeIORef cleanupFailure (Just message)
+    -- Reaping cannot block here: the group was just confirmed empty, so gh
+    -- is at most an unreaped zombie. It is skipped entirely when that
+    -- confirmation failed, since waiting on a gh that is still running would
+    -- block this thread and the refresh would never report anything at all.
+    Right () -> void (try @IOException (waitForProcess processHandle))
+  mapM_ (ignoreIOException . hClose) input
+
+-- | Terminates the process group led by a spawned @gh@ and confirms nothing
+-- from it survives. The group is censused first so the confirmation covers
+-- every member: a credential helper, or any other child gh starts, inherits
+-- the group, and cleanup tracking only the leader would call the group dead
+-- while a descendant kept running.
+killGhGroup :: ProcessHandle -> IO (Either Text ())
+killGhGroup processHandle = do
+  spawnedPid <- getPid processHandle
+  case spawnedPid of
+    -- No PID left to signal: the handle has already been reaped, which only
+    -- happens once gh has exited and been waited on.
+    Nothing -> pure (Right ())
+    Just pid -> do
+      let groupPid = fromIntegral pid
+      snapshot <- defaultProcessSnapshot
+      case snapshot of
+        Left message -> pure (Left message)
+        Right processes -> case identityForPid groupPid processes of
+          -- A live gh that is not its own group leader means @create_group@
+          -- did not take effect, and signalling its pgid would reach
+          -- processes this fetch never spawned. Refusing is the only safe
+          -- answer, and it is loud rather than silent.
+          Just leader
+            | leader.processIdentityGroupPid /= groupPid ->
+                pure (Left "gh is not the leader of its own process group, so its group cannot be terminated safely")
+          _ -> killVerifiedGroup groupPid (groupMembers groupPid processes)
+
+groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
+groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
+
+ignoreIOException :: IO () -> IO ()
+ignoreIOException action = void (try @IOException action)
 
 advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError FetchState
 advanceState limits previous page = do

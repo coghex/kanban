@@ -1,6 +1,7 @@
 module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    BoardRefreshOutcome (..),
     CardEnv (..),
     ChatTranscript (..),
     DetailsEnv (..),
@@ -65,9 +66,11 @@ module Kanban.UI
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
+    reusableSolveSession,
     reviewSessionReusable,
     reviewSessionsNeedingArm,
     revisedAttr,
+    runBoardRefreshWith,
     runDashboard,
     solveSessionAlreadyResolved,
     themeFor,
@@ -75,6 +78,7 @@ module Kanban.UI
     trackerHeaderAttribute,
     transcriptScrollKey,
     transcriptShouldTail,
+    unverifiedRefreshNotice,
     visibleSelectionRows,
   )
 where
@@ -129,7 +133,7 @@ import Kanban.Drainer
     queryDrainerStatus,
     setDrainerRunning,
   )
-import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
+import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( PreflightAction (..),
@@ -430,8 +434,17 @@ data AgentSessionEntry = AgentSessionEntry
   }
   deriving stock (Eq, Show)
 
+-- | How a board refresh ended. 'BoardRefreshUnverified' is not just another
+-- failure: it means the @gh@ process group the refresh spawned could not be
+-- confirmed dead, so the board must stay 'Loading' and no second @gh@ may be
+-- started alongside a first one that may still be running.
+data BoardRefreshOutcome
+  = BoardRefreshCompleted (Either ProviderError GitHubResult)
+  | BoardRefreshUnverified Text
+  deriving stock (Eq, Show)
+
 data AppEvent
-  = BoardRefreshFinished (Either ProviderError GitHubResult)
+  = BoardRefreshFinished BoardRefreshOutcome
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerStatus)
@@ -3124,7 +3137,7 @@ runningProcessOverlay state (IssueItem issue)
 startApplication :: EventM Name AppState ()
 startApplication = do
   vty <- getVtyHandle
-  liftIO (Vty.setMode (Vty.outputIface vty) Vty.Mouse True)
+  liftIO (enableMouseIfSupported (Vty.outputIface vty))
   startAllRefreshes
   state <- get
   void . liftIO . forkIO $ discoverWorkers state.appRepository >>= writeBChan state.appEventChannel . WorkerDiscoveryFinished
@@ -3135,6 +3148,16 @@ startApplication = do
         . liftIO
         . forkIO
         $ monitorDrainer controller state.appEventChannel
+
+-- | Mouse reporting is an optional affordance on a dashboard that must stay
+-- fully keyboard-operable (docs\/design.md §2), and vty exposes mode support
+-- as a queryable capability precisely because setting an unsupported mode is
+-- not guaranteed to be harmless. Asking first means a terminal without mouse
+-- reporting simply starts with the mouse features inert, rather than risking
+-- the whole startup over an affordance nothing depends on.
+enableMouseIfSupported :: Vty.Output -> IO ()
+enableMouseIfSupported output =
+  when (Vty.supportsMode output Vty.Mouse) (Vty.setMode output Vty.Mouse True)
 
 monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
 monitorDrainer controller eventChannel = forever $ do
@@ -3158,12 +3181,33 @@ openItemSolveChooser workflow (PullRequestItem _) = setNotice ("Select an issue 
 openIssueSolveChooser :: SolveWorkflow -> Issue -> EventM Name AppState ()
 openIssueSolveChooser workflow issue = do
   state <- get
-  case Map.lookup issue.issueNumber state.appSolveSessions of
-    Just session
-      | solveSessionActive session || session.solveSessionWorkflow == workflow -> do
-          modify (\current -> current {appOverlay = Just (SolveOverlay issue.issueNumber), appNotice = Nothing})
-          presentTranscriptTail
-    _ -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+    Just _ -> openExistingSolveOverlay issue.issueNumber
+    Nothing -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+
+-- | The session a solve request for `issueNumber` must reuse rather than
+-- replace: one that is still running, or a finished one from the very
+-- workflow being requested. Only a terminal session belonging to a
+-- /different/ workflow may be replaced.
+--
+-- Both the moment the chooser opens and the moment a chooser digit launches
+-- consult this, because they are not the same moment: persistent-worker
+-- discovery ('ensureWorkerSession') can attach a recovered session for the
+-- issue while the chooser sits open, and a launch that only trusted the
+-- chooser-open answer would overwrite that recovered session's transcript,
+-- log path, and session id with an empty one — leaving the overlay showing a
+-- record the live worker's events no longer belong to.
+reusableSolveSession :: SolveWorkflow -> Int -> Map Int SolveSession -> Maybe SolveSession
+reusableSolveSession workflow issueNumber sessions = do
+  session <- Map.lookup issueNumber sessions
+  if solveSessionActive session || session.solveSessionWorkflow == workflow
+    then Just session
+    else Nothing
+
+openExistingSolveOverlay :: Int -> EventM Name AppState ()
+openExistingSolveOverlay issueNumber = do
+  modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
+  presentTranscriptTail
 
 solveSessionActive :: SolveSession -> Bool
 solveSessionActive session = session.solveSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
@@ -3174,6 +3218,13 @@ workflowKey AutoSolve = "A"
 
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do
+  state <- get
+  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+    Just _ -> openExistingSolveOverlay issue.issueNumber
+    Nothing -> startFreshIssueSolve issue workflow brand
+
+startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
+startFreshIssueSolve issue workflow brand = do
   state <- get
   let autoProgress = case workflow of
         SolveOnly -> Nothing
@@ -4752,20 +4803,34 @@ codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds 
 claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
 
 runBoardRefresh :: Options -> ResolvedConfig -> Repository -> BChan AppEvent -> IO ()
-runBoardRefresh options config repository eventChannel = do
+runBoardRefresh options config repository eventChannel =
+  runBoardRefreshWith (writeBChan eventChannel . BoardRefreshFinished) options config repository
+
+-- | 'runBoardRefresh' with the publish step injected, so the suite can
+-- observe the process table at exactly the instant the outcome is published
+-- and prove the abandoned @gh@ group is already gone by then — something no
+-- assertion made after reading a 'BChan' could establish.
+runBoardRefreshWith :: (BoardRefreshOutcome -> IO ()) -> Options -> ResolvedConfig -> Repository -> IO ()
+runBoardRefreshWith publish options config repository = do
   let timeoutMicros = githubRefreshTimeoutMicros config
-  timedResult <- timeout timeoutMicros (fetchGitHubSnapshot config.resolvedLimits config.resolvedWorkflow repository)
-  result <- case timedResult of
-    Nothing -> pure (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds")))
-    Just (Left providerError) -> pure (Left providerError)
-    Just (Right githubResult)
-      | not (cacheEnabled options config) -> pure (Right githubResult)
+  guard <- newGhFetchGuard
+  timedResult <- timeout timeoutMicros (fetchGitHubSnapshot guard config.resolvedLimits config.resolvedWorkflow repository)
+  -- Read after the fetch has fully unwound, so the abandoned group's
+  -- verified TERM/KILL has already run to completion: whatever it recorded
+  -- is final by now, and nothing is published before it is known.
+  cleanupFailure <- ghFetchCleanupFailure guard
+  outcome <- case (cleanupFailure, timedResult) of
+    (Just message, _) -> pure (BoardRefreshUnverified message)
+    (Nothing, Nothing) -> pure (BoardRefreshCompleted (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds"))))
+    (Nothing, Just (Left providerError)) -> pure (BoardRefreshCompleted (Left providerError))
+    (Nothing, Just (Right githubResult))
+      | not (cacheEnabled options config) -> pure (BoardRefreshCompleted (Right githubResult))
       | otherwise -> do
           cacheResult <- writeRepositoryCache repository githubResult.githubSnapshot
-          pure . Right $ case cacheResult of
+          pure . BoardRefreshCompleted . Right $ case cacheResult of
             Left warning -> githubResult {githubWarnings = githubResult.githubWarnings <> [warning]}
             Right () -> githubResult
-  writeBChan eventChannel (BoardRefreshFinished result)
+  publish outcome
 
 startCodexRefresh :: EventM Name AppState ()
 startCodexRefresh = do
@@ -4809,15 +4874,21 @@ startClaudeRefresh = do
 runClaudeRefresh :: Int -> BChan AppEvent -> IO ()
 runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>= writeBChan eventChannel . ClaudeRefreshFinished
 
-applyBoardRefresh :: Either ProviderError GitHubResult -> EventM Name AppState ()
-applyBoardRefresh result = do
-  modify $ \state -> case result of
-    Left providerError ->
+applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
+applyBoardRefresh outcome = do
+  modify $ \state -> case outcome of
+    -- 'appBoardFreshness' deliberately stays 'Loading'. The gh process group
+    -- could not be confirmed dead, and 'startBoardRefresh' refusing to start
+    -- a second fetch while the board is loading is the only thing keeping a
+    -- new gh off a possibly still-live one, so releasing the gate here is
+    -- exactly what must not happen.
+    BoardRefreshUnverified message -> state {appNotice = Just (unverifiedRefreshNotice message)}
+    BoardRefreshCompleted (Left providerError) ->
       state
         { appBoardFreshness = failureFreshness state providerError,
           appNotice = Just (renderProviderError providerError)
         }
-    Right githubResult ->
+    BoardRefreshCompleted (Right githubResult) ->
       let snapshot = githubResult.githubSnapshot
           refreshedBoard = deriveBoard state.appConfig.resolvedWorkflow snapshot
           (selectedColumn, selectedRows) = preserveSelection state refreshedBoard
@@ -4839,9 +4910,20 @@ applyBoardRefresh result = do
               appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
             }
   startPendingWorkerMonitors
-  case result of
-    Right githubResult -> advanceAutoSolves githubResult.githubSnapshot
-    Left _ -> pure ()
+  case outcome of
+    BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
+    _ -> pure ()
+
+-- | What the board reports when a refresh's @gh@ process group could not be
+-- confirmed dead. It has to name both the cause and the consequence: the
+-- board is stuck loading on purpose, and the "GitHub refresh is already
+-- running" that any later @u@ produces is the same fact restated, not a
+-- contradiction.
+unverifiedRefreshNotice :: Text -> Text
+unverifiedRefreshNotice message =
+  "GitHub refresh timed out and its gh process could not be confirmed stopped ("
+    <> message
+    <> "); refreshing stays blocked while it may still be running — restart the dashboard to clear it"
 
 reconcilePullRequestSessions :: [PullRequest] -> Map Int PullRequestReviewSession -> Map Int PullRequestReviewSession
 reconcilePullRequestSessions pullRequests = Map.mapWithKey reconcile

@@ -38,7 +38,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (FetchState (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), GitHubResult (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -92,6 +92,7 @@ import Kanban.Process
     membersStillInGroup,
     readProcessSnapshot,
   )
+import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Repository (parseRemoteRepository, parseRepositoryName, resolveRepository)
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
@@ -184,6 +185,7 @@ import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChil
 import Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    BoardRefreshOutcome (..),
     CardEnv (..),
     ChatTranscript (..),
     DetailsEnv (..),
@@ -245,18 +247,21 @@ import Kanban.UI
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
+    reusableSolveSession,
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
     reviewSessionReusable,
     reviewSessionsNeedingArm,
     revisedAttr,
+    runBoardRefreshWith,
     solveSessionAlreadyResolved,
     themeFor,
     trackerAttr,
     trackerHeaderAttribute,
     transcriptScrollKey,
     transcriptShouldTail,
+    unverifiedRefreshNotice,
     visibleSelectionRows,
   )
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, orderCardLabels, pullRequestStatus)
@@ -4874,6 +4879,125 @@ main = hspec $ do
       flagForVariable "issueCursor" firstPageArguments `shouldBe` Nothing
       flagForVariable "pullRequestCursor" firstPageArguments `shouldBe` Nothing
 
+  describe "board refresh gh process group cleanup" $ do
+    it "kills the abandoned gh's whole process group, credential-helper descendant included, before it publishes the timeout" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let leaderMarker = temporaryRoot </> "gh.pid"
+            descendantMarker = temporaryRoot </> "helper.pid"
+        -- gh itself ignores TERM, standing in for one wedged on network I/O,
+        -- and the helper it spawned inherits its process group and ignores
+        -- TERM too. Cleanup that only TERMed the direct child -- what
+        -- readProcessWithExitCode did -- leaves both of these running.
+        withFakeGh
+          temporaryRoot
+          [ "trap '' TERM",
+            "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+            "printf '%s\\n' \"$!\" > " <> ByteString.pack descendantMarker,
+            "printf '%s\\n' \"$$\" > " <> ByteString.pack leaderMarker,
+            "while :; do sleep 1; done"
+          ]
+          $ do
+            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 1
+            leaderPid <- readMarkerPid leaderMarker
+            descendantPid <- readMarkerPid descendantMarker
+            -- The snapshot was taken by the publish callback itself, so this
+            -- is the process table as of the instant the outcome was
+            -- published -- not merely some time afterwards.
+            case snapshotWhenPublished of
+              Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+              Right identities -> do
+                identityForPid leaderPid identities `shouldBe` Nothing
+                identityForPid descendantPid identities `shouldBe` Nothing
+            case outcome of
+              BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+              other -> expectationFailure ("expected a clean timeout, got " <> show other)
+
+    it "leaves a fast gh's decoded page untouched" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withFakeGh
+          temporaryRoot
+          ["printf '%s' '" <> emptyGraphqlPage <> "'"]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right githubResult) -> do
+                githubResult.githubSnapshot.snapshotIssues `shouldBe` []
+                githubResult.githubSnapshot.snapshotPullRequests `shouldBe` []
+              other -> expectationFailure ("expected a decoded snapshot, got " <> show other)
+
+    it "leaves a failing gh's exit status and stderr untouched" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withFakeGh
+          temporaryRoot
+          [ "printf '%s\\n' 'gh: authentication token expired' >&2",
+            "exit 1"
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Left providerError) -> do
+                providerError.providerErrorKind `shouldBe` AuthenticationRequired
+                Data.Text.unpack providerError.providerErrorMessage `shouldContain` "authentication token expired"
+              other -> expectationFailure ("expected a reported gh failure, got " <> show other)
+
+    it "explains both the unverified gh and the deliberate refresh block it causes" $ do
+      -- The board is left 'Loading' on purpose after an unverified cleanup,
+      -- so the notice has to carry the reason: otherwise the user sees a
+      -- dashboard that never finishes loading and a 'u' that only ever
+      -- answers "GitHub refresh is already running".
+      let notice = unverifiedRefreshNotice "ps exited 1"
+      notice `shouldMention` "ps exited 1"
+      notice `shouldMention` "could not be confirmed stopped"
+      notice `shouldMention` "restart the dashboard"
+
+  describe "solve launch against a session attached while the chooser sits open" $ do
+    -- 'startIssueSolve' and 'openIssueSolveChooser' both run in brick's
+    -- 'EventM', which no unit test here can drive; this covers
+    -- 'reusableSolveSession', the single predicate they now share. A 'Just'
+    -- answer is precisely what routes a chooser digit into
+    -- 'openExistingSolveOverlay' -- select 'SolveOverlay', present the
+    -- transcript, return -- instead of the 'Map.insert' plus
+    -- 'launchSolveInvocation' that would replace the session.
+    let sessionFor workflow phase =
+          SolveSession
+            { solveSessionIssue = baseIssue 40 [],
+              solveSessionWorkflow = workflow,
+              solveSessionBrand = CodexSolver,
+              solveSessionId = Just "recovered-worker-session",
+              solveSessionPhase = phase,
+              solveSessionActivity = "reattaching persistent worker",
+              solveSessionActivityStartedAt = epoch,
+              solveSessionLogPath = Just "/tmp/recovered.jsonl",
+              solveSessionTranscript = ChatTranscript "recovered" "" "",
+              solveSessionInput = "",
+              solveSessionSpinnerFrame = 0,
+              solveSessionAutoProgress = Nothing,
+              solveSessionResumeProvenance = ResumeAnswer,
+              solveSessionFollowing = True
+            }
+        sessionsWith session = Map.fromList [(40, session)]
+
+    it "reuses a session that persistent-worker discovery attached after the chooser opened" $ do
+      -- The chooser opened because nothing was attached yet...
+      reusableSolveSession AutoSolve 40 Map.empty `shouldBe` Nothing
+      -- ...then 'ensureWorkerSession' inserted the recovered session, and the
+      -- digit that follows must return that very object, untouched: its
+      -- transcript, log path, and worker session id are what the live worker's
+      -- events still target.
+      let recovered = sessionFor SolveOnly SolveStarting
+      reusableSolveSession AutoSolve 40 (sessionsWith recovered) `shouldBe` Just recovered
+      reusableSolveSession SolveOnly 40 (sessionsWith recovered) `shouldBe` Just recovered
+
+    it "reuses any still-running session, whichever workflow was requested" $
+      mapM_
+        (\phase -> reusableSolveSession AutoSolve 40 (sessionsWith (sessionFor SolveOnly phase)) `shouldSatisfy` isJust)
+        [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
+
+    it "still replaces a finished session belonging to a different workflow" $ do
+      reusableSolveSession AutoSolve 40 (sessionsWith (sessionFor SolveOnly SolveFinished)) `shouldBe` Nothing
+      reusableSolveSession AutoSolve 40 (sessionsWith (sessionFor AutoSolve SolveFinished))
+        `shouldBe` Just (sessionFor AutoSolve SolveFinished)
+
   describe "Codex app-server decoding" $ do
     it "maps returned windows by duration and computes percentage left" $ do
       case decodeCodexUsageResponse epoch codexRateLimitResponse of
@@ -6537,6 +6661,46 @@ fullFixtureToml =
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
+
+-- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
+-- it instead of the real thing.
+withFakeGh :: FilePath -> [ByteString.ByteString] -> IO result -> IO result
+withFakeGh temporaryRoot body action = do
+  let binaryRoot = temporaryRoot </> "bin"
+  createDirectoryIfMissing True binaryRoot
+  ByteString.writeFile (binaryRoot </> "gh") (ByteString.unlines ("#!/bin/sh" : body))
+  setFileMode (binaryRoot </> "gh") 0o700
+  originalPath <- maybe "" id <$> lookupEnv "PATH"
+  withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) action
+
+-- | Runs a board refresh against whatever @gh@ is on PATH and reports both
+-- the published outcome and the process table as of the exact moment it was
+-- published -- the only way to prove an abandoned gh was already gone by
+-- then, rather than merely gone by the time an assertion got around to
+-- looking.
+captureBoardRefresh :: FilePath -> Int -> IO (BoardRefreshOutcome, Either Text [ProcessIdentity])
+captureBoardRefresh temporaryRoot githubSeconds = do
+  published <- newEmptyMVar
+  runBoardRefreshWith
+    (\outcome -> readProcessSnapshot >>= putMVar published . (,) outcome)
+    testOptions
+    testResolvedConfig
+      { resolvedCache = False,
+        resolvedTimeouts = defaultTimeoutsConfig {timeoutsGithubSeconds = githubSeconds}
+      }
+    (Repository temporaryRoot "coghex" "kanban")
+  takeMVar published
+
+readMarkerPid :: FilePath -> IO Int
+readMarkerPid markerPath = do
+  markerText <- readFile markerPath
+  pure (read (filter (`notElem` (" \n" :: String)) markerText))
+
+-- | The smallest GraphQL response the board fetch accepts: both requested
+-- connections present, both empty, neither paginated.
+emptyGraphqlPage :: ByteString.ByteString
+emptyGraphqlPage =
+  "{\"data\":{\"repository\":{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
 
 withTemporaryCacheRoot :: (FilePath -> IO result) -> IO result
 withTemporaryCacheRoot = bracket createTemporaryDirectory removePathForcibly
