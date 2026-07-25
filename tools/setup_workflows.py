@@ -213,9 +213,38 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
     )
 
 
+def backend_is_installed(install_dir: Path) -> bool:
+    """Whether a usable Kanban-managed backend already occupies install_dir.
+
+    Both installed files are required, since `approve_issues.py` imports
+    `kanban_config.py` at module scope, and each must resolve to this
+    repository's own tracked asset rather than merely exist.
+    """
+    return all(
+        (install_dir / name).is_file()
+        and install_issue_review.is_managed_asset(install_dir / name, name)
+        for name in ("approve_issues.py", "kanban_config.py")
+    )
+
+
 def plan_legacy_launcher(
-    install_dir: Path, legacy_path: Path, *, migrate: bool
+    install_dir: Path, legacy_path: Path, *, migrate: bool, backend_ready: bool
 ) -> dict[str, Any]:
+    # The launcher is a symlink *to* the managed backend link, so installing
+    # it without that backend would produce a launcher pointing at nothing
+    # -- and with --migrate-legacy-launcher it would first move the user's
+    # own launcher aside to make room for that dangling link.
+    if not backend_ready:
+        return component_result(
+            "legacy-launcher",
+            "unavailable",
+            scope="user (pre-Kanban automation compatibility)",
+            message=(
+                f"The canonical issue-review backend is not installed at {install_dir}, so "
+                "the compatibility launcher would point at nothing. Install it first, or "
+                "select --component issue-review in the same run."
+            ),
+        )
     plan = install_issue_review.plan_legacy_launcher(
         legacy_path, install_dir / "approve_issues.py", allow_migration=migrate
     )
@@ -387,12 +416,15 @@ def plan_component(
     legacy_path: Path,
     scope: str,
     migrate: bool,
+    backend_ready: bool,
 ) -> dict[str, Any]:
     try:
         if component == "issue-review":
             return plan_issue_review(repo, install_dir)
         if component == "legacy-launcher":
-            return plan_legacy_launcher(install_dir, legacy_path, migrate=migrate)
+            return plan_legacy_launcher(
+                install_dir, legacy_path, migrate=migrate, backend_ready=backend_ready
+            )
         if component == "codex-plugin":
             return plan_codex_plugin(repo, scope)
         if component == "claude-plugin":
@@ -426,6 +458,20 @@ def apply_component(
         plan = dict(plan, applied=True, results=results)
         return plan
     if component == "legacy-launcher":
+        # Re-checked here, not only at plan time: the backend this launcher
+        # points at may be installed by an earlier component in this same
+        # run, and nothing may move the user's own launcher aside for a link
+        # to a backend that did not actually arrive.
+        if not backend_is_installed(install_dir):
+            return dict(
+                plan,
+                status="failed",
+                applied=False,
+                message=(
+                    f"The canonical issue-review backend is still not installed at "
+                    f"{install_dir}; the compatibility launcher was left untouched."
+                ),
+            )
         result = install_issue_review.migrate_legacy_launcher(
             legacy_path, install_dir / "approve_issues.py", allow_migration=migrate
         )
@@ -538,11 +584,11 @@ def selected_components(args: argparse.Namespace) -> list[str]:
             + ", ".join(f"--component {name}" for name in COMPONENTS)
             + ", or --all."
         )
-    seen: list[str] = []
-    for component in args.component:
-        if component not in seen:
-            seen.append(component)
-    return seen
+    # Canonical order, not the order they were typed: the compatibility
+    # launcher points at the backend the issue-review component installs, so
+    # it has to be planned and applied after it whichever way round the user
+    # asked for them.
+    return [component for component in COMPONENTS if component in set(args.component)]
 
 
 def print_plan(result: dict[str, Any]) -> None:
@@ -572,18 +618,29 @@ def main(argv: list[str] | None = None) -> int:
         target = Path(args.target).expanduser().resolve() if args.target else repo
         install_dir = Path(args.install_dir).expanduser().resolve()
         legacy_path = Path(args.legacy_path).expanduser()
-        planned = [
-            plan_component(
-                component,
-                repo=repo,
-                target=target,
-                install_dir=install_dir,
-                legacy_path=legacy_path,
-                scope=args.scope,
-                migrate=args.migrate_legacy_launcher,
+        planned: list[dict[str, Any]] = []
+        for component in components:
+            # A backend already installed counts, and so does one this same
+            # run is about to install: components are applied in the
+            # canonical order selected_components returns, so issue-review
+            # lands before the launcher that depends on it.
+            backend_ready = backend_is_installed(install_dir) or any(
+                plan["component"] == "issue-review"
+                and plan["status"] in ("install", "unchanged")
+                for plan in planned
             )
-            for component in components
-        ]
+            planned.append(
+                plan_component(
+                    component,
+                    repo=repo,
+                    target=target,
+                    install_dir=install_dir,
+                    legacy_path=legacy_path,
+                    scope=args.scope,
+                    migrate=args.migrate_legacy_launcher,
+                    backend_ready=backend_ready,
+                )
+            )
         if args.apply:
             planned = [
                 apply_component(

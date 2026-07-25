@@ -332,11 +332,60 @@ class ConflictTests(HermeticSetupTests):
         self.assertIn("claude plugin marketplace remove kanban", entry["message"])
         self.assertEqual(self.mutating_calls("claude"), [])
 
+    def test_the_launcher_is_refused_without_the_backend_it_points_at(self):
+        code, payload = self.run_setup("--component", "legacy-launcher", "--apply")
+
+        entry = self.component(payload, "legacy-launcher")
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "unavailable")
+        self.assertIn("--component issue-review", entry["message"])
+        self.assertFalse(os.path.lexists(self.legacy_path))
+
+    def test_migration_never_moves_a_user_file_aside_for_a_dangling_launcher(self):
+        # The damaging shape: --migrate-legacy-launcher would back the
+        # user's own launcher up and replace it with a link to a backend
+        # that was never installed.
+        self.legacy_path.parent.mkdir(parents=True)
+        self.legacy_path.write_text("pre-kanban launcher\n", encoding="utf-8")
+
+        code, payload = self.run_setup(
+            "--component", "legacy-launcher", "--migrate-legacy-launcher", "--apply"
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.component(payload, "legacy-launcher")["status"], "unavailable")
+        self.assertFalse(self.legacy_path.is_symlink())
+        self.assertEqual(
+            self.legacy_path.read_text(encoding="utf-8"), "pre-kanban launcher\n"
+        )
+        self.assertFalse(
+            os.path.lexists(
+                self.legacy_path.with_name(self.legacy_path.name + ".pre-kanban-backup")
+            )
+        )
+
+    def test_the_launcher_is_installed_after_the_backend_in_the_same_run(self):
+        # Requested in the damaging order; setup must still install the
+        # backend first, and the resulting launcher must resolve.
+        code, payload = self.run_setup(
+            "--component", "legacy-launcher", "--component", "issue-review", "--apply"
+        )
+
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(
+            [entry["component"] for entry in payload["components"]],
+            ["issue-review", "legacy-launcher"],
+        )
+        self.assertTrue(self.legacy_path.is_symlink())
+        self.assertTrue(self.legacy_path.is_file(), "the launcher must actually resolve")
+
     def test_an_ordinary_legacy_launcher_is_preserved_until_migration_is_opted_into(self):
         self.legacy_path.parent.mkdir(parents=True)
         self.legacy_path.write_text("pre-kanban launcher\n", encoding="utf-8")
 
-        code, payload = self.run_setup("--component", "legacy-launcher", "--apply")
+        code, payload = self.run_setup(
+            "--component", "issue-review", "--component", "legacy-launcher", "--apply"
+        )
 
         entry = self.component(payload, "legacy-launcher")
         self.assertEqual(code, 1)
@@ -393,7 +442,12 @@ class ConflictTests(HermeticSetupTests):
         self.legacy_path.symlink_to(unrelated)
 
         code, payload = self.run_setup(
-            "--component", "legacy-launcher", "--migrate-legacy-launcher", "--apply"
+            "--component",
+            "issue-review",
+            "--component",
+            "legacy-launcher",
+            "--migrate-legacy-launcher",
+            "--apply",
         )
 
         entry = self.component(payload, "legacy-launcher")

@@ -5819,6 +5819,28 @@ main = hspec $ do
           environment <- gatherPreflightEnvironment root
           let rendered = Data.Text.unlines (doctorLines environment)
           mapM_ (\action -> rendered `shouldSatisfy` Data.Text.isInfixOf (actionLabel action)) doctorActions
+          -- Every action a user can select from the board gets its own
+          -- line, including the ones whose dependency set happens to match
+          -- another's, so a future collapse cannot silently drop one.
+          mapM_
+            (\action -> doctorActions `shouldSatisfy` elem action)
+            [ ActionIssueReview IssueOriginCodex,
+              ActionIssueReview IssueOriginClaude,
+              ActionIssueReview IssueOriginUnmarked,
+              ActionIssueRevision IssueOriginCodex,
+              ActionIssueRevision IssueOriginClaude,
+              ActionSolve CodexSolver,
+              ActionSolve ClaudeSolver,
+              ActionAutoSolve CodexSolver,
+              ActionAutoSolve ClaudeSolver,
+              ActionPullRequestFlow PullRequestCodex PullRequestReview,
+              ActionPullRequestFlow PullRequestClaude PullRequestReview,
+              ActionPullRequestFlow PullRequestCodex PullRequestRereview,
+              ActionPullRequestFlow PullRequestClaude PullRequestRereview,
+              ActionPullRequestFlow PullRequestCodex PullRequestRevision,
+              ActionPullRequestFlow PullRequestClaude PullRequestRevision
+            ]
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r)"
           -- The drainer keeps its own dedicated install and status flow.
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
 

@@ -50,10 +50,16 @@ four with `--all`.
 
 | Component | What it installs | Needed for |
 | --- | --- | --- |
-| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend under `~/Library/Application Support/kanban/issue-review/` | Canonical issue review/rereview (`r`), and the read-only readiness gate a solve session checks before claiming an issue |
+| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/` | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
+
+A plugin component alone is not enough for the PR flows: they call the
+`issue-review` backend too, so install it as well (`--all` covers this).
+`legacy-launcher` depends on it outright — it is a symlink *to* that
+installed backend, so setup refuses it until the backend is present or
+selected in the same run.
 
 `issue-review` and `legacy-launcher` install into a per-user location by
 design: `src/Kanban/Review.hs` resolves exactly that path, and there is no
@@ -126,12 +132,18 @@ actually spawns:
   its read-only readiness gate. **Auto-solve** reviews its own pull request
   with the opposite brand, so it needs both brands.
 - **PR review and rereview** run on the opposite brand from the PR's origin
-  marker and are themselves the canonical reviewer, so they need only that
+  marker and are themselves the canonical reviewer, so they need that
   brand's CLI and bundle. **PR revise** runs on the PR's *own* brand and
   then hands off to exactly one canonical rereview by spawning the opposite
   brand from inside that session, so it also needs that brand's CLI and
   sign-in — but not its bundle, since the nested call is a direct
-  `codex exec` / `claude -p`.
+  `codex exec` / `claude -p`. All three additionally need the
+  `issue-review` backend: the bundled coordinator runs its read-only
+  `--check` gate against the PR's linked issue before publishing any
+  verdict.
+
+Every action above also needs `gh`, signed in — the board's GitHub data and
+every write action go through it.
 
 The doctor path is read-only and non-interactive. It resolves executables,
 reads `--version`, and asks each provider its own status-only questions

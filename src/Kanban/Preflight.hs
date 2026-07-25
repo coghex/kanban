@@ -617,10 +617,13 @@ doctorActions =
     ActionSolve ClaudeSolver,
     ActionAutoSolve CodexSolver,
     ActionAutoSolve ClaudeSolver,
-    -- Rereview's dependency set is identical to review's, so listing
-    -- review and revise per origin already covers every distinct set.
+    -- Every board action gets its own line, including rereview: its
+    -- dependency set currently matches review's, but the doctor reports
+    -- readiness per action a user can select, not per distinct set.
     ActionPullRequestFlow PullRequestCodex PullRequestReview,
     ActionPullRequestFlow PullRequestClaude PullRequestReview,
+    ActionPullRequestFlow PullRequestCodex PullRequestRereview,
+    ActionPullRequestFlow PullRequestClaude PullRequestRereview,
     ActionPullRequestFlow PullRequestCodex PullRequestRevision,
     ActionPullRequestFlow PullRequestClaude PullRequestRevision
   ]
