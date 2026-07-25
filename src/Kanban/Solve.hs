@@ -8,6 +8,7 @@ module Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    agentOutcome,
     codexSolverModel,
     claudeSolverModel,
     codexReviewerModel,
@@ -18,6 +19,7 @@ module Kanban.Solve
     runSolve,
     runSolveWith,
     solveArguments,
+    solveOutcome,
     solverLabel,
   )
 where
@@ -496,23 +498,52 @@ stderrOnLine sessionLog eventSink issueNumber line
       mapM_ (\value -> logRawLine value "stderr" line) sessionLog
       eventSink (SolveDiagnostic issueNumber (decodeBytes line))
 
-solveOutcome :: ExitCode -> Text -> SolveOutcome
-solveOutcome ExitSuccess lastMessage = case needsInputQuestion lastMessage of
+-- | The one outcome classifier both agent workflows use, so the solve and
+-- PR flows can no longer disagree about what a terminal message means. A
+-- valid stop-and-ask handoff outranks the exit status: an agent that printed
+-- its question and then exited nonzero (a CLI quirk, a cleanup failure after
+-- the ask) has still followed the protocol, and needs-input is always more
+-- useful to the user than a bare failure that buries the question in error
+-- text. Without a handoff the exit status decides, and each workflow passes
+-- its own @agentLabel@ so the failure diagnostic keeps its existing wording.
+agentOutcome :: Text -> ExitCode -> Text -> SolveOutcome
+agentOutcome agentLabel exitCode lastMessage = case needsInputQuestion lastMessage of
   Just question -> SolveNeedsInput question
-  Nothing -> SolveCompleted
-solveOutcome (ExitFailure code) lastMessage =
-  SolveFailed
-    ( "Solver exited with status "
-        <> Text.pack (show code)
-        <> if Text.null (Text.strip lastMessage) then "" else ": " <> Text.take 1000 (Text.strip lastMessage)
-    )
+  Nothing -> case exitCode of
+    ExitSuccess -> SolveCompleted
+    ExitFailure code ->
+      SolveFailed
+        ( agentLabel
+            <> " exited with status "
+            <> Text.pack (show code)
+            <> if Text.null (Text.strip lastMessage) then "" else ": " <> Text.take 1000 (Text.strip lastMessage)
+        )
 
+solveOutcome :: ExitCode -> Text -> SolveOutcome
+solveOutcome = agentOutcome "Solver"
+
+-- | The question from a stop-and-ask handoff, if the agent's final message
+-- really carries one. The marker must /begin/ a line (leading whitespace
+-- allowed) and be followed by a non-empty question. Anchoring is what makes
+-- this trustworthy: the workflow prompts themselves instruct the agent to
+-- "stop with exactly KANBAN_NEEDS_INPUT: <question>", so a completion
+-- summary that merely quotes that contract mid-sentence would otherwise turn
+-- a finished run into a phantom question nobody asked — the card goes orange
+-- and autosolve stalls waiting for an answer. When several lines qualify the
+-- last one wins, so a resumed session's newest ask is the one that reaches
+-- the user.
 needsInputQuestion :: Text -> Maybe Text
-needsInputQuestion message =
-  case Text.breakOnEnd needsInputMarker message of
-    (prefix, question)
-      | Text.null prefix || Text.null (Text.strip question) -> Nothing
-      | otherwise -> Just (Text.strip (Text.takeWhile (/= '\n') question))
+needsInputQuestion message = case mapMaybe handoffQuestion (Text.lines message) of
+  [] -> Nothing
+  questions -> Just (last questions)
+
+-- | The question a single line hands off, or 'Nothing' when the line is not
+-- an anchored marker line or leaves the question empty.
+handoffQuestion :: Text -> Maybe Text
+handoffQuestion line = do
+  remainder <- Text.stripPrefix needsInputMarker (Text.stripStart line)
+  let question = Text.strip remainder
+  if Text.null question then Nothing else Just question
 
 needsInputMarker :: Text
 needsInputMarker = "KANBAN_NEEDS_INPUT:"

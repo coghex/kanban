@@ -66,6 +66,7 @@ import Kanban.PullRequestFlow
     PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
+    flowOutcome,
     originFromBody,
     pullRequestArguments,
     pullRequestVerdictForLabels,
@@ -132,6 +133,7 @@ import Kanban.Solve
     runSolve,
     runSolveWith,
     solveArguments,
+    solveOutcome,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.StreamReader
@@ -3102,6 +3104,83 @@ main = hspec $ do
         Nothing -> expectationFailure "handleReadLine did not return after being interrupted"
       managedProcessFor process >>= killManagedProcess
       void (timeout 3000000 (waitForProcess process))
+
+  -- Both workflows classify their terminal outcome through one shared
+  -- implementation, so every case below is asserted against 'solveOutcome'
+  -- and 'flowOutcome' together: they must agree on marker anchoring and on
+  -- exit-status precedence, and differ only in the failure diagnostic's
+  -- agent label.
+  describe "agent handoff outcome classification" $ do
+    let bothOutcomes message exitCode = (solveOutcome exitCode message, flowOutcome exitCode message)
+
+    it "treats a marker that begins the final message as a handoff" $
+      bothOutcomes "KANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
+        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
+
+    it "treats a marker that begins a later line as a handoff" $
+      bothOutcomes "I inspected the worktree.\nKANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
+        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
+
+    it "accepts an indented marker line" $
+      bothOutcomes "Summary:\n   \tKANBAN_NEEDS_INPUT: which base branch?" ExitSuccess
+        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
+
+    -- The regression this classification exists for: the prompts tell the
+    -- agent to "stop with exactly KANBAN_NEEDS_INPUT: <question>", so a
+    -- completion summary quoting the contract used to turn a finished run
+    -- into a question nobody asked.
+    it "completes a successful run whose message only mentions the marker mid-line" $
+      bothOutcomes
+        "Opened PR #42. Had ambiguity arisen I would have stopped with KANBAN_NEEDS_INPUT: a concrete question."
+        ExitSuccess
+        `shouldBe` (SolveCompleted, SolveCompleted)
+
+    it "completes a successful run with no marker at all" $
+      bothOutcomes "PR #42 — anchored the marker match." ExitSuccess
+        `shouldBe` (SolveCompleted, SolveCompleted)
+
+    it "ignores an anchored marker whose question is empty" $
+      bothOutcomes "KANBAN_NEEDS_INPUT:   " ExitSuccess
+        `shouldBe` (SolveCompleted, SolveCompleted)
+
+    -- Deterministic rule: the last *valid* anchored line supplies the single
+    -- question, so a resumed session's newest ask is the one surfaced.
+    it "takes the last anchored line when several qualify" $
+      bothOutcomes
+        "KANBAN_NEEDS_INPUT: first question?\nstill working\nKANBAN_NEEDS_INPUT: second question?"
+        ExitSuccess
+        `shouldBe` (SolveNeedsInput "second question?", SolveNeedsInput "second question?")
+
+    it "skips a trailing empty marker in favour of the last valid anchored line" $
+      bothOutcomes "KANBAN_NEEDS_INPUT: real question?\nKANBAN_NEEDS_INPUT:" ExitSuccess
+        `shouldBe` (SolveNeedsInput "real question?", SolveNeedsInput "real question?")
+
+    -- A question the agent actually printed must outrank the exit status:
+    -- needs-input is always more useful than a failure that buries it.
+    it "keeps an anchored handoff when the agent exits nonzero" $
+      bothOutcomes "KANBAN_NEEDS_INPUT: which base branch?" (ExitFailure 1)
+        `shouldBe` (SolveNeedsInput "which base branch?", SolveNeedsInput "which base branch?")
+
+    it "still fails a nonzero exit whose message only mentions the marker mid-line" $
+      bothOutcomes "aborted before I could stop with KANBAN_NEEDS_INPUT: a question" (ExitFailure 3)
+        `shouldBe` ( SolveFailed "Solver exited with status 3: aborted before I could stop with KANBAN_NEEDS_INPUT: a question",
+                     SolveFailed "PR agent exited with status 3: aborted before I could stop with KANBAN_NEEDS_INPUT: a question"
+                   )
+
+    it "reports a nonzero exit without a marker using each workflow's diagnostic" $
+      bothOutcomes "fatal: not a git repository" (ExitFailure 128)
+        `shouldBe` ( SolveFailed "Solver exited with status 128: fatal: not a git repository",
+                     SolveFailed "PR agent exited with status 128: fatal: not a git repository"
+                   )
+
+    it "omits the message from the diagnostic when the final message is blank" $
+      bothOutcomes "  \n  " (ExitFailure 2)
+        `shouldBe` (SolveFailed "Solver exited with status 2", SolveFailed "PR agent exited with status 2")
+
+    it "truncates a long failure message to 1000 characters" $ do
+      let (solveFailure, flowFailure) = bothOutcomes (Data.Text.replicate 1200 "x") (ExitFailure 1)
+      solveFailure `shouldBe` SolveFailed ("Solver exited with status 1: " <> Data.Text.replicate 1000 "x")
+      flowFailure `shouldBe` SolveFailed ("PR agent exited with status 1: " <> Data.Text.replicate 1000 "x")
 
   describe "solve process protocol" $ do
     it "pins the canonical solver and reviewer model contract" $ do
