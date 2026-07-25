@@ -4936,7 +4936,7 @@ unverifiedRefreshNotice failure =
     <> "); "
     <> case failure.ghCleanupGuard of
       GuardRecorded -> "the next refresh re-checks it and will proceed once it is gone"
-      GuardForciblyTerminated -> "it was killed outright and its main process confirmed gone, but this dashboard will not refresh again; restarting is safe"
+      GuardForciblyTerminated -> "it was killed outright and its whole process group confirmed gone, but this dashboard will not refresh again; restarting is safe"
       GuardInMemoryOnly -> "this dashboard will not refresh again, and a restart cannot know to hold back — check for a stray gh process first"
 
 -- | The unverified cleanup rendered as a provider error, purely so

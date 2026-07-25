@@ -139,10 +139,11 @@ data GhCleanupGuard
   = -- | The group is on disk. Any later fetch re-checks it before spawning
     -- anything, in this dashboard or one started long afterwards.
     GuardRecorded
-  | -- | Nothing could be recorded, so the group was killed outright and its
-    -- leader reaped. No durable guard is needed because nothing survivable
-    -- is known to be left — though the members that could not be censused
-    -- are still only presumed dead, so this dashboard stops refreshing.
+  | -- | Nothing could be recorded, so the group was killed outright — and a
+    -- fresh snapshot then showed it empty, leader and descendants alike. No
+    -- durable guard is needed because nothing is left to guard against. This
+    -- dashboard still stops refreshing, since the store it would need to
+    -- record the next one is evidently broken.
     GuardForciblyTerminated
   | -- | Nothing could be recorded and the forced kill could not be confirmed
     -- either. This dashboard's refusal to refresh is all that remains, and
@@ -310,20 +311,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
   outcome <- killGhGroup processHandle
   case outcome of
     Left (message, unconfirmed) -> do
-      -- Upgrading the spawn-time guard to the full census is what lets a
-      -- later run re-kill the group rather than only watch it, so it is
-      -- worth attempting -- but nothing depends on it succeeding, because
-      -- the entry written at spawn time already covers this pgid.
-      void (recordGhGroup repository unconfirmed)
-      recorded <- ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
-      guard <-
-        if recorded
-          then pure GuardRecorded
-          else -- Nothing is on disk and nothing was verified, so a restart
-          -- would find no reason to hold back. Force is the only thing
-          -- left that does not depend on the two facilities that just
-          -- failed.
-            forceKillGhGroup processHandle spawnedPid
+      guard <- guardAfterFailedCleanup repository processHandle spawnedPid unconfirmed
       writeIORef cleanupFailure (Just (GhCleanupFailure message guard))
     -- Reaping cannot block here: the group was just confirmed empty, so gh
     -- is at most an unreaped zombie. It is skipped entirely when that
@@ -338,28 +326,75 @@ ghGroupIsRecorded :: Repository -> Int -> IO Bool
 ghGroupIsRecorded repository groupPid =
   any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository
 
--- | The last resort for a fetch that could neither verify its @gh@ group nor
--- record it: kill the group outright and reap the leader.
+-- | Everything still worth trying once the verified kill has failed, in
+-- descending order of what it can promise. Each rung is attempted only
+-- because the one above it did not hold, and the rung that succeeds is what
+-- the caller reports.
+--
+-- The ordering is deliberate: a durable record is worth more than a forced
+-- kill, because it survives this dashboard; and a forced kill is claimed
+-- only once a fresh snapshot shows the group actually empty, since
+-- signalling proves nothing about a member that never appeared in a census.
+-- When even that cannot be shown, the record is tried once more — the
+-- filesystem may simply have been busy — before admitting that nothing
+-- durable is holding the line.
+guardAfterFailedCleanup :: Repository -> ProcessHandle -> Maybe Int -> OwnedProcessGroup -> IO GhCleanupGuard
+guardAfterFailedCleanup repository processHandle spawnedPid unconfirmed = do
+  -- Upgrading the spawn-time guard to the full census is what lets a later
+  -- run re-kill the group rather than only watch it, so it is worth
+  -- attempting -- but nothing depends on it succeeding, because the entry
+  -- written at spawn time already covers this pgid.
+  recorded <- recordAndConfirm
+  if recorded
+    then pure GuardRecorded
+    else do
+      -- Nothing is on disk and nothing was verified, so a restart would find
+      -- no reason to hold back. Force is the only thing left that does not
+      -- depend on either facility that just failed.
+      forceKillGhGroup processHandle spawnedPid
+      emptied <- groupConfirmedEmpty unconfirmed.ownedProcessGroupPid
+      if emptied
+        then pure GuardForciblyTerminated
+        else do
+          retried <- recordAndConfirm
+          pure (if retried then GuardRecorded else GuardInMemoryOnly)
+  where
+    recordAndConfirm = do
+      void (recordGhGroup repository unconfirmed)
+      ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
+
+-- | SIGKILL the group outright and reap the leader.
 --
 -- Neither step consults the process table or the filesystem, which is
 -- precisely why this is still available when both of those have failed.
 -- SIGKILL cannot be caught, blocked, or deferred, so it reaches every member
--- the group currently has; and waiting on the leader — this fetch's own
--- child — confirms /it/ is gone directly, rather than inferring it from a
--- snapshot that is not to be had. The wait is bounded anyway, so a process
--- wedged in an uninterruptible state cannot strand the refresh.
+-- the group currently has, and waiting on the leader — this fetch's own
+-- child — clears it out of the process table rather than leaving a zombie
+-- behind. The wait is bounded, so a process wedged in an uninterruptible
+-- state cannot strand the refresh.
 --
--- What this buys is a restart that has nothing to collide with. What it
--- cannot buy is a census: members other than the leader are only presumed
--- dead, which is why even success here leaves this dashboard refusing to
--- refresh again.
-forceKillGhGroup :: ProcessHandle -> Maybe Int -> IO GhCleanupGuard
+-- Delivering the signal is all this does. Whether it worked is a separate
+-- question, and 'groupConfirmedEmpty' is the only thing that answers it.
+forceKillGhGroup :: ProcessHandle -> Maybe Int -> IO ()
 forceKillGhGroup processHandle spawnedPid = do
   mapM_ (ignoreIOException . signalProcessGroup sigKILL . fromIntegral) spawnedPid
-  reaped <- timeout forcedReapTimeoutMicros (try @IOException (waitForProcess processHandle))
-  pure $ case reaped of
-    Just (Right _) -> GuardForciblyTerminated
-    _ -> GuardInMemoryOnly
+  void (timeout forcedReapTimeoutMicros (try @IOException (waitForProcess processHandle)))
+
+-- | Whether a fresh snapshot shows nothing left in the group at all — not
+-- the leader, and not any descendant that inherited it.
+--
+-- This is what stands behind a claim that the group is gone, and it is
+-- deliberately about the /whole/ group: reaping the leader says nothing
+-- about a credential helper still wedged in uninterruptible I\/O, which
+-- would survive long enough to be running when a restarted dashboard
+-- spawned its own gh. A snapshot that cannot be taken answers 'False',
+-- because "could not look" is not "nothing there".
+groupConfirmedEmpty :: Int -> IO Bool
+groupConfirmedEmpty groupPid = do
+  snapshot <- defaultProcessSnapshot
+  pure $ case snapshot of
+    Left _ -> False
+    Right processes -> null (groupMembers groupPid processes)
 
 forcedReapTimeoutMicros :: Int
 forcedReapTimeoutMicros = 5 * 1000 * 1000

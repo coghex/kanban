@@ -5111,36 +5111,28 @@ main = hspec $ do
                   filter (Data.Text.isInfixOf (Data.Text.pack (temporaryRoot </> "bin")) . processIdentityCommand) identities
                     `shouldBe` []
 
-    it "force-kills the gh when neither the guard can be written nor its death confirmed, so a restart still has nothing to collide with" $
+    it "claims a forced kill only once a snapshot shows the whole group gone, descendant included" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
-        let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
-            binaryRoot = temporaryRoot </> "bin"
-        ByteString.writeFile unwritableCacheRoot "not a directory"
-        -- Both facilities the ordinary guards depend on are gone at once: no
-        -- durable record can be written, and no process snapshot can be taken
-        -- to verify a kill. What is left is the child handle itself, which
-        -- needs neither.
-        withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
-          withFakeGh
-            temporaryRoot
-            ["trap '' TERM", "while :; do sleep 1; done"]
-            $ do
-              createDirectoryIfMissing True binaryRoot
-              ByteString.writeFile (binaryRoot </> "ps") (ByteString.unlines ["#!/bin/sh", "exit 1"])
-              setFileMode (binaryRoot </> "ps") 0o700
-              (outcome, _) <- captureBoardRefresh temporaryRoot 2
-              case outcome of
-                -- Not a clean timeout and not a recorded group: the one
-                -- guard left is that the process was actually killed.
-                BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardForciblyTerminated
-                other -> expectationFailure ("expected a forcibly terminated gh, got " <> show other)
-        -- Asked with the real ps, now that the fake is off PATH again.
-        snapshot <- readProcessSnapshot
-        case snapshot of
-          Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
-          Right identities ->
-            filter (Data.Text.isInfixOf (Data.Text.pack binaryRoot) . processIdentityCommand) identities
-              `shouldBe` []
+        -- ps fails for exactly as long as the verified kill needs it (three
+        -- attempts, the retry budget of 'defaultProcessSnapshot') and then
+        -- works again, so the forced fallback runs and its own whole-group
+        -- check is the thing that gets to answer.
+        (outcome, survivors) <- forcedCleanupRun temporaryRoot (Just 3)
+        case outcome of
+          BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardForciblyTerminated
+          other -> expectationFailure ("expected a forcibly terminated gh, got " <> show other)
+        survivors `shouldBe` []
+
+    it "refuses to claim a forced kill while no snapshot can confirm the group, but still takes the descendant with it" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- ps never works, so whole-group absence can never be shown. The
+        -- guard must not claim a restart is safe -- but SIGKILL still went to
+        -- the group, so the TERM-ignoring descendant is gone regardless.
+        (outcome, survivors) <- forcedCleanupRun temporaryRoot Nothing
+        case outcome of
+          BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardInMemoryOnly
+          other -> expectationFailure ("expected an unguarded gh, got " <> show other)
+        survivors `shouldBe` []
 
     it "explains the unverified gh and what happens next, without offering a restart as the fix" $ do
       -- A recorded group self-heals on the next refresh; an unrecorded one
@@ -6872,6 +6864,55 @@ fullFixtureToml =
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
+
+-- | Drives a board refresh in which both facilities the ordinary guards rest
+-- on are broken at once: the cache is unwritable, so no durable record can be
+-- made, and @ps@ fails, so no kill can be verified. That combination is what
+-- forces the last-resort path.
+--
+-- @psFailures@ is how many @ps@ invocations fail before the real one takes
+-- over ('Nothing' fails every one). The fake gh spawns a TERM-ignoring
+-- descendant into its own group, so what comes back — the published outcome,
+-- and anything of this fixture's still alive once the real @ps@ is back —
+-- answers both halves of the question: what the guard claimed, and whether
+-- the descendant actually died.
+forcedCleanupRun :: FilePath -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
+forcedCleanupRun temporaryRoot psFailures = do
+  let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
+      binaryRoot = temporaryRoot </> "bin"
+      psCounter = temporaryRoot </> "ps.count"
+  ByteString.writeFile unwritableCacheRoot "not a directory"
+  outcome <-
+    withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
+      withFakeGh
+        temporaryRoot
+        [ "trap '' TERM",
+          "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+          "while :; do sleep 1; done"
+        ]
+        $ do
+          createDirectoryIfMissing True binaryRoot
+          ByteString.writeFile
+            (binaryRoot </> "ps")
+            ( ByteString.unlines
+                [ "#!/bin/sh",
+                  ByteString.pack ("attempt=$(cat " <> psCounter <> " 2>/dev/null || echo 0)"),
+                  "attempt=$((attempt + 1))",
+                  ByteString.pack ("printf '%s' \"$attempt\" > " <> psCounter),
+                  ByteString.pack ("[ " <> maybe "1 -eq 1" (\n -> "\"$attempt\" -le " <> show n) psFailures <> " ] && exit 1"),
+                  "exec /bin/ps \"$@\""
+                ]
+            )
+          setFileMode (binaryRoot </> "ps") 0o700
+          -- Short only so a regression fails fast: the guard write fails
+          -- before gh is used, long before this matters.
+          fst <$> captureBoardRefresh temporaryRoot 2
+  -- Asked with the real ps, now that the fake is off PATH again.
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities ->
+      pure (outcome, filter (Data.Text.isInfixOf (Data.Text.pack binaryRoot) . processIdentityCommand) identities)
 
 -- | A TERM-ignoring process leading its own group, handed to the action by
 -- PID. Its standard streams go to @\/dev\/null@ and the group is force-killed
