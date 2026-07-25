@@ -34,9 +34,10 @@ The Python tests use temporary repositories and fake command-line tools. They do
 - `app/` — executable entry point.
 - `src/Kanban/` — board, GitHub, terminal interface, worker, review, and settings code.
 - `test/` — Haskell tests.
-- `tools/` — PR drainer, controller, installer, and Python tests.
+- `tools/` — PR drainer, controller, installers, workflow setup, and Python tests.
+- `codex-plugin/`, `claude-plugin/` — the tracked workflow bundles Kanban's AI actions invoke by name.
 - `.github/workflows/` — continuous integration.
 
 ## Further detail
 
-See [design.md](design.md) for the complete behavior contract, architecture notes, and implementation history.
+See [design.md](design.md) for the complete behavior contract, architecture notes, and implementation history, and [workflow-setup.md](workflow-setup.md) for installing and diagnosing the optional AI-action components.

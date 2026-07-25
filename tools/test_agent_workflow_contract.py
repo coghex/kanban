@@ -29,6 +29,7 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 SURFACE_FILES = [
     "src/Kanban/Solve.hs",
     "src/Kanban/PullRequestFlow.hs",
+    "src/Kanban/Preflight.hs",
     "src/Kanban/Review.hs",
     "src/Kanban/Codex.hs",
     "src/Kanban/Claude.hs",

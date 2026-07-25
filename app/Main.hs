@@ -1,10 +1,13 @@
 module Main (main) where
 
+import Control.Monad (unless)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 import Kanban.CLI (Options (..), optionsParserInfo)
 import Kanban.Config (RawConfig (..), loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
+import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository)
 import Kanban.UI (runDashboard)
 import Kanban.Worker (runWorker)
@@ -22,6 +25,13 @@ main = do
         Left message -> hPutStrLn stderr ("kanban worker: " <> Text.unpack message) >> exitFailure
         Right () -> pure ()
     Nothing | parsedOptions.optionGlyphTest -> runGlyphTest
+    -- Read-only, and deliberately ahead of configuration and repository
+    -- resolution: a fresh clone with no configured remote still needs to be
+    -- able to ask why an AI action would not start.
+    Nothing | parsedOptions.optionDoctor -> do
+      environment <- gatherPreflightEnvironment parsedOptions.optionPath
+      mapM_ TextIO.putStrLn (doctorLines environment)
+      unless (doctorReady environment) exitFailure
     Nothing -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

@@ -197,7 +197,63 @@ everything else.
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.
 
-### 2.5 Provider executables, GitHub authentication, and host prerequisites
+### 2.5 Workflow setup and the preflight/doctor path
+
+- **Owning source:** `tools/setup_workflows.py` (opt-in installer) and
+  `src/Kanban/Preflight.hs` (readiness probing), surfaced by
+  `kanban --doctor` and, per action, by the board itself. Documented for
+  users in [docs/workflow-setup.md](workflow-setup.md).
+- **Invocation:**
+  - Setup installs the canonical issue-review backend through the same
+    `tools/install_issue_review.py` primitives described in §3, and each
+    provider bundle through that provider's own documented mechanism
+    (`codex plugin marketplace add` / `codex plugin add`,
+    `claude plugin marketplace add` / `claude plugin install`). It runs no
+    other external command.
+  - Preflight resolves `codex`, `claude`, `gh`, and `python3` with
+    `findExecutable`, then runs only status-only probes: `--version`,
+    `codex login status`, `claude auth status`, `gh auth status`, and each
+    provider's `plugin list --json`. It also stats the Kanban-managed
+    backend install path resolved by `canonicalIssueReviewerPath`.
+- **Inputs:** for setup, the selected components, `--scope`, the Kanban
+  checkout, and the target repository for a project-scoped registration;
+  for preflight, the repository the board is pointed at (provider plugin
+  listings are resolved relative to it).
+- **Outputs:** for setup, a plan (the default) or the performed
+  installation, plus a non-zero exit whenever a component needs user
+  action; for preflight, a per-dependency and per-action readiness report,
+  and the remediation the board substitutes for a generic agent failure.
+- **Failure semantics:** setup never replaces an ordinary user file, a
+  symlink it does not recognize as its own, a marketplace registered from
+  another checkout, or an installed-but-disabled bundle — each is reported
+  as `refused`, preserved, and paired with its recovery step. Preflight
+  blocks an action only on a definite local observation; a probe it cannot
+  interpret is reported as unknown and never blocks. Its per-action
+  dependency set is exact and follows what each action spawns: the
+  canonical gate needs both installed backend files, `gh`, and the reviewer
+  the backend itself invokes (the opposite brand from the issue's origin,
+  or both when unmarked under the dual policy Kanban passes); a revision
+  needs the Codex coordinator and, for a Claude-origin issue, the Claude
+  CLI its `kanban_run_claude` amendment authoring uses; neither needs a
+  packaged bundle, since both run their providers directly. Auto-solve
+  needs both brands, since it reviews its own pull request with the
+  opposite one, and so does `pr-revise`: it runs on the PR's own brand and
+  spawns the opposite one for its single nested canonical rereview (§2.2),
+  which is a direct provider call and therefore needs that brand's
+  executable and sign-in but not its bundle.
+- **Required authority:** setup needs write access to the user's own
+  provider configuration and to the Kanban-namespaced install directory.
+  Preflight needs none: it is read-only and non-interactive, never starts an
+  agent session or a login flow, consumes no model quota, and mutates no
+  filesystem, provider-configuration, LaunchAgent, or GitHub state.
+- **Durable state:** whatever each provider's own installer records, plus
+  the install directory described in §3. Setup owns no state of its own.
+- **Mandatory/optional:** fully optional, and never run by Kanban's build or
+  startup path. The PR drainer is deliberately outside both: it keeps its
+  own dedicated installer and status flow (§2.4), and neither the setup
+  command nor preflight installs, starts, or reports on it.
+
+### 2.6 Provider executables, GitHub authentication, and host prerequisites
 
 | Dependency | Mandatory | Why |
 | --- | --- | --- |
@@ -235,9 +291,22 @@ commands need.
   `~/Library/Application Support/kanban/issue-review/approve_issues.py`
   (overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), in the same
   dry-run-capable, idempotent, never-overwrite-an-ordinary-file manner as
-  `tools/install_drainer.py` (§5). `src/Kanban/Review.hs` resolves the
-  backend from that stable link (`resolveCanonicalIssueReviewer`) and fails
-  visibly, naming this installer, when it has not been installed yet.
+  `tools/install_drainer.py` (§5). Ownership is established by identity, not
+  location: each tracked asset carries a `kanban-managed-asset:issue-review/
+  <file>` marker, and the installer re-points an existing symlink only when
+  it resolves to a file carrying that marker, or when it is already broken
+  (the state a moved or deleted checkout leaves behind, which holds no
+  content to preserve). A link resolving to any other real file is
+  preserved and refused, so an unknown installation is never silently
+  replaced — a path-shape test alone could not tell one apart, since any
+  `.../tools/approve_issues.py` satisfies it. `src/Kanban/Review.hs`
+  resolves the backend from that stable link
+  (`resolveCanonicalIssueReviewer`) and fails visibly, naming this
+  installer, when it has not been installed yet; `src/Kanban/Preflight.hs`
+  (§2.5) treats only that same marker-carrying link as installed, and
+  requires both installed files (`approve_issues.py` imports
+  `kanban_config.py`), so preflight and the installer can never disagree
+  about whether an install path is occupied.
 - **`~/work/approve-issues.py`** is now a purely optional **compatibility
   launcher** for pre-migration automation that still invokes it directly. It
   is not Kanban's source of truth and nothing in Kanban's own code resolves
@@ -245,6 +314,11 @@ commands need.
   with a symlink to the Kanban-managed link above, backing up and reporting
   the location of any pre-existing ordinary file there; without that opt-in
   flag, an ordinary file at this path is left untouched and refused, per §5.
+  A symlink already resolving to that same tracked backend through another
+  install directory, or one left broken by an install directory that went
+  away, is re-pointed without the opt-in; a symlink resolving to any other
+  real file is preserved and refused with or without it, since a link has no
+  content to back up.
 - **`~/.codex/skills/approve-issues/...`** is no longer a dependency of any
   Kanban-supported command. The backend's incident handling
   (`open_invalid_incident` in `tools/approve_issues.py`) is now
@@ -279,15 +353,15 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
   dependency Kanban consumes but does not define, e.g. a Codex-side skill
   package).
 - `status`: `supported` or `migration-target`.
-- `mandatory`: `yes` or `no`, matching §2.5 for executables.
+- `mandatory`: `yes` or `no`, matching §2.6 for executables.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
+python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
@@ -322,8 +396,17 @@ the Codex plugin being installed.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
   build (`cabal build all`) or normal startup path installs the drainer's
   LaunchAgent or the issue-review backend's stable link; the latter is only
-  installed by running `tools/install_issue_review.py` directly, and it
-  never starts a daemon.
+  installed by running `tools/install_issue_review.py`, or
+  `tools/setup_workflows.py --component issue-review --apply`, directly,
+  and neither starts a daemon.
+- **The workflow-setup command is dry-run first and component-selected.**
+  `tools/setup_workflows.py` (§2.5) inspects and prints its plan unless
+  `--apply` is passed, requires an explicit `--component`/`--all`
+  selection, defaults to project scope, and makes a user-global provider
+  registration an explicit `--scope user` choice. It installs each provider
+  bundle only through that provider's own documented mechanism, and it is
+  not, and must not become, an installer for the PR drainer, an approval
+  daemon, models, or credentials.
 - **Installers must be dry-run capable, idempotent, and must never replace
   an ordinary user file.** `tools/install_drainer.py`'s `install_symlink`
   already meets this bar (see `tools/test_install_drainer.py`);

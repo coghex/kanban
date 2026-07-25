@@ -13,16 +13,29 @@ from unittest import mock
 import install_issue_review
 
 
+def managed_asset_text(name: str, note: str = "") -> str:
+    """Content that identifies a file as this repository's tracked asset,
+    exactly as the real tools/ files do."""
+    return f"# {install_issue_review.managed_asset_marker(name)}\n{note}"
+
+
 class InstallSymlinkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.source_a = self.root / "source-a.py"
-        self.source_b = self.root / "source-b.py"
-        self.destination = self.root / "installed" / "script.py"
-        self.source_a.write_text("a\n", encoding="utf-8")
-        self.source_b.write_text("b\n", encoding="utf-8")
+        # Two checkouts of the same repository, which is the shape a
+        # repository move produces and the only one install_symlink may
+        # re-point: a link already naming this component's file inside some
+        # checkout's tools/ directory.
+        self.source_a = self.root / "checkout-a" / "tools" / "approve_issues.py"
+        self.source_b = self.root / "checkout-b" / "tools" / "approve_issues.py"
+        self.destination = self.root / "installed" / "approve_issues.py"
+        for source, note in ((self.source_a, "a\n"), (self.source_b, "b\n")):
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                managed_asset_text("approve_issues.py", note), encoding="utf-8"
+            )
 
     def test_creates_link_and_is_idempotent(self):
         self.assertEqual(
@@ -35,7 +48,7 @@ class InstallSymlinkTests(unittest.TestCase):
             "unchanged",
         )
 
-    def test_atomically_updates_an_existing_link(self):
+    def test_atomically_updates_a_prior_managed_link_after_the_checkout_moves(self):
         self.destination.parent.mkdir()
         self.destination.symlink_to(self.source_a)
         self.assertEqual(
@@ -43,6 +56,80 @@ class InstallSymlinkTests(unittest.TestCase):
             "updated",
         )
         self.assertEqual(self.destination.resolve(), self.source_b.resolve())
+
+    def test_refuses_to_replace_a_symlink_it_did_not_install(self):
+        # Same file name, same tools/ parent, readable target: every shape
+        # test passes and only the tracked file's identity marker, which
+        # this one does not carry, tells it apart from Kanban's backend.
+        unrelated = self.root / "someone-elses-project" / "tools" / "approve_issues.py"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("#!/usr/bin/env python3\nprint('mine')\n", encoding="utf-8")
+        self.destination.parent.mkdir()
+        self.destination.symlink_to(unrelated)
+
+        self.assertEqual(
+            install_issue_review.plan_symlink(self.source_a.resolve(), self.destination),
+            "refused",
+        )
+        with self.assertRaises(install_issue_review.InstallError):
+            install_issue_review.install_symlink(self.source_a, self.destination)
+        self.assertEqual(Path(os.readlink(self.destination)), unrelated)
+
+    def test_refuses_a_working_relative_link_to_someone_elses_file(self):
+        # os.readlink returns "../someone-elses-project/tools/approve_issues.py",
+        # which only resolves against the link's own directory. Checking it
+        # against the process working directory would call this working
+        # link broken -- and broken links are the ones this installer
+        # replaces.
+        unrelated = self.root / "someone-elses-project" / "tools" / "approve_issues.py"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        self.destination.parent.mkdir()
+        relative = Path(os.path.relpath(unrelated, self.destination.parent))
+        self.destination.symlink_to(relative)
+        self.assertTrue(self.destination.exists(), "fixture link must actually resolve")
+
+        self.assertEqual(
+            install_issue_review.plan_symlink(self.source_a.resolve(), self.destination),
+            "refused",
+        )
+        self.assertEqual(Path(os.readlink(self.destination)), relative)
+
+    def test_repoints_a_working_relative_link_to_the_same_tracked_asset(self):
+        self.destination.parent.mkdir()
+        relative = Path(os.path.relpath(self.source_a, self.destination.parent))
+        self.destination.symlink_to(relative)
+
+        self.assertEqual(
+            install_issue_review.install_symlink(self.source_b, self.destination), "updated"
+        )
+        self.assertEqual(self.destination.resolve(), self.source_b.resolve())
+
+    def test_repoints_a_link_left_broken_by_a_vanished_checkout(self):
+        # The state a moved or deleted checkout leaves behind. Refusal
+        # exists to protect content, and a broken link holds none, so this
+        # is the case a re-run has to converge rather than refuse.
+        self.destination.parent.mkdir()
+        self.destination.symlink_to(self.root / "gone" / "tools" / "approve_issues.py")
+        self.assertEqual(
+            install_issue_review.plan_symlink(self.source_a.resolve(), self.destination),
+            "updated",
+        )
+
+    def test_names_the_recovery_step_for_each_kind_of_refusal(self):
+        self.destination.parent.mkdir()
+        self.destination.write_text("keep me\n", encoding="utf-8")
+        self.assertIn(
+            "is not a symlink", install_issue_review.symlink_refusal_reason(self.destination)
+        )
+
+        self.destination.unlink()
+        unrelated = self.root / "someone-elses-backend.py"
+        unrelated.write_text("mine\n", encoding="utf-8")
+        self.destination.symlink_to(unrelated)
+        reason = install_issue_review.symlink_refusal_reason(self.destination)
+        self.assertIn(str(unrelated), reason)
+        self.assertIn("does not resolve to Kanban's own tracked backend file", reason)
 
     def test_refuses_to_overwrite_an_ordinary_file(self):
         self.destination.parent.mkdir()
@@ -72,7 +159,9 @@ class LegacyLauncherMigrationTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.kanban_link = self.root / "installed" / "approve_issues.py"
         self.kanban_link.parent.mkdir(parents=True)
-        self.kanban_link.write_text("backend\n", encoding="utf-8")
+        self.kanban_link.write_text(
+            managed_asset_text("approve_issues.py", "backend\n"), encoding="utf-8"
+        )
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
         self.legacy_path.parent.mkdir(parents=True)
 
@@ -90,7 +179,9 @@ class LegacyLauncherMigrationTests(unittest.TestCase):
         # The legacy launcher must stop at kanban_link, one hop, so a
         # repository move only ever requires reinstalling kanban_link.
         repo_backend = self.root / "repo-backend.py"
-        repo_backend.write_text("backend\n", encoding="utf-8")
+        repo_backend.write_text(
+            managed_asset_text("approve_issues.py", "backend\n"), encoding="utf-8"
+        )
         self.kanban_link.unlink()
         self.kanban_link.symlink_to(repo_backend)
 
@@ -101,15 +192,54 @@ class LegacyLauncherMigrationTests(unittest.TestCase):
         self.assertEqual(Path(os.readlink(self.legacy_path)), self.kanban_link)
         self.assertNotEqual(Path(os.readlink(self.legacy_path)), repo_backend)
 
-    def test_repoints_an_existing_symlink_without_opt_in(self):
-        other_target = self.root / "other.py"
-        other_target.write_text("other\n", encoding="utf-8")
-        self.legacy_path.symlink_to(other_target)
+    def test_repoints_a_launcher_for_another_install_directory_without_opt_in(self):
+        other_install = self.root / "other-install" / "approve_issues.py"
+        other_install.parent.mkdir(parents=True)
+        other_install.write_text(
+            managed_asset_text("approve_issues.py", "other\n"), encoding="utf-8"
+        )
+        self.legacy_path.symlink_to(other_install)
         result = install_issue_review.migrate_legacy_launcher(
             self.legacy_path, self.kanban_link, allow_migration=False
         )
         self.assertEqual(result["status"], "updated")
         self.assertEqual(self.legacy_path.resolve(), self.kanban_link.resolve())
+
+    def test_refuses_a_symlink_that_is_not_a_canonical_backend_even_with_opt_in(self):
+        # Named exactly like a canonical backend, so only its missing
+        # identity marker distinguishes it.
+        other_target = self.root / "someone-elses-install" / "approve_issues.py"
+        other_target.parent.mkdir(parents=True)
+        other_target.write_text("#!/usr/bin/env python3\nprint('mine')\n", encoding="utf-8")
+        self.legacy_path.symlink_to(other_target)
+
+        for allow_migration in (False, True):
+            result = install_issue_review.migrate_legacy_launcher(
+                self.legacy_path, self.kanban_link, allow_migration=allow_migration
+            )
+            self.assertEqual(result["status"], "refused", allow_migration)
+            self.assertIn(str(other_target), result["message"])
+        # Preserved exactly, and nothing was backed up: a symlink has no
+        # content to preserve, so refusal is the only safe outcome.
+        self.assertEqual(Path(os.readlink(self.legacy_path)), other_target)
+        self.assertFalse(
+            os.path.lexists(self.legacy_path.with_name(self.legacy_path.name + ".pre-kanban-backup"))
+        )
+
+    def test_refuses_a_working_relative_launcher_link_even_with_opt_in(self):
+        unrelated = self.root / "my-own-install" / "approve_issues.py"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        relative = Path(os.path.relpath(unrelated, self.legacy_path.parent))
+        self.legacy_path.symlink_to(relative)
+        self.assertTrue(self.legacy_path.exists(), "fixture link must actually resolve")
+
+        for allow_migration in (False, True):
+            result = install_issue_review.migrate_legacy_launcher(
+                self.legacy_path, self.kanban_link, allow_migration=allow_migration
+            )
+            self.assertEqual(result["status"], "refused", allow_migration)
+        self.assertEqual(Path(os.readlink(self.legacy_path)), relative)
 
     def test_refuses_an_ordinary_file_without_opt_in(self):
         self.legacy_path.write_text("pre-kanban\n", encoding="utf-8")
@@ -163,8 +293,12 @@ class InstallerPolicyTests(unittest.TestCase):
         self.repo = self.root / "repo"
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
-        (tools / "approve_issues.py").write_text("backend\n", encoding="utf-8")
-        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        (tools / "approve_issues.py").write_text(
+            managed_asset_text("approve_issues.py", "backend\n"), encoding="utf-8"
+        )
+        (tools / "kanban_config.py").write_text(
+            managed_asset_text("kanban_config.py", "config module\n"), encoding="utf-8"
+        )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
 
@@ -314,8 +448,12 @@ class CLIOutputTests(unittest.TestCase):
         self.repo = self.root / "repo"
         tools = self.repo / "tools"
         tools.mkdir(parents=True)
-        (tools / "approve_issues.py").write_text("backend\n", encoding="utf-8")
-        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        (tools / "approve_issues.py").write_text(
+            managed_asset_text("approve_issues.py", "backend\n"), encoding="utf-8"
+        )
+        (tools / "kanban_config.py").write_text(
+            managed_asset_text("kanban_config.py", "config module\n"), encoding="utf-8"
+        )
         subprocess.run(
             ["git", "init", "-q", str(self.repo)], check=True, capture_output=True
         )

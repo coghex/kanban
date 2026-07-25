@@ -20,6 +20,7 @@ extra-doc-files:
   docs/design.md
   docs/pr-drainer.md
   docs/user-guide.md
+  docs/workflow-setup.md
 
 source-repository head
   type: git
@@ -55,6 +56,7 @@ library
     Kanban.GlyphTest
     Kanban.GitHub
     Kanban.Layout
+    Kanban.Preflight
     Kanban.Process
     Kanban.Provider
     Kanban.PullRequestFlow

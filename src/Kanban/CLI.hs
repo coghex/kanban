@@ -20,6 +20,7 @@ data Options = Options
     optionColor :: ColorPolicy,
     optionBorder :: BorderPolicy,
     optionGlyphTest :: Bool,
+    optionDoctor :: Bool,
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
@@ -72,6 +73,10 @@ optionsParser =
     <*> switch
       ( long "glyph-test"
           <> help "Print vertical-line candidates without starting the dashboard"
+      )
+    <*> switch
+      ( long "doctor"
+          <> help "Report AI-action readiness read-only, then exit without starting the dashboard"
       )
     <*> switch (long "ascii" <> help "Use ASCII borders")
     <*> switch (long "no-cache" <> help "Do not read or write snapshots")

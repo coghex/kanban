@@ -59,6 +59,61 @@ def repository_root(requested: Path) -> Path:
     return root
 
 
+MANAGED_ASSET_MARKER_PREFIX = "kanban-managed-asset:issue-review/"
+
+
+def resolved_link_target(link: Path, target: Path) -> Path:
+    """A symlink's target as this process can reach it.
+
+    `os.readlink` returns the target exactly as written, and a relative one
+    is resolved by the kernel against the *link's own directory* -- not
+    against this process's working directory. Checking a raw relative
+    target directly would report a perfectly working link as broken, and
+    this installer replaces broken links, so that mistake would silently
+    destroy someone else's working installation.
+    """
+    return target if target.is_absolute() else link.parent / target
+
+
+def managed_asset_marker(name: str) -> str:
+    """The identity marker the tracked asset `name` carries."""
+    return MANAGED_ASSET_MARKER_PREFIX + name
+
+
+def is_managed_asset(path: Path, name: str) -> bool:
+    """Whether `path` resolves to this repository's own tracked asset.
+
+    Verified by reading the identity marker the tracked file itself carries,
+    not by where the path happens to point: a symlink to some unrelated
+    `.../tools/approve_issues.py` matches every shape test one could write
+    while being someone else's file, and only its content can tell the two
+    apart. An unreadable target is never treated as recognized.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return managed_asset_marker(name) in content
+
+
+def is_prior_managed_backend_link(current_target: Path, source: Path) -> bool:
+    """Whether an existing symlink may be re-pointed at `source`.
+
+    Two cases qualify, and refusal protects content in both. A link already
+    resolving to this same tracked asset is a duplicate install this
+    installer owns. A link whose target no longer exists at all is what a
+    moved or deleted checkout leaves behind: broken, holding nothing to
+    preserve, and exactly the state a re-run has to converge. A link
+    resolving to any other real file is someone else's installation, and is
+    preserved and refused rather than silently replaced.
+    """
+    if current_target.name != source.name:
+        return False
+    if not os.path.exists(current_target):
+        return True
+    return is_managed_asset(current_target, source.name)
+
+
 def plan_symlink(source: Path, destination: Path) -> str:
     """What install_symlink would do to point destination at source (already
     resolved to its intended literal target), without writing anything."""
@@ -66,8 +121,29 @@ def plan_symlink(source: Path, destination: Path) -> str:
         if not destination.is_symlink():
             return "refused"
         current_target = Path(os.readlink(destination))
-        return "unchanged" if current_target == source else "updated"
+        if current_target == source:
+            return "unchanged"
+        if is_prior_managed_backend_link(
+            resolved_link_target(destination, current_target), source
+        ):
+            return "updated"
+        return "refused"
     return "created"
+
+
+def symlink_refusal_reason(destination: Path) -> str:
+    """Why plan_symlink refused this destination, phrased as the recovery
+    step. Read alongside a "refused" plan, so the two never disagree."""
+    if not destination.is_symlink():
+        return (
+            f"{destination} already exists and is not a symlink. It is left untouched; "
+            "move or remove it yourself, then re-run."
+        )
+    return (
+        f"{destination} is a symlink to {os.readlink(destination)}, which does not "
+        "resolve to Kanban's own tracked backend file. It is left untouched; remove it "
+        "yourself, then re-run."
+    )
 
 
 def unique_sibling(path: Path) -> Path:
@@ -93,9 +169,7 @@ def install_symlink(source: Path, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     plan = plan_symlink(source, destination)
     if plan == "refused":
-        raise InstallError(
-            f"Refusing to overwrite non-symlink installation path: {destination}"
-        )
+        raise InstallError(f"Refusing to replace an existing installation: {symlink_refusal_reason(destination)}")
     if plan == "created":
         destination.symlink_to(source)
     elif plan == "updated":
@@ -115,8 +189,29 @@ def plan_legacy_launcher(
     if os.path.lexists(legacy_path):
         if legacy_path.is_symlink():
             current_target = Path(os.readlink(legacy_path))
-            status = "unchanged" if current_target == kanban_link else "updated"
-            return {"path": str(legacy_path), "status": status, "backup_path": None}
+            if current_target == kanban_link:
+                return {"path": str(legacy_path), "status": "unchanged", "backup_path": None}
+            resolved_target = resolved_link_target(legacy_path, current_target)
+            if not os.path.exists(resolved_target) or is_managed_asset(
+                resolved_target, kanban_link.name
+            ):
+                # Already a launcher for this same tracked backend reached
+                # through another install directory, or a link left broken
+                # by one that went away: re-pointing it at the current
+                # install location is this installer's own migration and
+                # destroys nothing. See is_prior_managed_backend_link.
+                return {"path": str(legacy_path), "status": "updated", "backup_path": None}
+            return {
+                "path": str(legacy_path),
+                "status": "refused",
+                "backup_path": None,
+                "message": (
+                    f"{legacy_path} is a symlink to {current_target}, which does not "
+                    "resolve to Kanban's own tracked issue-review backend. It is left "
+                    "untouched; remove it yourself if you want the compatibility "
+                    "launcher installed here."
+                ),
+            }
         if allow_migration:
             backup_path = legacy_path.with_name(legacy_path.name + ".pre-kanban-backup")
             if os.path.lexists(backup_path):
@@ -147,11 +242,15 @@ def migrate_legacy_launcher(
 ) -> dict[str, Any]:
     """Point the compatibility launcher at the Kanban-managed link.
 
-    A missing path or an existing symlink is always safe to (re)point, so
-    that case never needs the opt-in and stays idempotent across reinstalls
-    and repository moves. An ordinary pre-Kanban file is left untouched
-    unless the caller explicitly opts in, in which case its content is
-    preserved as a reported backup before the symlink replaces it.
+    A missing path, or a symlink that already resolves to this same tracked
+    backend, is safe to (re)point without the opt-in, so reinstalls and
+    repository moves stay idempotent. An ordinary pre-Kanban file is left
+    untouched unless the caller explicitly opts in, in which case its
+    content is preserved as a reported backup before the symlink replaces
+    it. A symlink resolving to anything else is someone else's
+    installation: it is preserved and refused outright, with or without the
+    opt-in, since there is no content to back up and no way to tell what
+    depends on it.
     """
     plan = plan_legacy_launcher(legacy_path, kanban_link, allow_migration=allow_migration)
     status = plan["status"]

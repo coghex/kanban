@@ -25,6 +25,7 @@ module Kanban.UI
     approvedInteriorAttr,
     autoSolveRevisionPrompt,
     cacheEnabled,
+    agentFailureNotice,
     canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
@@ -91,7 +92,7 @@ import Data.Char (isPrint)
 import Data.List (find, findIndex, intersperse, sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -130,6 +131,16 @@ import Kanban.Drainer
   )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
+import Kanban.Preflight
+  ( PreflightAction (..),
+    actionReport,
+    blockingRemediation,
+    gatherPreflightEnvironment,
+    issueOriginFromBody,
+    preflightDiagnostic,
+    preflightDiagnosticDetail,
+    reviewBackendAction,
+  )
 import Kanban.Process (ManagedProcess, interruptManagedProcess, interruptThenKillManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.PullRequestFlow
@@ -3234,19 +3245,40 @@ launchSolveInvocation issueNumber workflow brand existingSession provenance inpu
     . liftIO
     . forkIO
     $ do
-      launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
-      case launched of
-        Left message -> do
+      blocked <- preflightBlocker state.appRepository (solvePreflightAction workflow brand)
+      case blocked of
+        Just message -> do
           writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
           writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
-        Right descriptor -> do
-          writeBChan eventChannel (WorkerRegistered descriptor)
+        Nothing -> do
+          launched <- launchSolveWorker state.appRepository issueNumber workflow brand existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+          case launched of
+            Left message -> do
+              writeBChan eventChannel (SolveProtocolEvent (SolveDiagnostic issueNumber message))
+              writeBChan eventChannel (SolveProtocolEvent (SolveProcessFinished issueNumber (SolveFailed message)))
+            Right descriptor -> do
+              writeBChan eventChannel (WorkerRegistered descriptor)
   void
     . liftIO
     . forkIO
     $ do
       threadDelay solveInitialRefreshDelayMicros
       writeBChan eventChannel SolveBoardRefreshRequested
+
+solvePreflightAction :: SolveWorkflow -> SolverBrand -> PreflightAction
+solvePreflightAction SolveOnly = ActionSolve
+solvePreflightAction AutoSolve = ActionAutoSolve
+
+-- | Preflight one AI action just before spawning it, so a missing
+-- Kanban-owned component is reported with the command that installs it
+-- instead of surfacing minutes later as an opaque agent failure. Only a
+-- definite local observation blocks; an inconclusive probe lets the action
+-- run and fail on its own terms, so a setup Kanban cannot introspect is
+-- never broken by its own diagnostics. Every probe is read-only.
+preflightBlocker :: Repository -> PreflightAction -> IO (Maybe Text)
+preflightBlocker repository action = do
+  environment <- gatherPreflightEnvironment repository.repositoryRoot
+  pure (preflightDiagnostic <$> blockingRemediation (actionReport environment action))
 
 submitSolveInput :: Int -> EventM Name AppState ()
 submitSolveInput issueNumber = do
@@ -3391,7 +3423,7 @@ applySolveEvent solveEvent = case solveEvent of
             setNotice ("Revision for #" <> showText issueNumber <> " finished; waiting for the revised PR state…")
           _ -> setNotice ("Solve workflow for #" <> showText issueNumber <> " finished")
         SolveNeedsInput _ -> setNotice ("Solve workflow for #" <> showText issueNumber <> " needs input")
-        SolveFailed message -> setNotice ("Solve workflow for #" <> showText issueNumber <> " failed: " <> sanitizeText message)
+        SolveFailed message -> setNotice (agentFailureNotice ("Solve workflow for #" <> showText issueNumber) message)
   where
     finishSolveSession (Just SolveInterrupting) _ session =
       session
@@ -3640,13 +3672,22 @@ applyPullRequestOrphans number outcome processes = do
   setNotice ("PR workflow #" <> showText number <> " is orphaned; press p to inspect it or x to kill it")
 
 -- | The activity text for a terminal or pending 'SolveFailed' outcome,
--- distinguishing the persistent-worker deadline from a generic provider
--- failure so the process inspector and session/card projection never
--- collapse the two.
+-- distinguishing the persistent-worker deadline and a preflight-detected
+-- setup gap from a generic provider failure, so the process inspector and
+-- session/card projection never collapse them.
 failureActivity :: Text -> Text
 failureActivity message
   | isDeadlineOutcome (SolveFailed message) = "deadline exceeded"
+  | isJust (preflightDiagnosticDetail message) = "setup required"
   | otherwise = "failed"
+
+-- | How a terminal agent failure is announced. A preflight diagnostic means
+-- the agent never ran: naming the missing component and its install command
+-- is the whole point, so it must not be reported as another opaque failure.
+agentFailureNotice :: Text -> Text -> Text
+agentFailureNotice subject message = case preflightDiagnosticDetail message of
+  Just remediation -> subject <> " cannot start — " <> sanitizeText remediation
+  Nothing -> subject <> " failed: " <> sanitizeText message
 
 -- | The orphan-pending activity text for a still-unverified outcome: a
 -- deadline that left survivors behind reads distinctly from ordinary
@@ -3866,11 +3907,11 @@ startIssueReview issue = do
         then do
           updated <- get
           case updated.appReviewBackend of
-            ReviewBackendReady client -> launchIssueReview client issue.issueNumber
+            ReviewBackendReady client -> launchIssueReview client issue
             ReviewBackendStarting -> pure ()
             ReviewBackendStopped -> startReviewBackend
             ReviewBackendFailed _ -> startReviewBackend
-        else launchCanonicalIssueReview issue.issueNumber requestedStage
+        else launchCanonicalIssueReview issue requestedStage
 
 reviewPhaseActive :: ReviewPhase -> Bool
 reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
@@ -3928,12 +3969,16 @@ newReviewSession issue stage priorGeneration =
       reviewSessionFollowing = True
     }
 
-launchCanonicalIssueReview :: Int -> ReviewStage -> EventM Name AppState ()
-launchCanonicalIssueReview issueNumber stage = do
+launchCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
+launchCanonicalIssueReview issue stage = do
   state <- get
   let channel = state.appEventChannel
+      issueNumber = issue.issueNumber
   void . liftIO . forkIO $ do
-    result <- runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
+    blocked <- preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody))
+    result <- case blocked of
+      Just message -> pure (Left message)
+      Nothing -> runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
     writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
 
 -- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded
@@ -3975,12 +4020,13 @@ applyCanonicalIssueReview issueNumber stage result = do
 canonicalReviewActivity :: Text -> Text
 canonicalReviewActivity message
   | outcomeUnknownDiagnostic message = "outcome unknown"
+  | isJust (preflightDiagnosticDetail message) = "setup required"
   | otherwise = "failed"
 
 canonicalReviewNotice :: Text -> Text
 canonicalReviewNotice message
   | outcomeUnknownDiagnostic message = "Canonical issue review outcome could not be observed; check the issue before running it again"
-  | otherwise = "Canonical issue review failed: " <> sanitizeText message
+  | otherwise = agentFailureNotice "Canonical issue review" message
 
 selectedReviewIssue :: AppState -> Maybe Issue
 selectedReviewIssue state = selectedReviewItem state >>= boardItemIssue
@@ -4067,13 +4113,19 @@ launchPullRequestFlow number origin action _brand existingSession provenance inp
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
-    case launched of
-      Left message -> do
+    blocked <- preflightBlocker state.appRepository (ActionPullRequestFlow origin action)
+    case blocked of
+      Just message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
-      Right descriptor -> do
-        writeBChan eventChannel (WorkerRegistered descriptor)
+      Nothing -> do
+        launched <- launchPullRequestWorker state.appRepository number origin action existingSession existingLogPath provenance input parent state.appOptions.optionConfig state.appConfig.resolvedWorkflow
+        case launched of
+          Left message -> do
+            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
+            writeBChan eventChannel (PullRequestProtocolEvent (PullRequestProcessFinished number (SolveFailed message)))
+          Right descriptor -> do
+            writeBChan eventChannel (WorkerRegistered descriptor)
 
 autoSolveWorkerParent :: AppState -> Int -> Maybe WorkerParent
 autoSolveWorkerParent state pullRequestNumber =
@@ -4166,7 +4218,7 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
           (\session -> session {solveSessionPhase = SolveAttention, solveSessionActivity = "PR review needs input; press p"})
       SolveFailed message ->
         modifyAutoSolveForPullRequest number
-          (\session -> session {solveSessionPhase = SolveFailedPhase, solveSessionActivity = "PR agent failed: " <> sanitizeText message})
+          (\session -> session {solveSessionPhase = SolveFailedPhase, solveSessionActivity = agentFailureNotice "PR agent" message})
       SolveCompleted -> pure ()
     startBoardRefresh
   where
@@ -4230,6 +4282,13 @@ schedulePullRequestTick number = do
   channel <- (.appEventChannel) <$> get
   void . liftIO . forkIO $ threadDelay reviewAnimationIntervalMicros >> writeBChan channel (PullRequestAnimationTick number)
 
+-- | One coordinator serves every revision session, so it preflights only
+-- its own origin-independent dependencies. A per-issue dependency checked
+-- here would be reported against sessions queued behind the one that
+-- started it: 'applyReviewBackendStarted' fails every 'ReviewStarting'
+-- revision on a backend failure, which is right for a shared cause and
+-- wrong for an issue-specific one. Each queued session gets its own
+-- preflight from 'launchIssueReview' once the coordinator is up.
 startReviewBackend :: EventM Name AppState ()
 startReviewBackend = do
   state <- get
@@ -4239,19 +4298,35 @@ startReviewBackend = do
   void
     . liftIO
     . forkIO
-    $ startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
+    $ do
+      blocked <- preflightBlocker state.appRepository reviewBackendAction
+      case blocked of
+        Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
+        Nothing -> startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
 
-launchIssueReview :: ReviewClient -> Int -> EventM Name AppState ()
-launchIssueReview client issueNumber = do
-  eventChannel <- (.appEventChannel) <$> get
+-- | Preflighted here too, not only in 'startReviewBackend': a backend
+-- already running for an earlier issue is reused as-is, so this is the only
+-- door a Claude-origin revision passes through when the coordinator was
+-- started for a Codex-origin one.
+launchIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
+launchIssueReview client issue = do
+  state <- get
+  let eventChannel = state.appEventChannel
+      issueNumber = issue.issueNumber
   void
     . liftIO
     . forkIO
     $ do
-      result <- beginIssueReview client issueNumber
+      blocked <- preflightBlocker state.appRepository (issueRevisionPreflightAction issue)
+      result <- case blocked of
+        Just message -> pure (Left message)
+        Nothing -> beginIssueReview client issueNumber
       case result of
         Left message -> writeBChan eventChannel (ReviewProtocolEvent (ReviewStartFailed issueNumber message))
         Right () -> pure ()
+
+issueRevisionPreflightAction :: Issue -> PreflightAction
+issueRevisionPreflightAction issue = ActionIssueRevision (issueOriginFromBody issue.issueBody)
 
 applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
 applyReviewBackendStarted result = case result of
@@ -4261,7 +4336,7 @@ applyReviewBackendStarted result = case result of
           state
             { appReviewBackend = ReviewBackendFailed message,
               appReviewSessions = Map.map (failStartingSession message) state.appReviewSessions,
-              appNotice = Just message
+              appNotice = Just (agentFailureNotice "Issue revision" message)
             }
       )
     tailDisplayedTranscript
@@ -4271,7 +4346,7 @@ applyReviewBackendStarted result = case result of
     mapM_
       ( \session ->
           if session.reviewSessionStage == IssueRevision && session.reviewSessionPhase == ReviewStarting && session.reviewSessionThreadId == Nothing
-            then launchIssueReview client session.reviewSessionIssue.issueNumber
+            then launchIssueReview client session.reviewSessionIssue
             else pure ()
       )
       sessions
@@ -4280,7 +4355,7 @@ applyReviewBackendStarted result = case result of
       | session.reviewSessionStage == IssueRevision && session.reviewSessionPhase == ReviewStarting =
           session
             { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = "failed",
+              reviewSessionActivity = canonicalReviewActivity message,
               reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
             }
       | otherwise = session
@@ -4402,15 +4477,20 @@ applyReviewEvent reviewEvent = case reviewEvent of
     case outcome of
       TurnSucceeded -> startBoardRefresh
       _ -> pure ()
-  ReviewStartFailed issueNumber message ->
+  -- Reached both when the coordinator itself rejects the turn and when
+  -- 'launchIssueReview' preflights a revision against an already-running
+  -- backend, so it classifies the message the same way every other terminal
+  -- path does rather than calling a missing component a failed agent.
+  ReviewStartFailed issueNumber message -> do
     appendToReviewSession issueNumber
       ( \session ->
           session
             { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = "failed",
+              reviewSessionActivity = canonicalReviewActivity message,
               reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
             }
       )
+    setNotice (agentFailureNotice "Issue revision" message)
   ReviewClientStopped message -> do
     modify
       ( \state ->
