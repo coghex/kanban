@@ -74,6 +74,13 @@ def configured_remote_name() -> str:
 NTFY_URL = configured_ntfy_url()
 CONFIGURED_CONFIG_PATH = configured_config_path()
 CONFIGURED_REMOTE_NAME = configured_remote_name()
+# Incident kinds. A crash incident says the drainer process died; a conflict
+# incident says a healthy drainer stopped working one pull request. They have
+# different payloads and different lifecycles, so every selector filters on
+# this field. Incidents written before the field existed are crashes.
+CRASH_INCIDENT_KIND = "drainer-exit"
+CONFLICT_INCIDENT_KIND = "merge-conflict"
+CONFLICT_SUMMARY_FILES = 3
 INTERVAL_SECONDS = 60
 START_TIMEOUT_SECONDS = 12
 START_STABILITY_SECONDS = 1.0
@@ -221,8 +228,16 @@ def require_default_branch(repo_path: Path, remote_name: str | None = None) -> N
         )
 
 
+def incident_kind(incident: dict[str, Any]) -> str:
+    kind = incident.get("kind")
+    return kind if isinstance(kind, str) else CRASH_INCIDENT_KIND
+
+
 def incident_files(
-    *, repo_path: Path | None = None, open_only: bool = False
+    *,
+    repo_path: Path | None = None,
+    open_only: bool = False,
+    kind: str | None = None,
 ) -> list[Path]:
     if not INCIDENT_DIR.exists():
         return []
@@ -233,6 +248,8 @@ def incident_files(
         if repo_path is not None and incident.get("repo") != str(repo_path):
             continue
         if open_only and incident.get("status") != "open":
+            continue
+        if kind is not None and incident_kind(incident) != kind:
             continue
         selected.append(path)
     return selected
@@ -528,6 +545,7 @@ def write_incident(
         summary = f"drain_prs.py exited unexpectedly with code {exit_code}"
     incident: dict[str, Any] = {
         "incident_id": incident_id,
+        "kind": CRASH_INCIDENT_KIND,
         "status": "open",
         "occurred_at": utc_stamp(),
         "summary": summary,
@@ -566,6 +584,134 @@ def write_incident(
         }
         service_log(str(exc))
     atomic_write_json(incident_path, incident)
+    return incident
+
+
+def conflict_summary(pull_request: int, files: list[str]) -> str:
+    if not files:
+        return (
+            f"PR #{pull_request} has a merge conflict with the default branch; "
+            "the drainer left it unmerged."
+        )
+    shown = ", ".join(files[:CONFLICT_SUMMARY_FILES])
+    remaining = len(files) - CONFLICT_SUMMARY_FILES
+    if remaining > 0:
+        shown += f" (+{remaining} more)"
+    return (
+        f"PR #{pull_request} has a merge conflict in {shown}; "
+        "the drainer left it unmerged."
+    )
+
+
+def find_open_conflict_incident(
+    repo_path: Path, pull_request: int
+) -> tuple[Path, dict[str, Any]] | None:
+    """The one open incident keyed by this repository, kind and PR, if any."""
+    for path in incident_files(
+        repo_path=repo_path, open_only=True, kind=CONFLICT_INCIDENT_KIND
+    ):
+        incident = read_json(path)
+        if incident is not None and incident.get("pull_request") == pull_request:
+            return path, incident
+    return None
+
+
+def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
+    incidents: list[dict[str, Any]] = []
+    for path in incident_files(
+        repo_path=repo_path, open_only=True, kind=CONFLICT_INCIDENT_KIND
+    ):
+        incident = read_json(path)
+        if incident is not None:
+            incidents.append(incident)
+    return incidents
+
+
+def record_conflict_incident(
+    *,
+    repo_path: Path,
+    pull_request: int,
+    files: list[str],
+) -> dict[str, Any]:
+    """Record that a healthy drainer stopped merging one conflicted PR.
+
+    Idempotent on (repository, kind, pull request): while an incident for that
+    PR is open, repeated polls return it untouched instead of accumulating
+    duplicates. A recurrence after resolution opens a new one.
+    """
+    existing = find_open_conflict_incident(repo_path, pull_request)
+    if existing is not None:
+        return existing[1]
+
+    INCIDENT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Second-granularity stamps repeat, and the same PR number can belong to
+    # two repositories, so disambiguate rather than overwrite a live incident.
+    base_id = (
+        time.strftime("incident-%Y%m%dT%H%M%SZ", time.gmtime())
+        + f"-{os.getpid()}-pr{pull_request}"
+    )
+    incident_id = base_id
+    duplicate = 1
+    while (INCIDENT_DIR / f"{incident_id}.json").exists():
+        duplicate += 1
+        incident_id = f"{base_id}-{duplicate}"
+    log_path = latest_log_path()
+    summary = conflict_summary(pull_request, files)
+    incident: dict[str, Any] = {
+        "incident_id": incident_id,
+        "kind": CONFLICT_INCIDENT_KIND,
+        "status": "open",
+        "occurred_at": utc_stamp(),
+        "summary": summary,
+        "pull_request": pull_request,
+        "files": files,
+        "repo": str(repo_path),
+        "drainer": str(DRAINER_PATH),
+        "drainer_log": str(log_path) if log_path else None,
+        "service_log": str(SERVICE_LOG_PATH),
+        "notification": {"delivered": False, "pending": True},
+    }
+    incident_path = INCIDENT_DIR / f"{incident_id}.json"
+    incident["path"] = str(incident_path)
+    atomic_write_json(incident_path, incident)
+
+    message_parts = [
+        summary,
+        f"Incident: {incident_id}",
+        "The drainer is still running and keeps draining every other approved PR.",
+        "Resolve the conflict on the PR branch; this incident clears itself "
+        "once GitHub reports the PR mergeable again.",
+    ]
+    try:
+        incident["notification"] = publish_ntfy(
+            "\n".join(message_parts),
+            title="PR drainer blocked on a merge conflict",
+            priority="high",
+            tags="warning,twisted_rightwards_arrows",
+        )
+    except ServiceError as exc:
+        incident["notification"] = {
+            "delivered": False,
+            "pending": False,
+            "error": str(exc),
+        }
+    atomic_write_json(incident_path, incident)
+    return incident
+
+
+def resolve_conflict_incident(
+    repo_path: Path, pull_request: int, note: str
+) -> dict[str, Any] | None:
+    """Resolve only this PR's conflict incident, leaving every other open
+    incident -- another PR's conflict, or a supervisor crash -- untouched."""
+    found = find_open_conflict_incident(repo_path, pull_request)
+    if found is None:
+        return None
+    path, incident = found
+    incident["status"] = "resolved"
+    incident["resolved_at"] = utc_stamp()
+    incident["resolution"] = note
+    atomic_write_json(path, incident)
     return incident
 
 

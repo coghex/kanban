@@ -5,6 +5,7 @@ temporary Git repository and a scriptable fake `gh`.
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import drain_prs
+import drain_prs_service
 import fake_cli
 
 
@@ -201,7 +203,6 @@ class ProcessPrFixture(unittest.TestCase):
                 self.ctx,
                 42,
                 dry_run=dry_run,
-                repair_conflicts=True,
                 state=state,
                 gates=gates,
             )
@@ -438,100 +439,8 @@ class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
                     interval=0,
                     once=True,
                     dry_run=False,
-                    repair_conflicts=True,
                     gates=gates,
                 )
-
-
-class ConflictPushVisibilityTests(ProcessPrFixture):
-    """Regression coverage for issue #27: the "did the repair agent push?"
-    check must poll through GitHub's read-after-write lag rather than
-    condemning a push that already landed but is not yet visible -- while
-    keeping every refusal that follows it.
-    """
-
-    STALE_HEAD = "a" * 40
-
-    def _script_head_reads(self, *overrides):
-        # Each override scripts one queued `gh pr view 42` snapshot; once the
-        # queue is exhausted the last one repeats, so the reads made by
-        # wait_for_branch_update_policy() keep seeing the final state.
-        for override in overrides:
-            pr_json = self._base_pr_json()
-            pr_json["labels"] = []
-            pr_json["statusCheckRollup"] = [
-                {
-                    "name": drain_prs.STALE_APPROVAL_CHECK,
-                    "status": "COMPLETED",
-                    "conclusion": "SUCCESS",
-                    "completedAt": "2026-07-18T00:00:02Z",
-                }
-            ]
-            pr_json.update(override)
-            self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
-
-    def _verify(self):
-        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
-            return drain_prs.verify_codex_conflict_push(
-                self.ctx,
-                self._base_pr_json(),
-                worktree=self.feature_wt,
-                previous_head=self.STALE_HEAD,
-                action="merge-conflict repair",
-            )
-
-    def test_push_visible_only_on_a_later_read_verifies(self):
-        self._script_head_reads(
-            {"headRefOid": self.STALE_HEAD},
-            {"headRefOid": self.head_sha},
-        )
-
-        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
-            refreshed = self._verify()
-
-        self.assertEqual(refreshed["headRefOid"], self.head_sha)
-        # The stale first read did not decide the outcome.
-        self.assertGreaterEqual(len(self._pr_view_calls()), 2)
-
-    def test_head_that_never_appears_fails_after_the_bounded_window(self):
-        self._script_head_reads({"headRefOid": self.STALE_HEAD})
-
-        # Wide enough that several reads fit inside the window, so the
-        # assertion below distinguishes polling from a single read.
-        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_WAIT_SECONDS", 0.5):
-            with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
-                with self.assertRaises(drain_prs.DrainError) as caught:
-                    self._verify()
-
-        self.assertIn("without pushing a new head", str(caught.exception))
-        # Bounded, but genuinely polled rather than read once.
-        self.assertGreaterEqual(len(self._pr_view_calls()), 2)
-
-    def test_stale_approve_label_on_the_new_head_is_still_refused(self):
-        self._script_head_reads(
-            {
-                "headRefOid": self.head_sha,
-                "labels": [{"name": drain_prs.APPROVE_LABEL}],
-            }
-        )
-
-        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
-            with self.assertRaises(drain_prs.DrainError) as caught:
-                self._verify()
-
-        self.assertIn("refusing to let the repair agent approve", str(caught.exception))
-
-    def test_local_head_mismatch_on_the_new_head_is_still_refused(self):
-        pushed = "c" * 40
-        self._script_head_reads({"headRefOid": pushed})
-
-        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
-            with self.assertRaises(drain_prs.DrainError) as caught:
-                self._verify()
-
-        message = str(caught.exception)
-        self.assertIn("left local HEAD", message)
-        self.assertIn(pushed[:12], message)
 
 
 class MarkerLookupPaginationTests(ProcessPrFixture):
@@ -702,7 +611,6 @@ class OneCycleStaleEntryCleanupTests(ProcessPrFixture):
                 interval=0,
                 once=True,
                 dry_run=False,
-                repair_conflicts=True,
                 gates=gates,
             )
 
@@ -1058,6 +966,329 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
         self.assertEqual(len(self.prepared), 1)
         review_path, _ = self.prepared[0]
         self.assertFalse(review_path.exists())
+
+
+class MergeConflictIncidentTests(ProcessPrFixture):
+    """Issue #123: a conflict is the one artifact in this pipeline no reviewer
+    has seen, so the drainer stops working that PR and raises an incident
+    instead of repairing it -- touching no label, merging nothing, calling no
+    model, and blocking no other PR.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Installed but never expected to run: an empty call log is the proof
+        # that conflict handling reaches no model.
+        self.fake.install("codex")
+        self.fake.install("claude")
+        self.incident_dir = self.root / "incidents"
+        self.incident_dir.mkdir()
+        self.drainer_log_dir = self.root / "drainer-logs"
+        self.drainer_log_dir.mkdir()
+        self.conflict_head = self._build_conflicting_branch()
+
+    def _build_conflicting_branch(self):
+        # README diverges on both sides of the merge base, so the local
+        # inspection has a real conflict to name.
+        run_git(["checkout", "-q", "-b", "issue-77-conflict"], cwd=self.upstream_sim)
+        (self.upstream_sim / "README").write_text("branch side\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "branch side"], cwd=self.upstream_sim)
+        head = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "origin", "issue-77-conflict"], cwd=self.upstream_sim)
+        run_git(["checkout", "-q", "master"], cwd=self.upstream_sim)
+        (self.upstream_sim / "README").write_text("master side\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "master side"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
+        return head
+
+    @contextlib.contextmanager
+    def _drainer(self):
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs_service, "INCIDENT_DIR", self.incident_dir),
+            mock.patch.object(drain_prs_service, "LOG_DIR", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+        ):
+            yield
+
+    def _conflicted_pr_json(self, **overrides):
+        pr_json = self._base_pr_json()
+        pr_json.update(
+            {
+                "number": 77,
+                "url": "https://github.com/acme/widgets/pull/77",
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+                "headRefOid": self.conflict_head,
+                "headRefName": "issue-77-conflict",
+                "closingIssuesReferences": [],
+            }
+        )
+        pr_json.update(overrides)
+        return pr_json
+
+    def _script_conflicted_pr(self, *overrides):
+        for override in overrides or ({},):
+            self.fake.script(
+                "gh",
+                ["pr", "view", "77"],
+                stdout=json.dumps(self._conflicted_pr_json(**override)),
+            )
+
+    def _entry(self, head):
+        return {
+            "approved_head": head,
+            "last_rereviewed_head": None,
+            "consecutive_failures": 0,
+            "retry_after_attempt": 0,
+            "last_attempt": 0,
+            "last_error": None,
+        }
+
+    def _gates(self):
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+    def _incidents(self, *, status="open"):
+        found = []
+        for path in sorted(self.incident_dir.glob("incident-*.json")):
+            incident = json.loads(path.read_text(encoding="utf-8"))
+            if incident["status"] == status:
+                found.append(incident)
+        return found
+
+    def _mutating_gh_calls(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:2] in (["pr", "edit"], ["pr", "merge"], ["pr", "ready"])
+        ]
+
+    def _write_conflict_incident(self, number, files):
+        with self._drainer():
+            return drain_prs_service.record_conflict_incident(
+                repo_path=self.ctx.path, pull_request=number, files=files
+            )
+
+    def _write_crash_incident(self):
+        path = self.incident_dir / "incident-20260101T000000Z-9-crash.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "incident_id": path.stem,
+                    "kind": drain_prs_service.CRASH_INCIDENT_KIND,
+                    "status": "open",
+                    "summary": "drain_prs.py exited unexpectedly with code 1",
+                    "exit_code": 1,
+                    "repo": str(self.ctx.path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_conflicted_pr_raises_one_incident_and_changes_nothing_else(self):
+        self._script_conflicted_pr()
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "prs": {"77": self._entry(self.conflict_head)},
+        }
+
+        with self._drainer():
+            # Two polls over the same unresolved conflict.
+            first = drain_prs.process_pr(
+                self.ctx, 77, dry_run=False, state=state, gates=self._gates()
+            )
+            second = drain_prs.process_pr(
+                self.ctx, 77, dry_run=False, state=state, gates=self._gates()
+            )
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        incident = incidents[0]
+        self.assertEqual(incident["kind"], drain_prs_service.CONFLICT_INCIDENT_KIND)
+        self.assertEqual(incident["pull_request"], 77)
+        self.assertIsInstance(incident["pull_request"], int)
+        self.assertEqual(incident["files"], ["README"])
+        self.assertIn("#77", incident["summary"])
+        self.assertIn("README", incident["summary"])
+        self.assertEqual(incident["repo"], str(self.ctx.path))
+        # Crash-incident semantics must not leak into a healthy-drainer block.
+        self.assertNotIn("exit_code", incident)
+        self.assertNotIn("drainer stopped", incident["summary"])
+        self.assertNotIn("exited", incident["summary"])
+
+        self.assertEqual(self._mutating_gh_calls(), [])
+        self.assertEqual(self.fake.calls("codex"), [])
+        self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_a_conflict_blocks_only_its_own_pr(self):
+        self._script_pr_view()
+        self._script_conflicted_pr()
+        for approved in (
+            [
+                {
+                    "number": 42,
+                    "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                    "isDraft": False,
+                    "headRefOid": self.head_sha,
+                },
+                {
+                    "number": 77,
+                    "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                    "isDraft": False,
+                    "headRefOid": self.conflict_head,
+                },
+            ],
+            [
+                {
+                    "number": 77,
+                    "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                    "isDraft": False,
+                    "headRefOid": self.conflict_head,
+                }
+            ],
+        ):
+            self.fake.script("gh", ["pr", "list"], stdout=json.dumps(approved))
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        with self._drainer():
+            for _ in range(2):
+                drain_prs.loop(
+                    self.ctx,
+                    interval=0,
+                    once=True,
+                    dry_run=False,
+                    gates=self._gates(),
+                )
+
+        merge_calls = self._pr_merge_calls()
+        self.assertEqual(len(merge_calls), 1)
+        self.assertEqual(merge_calls[0]["args"][2], "42")
+
+        incidents = self._incidents()
+        self.assertEqual([incident["pull_request"] for incident in incidents], [77])
+
+        self.assertEqual(
+            [call for call in self._mutating_gh_calls() if "77" in call["args"]], []
+        )
+        state = json.loads(
+            drain_prs.drain_state_path(self.ctx).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("42", state["prs"])
+        # A blocked PR is not a failed attempt, so it earns no cooldown.
+        self.assertEqual(state["prs"]["77"]["consecutive_failures"], 0)
+
+    def test_dry_run_reports_the_incident_without_recording_or_fetching(self):
+        self._script_conflicted_pr()
+        refs_before = run_git(
+            ["for-each-ref", "--format=%(refname) %(objectname)"], cwd=self.main
+        )
+
+        with self._drainer():
+            result = drain_prs.process_pr(
+                self.ctx,
+                77,
+                dry_run=True,
+                state={
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {"77": self._entry(self.conflict_head)},
+                },
+                gates=self._gates(),
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(list(self.incident_dir.glob("*.json")), [])
+        self.assertEqual(
+            run_git(["for-each-ref", "--format=%(refname) %(objectname)"], cwd=self.main),
+            refs_before,
+        )
+        self.assertEqual(self._mutating_gh_calls(), [])
+        self.assertEqual(self.fake.calls("codex"), [])
+
+    def test_reconciliation_resolves_only_the_pr_that_is_no_longer_conflicted(self):
+        cleared = self._write_conflict_incident(77, ["README"])
+        closed = self._write_conflict_incident(55, ["docs/pr-drainer.md"])
+        still_conflicted = self._write_conflict_incident(66, ["tools/drain_prs.py"])
+        crash = self._write_crash_incident()
+
+        self._script_conflicted_pr(
+            {"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
+        )
+        self.fake.script(
+            "gh",
+            ["pr", "view", "55"],
+            stdout=json.dumps({"number": 55, "state": "CLOSED", "mergeable": "UNKNOWN"}),
+        )
+        self.fake.script(
+            "gh",
+            ["pr", "view", "66"],
+            stdout=json.dumps(
+                {
+                    "number": 66,
+                    "state": "OPEN",
+                    "mergeable": "CONFLICTING",
+                    "mergeStateStatus": "DIRTY",
+                }
+            ),
+        )
+
+        with self._drainer():
+            drain_prs.reconcile_conflict_incidents(self.ctx, dry_run=False)
+
+        resolved = {
+            incident["incident_id"] for incident in self._incidents(status="resolved")
+        }
+        still_open = {
+            incident["incident_id"] for incident in self._incidents(status="open")
+        }
+        self.assertEqual(resolved, {cleared["incident_id"], closed["incident_id"]})
+        self.assertEqual(
+            still_open, {still_conflicted["incident_id"], crash.stem}
+        )
+        self.assertEqual(self._mutating_gh_calls(), [])
+
+    def test_unconfirmed_readings_keep_a_conflict_incident_open(self):
+        unknown = self._write_conflict_incident(77, ["README"])
+        unreadable = self._write_conflict_incident(55, ["README"])
+
+        self._script_conflicted_pr(
+            {"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}
+        )
+        self.fake.script("gh", ["pr", "view", "55"], stderr="boom", exit_code=1)
+
+        with self._drainer():
+            drain_prs.reconcile_conflict_incidents(self.ctx, dry_run=False)
+
+        self.assertEqual(
+            {incident["incident_id"] for incident in self._incidents(status="open")},
+            {unknown["incident_id"], unreadable["incident_id"]},
+        )
+
+    def test_dry_run_reconciliation_resolves_nothing(self):
+        incident = self._write_conflict_incident(77, ["README"])
+        self._script_conflicted_pr(
+            {"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
+        )
+
+        with self._drainer():
+            drain_prs.reconcile_conflict_incidents(self.ctx, dry_run=True)
+
+        self.assertEqual(
+            [entry["incident_id"] for entry in self._incidents(status="open")],
+            [incident["incident_id"]],
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Unit tests for the tracked LaunchAgent controller."""
 
 import json
+import os
 import plistlib
 import subprocess
 import tempfile
@@ -151,6 +152,133 @@ class ControllerConfigurationTests(unittest.TestCase):
             repo, "Cleared when the PR drainer was intentionally stopped."
         )
         self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
+
+    def test_conflict_incidents_are_keyed_per_pull_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            incident_dir = Path(tmp)
+            with (
+                mock.patch.object(drain_prs_service, "INCIDENT_DIR", incident_dir),
+                mock.patch.object(drain_prs_service, "NTFY_URL", None),
+            ):
+                first = drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/a"), pull_request=42, files=["README"]
+                )
+                repeat = drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/a"), pull_request=42, files=["README"]
+                )
+                other = drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/a"), pull_request=43, files=["docs/x.md"]
+                )
+                files = sorted(path.name for path in incident_dir.glob("*.json"))
+
+        # A second poll over the same unresolved conflict returns the open
+        # incident rather than opening a duplicate.
+        self.assertEqual(repeat["incident_id"], first["incident_id"])
+        self.assertNotEqual(other["incident_id"], first["incident_id"])
+        self.assertEqual(len(files), 2)
+        self.assertEqual(first["kind"], drain_prs_service.CONFLICT_INCIDENT_KIND)
+        self.assertEqual(first["pull_request"], 42)
+        self.assertEqual(first["files"], ["README"])
+        self.assertIn("#42", first["summary"])
+        self.assertIn("README", first["summary"])
+        self.assertNotIn("exit_code", first)
+
+    def test_conflict_resolution_leaves_other_open_incidents_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            incident_dir = Path(tmp)
+            crash = incident_dir / "incident-20260101T000000Z-1.json"
+            crash.write_text(
+                json.dumps(
+                    {
+                        "incident_id": crash.stem,
+                        "kind": drain_prs_service.CRASH_INCIDENT_KIND,
+                        "status": "open",
+                        "repo": "/tmp/a",
+                        "exit_code": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy = incident_dir / "incident-20250101T000000Z-1.json"
+            legacy.write_text(
+                json.dumps(
+                    {"incident_id": legacy.stem, "status": "open", "repo": "/tmp/a"}
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(drain_prs_service, "INCIDENT_DIR", incident_dir),
+                mock.patch.object(drain_prs_service, "NTFY_URL", None),
+            ):
+                drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/a"), pull_request=42, files=["README"]
+                )
+                kept = drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/a"), pull_request=43, files=["README"]
+                )
+                foreign = drain_prs_service.record_conflict_incident(
+                    repo_path=Path("/tmp/b"), pull_request=42, files=["README"]
+                )
+                resolved = drain_prs_service.resolve_conflict_incident(
+                    Path("/tmp/a"), 42, "PR #42 merges cleanly again."
+                )
+                missing = drain_prs_service.resolve_conflict_incident(
+                    Path("/tmp/a"), 42, "already resolved"
+                )
+                open_ids = {
+                    json.loads(path.read_text(encoding="utf-8"))["incident_id"]
+                    for path in incident_dir.glob("*.json")
+                    if json.loads(path.read_text(encoding="utf-8"))["status"] == "open"
+                }
+
+        self.assertEqual(resolved["pull_request"], 42)
+        self.assertEqual(resolved["resolution"], "PR #42 merges cleanly again.")
+        self.assertIn("resolved_at", resolved)
+        self.assertIsNone(missing)
+        # The other PR's conflict, the other repository's, the crash, and a
+        # pre-kind legacy incident all survive.
+        self.assertEqual(
+            open_ids,
+            {kept["incident_id"], foreign["incident_id"], crash.stem, legacy.stem},
+        )
+
+    def test_a_running_service_surfaces_the_newest_conflict_incident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            incident_dir = root / "incidents"
+            incident_dir.mkdir()
+            status_path = root / "status.json"
+            repo = Path("/tmp/a").resolve()
+            alive = os.getpid()
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "state": "running",
+                        "runner_pid": alive,
+                        "drainer_pid": alive,
+                        "repo": str(repo),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(drain_prs_service, "INCIDENT_DIR", incident_dir),
+                mock.patch.object(drain_prs_service, "STATUS_PATH", status_path),
+                mock.patch.object(drain_prs_service, "NTFY_URL", None),
+                mock.patch.object(drain_prs_service, "launchd_loaded", return_value=True),
+                mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
+                mock.patch.object(drain_prs_service, "lock_pid", return_value=None),
+            ):
+                drain_prs_service.record_conflict_incident(
+                    repo_path=repo, pull_request=42, files=["README"]
+                )
+                snapshot = drain_prs_service.status_snapshot(repo)
+
+        # Kanban renders `running` + an open incident as a DrainerWarning
+        # carrying this summary, so the conflict reaches the board.
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["open_incident"]["pull_request"], 42)
+        self.assertIn("#42", snapshot["open_incident"]["summary"])
 
     def test_status_marks_a_stopped_dirty_checkout_as_an_error_state(self):
         repo = Path("/tmp/a")
