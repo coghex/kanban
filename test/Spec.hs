@@ -5049,6 +5049,52 @@ main = hspec $ do
               identityForPid descendantPid identities `shouldBe` Nothing
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
+    it "refuses to spawn gh while a non-leader record's saved gh is alive in some other process group" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- The record 'abandonGh' writes when create_group did not take
+        -- effect: the pgid is gh's own PID, but gh is sitting in somebody
+        -- else's group, so nothing ever has that pgid. Asking only about the
+        -- pgid finds an empty group and calls the record spent -- while the
+        -- gh it names is still running.
+        withNonLeaderProcess $ \nonLeaderPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            snapshot <- readProcessSnapshot
+            identity <- case snapshot >>= maybe (Left "fixture absent from snapshot") Right . identityForPid nonLeaderPid of
+              Left message -> fail (Data.Text.unpack message)
+              Right identity -> pure identity
+            identity.processIdentityGroupPid `shouldNotBe` nonLeaderPid
+            writeGhGroupRecord repository [OwnedProcessGroup nonLeaderPid [identity] False] `shouldReturn` Right ()
+            withFakeGh
+              temporaryRoot
+              [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+                "printf '%s' '" <> emptyGraphqlPage <> "'"
+              ]
+              $ do
+                (outcome, _) <- captureBoardRefresh temporaryRoot 30
+                case outcome of
+                  BoardRefreshCompleted (Left providerError) ->
+                    providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
+                  other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+            doesFileExist ranMarker `shouldReturn` False
+            (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+        -- Once the saved gh exits the record has nothing left to name, so the
+        -- refusal lifts on its own.
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Right _) -> pure ()
+                other -> expectationFailure ("expected the refresh to proceed once the saved gh exited, got " <> show other)
+          doesFileExist ranMarker `shouldReturn` True
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
     it "refuses to spawn gh while an uncensused record's pgid is still occupied, rather than reading its empty membership as absent" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let ranMarker = temporaryRoot </> "gh-ran"
@@ -7015,6 +7061,25 @@ withSurvivingGroupLeader =
       leaderPid <- maybe (fail "surviving fixture reported no PID") (pure . fromIntegral) =<< getPid leader
       threadDelay 200000
       pure (leaderPid :: Int, leader)
+
+-- | Like 'withSurvivingGroupLeader', but deliberately /not/ its own group
+-- leader — it stays in this test process's group — so its PID and its PGID
+-- differ. That is the shape @create_group@ failing to take effect would
+-- leave behind, and the only one where asking about a PGID says nothing
+-- about the process itself.
+withNonLeaderProcess :: (Int -> IO result) -> IO result
+withNonLeaderProcess =
+  bracket spawn (\(pid, _) -> ignoringIOException (signalProcess sigKILL (fromIntegral pid)))
+    . (. fst)
+  where
+    spawn = do
+      (_, _, _, child) <-
+        createProcess
+          (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done </dev/null >/dev/null 2>&1"])
+            {create_group = False}
+      childPid <- maybe (fail "non-leader fixture reported no PID") (pure . fromIntegral) =<< getPid child
+      threadDelay 200000
+      pure (childPid :: Int, child)
 
 ignoringIOException :: IO () -> IO ()
 ignoringIOException action = void (try @IOException action)

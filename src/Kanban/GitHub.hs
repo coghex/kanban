@@ -45,7 +45,7 @@ import Data.Time (getCurrentTime)
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
-import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, membersStillInGroup)
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, matchingIdentities, membersStillInGroup)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
@@ -599,23 +599,32 @@ reclaimGhGroup group = go False groupCleanupPasses
       snapshot <- defaultProcessSnapshot
       case snapshot of
         Left message -> pure (Left message)
-        Right processes -> case groupMembers groupPid processes of
-          -- Nothing left in the group at all: the only ending that clears
-          -- the record, and the reason emptiness is asked of a fresh census
-          -- rather than inferred from the recorded members going away.
-          [] -> pure (Right ())
-          occupants
-            | not (owned || provablyOurs processes) -> pure (Left (unprovable (length occupants)))
-            | passesLeft <= 0 -> pure (Left exhausted)
-            | otherwise -> do
-                -- Signalling the whole current census, not the recorded
-                -- members: a descendant forked from a member's TERM handler
-                -- is in the group but in no recorded list, and would
-                -- otherwise be left behind the moment its parent exited.
-                result <- killVerifiedGroup groupPid occupants
-                case result of
-                  Left message -> pure (Left message)
-                  Right () -> go True (passesLeft - 1)
+        Right processes -> do
+          let occupants = groupMembers groupPid processes
+              -- Saved identities are asked about by identity, never by
+              -- group. The record written when gh turned out not to lead its
+              -- own group names a pgid that was never this repository's, so
+              -- looking only at that pgid finds nothing and would call the
+              -- record spent while the gh it names is still running.
+              savedAlive = matchingIdentities processes group.ownedProcessGroupMembers
+          case occupants <> savedAlive of
+            -- Nothing in the group and nothing the record names: the only
+            -- ending that clears it, and the reason this is asked of a fresh
+            -- census rather than inferred from the recorded members going
+            -- away.
+            [] -> pure (Right ())
+            survivors
+              | not (owned || provablyOurs processes) -> pure (Left (unprovable (length survivors)))
+              | passesLeft <= 0 -> pure (Left exhausted)
+              | otherwise -> do
+                  -- Signalling the whole current census, not the recorded
+                  -- members: a descendant forked from a member's TERM handler
+                  -- is in the group but in no recorded list, and would
+                  -- otherwise be left behind the moment its parent exited.
+                  result <- killVerifiedGroup groupPid occupants
+                  case result of
+                    Left message -> pure (Left message)
+                    Right () -> go True (passesLeft - 1)
 
     -- An uncensused record never pins anything, so its group can only ever
     -- be watched; a censused one is ours to signal exactly while one of its
@@ -624,12 +633,12 @@ reclaimGhGroup group = go False groupCleanupPasses
       group.ownedProcessGroupCensused
         && not (null (membersStillInGroup groupPid processes group.ownedProcessGroupMembers))
 
-    unprovable occupied =
-      "a gh process group from an earlier GitHub refresh (pgid "
+    unprovable surviving =
+      "a gh from an earlier GitHub refresh (pgid "
         <> Text.pack (show groupPid)
-        <> ") still has "
-        <> Text.pack (show occupied)
-        <> " process(es) in it that cannot be identified as this repository's, so they cannot be signalled from here"
+        <> ") still accounts for "
+        <> Text.pack (show surviving)
+        <> " running process(es) that cannot be identified as this repository's, so they cannot be signalled from here"
 
     exhausted =
       "a gh process group from an earlier GitHub refresh (pgid "
