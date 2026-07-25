@@ -113,8 +113,26 @@ SCOPE_GATE_RULES = (
     "report it rather than dropping it",
     "name the gate that defers it",
     "may override the deferral at signoff",
+    # R4, all-deferred case: the override surface must still appear when the
+    # gate leaves nothing to draft, or a one-candidate workflow would stop at
+    # "nothing worth opening" and the user would never see the deferral.
+    "is not a nothing-worth-opening result",
+    "lift a deferral or confirm the stop",
     # R5: the gate changes selection, not drafting quality.
     "the gate changes selection only",
+)
+
+# The one-candidate hunters reach signoff only by producing a draft, so they
+# are the assets where an all-deferred run could otherwise stop at "nothing
+# worth opening" and strand the deferral. Both must condition that phrase.
+ONE_CANDIDATE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+)
+
+NOTHING_WORTH_OPENING_CONDITION = (
+    "if a scope gate deferred candidates, present those at signoff "
+    "instead of reporting nothing worth opening"
 )
 
 # The absent-gate guard, and the instructions that only make sense once a
@@ -407,6 +425,26 @@ class ScopeGateTests(unittest.TestCase):
         # cannot deliver and this contract must not claim.
         self.assertIn("agent runs are nondeterministic", self.document)
         self.assertIn("never an identical candidate list across runs", self.document)
+
+    def test_an_all_deferred_run_still_reaches_signoff(self):
+        # The one-candidate hunters otherwise reach signoff only by producing
+        # a draft. If a gate defers every candidate, "nothing worth opening"
+        # would end the run before the override surface ever appeared, and
+        # requirement 4 would be unsatisfiable.
+        for path in ONE_CANDIDATE_ASSETS:
+            self.assertIn(
+                NOTHING_WORTH_OPENING_CONDITION,
+                self.assets[path],
+                f"{path}: 'nothing worth opening' is not conditioned on the gate, so an "
+                "all-deferred run can stop without offering the user an override",
+            )
+
+    def test_document_reserves_nothing_worth_opening_for_non_gate_stops(self):
+        self.assertIn(
+            "only a run whose candidates were killed by verification or deduplication "
+            "- not by a gate - may report nothing worth opening",
+            self.document.replace("—", "-"),
+        )
 
     def test_scope_gate_does_not_reach_the_issue_review_workflows(self):
         for path in SCOPE_GATE_FREE_ASSETS:

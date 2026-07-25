@@ -180,6 +180,16 @@ eligible again. The stop-and-ask interaction each hunting workflow already
 performs (§3.1, §3.2) is that override surface; the gate must not bypass,
 replace, or add a confirmation step to it.
 
+That override surface has to exist even when the gate leaves nothing to
+draft. The one-candidate workflows otherwise reach signoff only by producing
+a draft, and may report "nothing worth opening" and stop — which would strand
+a deferral the user never saw. So: if a gate defers every candidate a
+workflow would otherwise draft, that is not a nothing-worth-opening result.
+The workflow stops and presents the deferred candidates as its signoff, each
+named with its gate, then waits for the user to lift a deferral or confirm
+the stop. Only a run whose candidates were killed by verification or
+deduplication — not by a gate — may report nothing worth opening.
+
 ### 4.5 Selection only
 
 A discretionary candidate that falls inside a declared scope stays eligible.
@@ -270,6 +280,9 @@ runs) parses §2 and fails if:
   correctness/stability/data-integrity/broken-CI/security exemptions, the
   overridable deferral report, or selection-only — so the document and those
   five assets cannot state different gate or exemption rules;
+- a one-candidate hunter stops leaving "nothing worth opening" conditional on
+  the gate, which would let an all-deferred run end before the user ever saw
+  the deferral it should have been offered (§4.4);
 - a discretionary-discovery asset states a gate instruction ahead of the
   absent-gate guard that conditions it, which is the mechanical form of §4.2's
   requirement that every gate instruction be conditional on a gate;
