@@ -34,6 +34,7 @@ module Kanban.Preflight
     VersionObservation (..),
     actionLabel,
     actionReport,
+    revisionAuthorBrand,
     blockingRemediation,
     classifyBundleListing,
     classifyClaudeAuth,
@@ -175,11 +176,22 @@ data PreflightCheck = PreflightCheck
 -- dedicated install and status flow.
 data PreflightAction
   = ActionIssueReview
-  | ActionIssueRevision
+  | ActionIssueRevision SolverBrand
   | ActionSolve SolverBrand
   | ActionAutoSolve SolverBrand
   | ActionPullRequestFlow SolverBrand
   deriving stock (Eq, Show)
+
+-- | Which brand authors a revision's amendment content, read from the
+-- issue's own origin marker. A Claude-origin issue routes that authoring
+-- through @kanban_run_claude@, so its revision needs the Claude CLI as well
+-- as the Codex coordinator thread; a Codex-origin or unmarked issue is
+-- authored by the coordinator itself. Mirrors the REVISION rule in
+-- 'Kanban.Review.reviewDeveloperInstructions'.
+revisionAuthorBrand :: Text -> SolverBrand
+revisionAuthorBrand body
+  | "<!-- issue-origin:claude -->" `Text.isInfixOf` body = ClaudeSolver
+  | otherwise = CodexSolver
 
 data PreflightReport = PreflightReport
   { reportAction :: PreflightAction,
@@ -205,7 +217,10 @@ oppositeBrand ClaudeSolver = CodexSolver
 
 actionLabel :: PreflightAction -> Text
 actionLabel ActionIssueReview = "issue review/rereview (r)"
-actionLabel ActionIssueRevision = "issue revision (r)"
+actionLabel (ActionIssueRevision brand) = "issue revision (r) · " <> originLabel brand
+  where
+    originLabel CodexSolver = "codex-origin"
+    originLabel ClaudeSolver = "claude-origin"
 actionLabel (ActionSolve brand) = "solve (S) · " <> brandExecutable brand
 actionLabel (ActionAutoSolve brand) = "auto-solve (A) · " <> brandExecutable brand
 actionLabel (ActionPullRequestFlow brand) = "PR review/revise (r) · " <> brandExecutable brand
@@ -476,7 +491,11 @@ reviewBackendCheck environment = PreflightCheck "canonical review backend" statu
         PreflightBlocked
           ConflictingInstallation
           (Text.pack path <> " is occupied by " <> detail)
-          "Move or remove that path yourself, then re-run setup; Kanban never replaces something it did not install."
+          ( "Run "
+              <> setupCommand "issue-review"
+              <> " to see whether setup can converge it; if it refuses, move or remove that "
+              <> "path yourself first. Kanban never replaces an installation it does not recognize."
+          )
 
 providerChecks :: Bool -> ProviderProbe -> [PreflightCheck]
 providerChecks needsBundle probe =
@@ -490,8 +509,19 @@ actionReport :: PreflightEnvironment -> PreflightAction -> PreflightReport
 actionReport environment action = PreflightReport action (checksFor action)
   where
     checksFor ActionIssueReview = [gitHubCheck environment, reviewBackendCheck environment]
-    checksFor ActionIssueRevision =
-      providerChecks False (environmentProbe environment CodexSolver) <> [gitHubCheck environment]
+    -- The revision coordinator is always Kanban's own @codex app-server@
+    -- thread, and neither brand's packaged bundle is involved: it runs
+    -- Kanban's own prompts. A Claude-origin issue additionally authors its
+    -- amendment through @kanban_run_claude@, so that brand's CLI has to be
+    -- installed and signed in too, or the session fails inside the tool
+    -- call instead of at the door.
+    checksFor (ActionIssueRevision authorBrand) =
+      providerChecks False (environmentProbe environment CodexSolver)
+        <> [ check
+             | authorBrand == ClaudeSolver,
+               check <- providerChecks False (environmentProbe environment ClaudeSolver)
+           ]
+        <> [gitHubCheck environment]
     checksFor (ActionSolve brand) =
       providerChecks True (environmentProbe environment brand)
         <> [gitHubCheck environment, reviewBackendCheck environment]
@@ -521,7 +551,8 @@ blockingRemediation report = do
 doctorActions :: [PreflightAction]
 doctorActions =
   [ ActionIssueReview,
-    ActionIssueRevision,
+    ActionIssueRevision CodexSolver,
+    ActionIssueRevision ClaudeSolver,
     ActionSolve CodexSolver,
     ActionSolve ClaudeSolver,
     ActionAutoSolve CodexSolver,
@@ -553,7 +584,9 @@ doctorLines environment =
        in case blockingRemediation report of
             Nothing -> ["  " <> pad labelWidth (actionLabel action) <> unresolvedSuffix report]
             Just remediation -> ["  " <> pad labelWidth (actionLabel action) <> "blocked — " <> remediation]
-    labelWidth = 30
+    -- Wide enough for the longest action label, so every status starts in
+    -- the same column.
+    labelWidth = 35
     unresolvedSuffix report
       | any (isUnknown . (.checkStatus)) report.reportChecks = "ready (some checks were inconclusive)"
       | otherwise = "ready"
@@ -649,24 +682,22 @@ probeReviewBackend = do
     Nothing -> pure ReviewBackendInterpreterMissing
     Just _ -> do
       scriptPath <- canonicalIssueReviewerPath
+      -- Only a symlink resolving to a file is a Kanban-managed install:
+      -- that is the single shape 'tools/install_issue_review.py' ever
+      -- creates, and the only one it will converge on a re-run. Anything
+      -- else already occupying the path -- an ordinary file someone copied
+      -- there, a directory, a link whose target has gone away -- is what
+      -- setup refuses to replace, so reporting it as ready here would both
+      -- contradict setup and hand the canonical reviewer an unmanaged
+      -- script to execute.
+      managed <- catchIOError (pathIsSymbolicLink scriptPath) (const (pure False))
       usable <- doesFileExist scriptPath
-      if usable
-        then pure (ReviewBackendReadyAt scriptPath)
-        else do
-          -- 'doesPathExist' follows symlinks, so it catches a directory or
-          -- other non-file sitting on the install path, while
-          -- 'pathIsSymbolicLink' catches the link whose target has gone
-          -- away. Both are installations setup will refuse to replace,
-          -- which is a different remediation from "never installed".
-          occupied <- doesPathExist scriptPath
-          dangling <- catchIOError (pathIsSymbolicLink scriptPath) (const (pure False))
-          pure $
-            if occupied
-              then ReviewBackendConflicting scriptPath "something that is not a regular file"
-              else
-                if dangling
-                  then ReviewBackendConflicting scriptPath "a symlink that no longer resolves to a file"
-                  else ReviewBackendMissing scriptPath
+      occupied <- doesPathExist scriptPath
+      pure $ case (managed, usable, occupied) of
+        (True, True, _) -> ReviewBackendReadyAt scriptPath
+        (True, False, _) -> ReviewBackendConflicting scriptPath "a symlink that no longer resolves to a file"
+        (False, _, True) -> ReviewBackendConflicting scriptPath "something that is not a Kanban-managed link"
+        (False, _, False) -> ReviewBackendMissing scriptPath
 
 -- | Bounded, non-interactive, output-capturing probe. Empty stdin and a
 -- hard timeout keep a probe from ever waiting on a prompt.

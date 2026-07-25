@@ -102,9 +102,18 @@ action, and exits non-zero if any action is blocked. It distinguishes:
 - a Kanban workflow bundle that is absent, or installed but disabled;
 - a canonical review backend that is not installed;
 - a GitHub CLI that is unavailable or not signed in;
-- a conflicting local installation that needs you to act — for example
-  something that is not a Kanban-managed link already occupying the backend
-  install path.
+- a conflicting local installation that needs you to act — for example an
+  ordinary file, a directory, or a link Kanban did not install already
+  occupying the backend install path. Only a symlink resolving to a file
+  counts as installed there, because that is the one shape setup creates
+  and the one it will converge on a re-run.
+
+Coverage is per action, not per provider: the canonical review gate needs
+the backend and `gh` but no provider CLI; a revision runs Kanban's own
+prompts through `codex app-server` and needs no packaged bundle, but a
+Claude-origin issue also authors its amendment through the Claude CLI, so
+that revision needs Claude installed and signed in too; auto-solve reviews
+its own pull request with the opposite brand, so it needs both.
 
 The doctor path is read-only and non-interactive. It resolves executables,
 reads `--version`, and asks each provider its own status-only questions
@@ -148,8 +157,8 @@ for the policy this implements.
 
 | Reported state | What happened | What to do |
 | --- | --- | --- |
-| `issue-review: refused` | Something that is not a Kanban-managed symlink occupies the install path | Move or remove that file yourself, then re-run. Setup never replaces it. |
-| `legacy-launcher: refused` | An ordinary pre-Kanban file exists at `~/work/approve-issues.py` | Re-run with `--migrate-legacy-launcher` to back it up as `approve-issues.py.pre-kanban-backup` and replace it with a symlink, or leave it alone — nothing in Kanban resolves this path. |
+| `issue-review: refused` | An ordinary file, or a symlink pointing at something that is not a Kanban-managed backend, occupies the install path | Move or remove it yourself, then re-run. Setup never replaces it. Only a link this installer recognizes as its own — one naming `tools/approve_issues.py` in some checkout — is re-pointed, which is what makes a moved checkout converge. |
+| `legacy-launcher: refused` | An ordinary pre-Kanban file, or a symlink to something that is not a canonical backend, exists at `~/work/approve-issues.py` | For an ordinary file, re-run with `--migrate-legacy-launcher` to back it up as `approve-issues.py.pre-kanban-backup` and replace it with a symlink. A symlink to something else is refused outright even with that flag — there is no content to back up — so remove it yourself if you want the launcher here. Either way, nothing in Kanban resolves this path. |
 | `codex-plugin`/`claude-plugin: refused`, marketplace mismatch | A marketplace named `kanban` is already registered from another checkout | Remove it (`codex plugin marketplace remove kanban` / `claude plugin marketplace remove kanban`) and re-run, or point `--repo` at that checkout. |
 | `codex-plugin`/`claude-plugin: refused`, bundle disabled | `kanban@kanban` is installed but disabled | Re-enable it (`claude plugin enable kanban@kanban`), or remove it (`codex plugin remove kanban@kanban` / `claude plugin uninstall kanban@kanban`) and re-run. |
 | `codex-plugin`/`claude-plugin: unavailable` | The provider CLI is absent, or its plugin listing could not be read | Install or update the provider CLI. An unreadable listing is never treated as "nothing installed". |

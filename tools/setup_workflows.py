@@ -198,10 +198,7 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
             "refused",
             links=links,
             scope="user (Kanban-namespaced install directory)",
-            message=(
-                f"{refused['destination']} already exists and is not a Kanban-managed "
-                "symlink. It is left untouched; move or remove it yourself, then re-run."
-            ),
+            message=install_issue_review.symlink_refusal_reason(Path(refused["destination"])),
         )
     status = "unchanged" if results == {"unchanged"} else "install"
     return component_result(
@@ -224,11 +221,9 @@ def plan_legacy_launcher(
     )
     status = {"refused": "refused", "unchanged": "unchanged"}.get(plan["status"], "install")
     if plan["status"] == "refused":
-        message = (
-            f"An ordinary file already exists at {legacy_path}. It is preserved and left "
-            "untouched; re-run with --migrate-legacy-launcher to back it up as "
-            f"{legacy_path.name}.pre-kanban-backup and replace it with a symlink."
-        )
+        # The installer's own refusal text is the authority here, so the two
+        # can never describe the same preserved file differently.
+        message = f"{legacy_path}: {plan['message']}"
     else:
         message = f"Compatibility launcher at {legacy_path}: {plan['status']}"
         if plan.get("backup_path"):

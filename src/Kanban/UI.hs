@@ -137,6 +137,7 @@ import Kanban.Preflight
     gatherPreflightEnvironment,
     preflightDiagnostic,
     preflightDiagnosticDetail,
+    revisionAuthorBrand,
   )
 import Kanban.Process (ManagedProcess, interruptManagedProcess, interruptThenKillManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
@@ -3904,10 +3905,10 @@ startIssueReview issue = do
         then do
           updated <- get
           case updated.appReviewBackend of
-            ReviewBackendReady client -> launchIssueReview client issue.issueNumber
+            ReviewBackendReady client -> launchIssueReview client issue
             ReviewBackendStarting -> pure ()
-            ReviewBackendStopped -> startReviewBackend
-            ReviewBackendFailed _ -> startReviewBackend
+            ReviewBackendStopped -> startReviewBackend issue
+            ReviewBackendFailed _ -> startReviewBackend issue
         else launchCanonicalIssueReview issue.issueNumber requestedStage
 
 reviewPhaseActive :: ReviewPhase -> Bool
@@ -4278,8 +4279,12 @@ schedulePullRequestTick number = do
   channel <- (.appEventChannel) <$> get
   void . liftIO . forkIO $ threadDelay reviewAnimationIntervalMicros >> writeBChan channel (PullRequestAnimationTick number)
 
-startReviewBackend :: EventM Name AppState ()
-startReviewBackend = do
+-- | The revision coordinator is shared, but its dependencies are not: the
+-- issue being revised decides whether the session will reach for the Claude
+-- CLI, so the issue whose 'r' press is starting the backend supplies the
+-- action to preflight.
+startReviewBackend :: Issue -> EventM Name AppState ()
+startReviewBackend issue = do
   state <- get
   modify (\current -> current {appReviewBackend = ReviewBackendStarting})
   let eventChannel = state.appEventChannel
@@ -4288,22 +4293,34 @@ startReviewBackend = do
     . liftIO
     . forkIO
     $ do
-      blocked <- preflightBlocker state.appRepository ActionIssueRevision
+      blocked <- preflightBlocker state.appRepository (issueRevisionPreflightAction issue)
       case blocked of
         Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
         Nothing -> startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
 
-launchIssueReview :: ReviewClient -> Int -> EventM Name AppState ()
-launchIssueReview client issueNumber = do
-  eventChannel <- (.appEventChannel) <$> get
+-- | Preflighted here too, not only in 'startReviewBackend': a backend
+-- already running for an earlier issue is reused as-is, so this is the only
+-- door a Claude-origin revision passes through when the coordinator was
+-- started for a Codex-origin one.
+launchIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
+launchIssueReview client issue = do
+  state <- get
+  let eventChannel = state.appEventChannel
+      issueNumber = issue.issueNumber
   void
     . liftIO
     . forkIO
     $ do
-      result <- beginIssueReview client issueNumber
+      blocked <- preflightBlocker state.appRepository (issueRevisionPreflightAction issue)
+      result <- case blocked of
+        Just message -> pure (Left message)
+        Nothing -> beginIssueReview client issueNumber
       case result of
         Left message -> writeBChan eventChannel (ReviewProtocolEvent (ReviewStartFailed issueNumber message))
         Right () -> pure ()
+
+issueRevisionPreflightAction :: Issue -> PreflightAction
+issueRevisionPreflightAction issue = ActionIssueRevision (revisionAuthorBrand issue.issueBody)
 
 applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
 applyReviewBackendStarted result = case result of
@@ -4323,7 +4340,7 @@ applyReviewBackendStarted result = case result of
     mapM_
       ( \session ->
           if session.reviewSessionStage == IssueRevision && session.reviewSessionPhase == ReviewStarting && session.reviewSessionThreadId == Nothing
-            then launchIssueReview client session.reviewSessionIssue.issueNumber
+            then launchIssueReview client session.reviewSessionIssue
             else pure ()
       )
       sessions

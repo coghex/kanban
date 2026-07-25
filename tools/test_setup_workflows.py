@@ -367,6 +367,37 @@ class ConflictTests(HermeticSetupTests):
             self.legacy_path.resolve(), (self.install_dir / "approve_issues.py").resolve()
         )
 
+    def test_a_symlink_kanban_did_not_install_is_refused_and_preserved(self):
+        unrelated = self.root / "someone-elses-backend.py"
+        unrelated.write_text("mine\n", encoding="utf-8")
+        self.install_dir.mkdir(parents=True)
+        occupied = self.install_dir / "approve_issues.py"
+        occupied.symlink_to(unrelated)
+
+        code, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "refused")
+        self.assertIn(str(unrelated), entry["message"])
+        self.assertEqual(Path(os.readlink(occupied)), unrelated)
+
+    def test_a_legacy_launcher_symlink_to_something_else_is_refused_and_preserved(self):
+        unrelated = self.root / "my-own-launcher.py"
+        unrelated.write_text("mine\n", encoding="utf-8")
+        self.legacy_path.parent.mkdir(parents=True)
+        self.legacy_path.symlink_to(unrelated)
+
+        code, payload = self.run_setup(
+            "--component", "legacy-launcher", "--migrate-legacy-launcher", "--apply"
+        )
+
+        entry = self.component(payload, "legacy-launcher")
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "refused")
+        self.assertIn(str(unrelated), entry["message"])
+        self.assertEqual(Path(os.readlink(self.legacy_path)), unrelated)
+
     def test_an_ordinary_file_on_the_install_path_is_refused_and_preserved(self):
         self.install_dir.mkdir(parents=True)
         occupied = self.install_dir / "approve_issues.py"
