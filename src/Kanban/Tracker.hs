@@ -64,9 +64,10 @@ parseLine additionalHeadings state (lineNumber, rawLine) = case parseHeading raw
           | otherwise -> state {sectionExcluded = isExcludedSubsection heading}
         Nothing -> state
   Nothing
-    | isExcludedSubsection rawLine && state.activeHeadingLevel /= Nothing -> state {sectionExcluded = True}
-    | state.activeHeadingLevel /= Nothing && not state.sectionExcluded -> parseChecklist lineNumber state rawLine
-    | otherwise -> state
+    | state.activeHeadingLevel == Nothing -> state
+    | isPseudoHeading rawLine -> state {sectionExcluded = isExcludedSubsection rawLine}
+    | state.sectionExcluded -> state
+    | otherwise -> parseChecklist lineNumber state rawLine
 
 parseChecklist :: Int -> ParseState -> Text -> ParseState
 parseChecklist lineNumber state line = case stripCheckbox line of
@@ -206,12 +207,55 @@ stripPrefixCaseFold prefix text
 stripHeadingPunctuation :: Text -> Text
 stripHeadingPunctuation = Text.unwords . Text.words . Text.filter (\character -> character /= ':' && character /= '#')
 
+-- Inside a tracker section, a pseudo-heading is a label line that reads as a
+-- sub-heading without being a Markdown one: a whole-line label ending in a
+-- colon, or one wholly wrapped in emphasis. Checklist rows and other list items
+-- are content rather than labels, and prose that merely opens with an excluded
+-- word is not a label either, so neither can change the exclusion state.
+isPseudoHeading :: Text -> Bool
+isPseudoHeading rawLine =
+  not (Text.null trimmed)
+    && not (looksLikeCheckbox rawLine)
+    && not (isListItem trimmed)
+    && (":" `Text.isSuffixOf` trimmed || isEmphasized trimmed)
+  where
+    trimmed = Text.strip rawLine
+
+isListItem :: Text -> Bool
+isListItem trimmed = case Text.uncons trimmed of
+  Just (marker, rest) -> isBulletMarker marker && Text.all isSpace (Text.take 1 rest)
+  Nothing -> False
+  where
+    isBulletMarker character = character == '-' || character == '*' || character == '+'
+
+-- Balanced surrounding emphasis, as in "**Related:**", "_Related:_", or
+-- "__Remaining__". A colon outside the closing marker ("**Related**:") is
+-- already caught by the trailing-colon form.
+isEmphasized :: Text -> Bool
+isEmphasized trimmed =
+  not (Text.null opening)
+    && Text.all (== Text.head opening) opening
+    && closing == opening
+    && not (Text.null inner)
+  where
+    opening = Text.takeWhile isEmphasisMarker trimmed
+    body = Text.drop (Text.length opening) trimmed
+    closing = Text.takeWhileEnd isEmphasisMarker body
+    inner = Text.dropWhileEnd isEmphasisMarker body
+
+isEmphasisMarker :: Char -> Bool
+isEmphasisMarker character = character == '*' || character == '_'
+
 isExcludedSubsection :: Text -> Bool
 isExcludedSubsection value =
   any (`Text.isPrefixOf` normalizeHeading value) ["external prerequisite", "related", "out of scope"]
 
+-- Emphasis markers are dropped alongside colons and hashes so a bold or
+-- underscored label matches the same excluded prefixes as its plain form.
 normalizeHeading :: Text -> Text
-normalizeHeading = Text.unwords . Text.words . Text.toCaseFold . Text.filter (\character -> character /= ':' && character /= '#')
+normalizeHeading = Text.unwords . Text.words . Text.toCaseFold . Text.filter (not . isHeadingDecoration)
+  where
+    isHeadingDecoration character = character == ':' || character == '#' || isEmphasisMarker character
 
 hasTrackerLabel :: WorkflowConfig -> [Label] -> Bool
 hasTrackerLabel config labels =
