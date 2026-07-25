@@ -40,7 +40,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), decodeGitHubItems, ghBehindBarrier, graphqlArguments, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), decodeGitHubItems, ghBehindBarrier, groupConfirmedEmpty, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -5009,7 +5009,7 @@ main = hspec $ do
             doesFileExist ranMarker `shouldReturn` True
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
-    it "reclaims a descendant a recorded member forked from its own TERM handler, instead of clearing the record when that member exits" $
+    it "refuses rather than clearing when a recorded member forks a replacement from its TERM handler and exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
             lateChild = binaryRoot </> "late-child"
@@ -5019,9 +5019,15 @@ main = hspec $ do
         ByteString.writeFile lateChild (ByteString.unlines ["#!/bin/sh", "trap '' TERM", "while :; do sleep 1; done"])
         setFileMode lateChild 0o700
         -- The recorded member forks its replacement from its TERM handler and
-        -- exits, so reclaim's escalation sees every identity it saved go away
-        -- while the group is still occupied. Trusting that as success clears
-        -- the record and lets the next gh start beside the newcomer.
+        -- exits, so reclaim's escalation sees every identity it knows go away
+        -- while the group is still occupied. Trusting that as success would
+        -- clear the record and let the next gh start beside the newcomer.
+        --
+        -- Nor may the newcomer simply be signalled: it appears in no census
+        -- taken while ownership was provable, and the one member that proved
+        -- ownership is now gone -- so between those two observations the group
+        -- could have emptied and its pgid been reissued. Refusing, and keeping
+        -- the record, is the only sound answer left.
         (_, _, _, recordedLeader) <-
           createProcess
             (proc "sh" ["-c", "trap '" <> lateChild <> " </dev/null >/dev/null 2>&1 & printf \"%s\" \"$!\" > " <> descendantMarker <> "; exit 0' TERM; while :; do sleep 1; done </dev/null >/dev/null 2>&1"])
@@ -5038,15 +5044,27 @@ main = hspec $ do
           withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
             case outcome of
-              BoardRefreshCompleted (Right _) -> pure ()
-              other -> expectationFailure ("expected the refresh to proceed once the group was emptied, got " <> show other)
+              BoardRefreshCompleted (Left providerError) ->
+                providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
+              other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
           descendantPid <- readMarkerPid descendantMarker
           reclaimed <- readProcessSnapshot
           case reclaimed of
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
             Right identities -> do
               identityForPid leaderPid identities `shouldBe` Nothing
-              identityForPid descendantPid identities `shouldBe` Nothing
+              -- Left alone rather than signalled, and still on record.
+              identityForPid descendantPid identities `shouldSatisfy` isJust
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+          -- Once it exits of its own accord the record has nothing left to
+          -- name, and the refusal lifts.
+          ignoringIOException (signalProcess sigKILL (fromIntegral descendantPid))
+          threadDelay 300000
+          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right _) -> pure ()
+              other -> expectationFailure ("expected the refresh to proceed once the descendant exited, got " <> show other)
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "refuses to spawn gh while a non-leader record's saved gh is alive in some other process group" $
@@ -5273,6 +5291,53 @@ main = hspec $ do
           BoardRefreshUnverified _ -> pure ()
           other -> expectationFailure ("expected the refresh to report a stopped gh, got " <> show other)
 
+    it "keeps the record when a descendant outlives a gh that exited normally" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            lingerer = binaryRoot </> "lingerer"
+            descendantMarker = temporaryRoot </> "lingerer.pid"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        createDirectoryIfMissing True binaryRoot
+        ByteString.writeFile lingerer (ByteString.unlines ["#!/bin/sh", "trap '' TERM", "while :; do sleep 1; done"])
+        setFileMode lingerer 0o700
+        -- gh answers correctly and exits 0, but leaves a descendant behind in
+        -- its group with the pipes closed, so nothing about the ordinary
+        -- collect path notices. Dropping the guard here would leave the next
+        -- page -- or the next refresh -- to start a gh beside it with nothing
+        -- recorded to reclaim.
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          withFakeGh
+            temporaryRoot
+            [ ByteString.pack (lingerer <> " </dev/null >/dev/null 2>&1 &"),
+              ByteString.pack ("printf '%s' \"$!\" > " <> descendantMarker),
+              "printf '%s' '" <> emptyGraphqlPage <> "'",
+              "exit 0"
+            ]
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Left providerError) ->
+                  providerError.providerErrorMessage `shouldMention` "could not confirm stopped"
+                other -> expectationFailure ("expected the unresolved group to be reported, got " <> show other)
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+          descendantPid <- readMarkerPid descendantMarker
+          -- Still running, and now recorded, so the next fetch reclaims it
+          -- rather than racing it.
+          snapshot <- readProcessSnapshot
+          case snapshot of
+            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+            Right identities -> identityForPid descendantPid identities `shouldSatisfy` isJust
+          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right _) -> pure ()
+              other -> expectationFailure ("expected the reclaimed group to let the next fetch proceed, got " <> show other)
+          reclaimed <- readProcessSnapshot
+          case reclaimed of
+            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+            Right identities -> identityForPid descendantPid identities `shouldBe` Nothing
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
     it "resolves each page's group before the next page starts, so a paginated fetch never guards two at once" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
@@ -5308,6 +5373,21 @@ main = hspec $ do
           countOccurrences "ownedProcessGroupPid" secondPageRecord `shouldBe` 1
           -- And nothing is left guarded once the fetch completes.
           doesFileExist recordPath `shouldReturn` False
+
+    it "does not read an unoccupied pgid as proof when the process it names is not that group's leader" $
+      -- The forced fallback signals the spawned PID as a process group and
+      -- then asks whether that group is empty. For a child that never became
+      -- its own leader the signal reaches no group at all, and the pgid it
+      -- names is unoccupied precisely because it does not exist -- so pgid
+      -- emptiness alone would read as a successful kill while the process is
+      -- plainly still running. create_group does take effect on this
+      -- platform, so this is asked of the check directly.
+      withNonLeaderProcess $ \nonLeaderPid -> do
+        snapshot <- readProcessSnapshot
+        case snapshot >>= maybe (Left "fixture absent from snapshot") Right . identityForPid nonLeaderPid of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right identity -> identity.processIdentityGroupPid `shouldNotBe` nonLeaderPid
+        groupConfirmedEmpty nonLeaderPid `shouldReturn` False
 
     it "never lets the child reach gh when the dashboard is lost before the guard is committed" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
