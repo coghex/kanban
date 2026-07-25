@@ -4915,6 +4915,35 @@ main = hspec $ do
               BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
               other -> expectationFailure ("expected a clean timeout, got " <> show other)
 
+    it "kills a descendant that joined the group after the census, while the members it did capture were exiting" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            lateChild = binaryRoot </> "late-child"
+            descendantMarker = temporaryRoot </> "late.pid"
+        createDirectoryIfMissing True binaryRoot
+        ByteString.writeFile lateChild (ByteString.unlines ["#!/bin/sh", "trap '' TERM", "while :; do sleep 1; done"])
+        setFileMode lateChild 0o700
+        -- gh forks this one from its own TERM handler and then exits, so it
+        -- joins the group strictly after the census and every captured
+        -- member is gone by the time the escalation re-checks them. A
+        -- verification that only looked for the identities it captured would
+        -- see them all absent, call the group clean, and report an ordinary
+        -- timeout with this still running.
+        withFakeGh
+          temporaryRoot
+          [ ByteString.pack ("trap '" <> lateChild <> " </dev/null >/dev/null 2>&1 & printf \"%s\" \"$!\" > " <> descendantMarker <> "; exit 0' TERM"),
+            "while :; do sleep 1; done"
+          ]
+          $ do
+            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 1
+            descendantPid <- readMarkerPid descendantMarker
+            case snapshotWhenPublished of
+              Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+              Right identities -> identityForPid descendantPid identities `shouldBe` Nothing
+            case outcome of
+              BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+              other -> expectationFailure ("expected a clean timeout, got " <> show other)
+
     it "leaves a fast gh's decoded page untouched" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withFakeGh

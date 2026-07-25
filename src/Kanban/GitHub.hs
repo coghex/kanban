@@ -412,8 +412,17 @@ killGhGroup processHandle = do
     -- No PID left to signal: the handle has already been reaped, which only
     -- happens once gh has exited and been waited on.
     Nothing -> pure (Right ())
-    Just pid -> do
-      let groupPid = fromIntegral pid
+    Just pid -> escalate (fromIntegral pid) groupCleanupPasses
+  where
+    -- Re-censusing between escalations is what makes this about the group
+    -- rather than about a list of PIDs. 'killVerifiedGroup' confirms only
+    -- the identities handed to it, so a process forked into the group after
+    -- the census -- during the TERM grace window, say, by a gh that then
+    -- exits -- is invisible to it: every captured member would be gone, it
+    -- would report success, and the newcomer would still be running. Asking
+    -- the group again, and only stopping when a fresh census shows it empty,
+    -- catches exactly that.
+    escalate groupPid passesLeft = do
       snapshot <- defaultProcessSnapshot
       case snapshot of
         -- Without a snapshot nothing pins these PIDs, so the group is
@@ -435,10 +444,26 @@ killGhGroup processHandle = do
                         OwnedProcessGroup groupPid [leader] False
                       )
                   )
-          _ -> do
-            let members = groupMembers groupPid processes
-            result <- killVerifiedGroup groupPid members
-            pure (first (,OwnedProcessGroup groupPid members True) result)
+          _ -> case groupMembers groupPid processes of
+            -- The only successful ending: the group, asked afresh, has
+            -- nobody left in it.
+            [] -> pure (Right ())
+            members
+              | passesLeft <= 0 ->
+                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True))
+              | otherwise -> do
+                  result <- killVerifiedGroup groupPid members
+                  case result of
+                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True))
+                    Right () -> escalate groupPid (passesLeft - 1)
+
+-- | How many census-then-escalate rounds a group gets before its survivors
+-- are handed to the durable record instead. More than one because a member
+-- can join while the census is being acted on; bounded because something
+-- forking faster than it can be killed is a problem to be recorded and
+-- refused, not looped on forever.
+groupCleanupPasses :: Int
+groupCleanupPasses = 3
 
 groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
 groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
