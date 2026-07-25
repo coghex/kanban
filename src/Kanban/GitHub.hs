@@ -2,17 +2,26 @@ module Kanban.GitHub
   ( -- 'FetchState' and 'graphqlArguments' are internal, exported so the
     -- suite can assert the exact argv handed to gh without a live request.
     FetchState (..),
+    GhCleanupFailure (..),
+    GhCleanupGuard (..),
+    ghBehindBarrier,
+    GhFetchGuard,
     GitHubResult (..),
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    ghFetchCleanupFailure,
     graphqlArguments,
+    newGhFetchGuard,
     paginationDecision,
+    reclaimRecordedGhGroups,
     snapshotWarnings,
   )
 where
 
-import Control.Exception (IOException, try)
-import Control.Monad (unless)
+import Control.Concurrent (forkIO, forkIOWithUnmask)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
+import Control.Monad (unless, void)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -25,19 +34,36 @@ import Data.Aeson
   )
 import Data.Aeson.Key (Key)
 import Data.Aeson.Types (Parser)
+import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Encoding as LazyTextEncoding
 import Data.Time (getCurrentTime)
+import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, matchingIdentities, membersStillInGroup)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
+import System.Directory (findExecutable)
+import System.IO (Handle, hClose, hFlush, hGetContents', hPutStrLn)
+import System.IO.Error (doesNotExistErrorType, mkIOError)
+import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Process
+  ( CreateProcess (..),
+    ProcessHandle,
+    StdStream (CreatePipe),
+    createProcess,
+    getPid,
+    proc,
+    waitForProcess,
+  )
+import System.Timeout (timeout)
 
 data GitHubResult = GitHubResult
   { githubSnapshot :: RepoSnapshot,
@@ -89,8 +115,53 @@ data CheckContext = CheckContext
 pageLimit :: Int
 pageLimit = 100
 
-fetchGitHubSnapshot :: LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
-fetchGitHubSnapshot limits workflowConfig repository = fetchPages initialState
+-- | Records whether the @gh@ process group an abandoned board fetch left
+-- running could actually be confirmed dead.
+--
+-- 'fetchGitHubSnapshot' is meant to be run under 'System.Timeout.timeout',
+-- so it is abandoned by an asynchronous exception rather than by returning a
+-- value: the unwinding is where the still-running @gh@ gets cleaned up, and
+-- this is the only channel through which the outcome of that cleanup can
+-- reach the caller. 'Just' means the group may still be live, so the caller
+-- must not report an ordinary clean timeout.
+newtype GhFetchGuard = GhFetchGuard (IORef (Maybe GhCleanupFailure))
+
+-- | A cleanup that could not confirm its @gh@ group is gone.
+data GhCleanupFailure = GhCleanupFailure
+  { ghCleanupMessage :: Text,
+    ghCleanupGuard :: GhCleanupGuard
+  }
+  deriving stock (Eq, Show)
+
+-- | What is keeping a possibly-live @gh@ from being overlapped, now that its
+-- death could not be confirmed.
+--
+-- There is deliberately no third state for "killed but unproven". Whether a
+-- signal was sent is not evidence; only a fresh snapshot showing the group
+-- gone is, and a cleanup that has that does not report a failure at all. So
+-- the only question left here is whether the guard outlives this dashboard.
+data GhCleanupGuard
+  = -- | The group is on disk. Any later fetch re-checks it before spawning
+    -- anything, in this dashboard or one started long afterwards.
+    GuardRecorded
+  | -- | Nothing could be recorded. This dashboard's refusal to refresh is all
+    -- that remains, and it is worth nothing once the dashboard exits — so
+    -- this is the one case that must never suggest a restart.
+    GuardInMemoryOnly
+  deriving stock (Eq, Show)
+
+newGhFetchGuard :: IO GhFetchGuard
+newGhFetchGuard = GhFetchGuard <$> newIORef Nothing
+
+ghFetchCleanupFailure :: GhFetchGuard -> IO (Maybe GhCleanupFailure)
+ghFetchCleanupFailure (GhFetchGuard cleanupFailure) = readIORef cleanupFailure
+
+fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
+fetchGitHubSnapshot guard limits workflowConfig repository = do
+  reclaimed <- reclaimRecordedGhGroups repository
+  case reclaimed of
+    Left message -> pure (Left (ProviderError RequestFailed message))
+    Right () -> fetchPages initialState
   where
     initialState = FetchState [] [] Nothing Nothing True True False False
 
@@ -106,7 +177,7 @@ fetchGitHubSnapshot limits workflowConfig repository = fetchPages initialState
                   state.pullRequestsTruncated
           pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot)))
       | otherwise = do
-          pageResult <- fetchPage limits repository state
+          pageResult <- fetchPage guard limits repository state
           case pageResult of
             Left providerError -> pure (Left providerError)
             Right page -> case advanceState limits state page of
@@ -121,29 +192,34 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage limits repository state = do
-  processResult <-
-    try @IOException
-      ( readProcessWithExitCode
-          "gh"
-          (graphqlArguments limits repository state)
-          ""
-      )
-  pure $ case processResult of
-    Left exception ->
+fetchPage :: GhFetchGuard -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
+fetchPage guard limits repository state = do
+  -- The unwritable-guard failure is deliberately not folded in with the
+  -- IOExceptions below: those mean gh could not be run, while this means gh
+  -- ran and was then stopped again because nothing durable could account for
+  -- it. Reporting it as a missing executable would send the user looking in
+  -- entirely the wrong place.
+  guarded <- try @GhGuardUnwritable (try @IOException (runGh guard repository (graphqlArguments limits repository state)))
+  pure $ case guarded of
+    Left (GhGuardUnwritable message) ->
+      Left
+        ProviderError
+          { providerErrorKind = RequestFailed,
+            providerErrorMessage = "GitHub refresh could not record the gh process it started (" <> message <> "), so it was stopped again"
+          }
+    Right (Left exception) ->
       Left
         ProviderError
           { providerErrorKind = ExecutableMissing,
             providerErrorMessage = Text.pack (show exception)
           }
-    Right (ExitFailure _, _, stderrText) ->
+    Right (Right (ExitFailure _, _, stderrText)) ->
       Left
         ProviderError
           { providerErrorKind = classifyFailure (Text.pack stderrText),
             providerErrorMessage = compactError stderrText
           }
-    Right (ExitSuccess, stdoutText, _) ->
+    Right (Right (ExitSuccess, stdoutText, _)) ->
       case eitherDecode (LazyTextEncoding.encodeUtf8 (LazyText.pack stdoutText)) of
         Left message ->
           Left
@@ -152,6 +228,449 @@ fetchPage limits repository state = do
                 providerErrorMessage = "GitHub returned invalid JSON: " <> Text.pack message
               }
         Right page -> Right page
+
+-- | Runs one page's @gh@ as the leader of its own process group, so a fetch
+-- that gets abandoned can be cleaned up as a group rather than as a lone
+-- child. 'readProcessWithExitCode', which this replaces, terminates only the
+-- direct child and never confirms it exited: a @gh@ wedged on network I\/O
+-- and ignoring TERM, or one that has spawned a credential helper, could
+-- outlive the timeout that reported it dead and still be running when the
+-- next refresh starts another one.
+runGh :: GhFetchGuard -> Repository -> [String] -> IO (ExitCode, String, String)
+runGh guard repository arguments = do
+  resolved <- findExecutable "gh"
+  case resolved of
+    Nothing -> ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh"))
+    Just ghPath -> bracketOnError (createProcess (ghProcess ghPath)) cleanUp run
+  where
+    cleanUp spawned = uninterruptibleCleanup (abandonGh guard repository spawned)
+
+    ghProcess ghPath =
+      (uncurry proc (ghBehindBarrier ghPath arguments))
+        { std_in = CreatePipe,
+          std_out = CreatePipe,
+          std_err = CreatePipe,
+          create_group = True
+        }
+
+    -- The child exists but has not run @gh@ yet, and cannot until this
+    -- releases it. So the durable guard is not merely written early -- there
+    -- is no instant at which a @gh@ is running that the record does not
+    -- already cover. Losing the dashboard anywhere in here closes the pipe,
+    -- the barrier reads EOF, and the child exits without ever having
+    -- executed anything.
+    run spawned@(input, _, _, _) = do
+      registered <- registerSpawnedGh repository spawned
+      case registered of
+        Left message -> throwIO (GhGuardUnwritable message)
+        -- The PID comes from the registration, captured while the child was
+        -- still unreaped: 'collect' waits on the handle, and 'getPid' goes
+        -- 'Nothing' the moment it does, which would leave the entry behind.
+        Right groupPid -> do
+          released <- releaseBarrier input
+          case released of
+            Left message -> throwIO (GhGuardUnwritable message)
+            Right () -> do
+              result <- collect spawned
+              -- gh has exited, so the guard covering it has nothing left to
+              -- cover. A failure to drop it is harmless: the next fetch finds
+              -- that pgid unoccupied and clears the record itself.
+              dropGhGroup repository groupPid
+              pure result
+
+    -- Writing the go-ahead is also what hands gh its (immediately closed)
+    -- standard input, so the barrier costs the child nothing it would
+    -- otherwise have had.
+    releaseBarrier Nothing = pure (Left "gh was started without a standard input to release it through")
+    releaseBarrier (Just input) = do
+      written <- try @IOException (hPutStrLn input "" >> hFlush input)
+      pure (first (Text.pack . show) written)
+
+    collect (input, output, errors, processHandle) = do
+      mapM_ (ignoreIOException . hClose) input
+      standardOutput <- drain output
+      standardError <- drain errors
+      -- Both pipes are drained to EOF before the exit status is collected,
+      -- exactly as 'readProcessWithExitCode' did, so a response larger than
+      -- the pipe buffer cannot deadlock gh against a reader that has not run
+      -- yet.
+      capturedOutput <- takeMVar standardOutput >>= either throwIO pure
+      capturedError <- takeMVar standardError >>= either throwIO pure
+      exitCode <- waitForProcess processHandle
+      pure (exitCode, capturedOutput, capturedError)
+
+    -- Each reader owns its handle for the handle's whole life, including
+    -- closing it. Closing from here instead would mean closing a handle a
+    -- reader thread may still be blocked on, which takes the handle's lock
+    -- and would hang the very cleanup that has to finish promptly.
+    drain Nothing = newEmptyMVar >>= \captured -> putMVar captured (Right "") >> pure captured
+    drain (Just handle) = do
+      captured <- newEmptyMVar
+      void . forkIO $ do
+        text <- try @IOException (hGetContents' handle)
+        ignoreIOException (hClose handle)
+        putMVar captured text
+      pure captured
+
+-- | Cleans up the @gh@ an abandoned fetch walked away from: TERM, then KILL,
+-- the whole process group it leads, confirmed against a fresh process
+-- snapshot rather than assumed from the act of signalling. A group that
+-- could not be terminated or could not be confirmed gone is both recorded on
+-- the guard — a possibly-live @gh@ is not a clean timeout and must not be
+-- reported as one — and written to the durable record, so the very next
+-- fetch re-verifies it before spawning anything, even if the dashboard is
+-- restarted in between.
+abandonGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
+abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) = do
+  -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
+  -- the moment it is reaped and the guard entry is keyed by this PID.
+  spawnedPid <- fmap fromIntegral <$> getPid processHandle
+  -- Written before any of the work below, all of which can be cut short by
+  -- the cleanup budget running out. Whatever happens after this point, the
+  -- fetch cannot end up reporting an ordinary clean timeout for a gh whose
+  -- death was never actually established.
+  writeIORef cleanupFailure (Just (GhCleanupFailure "gh cleanup did not run to completion" GuardInMemoryOnly))
+  outcome <- killGhGroup processHandle
+  resolved <- case outcome of
+    Right () -> pure (Right ())
+    Left (message, unconfirmed) -> do
+      -- Upgrading the spawn-time guard to the full census is what lets a
+      -- later run re-kill the group rather than only watch it, so it is
+      -- worth attempting -- but nothing depends on it succeeding, because
+      -- the entry written at spawn time already covers this pgid.
+      recorded <- recordAndConfirm unconfirmed
+      if recorded
+        then pure (Left (GhCleanupFailure message GuardRecorded))
+        else do
+          -- Nothing on disk and nothing verified, so a restart would find no
+          -- reason to hold back. Force is all that is left that depends on
+          -- neither facility -- but it settles nothing by itself: only a
+          -- snapshot showing the group actually empty does, and if it does,
+          -- this was not a failed cleanup at all.
+          forceKillGhGroup processHandle spawnedPid
+          emptied <- groupConfirmedEmpty unconfirmed.ownedProcessGroupPid
+          if emptied
+            then pure (Right ())
+            else do
+              retried <- recordAndConfirm unconfirmed
+              pure (Left (GhCleanupFailure message (if retried then GuardRecorded else GuardInMemoryOnly)))
+  case resolved of
+    Left failure -> writeIORef cleanupFailure (Just failure)
+    -- Reaping cannot block here: the group has been confirmed empty, so gh
+    -- is at most an unreaped zombie. It is skipped entirely when that
+    -- confirmation failed, since waiting on a gh that is still running would
+    -- block this thread and the refresh would never report anything at all.
+    Right () -> do
+      void (try @IOException (waitForProcess processHandle))
+      mapM_ (dropGhGroup repository) spawnedPid
+      -- Only now, with the group confirmed empty and its record dropped, is
+      -- the pessimistic entry above retracted.
+      writeIORef cleanupFailure Nothing
+  mapM_ (ignoreIOException . hClose) input
+  where
+    recordAndConfirm unconfirmed = do
+      void (recordGhGroup repository unconfirmed)
+      ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
+
+-- | Runs a cleanup that must not be cut short by the refresh timer.
+--
+-- 'bracketOnError' masks its handler, but 'mask' still admits an exception
+-- at every interruptible point, and this cleanup is little else: two grace
+-- windows and several subprocess waits. A refresh timeout landing in one of
+-- them would abandon the work half-done — signalled but never confirmed,
+-- nothing recorded — and the fetch would go on to report an ordinary
+-- timeout for a process that is still running.
+--
+-- So the work happens on a thread of its own, where the timer's exception
+-- cannot reach it, and this thread waits for it without accepting exceptions
+-- either. That wait cannot outlast the worker, and the worker holds itself
+-- to a budget, so refusing interruption here does not mean waiting forever.
+uninterruptibleCleanup :: IO () -> IO ()
+uninterruptibleCleanup cleanup = do
+  finished <- newEmptyMVar
+  void (forkIOWithUnmask (\unmask -> void (timeout cleanupBudgetMicros (unmask cleanup)) `finally` putMVar finished ()))
+  uninterruptibleMask_ (takeMVar finished)
+
+-- | Comfortably longer than a cleanup that is behaving: three escalation
+-- rounds of grace windows and snapshots, plus the forced fallback's own
+-- bounded reap. It exists only so that a cleanup wedged on something
+-- unexpected cannot hold the refresh thread indefinitely.
+cleanupBudgetMicros :: Int
+cleanupBudgetMicros = 30 * 1000 * 1000
+
+ghGroupIsRecorded :: Repository -> Int -> IO Bool
+ghGroupIsRecorded repository groupPid =
+  any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository
+
+-- | SIGKILL the group outright and reap the leader.
+--
+-- Neither step consults the process table or the filesystem, which is
+-- precisely why this is still available when both of those have failed.
+-- SIGKILL cannot be caught, blocked, or deferred, so it reaches every member
+-- the group currently has, and waiting on the leader — this fetch's own
+-- child — clears it out of the process table rather than leaving a zombie
+-- behind. The wait is bounded, so a process wedged in an uninterruptible
+-- state cannot strand the refresh.
+--
+-- Delivering the signal is all this does. Whether it worked is a separate
+-- question, and 'groupConfirmedEmpty' is the only thing that answers it.
+forceKillGhGroup :: ProcessHandle -> Maybe Int -> IO ()
+forceKillGhGroup processHandle spawnedPid = do
+  mapM_ (ignoreIOException . signalProcessGroup sigKILL . fromIntegral) spawnedPid
+  void (timeout forcedReapTimeoutMicros (try @IOException (waitForProcess processHandle)))
+
+-- | Whether a fresh snapshot shows nothing left in the group at all — not
+-- the leader, and not any descendant that inherited it.
+--
+-- This is what stands behind a claim that the group is gone, and it is
+-- deliberately about the /whole/ group: reaping the leader says nothing
+-- about a credential helper still wedged in uninterruptible I\/O, which
+-- would survive long enough to be running when a restarted dashboard
+-- spawned its own gh. A snapshot that cannot be taken answers 'False',
+-- because "could not look" is not "nothing there".
+groupConfirmedEmpty :: Int -> IO Bool
+groupConfirmedEmpty groupPid = do
+  snapshot <- defaultProcessSnapshot
+  pure $ case snapshot of
+    Left _ -> False
+    Right processes -> null (groupMembers groupPid processes)
+
+forcedReapTimeoutMicros :: Int
+forcedReapTimeoutMicros = 5 * 1000 * 1000
+
+-- | Terminates the process group led by a spawned @gh@ and confirms nothing
+-- from it survives. The group is censused first so the confirmation covers
+-- every member: a credential helper, or any other child gh starts, inherits
+-- the group, and cleanup tracking only the leader would call the group dead
+-- while a descendant kept running. A failure carries the group it could not
+-- account for, so the caller can hand exactly that to the durable record.
+killGhGroup :: ProcessHandle -> IO (Either (Text, OwnedProcessGroup) ())
+killGhGroup processHandle = do
+  spawnedPid <- getPid processHandle
+  case spawnedPid of
+    -- No PID left to signal: the handle has already been reaped, which only
+    -- happens once gh has exited and been waited on.
+    Nothing -> pure (Right ())
+    Just pid -> escalate (fromIntegral pid) groupCleanupPasses
+  where
+    -- Re-censusing between escalations is what makes this about the group
+    -- rather than about a list of PIDs. 'killVerifiedGroup' confirms only
+    -- the identities handed to it, so a process forked into the group after
+    -- the census -- during the TERM grace window, say, by a gh that then
+    -- exits -- is invisible to it: every captured member would be gone, it
+    -- would report success, and the newcomer would still be running. Asking
+    -- the group again, and only stopping when a fresh census shows it empty,
+    -- catches exactly that.
+    escalate groupPid passesLeft = do
+      snapshot <- defaultProcessSnapshot
+      case snapshot of
+        -- Without a snapshot nothing pins these PIDs, so the group is
+        -- recorded uncensused: a later run may watch that pgid until it is
+        -- empty, but must never signal it, because by then the PIDs could
+        -- belong to anything.
+        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False))
+        Right processes -> case identityForPid groupPid processes of
+          -- A live gh that is not its own group leader means @create_group@
+          -- did not take effect, and its pgid now names processes this fetch
+          -- never spawned -- so it must not be signalled. Its own identity is
+          -- known and exact, though, so it is recorded uncensused and watched
+          -- until that identity is gone.
+          Just leader
+            | leader.processIdentityGroupPid /= groupPid ->
+                pure
+                  ( Left
+                      ( "gh is not the leader of its own process group, so its group cannot be terminated safely",
+                        OwnedProcessGroup groupPid [leader] False
+                      )
+                  )
+          _ -> case groupMembers groupPid processes of
+            -- The only successful ending: the group, asked afresh, has
+            -- nobody left in it.
+            [] -> pure (Right ())
+            members
+              | passesLeft <= 0 ->
+                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True))
+              | otherwise -> do
+                  result <- killVerifiedGroup groupPid members
+                  case result of
+                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True))
+                    Right () -> escalate groupPid (passesLeft - 1)
+
+-- | How many census-then-escalate rounds a group gets before its survivors
+-- are handed to the durable record instead. More than one because a member
+-- can join while the census is being acted on; bounded because something
+-- forking faster than it can be killed is a problem to be recorded and
+-- refused, not looped on forever.
+groupCleanupPasses :: Int
+groupCleanupPasses = 3
+
+groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
+groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
+
+-- | The argv that starts @gh@ behind a barrier: a shell that waits for a
+-- line on standard input and only then replaces itself with @gh@.
+--
+-- This is what makes the durable guard genuinely a /pre/-spawn guard. Writing
+-- the record straight after 'createProcess' would still leave a window —
+-- short, but real — in which @gh@ is running and nothing on disk names it, so
+-- losing the dashboard there would strand it unguarded. Here the child cannot
+-- reach @gh@ until the record is committed, and because the wait ends on EOF
+-- as well as on input, a parent that dies in that window closes the pipe and
+-- the child exits without ever executing anything.
+--
+-- @exec@ matters: the shell is replaced rather than forked, so the PID and
+-- process group the record names are exactly the ones @gh@ ends up running
+-- under.
+-- The executable is resolved by the parent rather than left to the shell's
+-- @exec@, so a missing or non-executable @gh@ is still reported as
+-- 'ExecutableMissing' from the spawn site instead of arriving later as an
+-- indistinguishable nonzero exit from inside the barrier.
+ghBehindBarrier :: FilePath -> [String] -> (FilePath, [String])
+ghBehindBarrier ghPath arguments = ("sh", ["-c", "read -r _release_ || exit 0; exec \"$0\" \"$@\"", ghPath] <> arguments)
+
+-- | Raised when the durable guard covering a freshly spawned @gh@ cannot be
+-- written. It is raised rather than returned so the spawn unwinds through
+-- 'abandonGh' and that @gh@ is terminated: a process this fetch started must
+-- never outlive the record that would have accounted for it.
+newtype GhGuardUnwritable = GhGuardUnwritable Text
+  deriving stock (Show)
+
+instance Exception GhGuardUnwritable
+
+-- | Writes the guard for a @gh@ that has just been spawned, before it is
+-- used for anything. The entry names only the process group, because that is
+-- all that is known this early and all a later run needs: an uncensused
+-- entry is watched until its pgid is unoccupied, which is exactly the
+-- question "did that gh outlive us?".
+registerSpawnedGh :: Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text Int)
+registerSpawnedGh repository (_, _, _, processHandle) = do
+  spawnedPid <- getPid processHandle
+  case spawnedPid of
+    Nothing -> pure (Left "gh reported no process id, so no guard could be written for it")
+    Just pid -> do
+      let groupPid = fromIntegral pid
+      written <- recordGhGroup repository (OwnedProcessGroup groupPid [] False)
+      pure (groupPid <$ written)
+
+-- | Replaces whatever is recorded for a group with `group`, keeping every
+-- other repository entry.
+recordGhGroup :: Repository -> OwnedProcessGroup -> IO (Either Text ())
+recordGhGroup repository group = do
+  existing <- recordedGhGroups repository
+  writeGhGroupRecord repository (group : withoutGroup group.ownedProcessGroupPid existing)
+
+dropGhGroup :: Repository -> Int -> IO ()
+dropGhGroup repository groupPid = do
+  existing <- recordedGhGroups repository
+  case withoutGroup groupPid existing of
+    [] -> void (removeGhGroupRecord repository)
+    remaining -> void (writeGhGroupRecord repository remaining)
+
+withoutGroup :: Int -> [OwnedProcessGroup] -> [OwnedProcessGroup]
+withoutGroup groupPid = filter ((/= groupPid) . ownedProcessGroupPid)
+
+recordedGhGroups :: Repository -> IO [OwnedProcessGroup]
+recordedGhGroups repository = do
+  existing <- loadGhGroupRecord repository
+  pure $ case existing of
+    GhGroupRecordLoaded groups -> groups
+    _ -> []
+
+-- | Re-verifies, and where it is safe to do so re-kills, every @gh@ group a
+-- previous fetch failed to confirm dead — including ones recorded by an
+-- earlier run of the dashboard, which is the whole reason the record is on
+-- disk. The record is cleared only once every entry is provably accounted
+-- for; anything else refuses the fetch outright, so a new @gh@ is never
+-- spawned alongside one that may still be running.
+reclaimRecordedGhGroups :: Repository -> IO (Either Text ())
+reclaimRecordedGhGroups repository = do
+  recordLoad <- loadGhGroupRecord repository
+  case recordLoad of
+    GhGroupRecordAbsent -> pure (Right ())
+    GhGroupRecordUnusable message -> pure (Left (refusal message))
+    GhGroupRecordLoaded groups -> do
+      outcomes <- traverse reclaimGhGroup groups
+      case [message | Left message <- outcomes] of
+        [] -> do
+          cleared <- removeGhGroupRecord repository
+          pure (first refusal cleared)
+        message : _ -> pure (Left (refusal message))
+  where
+    refusal message = "a gh process from an earlier GitHub refresh could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
+
+-- | One recorded group's second chance.
+--
+-- A censused group is identity-pinned and this dashboard's to signal, so it
+-- gets the same verified TERM-then-KILL escalation again. An uncensused one
+-- never can be, so it is only ever observed: whatever still matches it
+-- refuses the fetch instead of being signalled blind, and — crucially — an
+-- uncensused entry is never handed to the group check, whose empty
+-- membership would read as vacuously absent and clear a live survivor.
+reclaimGhGroup :: OwnedProcessGroup -> IO (Either Text ())
+reclaimGhGroup group = go False groupCleanupPasses
+  where
+    groupPid = group.ownedProcessGroupPid
+
+    -- `owned` records that a recorded identity has already been seen alive
+    -- in this group during this reclaim. Until that happens the group's
+    -- occupants might be anyone: this record can be days old and read by a
+    -- process that never spawned anything, so the pgid may since have been
+    -- recycled. Once it /has/ happened, the group has been continuously
+    -- occupied from that observation onward, so the pgid cannot have been
+    -- reissued underneath us and everything now in it is descended from what
+    -- this repository started.
+    go owned passesLeft = do
+      snapshot <- defaultProcessSnapshot
+      case snapshot of
+        Left message -> pure (Left message)
+        Right processes -> do
+          let occupants = groupMembers groupPid processes
+              -- Saved identities are asked about by identity, never by
+              -- group. The record written when gh turned out not to lead its
+              -- own group names a pgid that was never this repository's, so
+              -- looking only at that pgid finds nothing and would call the
+              -- record spent while the gh it names is still running.
+              savedAlive = matchingIdentities processes group.ownedProcessGroupMembers
+          case occupants <> savedAlive of
+            -- Nothing in the group and nothing the record names: the only
+            -- ending that clears it, and the reason this is asked of a fresh
+            -- census rather than inferred from the recorded members going
+            -- away.
+            [] -> pure (Right ())
+            survivors
+              | not (owned || provablyOurs processes) -> pure (Left (unprovable (length survivors)))
+              | passesLeft <= 0 -> pure (Left exhausted)
+              | otherwise -> do
+                  -- Signalling the whole current census, not the recorded
+                  -- members: a descendant forked from a member's TERM handler
+                  -- is in the group but in no recorded list, and would
+                  -- otherwise be left behind the moment its parent exited.
+                  result <- killVerifiedGroup groupPid occupants
+                  case result of
+                    Left message -> pure (Left message)
+                    Right () -> go True (passesLeft - 1)
+
+    -- An uncensused record never pins anything, so its group can only ever
+    -- be watched; a censused one is ours to signal exactly while one of its
+    -- recorded identities is still holding its PID, start time, and group.
+    provablyOurs processes =
+      group.ownedProcessGroupCensused
+        && not (null (membersStillInGroup groupPid processes group.ownedProcessGroupMembers))
+
+    unprovable surviving =
+      "a gh from an earlier GitHub refresh (pgid "
+        <> Text.pack (show groupPid)
+        <> ") still accounts for "
+        <> Text.pack (show surviving)
+        <> " running process(es) that cannot be identified as this repository's, so they cannot be signalled from here"
+
+    exhausted =
+      "a gh process group from an earlier GitHub refresh (pgid "
+        <> Text.pack (show groupPid)
+        <> ") kept gaining members faster than they could be terminated"
+
+ignoreIOException :: IO () -> IO ()
+ignoreIOException action = void (try @IOException action)
 
 advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError FetchState
 advanceState limits previous page = do
