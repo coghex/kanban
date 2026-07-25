@@ -62,6 +62,7 @@ module Kanban.UI
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
+    reusableSolveSession,
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
@@ -3124,7 +3125,7 @@ runningProcessOverlay state (IssueItem issue)
 startApplication :: EventM Name AppState ()
 startApplication = do
   vty <- getVtyHandle
-  liftIO (Vty.setMode (Vty.outputIface vty) Vty.Mouse True)
+  liftIO (enableMouseIfSupported (Vty.outputIface vty))
   startAllRefreshes
   state <- get
   void . liftIO . forkIO $ discoverWorkers state.appRepository >>= writeBChan state.appEventChannel . WorkerDiscoveryFinished
@@ -3135,6 +3136,16 @@ startApplication = do
         . liftIO
         . forkIO
         $ monitorDrainer controller state.appEventChannel
+
+-- | Mouse reporting is an optional affordance on a dashboard that must stay
+-- fully keyboard-operable (docs\/design.md §2), and vty exposes mode support
+-- as a queryable capability precisely because setting an unsupported mode is
+-- not guaranteed to be harmless. Asking first means a terminal without mouse
+-- reporting simply starts with the mouse features inert, rather than risking
+-- the whole startup over an affordance nothing depends on.
+enableMouseIfSupported :: Vty.Output -> IO ()
+enableMouseIfSupported output =
+  when (Vty.supportsMode output Vty.Mouse) (Vty.setMode output Vty.Mouse True)
 
 monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
 monitorDrainer controller eventChannel = forever $ do
@@ -3158,12 +3169,33 @@ openItemSolveChooser workflow (PullRequestItem _) = setNotice ("Select an issue 
 openIssueSolveChooser :: SolveWorkflow -> Issue -> EventM Name AppState ()
 openIssueSolveChooser workflow issue = do
   state <- get
-  case Map.lookup issue.issueNumber state.appSolveSessions of
-    Just session
-      | solveSessionActive session || session.solveSessionWorkflow == workflow -> do
-          modify (\current -> current {appOverlay = Just (SolveOverlay issue.issueNumber), appNotice = Nothing})
-          presentTranscriptTail
-    _ -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+    Just _ -> openExistingSolveOverlay issue.issueNumber
+    Nothing -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+
+-- | The session a solve request for `issueNumber` must reuse rather than
+-- replace: one that is still running, or a finished one from the very
+-- workflow being requested. Only a terminal session belonging to a
+-- /different/ workflow may be replaced.
+--
+-- Both the moment the chooser opens and the moment a chooser digit launches
+-- consult this, because they are not the same moment: persistent-worker
+-- discovery ('ensureWorkerSession') can attach a recovered session for the
+-- issue while the chooser sits open, and a launch that only trusted the
+-- chooser-open answer would overwrite that recovered session's transcript,
+-- log path, and session id with an empty one — leaving the overlay showing a
+-- record the live worker's events no longer belong to.
+reusableSolveSession :: SolveWorkflow -> Int -> Map Int SolveSession -> Maybe SolveSession
+reusableSolveSession workflow issueNumber sessions = do
+  session <- Map.lookup issueNumber sessions
+  if solveSessionActive session || session.solveSessionWorkflow == workflow
+    then Just session
+    else Nothing
+
+openExistingSolveOverlay :: Int -> EventM Name AppState ()
+openExistingSolveOverlay issueNumber = do
+  modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
+  presentTranscriptTail
 
 solveSessionActive :: SolveSession -> Bool
 solveSessionActive session = session.solveSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
@@ -3174,6 +3206,13 @@ workflowKey AutoSolve = "A"
 
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do
+  state <- get
+  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+    Just _ -> openExistingSolveOverlay issue.issueNumber
+    Nothing -> startFreshIssueSolve issue workflow brand
+
+startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
+startFreshIssueSolve issue workflow brand = do
   state <- get
   let autoProgress = case workflow of
         SolveOnly -> Nothing
