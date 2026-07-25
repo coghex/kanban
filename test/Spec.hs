@@ -201,6 +201,7 @@ import Kanban.UI
     ReviewTickFireOutcome (..),
     SolvePhase (..),
     SolveSession (..),
+    agentFailureNotice,
     canonicalReviewActivity,
     TranscriptGeometry (..),
     TranscriptSession (..),
@@ -5729,6 +5730,19 @@ main = hspec $ do
       it "distinguishes a setup gap from a generic failure in the activity text" $ do
         failureActivity (preflightDiagnostic "bundle absent") `shouldBe` "setup required"
         failureActivity "provider exited 1" `shouldBe` "failed"
+      -- The revision path reports through canonicalReviewActivity whether
+      -- the coordinator rejected the turn or preflight stopped it against
+      -- an already-running backend, so both readings live here.
+      it "classifies a revision start failure by cause" $ do
+        canonicalReviewActivity (preflightDiagnostic "claude was not found on PATH") `shouldBe` "setup required"
+        canonicalReviewActivity "the coordinator rejected the turn" `shouldBe` "failed"
+      it "names the remediation when a revision cannot start" $ do
+        agentFailureNotice "Issue revision" (preflightDiagnostic "claude was not found on PATH. Install it.")
+          `shouldSatisfy` Data.Text.isInfixOf "Issue revision cannot start — "
+        agentFailureNotice "Issue revision" (preflightDiagnostic "claude was not found on PATH. Install it.")
+          `shouldSatisfy` Data.Text.isInfixOf "Install it."
+        agentFailureNotice "Issue revision" "the coordinator rejected the turn"
+          `shouldSatisfy` Data.Text.isInfixOf "Issue revision failed: "
 
     describe "hermetic fresh-machine probing" $ do
       it "reports a fully provisioned machine as ready for every action" $

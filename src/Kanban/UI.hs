@@ -25,6 +25,7 @@ module Kanban.UI
     approvedInteriorAttr,
     autoSolveRevisionPrompt,
     cacheEnabled,
+    agentFailureNotice,
     canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
@@ -4472,15 +4473,20 @@ applyReviewEvent reviewEvent = case reviewEvent of
     case outcome of
       TurnSucceeded -> startBoardRefresh
       _ -> pure ()
-  ReviewStartFailed issueNumber message ->
+  -- Reached both when the coordinator itself rejects the turn and when
+  -- 'launchIssueReview' preflights a revision against an already-running
+  -- backend, so it classifies the message the same way every other terminal
+  -- path does rather than calling a missing component a failed agent.
+  ReviewStartFailed issueNumber message -> do
     appendToReviewSession issueNumber
       ( \session ->
           session
             { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = "failed",
+              reviewSessionActivity = canonicalReviewActivity message,
               reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
             }
       )
+    setNotice (agentFailureNotice "Issue revision" message)
   ReviewClientStopped message -> do
     modify
       ( \state ->
