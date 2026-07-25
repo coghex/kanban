@@ -39,6 +39,7 @@ import Data.Aeson.Types (Parser)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -157,6 +158,9 @@ newGhFetchGuard = GhFetchGuard <$> newIORef Nothing
 
 ghFetchCleanupFailure :: GhFetchGuard -> IO (Maybe GhCleanupFailure)
 ghFetchCleanupFailure (GhFetchGuard cleanupFailure) = readIORef cleanupFailure
+
+setCleanupFailure :: GhFetchGuard -> GhCleanupFailure -> IO ()
+setCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure . Just
 
 fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
 fetchGitHubSnapshot guard limits workflowConfig repository = do
@@ -319,11 +323,11 @@ runGh guard repository arguments = do
       capturedOutput <- takeMVar standardOutput >>= either throwIO pure
       capturedError <- takeMVar standardError >>= either throwIO pure
       settled <- settleGroup groupPid
-      exitCode <- waitForProcess processHandle
       case settled of
         -- gh has exited and nothing it led is left, so the guard covering it
         -- has nothing left to cover.
         Right () -> do
+          exitCode <- waitForProcess processHandle
           dropGhGroup repository groupPid
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
@@ -331,8 +335,20 @@ runGh guard repository arguments = do
         -- The record stays, naming what is left, so the next fetch reclaims
         -- it with the full ownership machinery instead of starting a gh
         -- beside it.
+        --
+        -- The finding is published to the guard before the handle is reaped,
+        -- and that order is deliberate: reaping is exactly what makes this
+        -- group unfindable from the cleanup path, where 'getPid' turns
+        -- 'Nothing' and there is no longer anything to census. A refresh
+        -- timeout arriving from here on would otherwise find nothing amiss
+        -- and report an ordinary timeout over a descendant this already knew
+        -- about.
         Left (message, survivors) -> do
+          setCleanupFailure guard (GhCleanupFailure message GuardInMemoryOnly)
           void (recordGhGroup repository (OwnedProcessGroup groupPid survivors True))
+          recorded <- ghGroupIsRecorded repository groupPid
+          setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
+          void (try @IOException (waitForProcess processHandle))
           throwIO (GhGroupUnresolved message)
 
     -- Establishes what became of the group, entirely before the handle is
@@ -404,11 +420,16 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
   -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
   -- the moment it is reaped and the guard entry is keyed by this PID.
   spawnedPid <- fmap fromIntegral <$> getPid processHandle
+  -- A finding already on the guard was established by the fetch itself, which
+  -- knew things this cleanup no longer can -- above all when the leader has
+  -- already been reaped and there is nothing left here to census. It is never
+  -- overwritten and never cleared; this cleanup only ever adds one.
+  alreadyReported <- isJust <$> readIORef cleanupFailure
   -- Written before any of the work below, all of which can be cut short by
   -- the cleanup budget running out. Whatever happens after this point, the
   -- fetch cannot end up reporting an ordinary clean timeout for a gh whose
   -- death was never actually established.
-  writeIORef cleanupFailure (Just (GhCleanupFailure "gh cleanup did not run to completion" GuardInMemoryOnly))
+  unless alreadyReported (writeIORef cleanupFailure (Just (GhCleanupFailure "gh cleanup did not run to completion" GuardInMemoryOnly)))
   outcome <- killGhGroup processHandle
   resolved <- case outcome of
     Right () -> pure (Right ())
@@ -434,7 +455,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
               retried <- recordAndConfirm unconfirmed
               pure (Left (GhCleanupFailure message (if retried then GuardRecorded else GuardInMemoryOnly)))
   case resolved of
-    Left failure -> writeIORef cleanupFailure (Just failure)
+    Left failure -> unless alreadyReported (writeIORef cleanupFailure (Just failure))
     -- Reaping cannot block here: the group has been confirmed empty, so gh
     -- is at most an unreaped zombie. It is skipped entirely when that
     -- confirmation failed, since waiting on a gh that is still running would
@@ -443,8 +464,9 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
       void (try @IOException (waitForProcess processHandle))
       mapM_ (dropGhGroup repository) spawnedPid
       -- Only now, with the group confirmed empty and its record dropped, is
-      -- the pessimistic entry above retracted.
-      writeIORef cleanupFailure Nothing
+      -- the pessimistic entry above retracted -- and only if it was this
+      -- cleanup's to retract.
+      unless alreadyReported (writeIORef cleanupFailure Nothing)
   mapM_ (ignoreIOException . hClose) input
   where
     recordAndConfirm unconfirmed = do

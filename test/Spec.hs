@@ -5316,8 +5316,13 @@ main = hspec $ do
             $ do
               (outcome, _) <- captureBoardRefresh temporaryRoot 30
               case outcome of
-                BoardRefreshCompleted (Left providerError) ->
-                  providerError.providerErrorMessage `shouldMention` "could not confirm stopped"
+                -- Reported through the guard rather than as a plain provider
+                -- error, because that is what a cleanup this fetch could not
+                -- verify is: the board must hold off, not merely show a
+                -- failed refresh.
+                BoardRefreshUnverified failure -> do
+                  failure.ghCleanupMessage `shouldMention` "still running"
+                  failure.ghCleanupGuard `shouldBe` GuardRecorded
                 other -> expectationFailure ("expected the unresolved group to be reported, got " <> show other)
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
           descendantPid <- readMarkerPid descendantMarker
