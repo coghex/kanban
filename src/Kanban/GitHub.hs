@@ -45,7 +45,7 @@ import Data.Time (getCurrentTime)
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
-import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, matchingIdentities)
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, killVerifiedGroup, membersStillInGroup)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
@@ -547,30 +547,58 @@ reclaimRecordedGhGroups repository = do
 -- uncensused entry is never handed to the group check, whose empty
 -- membership would read as vacuously absent and clear a live survivor.
 reclaimGhGroup :: OwnedProcessGroup -> IO (Either Text ())
-reclaimGhGroup group
-  | group.ownedProcessGroupCensused =
-      killVerifiedGroup group.ownedProcessGroupPid group.ownedProcessGroupMembers
-  | otherwise = do
-      snapshot <- defaultProcessSnapshot
-      pure $ case snapshot of
-        Left message -> Left message
-        Right processes
-          | null (survivors processes) -> Right ()
-          | otherwise ->
-              Left
-                ( "a gh process (pgid "
-                    <> Text.pack (show group.ownedProcessGroupPid)
-                    <> ") was never safely identified and something matching it is still running; it cannot be signalled from here"
-                )
+reclaimGhGroup group = go False groupCleanupPasses
   where
-    -- With identities recorded, those exact processes are the question, PIDs
-    -- pinned to start times. Without any, the only available question is
-    -- whether that pgid is occupied at all, which is deliberately the
-    -- broadest reading: refusing on an unrelated squatter merely blocks
-    -- refreshing, while clearing on a survivor is the overlap itself.
-    survivors processes = case group.ownedProcessGroupMembers of
-      [] -> groupMembers group.ownedProcessGroupPid processes
-      members -> matchingIdentities processes members
+    groupPid = group.ownedProcessGroupPid
+
+    -- `owned` records that a recorded identity has already been seen alive
+    -- in this group during this reclaim. Until that happens the group's
+    -- occupants might be anyone: this record can be days old and read by a
+    -- process that never spawned anything, so the pgid may since have been
+    -- recycled. Once it /has/ happened, the group has been continuously
+    -- occupied from that observation onward, so the pgid cannot have been
+    -- reissued underneath us and everything now in it is descended from what
+    -- this repository started.
+    go owned passesLeft = do
+      snapshot <- defaultProcessSnapshot
+      case snapshot of
+        Left message -> pure (Left message)
+        Right processes -> case groupMembers groupPid processes of
+          -- Nothing left in the group at all: the only ending that clears
+          -- the record, and the reason emptiness is asked of a fresh census
+          -- rather than inferred from the recorded members going away.
+          [] -> pure (Right ())
+          occupants
+            | not (owned || provablyOurs processes) -> pure (Left (unprovable (length occupants)))
+            | passesLeft <= 0 -> pure (Left exhausted)
+            | otherwise -> do
+                -- Signalling the whole current census, not the recorded
+                -- members: a descendant forked from a member's TERM handler
+                -- is in the group but in no recorded list, and would
+                -- otherwise be left behind the moment its parent exited.
+                result <- killVerifiedGroup groupPid occupants
+                case result of
+                  Left message -> pure (Left message)
+                  Right () -> go True (passesLeft - 1)
+
+    -- An uncensused record never pins anything, so its group can only ever
+    -- be watched; a censused one is ours to signal exactly while one of its
+    -- recorded identities is still holding its PID, start time, and group.
+    provablyOurs processes =
+      group.ownedProcessGroupCensused
+        && not (null (membersStillInGroup groupPid processes group.ownedProcessGroupMembers))
+
+    unprovable occupied =
+      "a gh process group from an earlier GitHub refresh (pgid "
+        <> Text.pack (show groupPid)
+        <> ") still has "
+        <> Text.pack (show occupied)
+        <> " process(es) in it that cannot be identified as this repository's, so they cannot be signalled from here"
+
+    exhausted =
+      "a gh process group from an earlier GitHub refresh (pgid "
+        <> Text.pack (show groupPid)
+        <> ") kept gaining members faster than they could be terminated"
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)

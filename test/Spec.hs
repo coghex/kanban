@@ -5009,6 +5009,46 @@ main = hspec $ do
             doesFileExist ranMarker `shouldReturn` True
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
+    it "reclaims a descendant a recorded member forked from its own TERM handler, instead of clearing the record when that member exits" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            lateChild = binaryRoot </> "late-child"
+            descendantMarker = temporaryRoot </> "late.pid"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        createDirectoryIfMissing True binaryRoot
+        ByteString.writeFile lateChild (ByteString.unlines ["#!/bin/sh", "trap '' TERM", "while :; do sleep 1; done"])
+        setFileMode lateChild 0o700
+        -- The recorded member forks its replacement from its TERM handler and
+        -- exits, so reclaim's escalation sees every identity it saved go away
+        -- while the group is still occupied. Trusting that as success clears
+        -- the record and lets the next gh start beside the newcomer.
+        (_, _, _, recordedLeader) <-
+          createProcess
+            (proc "sh" ["-c", "trap '" <> lateChild <> " </dev/null >/dev/null 2>&1 & printf \"%s\" \"$!\" > " <> descendantMarker <> "; exit 0' TERM; while :; do sleep 1; done </dev/null >/dev/null 2>&1"])
+              {create_group = True}
+        Just leaderPid <- fmap fromIntegral <$> getPid recordedLeader
+        threadDelay 200000
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          snapshot <- readProcessSnapshot
+          case snapshot of
+            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+            Right identities ->
+              writeGhGroupRecord repository [OwnedProcessGroup leaderPid (filter ((== leaderPid) . processIdentityGroupPid) identities) True]
+                `shouldReturn` Right ()
+          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right _) -> pure ()
+              other -> expectationFailure ("expected the refresh to proceed once the group was emptied, got " <> show other)
+          descendantPid <- readMarkerPid descendantMarker
+          reclaimed <- readProcessSnapshot
+          case reclaimed of
+            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+            Right identities -> do
+              identityForPid leaderPid identities `shouldBe` Nothing
+              identityForPid descendantPid identities `shouldBe` Nothing
+          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
     it "refuses to spawn gh while an uncensused record's pgid is still occupied, rather than reading its empty membership as absent" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let ranMarker = temporaryRoot </> "gh-ran"
@@ -5029,7 +5069,7 @@ main = hspec $ do
                 (outcome, _) <- captureBoardRefresh temporaryRoot 30
                 case outcome of
                   BoardRefreshCompleted (Left providerError) ->
-                    providerError.providerErrorMessage `shouldMention` "never safely identified"
+                    providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
                   other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
             doesFileExist ranMarker `shouldReturn` False
             -- The record survives the refusal: nothing about this attempt
@@ -5060,7 +5100,7 @@ main = hspec $ do
                       (outcome, _) <- captureBoardRefresh temporaryRoot 30
                       case outcome of
                         BoardRefreshCompleted (Left providerError) ->
-                          providerError.providerErrorMessage `shouldMention` "never safely identified"
+                          providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
                         other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
                   doesFileExist ranMarker `shouldReturn` False
                 pure identity
