@@ -55,6 +55,7 @@ module Kanban.UI
     pullRequestSessionReusable,
     readyAttr,
     reconcileReviewSessions,
+    refreshOverlay,
     resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
@@ -68,6 +69,8 @@ module Kanban.UI
     runDashboard,
     solveSessionAlreadyResolved,
     themeFor,
+    trackerAttr,
+    trackerHeaderAttribute,
     transcriptScrollKey,
     transcriptShouldTail,
     visibleSelectionRows,
@@ -960,9 +963,7 @@ drawTrackerHeader state column row tracker expanded =
     marker
       | selected = withAttr selectedAttr (txt (if state.appOptions.optionAscii then ">" else "▌"))
       | otherwise = txt " "
-    headerAttribute
-      | null tracker.trackerDiagnostics = trackerAttr
-      | otherwise = pendingAttr
+    headerAttribute = trackerHeaderAttribute tracker
     disclosure
       | state.appOptions.optionAscii = if expanded then "v" else ">"
       | expanded = "▾"
@@ -979,6 +980,15 @@ drawTrackerHeader state column row tracker expanded =
         <> showText tracker.trackerTotal
         <> " complete"
         <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
+
+-- | A tracker header carries its own parse state: amber whenever the tracker
+-- produced diagnostics -- including the childless header, whose diagnostic is
+-- the only thing on the board saying why it has no children -- and the
+-- ordinary tracker accent otherwise.
+trackerHeaderAttribute :: Tracker -> AttrName
+trackerHeaderAttribute tracker
+  | null tracker.trackerDiagnostics = trackerAttr
+  | otherwise = pendingAttr
 
 -- | The tracker-context rows. They wrap rather than truncate, so a long
 -- implementation key or tracker reference stays fully visible and the frame
@@ -1863,12 +1873,18 @@ drawDetails env item =
            ]
     )
   where
-    trackingDetails = case findEntry env.detailsBoard (itemId item) of
+    boardEntry = findEntry env.detailsBoard (itemId item)
+    trackingDetails = case boardEntry of
       Just (Tracked context _) -> drawTrackingDetails context
       _ -> []
-    trackerDiagnosticDetails = case item of
-      IssueItem issue -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue env.detailsConfig.resolvedWorkflow issue)
-      PullRequestItem _ -> []
+    -- A structural header already carries the diagnostics 'deriveBoard'
+    -- produced with the board's own workflow config, so prefer them over
+    -- re-parsing the body here: the overlay a childless tracker opens then
+    -- says exactly what its header said, under any configured tracker label.
+    trackerDiagnosticDetails = case (boardEntry, item) of
+      (Just (TrackerHeader tracker), _) -> drawTrackerDiagnosticDetails tracker.trackerDiagnostics
+      (_, IssueItem issue) -> drawTrackerDiagnosticDetails (trackerDiagnosticsForIssue env.detailsConfig.resolvedWorkflow issue)
+      (_, PullRequestItem _) -> []
 
 -- | Label chips as wrapped rows, measured against the width the overlay
 -- actually got.

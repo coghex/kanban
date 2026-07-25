@@ -146,7 +146,7 @@ import Kanban.StreamReader
   )
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
-import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren)
+import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren, renderTrackerDiagnostic)
 import Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
@@ -204,6 +204,7 @@ import Kanban.UI
     pullRequestCardAttribute,
     readyAttr,
     reconcileReviewSessions,
+    refreshOverlay,
     resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
@@ -216,6 +217,8 @@ import Kanban.UI
     revisedAttr,
     solveSessionAlreadyResolved,
     themeFor,
+    trackerAttr,
+    trackerHeaderAttribute,
     transcriptScrollKey,
     transcriptShouldTail,
     visibleSelectionRows,
@@ -4377,6 +4380,44 @@ main = hspec $ do
           rendered.trackerDiagnostics `shouldBe` [TrackerSectionMissing]
         entries -> expectationFailure ("unexpected issue entries: " <> show entries)
 
+    -- §8: a configured tracker label keeps the issue out of the work cards
+    -- however its checklist parsed. The one malformed row here is diagnosed
+    -- and dropped, so the tracker reaches 'deriveBoard' with no children of
+    -- its own while #3 falls back to Standalone per §17.
+    it "keeps a tracker whose checklist parsed to nothing out of every column's work cards" $ do
+      let snapshot = RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+          workCards = filter (not . isTrackerHeaderEntry) (concat (Map.elems columns))
+      map (itemNumber . entryItem) workCards `shouldBe` [3]
+      case Map.findWithDefault [] Issues columns of
+        [TrackerHeader rendered, standalone] -> do
+          rendered.trackerIssue.issueNumber `shouldBe` 12
+          rendered.trackerTotal `shouldBe` 0
+          rendered.trackerDiagnostics `shouldBe` zeroChildDiagnostics
+          standalone `shouldBe` Standalone (IssueItem (baseIssue 3 []))
+        entries -> expectationFailure ("unexpected issue entries: " <> show entries)
+
+    -- A childless header is structure, not work in progress, so it has no
+    -- business competing for a slot in Active just because someone is
+    -- assigned to the tracker issue.
+    it "places an assigned zero-child tracker in Issues rather than Active" $ do
+      let tracker = zeroChildTracker {issueAssignees = [Assignee "agent"]}
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+      Map.findWithDefault [] Active columns `shouldBe` []
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [12]
+
+    it "recognizes zero-child trackers by configured label rather than a hard-coded epic" $ do
+      let config = defaultWorkflowConfig {trackerLabels = Set.singleton "tracker"}
+          configured = zeroChildTracker {issueNumber = 20, issueLabels = [Label "tracker" "5319e7"]}
+          Board columns = deriveBoard config (RepoSnapshot [configured, zeroChildTracker] [] epoch False False)
+      case Map.findWithDefault [] Issues columns of
+        [TrackerHeader rendered, epicLabelled] -> do
+          rendered.trackerIssue.issueNumber `shouldBe` 20
+          rendered.trackerDiagnostics `shouldBe` zeroChildDiagnostics
+          -- "epic" is not configured here, so that issue is ordinary work.
+          epicLabelled `shouldBe` Standalone (IssueItem zeroChildTracker)
+        entries -> expectationFailure ("unexpected issue entries: " <> show entries)
+
     it "uses an Epic: title as a tracker fallback when the issue has no labels" $ do
       let tracker = (baseIssue 12 []) {issueTitle = "Epic: Legacy tracker"}
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
@@ -4530,6 +4571,39 @@ main = hspec $ do
       rows `shouldBe` [0, 2]
       currentPosition `shouldBe` 0
       (rows !! (currentPosition + 1)) `shouldBe` 2
+
+  -- A tracker with no children has no child card to be reached through, so
+  -- the header itself has to carry every interaction §12 and §17 promise.
+  describe "zero-child tracker headers" $ do
+    it "is a keyboard focus target with no epic expanded" $ do
+      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch False False)
+      visibleSelectionRows Set.empty board Issues `shouldBe` [0, 1]
+      normalizeCollapsedRow Set.empty board Issues 0 `shouldBe` 0
+
+    it "draws amber while a tracker that parsed cleanly keeps the ordinary accent" $ do
+      let Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch False False)
+      case Map.findWithDefault [] Issues columns of
+        [TrackerHeader rendered] -> trackerHeaderAttribute rendered `shouldBe` pendingAttr
+        entries -> expectationFailure ("unexpected issue entries: " <> show entries)
+      trackerHeaderAttribute (fixtureTracker 100) `shouldBe` trackerAttr
+
+    it "keeps its details overlay open across a refresh while the tracker issue stays open" $ do
+      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch False False)
+          closed = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] epoch False False)
+          overlay = Just (DetailsOverlay (IssueItem zeroChildTracker))
+      refreshOverlay board overlay `shouldBe` (overlay, Nothing)
+      refreshOverlay closed overlay `shouldBe` (Nothing, Just "Details closed because that item is no longer open")
+
+    -- The overlay reads the diagnostics 'deriveBoard' attached to the header
+    -- rather than re-parsing the body, so a tracker recognized only by a
+    -- non-default configured label still explains itself here even though a
+    -- re-parse under the default config would not recognize it at all.
+    it "lists the diagnostics the derived tracker retained rather than a re-parse" $ do
+      let config = defaultWorkflowConfig {trackerLabels = Set.singleton "tracker"}
+          tracker = zeroChildTracker {issueLabels = [Label "tracker" "5319e7"]}
+          board = deriveBoard config (RepoSnapshot [tracker] [] epoch False False)
+      detailsRows (renderDetails board (IssueItem tracker)) "Tracker warnings"
+        `shouldBe` map (("• " <>) . renderTrackerDiagnostic) zeroChildDiagnostics
 
   describe "tracker checklist parsing" $ do
     it "parses supported checkboxes, progress, and natural keys only in tracker sections" $ do
@@ -5415,6 +5489,26 @@ main = hspec $ do
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
   Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0
+
+-- | A tracker whose child section is recognized but yields nothing usable:
+-- its single row is malformed, so it is diagnosed and dropped. The tracker
+-- reaches 'deriveBoard' with zero children without depending on any parser
+-- defect, and #3 stays an ordinary issue.
+zeroChildTracker :: Issue
+zeroChildTracker =
+  (baseIssue 12 [])
+    { issueLabels = [Label "epic" "5319e7"],
+      issueBody = "## Children\n- [?] #3 — A1: Malformed"
+    }
+
+-- | Row-level diagnostics first, then the section-level verdict, exactly as
+-- 'parseTrackerBody' orders them.
+zeroChildDiagnostics :: [TrackerDiagnostic]
+zeroChildDiagnostics = [TrackerMalformedCheckbox 2, TrackerChildrenMissing]
+
+isTrackerHeaderEntry :: ColumnEntry -> Bool
+isTrackerHeaderEntry (TrackerHeader _) = True
+isTrackerHeaderEntry _ = False
 
 fixtureTracker :: Int -> Tracker
 fixtureTracker number = Tracker (baseIssue number []) 0 0 Map.empty []

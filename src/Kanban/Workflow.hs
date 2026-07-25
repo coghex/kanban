@@ -68,8 +68,15 @@ deriveBoard config snapshot =
         )
         | issue <- ordinaryIssues
       ]
+    -- A tracker with no visible children has no group to sit above, so unlike
+    -- every other entry its column cannot be inferred from the work it
+    -- contains. It is a structural header rather than a work card, so
+    -- 'issueColumn' does not apply either: an assigned epic is not itself
+    -- in-progress work and must not compete for a slot in Active. Such headers
+    -- always land in Issues, which keeps section 17's "tracker remains
+    -- visible" true in one predictable place.
     trackerHeaderEntries =
-      [ (issueColumn tracker.trackerIssue, TrackerHeader tracker)
+      [ (Issues, TrackerHeader tracker)
         | tracker <- trackers,
           tracker.trackerIssue.issueNumber `Set.notMember` visibleTrackerNumbers
       ]
