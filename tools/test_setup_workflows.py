@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -499,6 +500,64 @@ class ConflictTests(HermeticSetupTests):
         self.assertEqual(entry["status"], "refused")
         self.assertIn(str(occupied), entry["message"])
         self.assertEqual(occupied.read_text(encoding="utf-8"), "someone else's file\n")
+
+
+class DryRunPurityTests(unittest.TestCase):
+    """A dry run must write nothing at all, which includes artefacts the
+    interpreter itself would leave behind. Driven as a subprocess, because
+    an in-process call cannot observe an import that already happened when
+    this test module was loaded."""
+
+    def snapshot(self, root: Path) -> list[str]:
+        # `.git` is excluded: git's own bookkeeping is not this tool's
+        # doing, and reading the checkout may touch it.
+        return sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if ".git" not in path.relative_to(root).parts
+        )
+
+    def test_a_dry_run_subprocess_leaves_the_checkout_byte_for_byte_alone(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            checkout = root / "checkout"
+            (checkout / "tools").mkdir(parents=True)
+            for source in (REPO_ROOT / "tools").glob("*.py"):
+                shutil.copy(source, checkout / "tools" / source.name)
+            subprocess.run(
+                ["git", "init", "-q", str(checkout)], check=True, capture_output=True
+            )
+            install_dir = root / "install"
+            legacy_path = root / "legacy" / "approve-issues.py"
+
+            before = self.snapshot(checkout)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(checkout / "tools" / "setup_workflows.py"),
+                    "--component",
+                    "issue-review",
+                    "--repo",
+                    str(checkout),
+                    "--install-dir",
+                    str(install_dir),
+                    "--legacy-path",
+                    str(legacy_path),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(root),
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(json.loads(proc.stdout)["dry_run"])
+            self.assertEqual(self.snapshot(checkout), before)
+            self.assertNotIn(
+                "tools/__pycache__", " ".join(self.snapshot(checkout))
+            )
+            self.assertFalse(install_dir.exists())
+            self.assertFalse(legacy_path.parent.exists())
 
 
 class ListingParsingTests(unittest.TestCase):

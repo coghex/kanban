@@ -33,7 +33,17 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import install_issue_review
+# A dry run must write nothing at all, and importing a sibling module would
+# otherwise leave CPython's bytecode cache behind in the checkout's
+# `tools/__pycache__`. The previous policy is restored immediately, so
+# importing this module from a test or another tool does not silently change
+# how the rest of that process behaves.
+_previous_bytecode_policy = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    import install_issue_review
+finally:
+    sys.dont_write_bytecode = _previous_bytecode_policy
 
 
 COMPONENTS = ("issue-review", "legacy-launcher", "codex-plugin", "claude-plugin")
