@@ -41,6 +41,7 @@ module Kanban.UI
     followAfterScroll,
     followAfterTurnStarted,
     githubRefreshTimeoutMicros,
+    killSelectionNotice,
     mergeExplanation,
     mergeText,
     neutralAttr,
@@ -2199,6 +2200,7 @@ handleEvent event = do
     (Just _, _) -> pure ()
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
     (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
     (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveCard (-1)
@@ -2229,11 +2231,23 @@ handleEvent event = do
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> setNotice "Terminal repaint requested"
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> forceTerminalRepaint
     _ -> pure ()
 
 setNotice :: Text -> EventM Name AppState ()
 setNotice message = modify (\state -> state {appNotice = Just message})
+
+-- | Repaint the terminal from scratch, with no network request. 'Vty.refresh'
+-- resets vty's assumed screen state and re-emits the current picture in full,
+-- so output another process scribbled over the display is overwritten instead
+-- of being preserved by the usual diffing update; 'invalidateCache' drops
+-- brick's render cache so the redraw after this event is rebuilt too.
+forceTerminalRepaint :: EventM Name AppState ()
+forceTerminalRepaint = do
+  invalidateCache
+  vty <- getVtyHandle
+  liftIO (Vty.refresh vty)
+  setNotice "Terminal repainted"
 
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
@@ -2455,8 +2469,14 @@ killSelectedWorkingProcess :: EventM Name AppState ()
 killSelectedWorkingProcess = do
   state <- get
   case selectedReviewItem state of
-    Nothing -> setNotice "Select a working issue or PR before pressing k"
+    Nothing -> setNotice killSelectionNotice
     Just item -> killItemWorkingProcess item
+
+-- | Shown when @x@ is pressed with nothing killable selected. It has to name
+-- @x@ itself: @k@ is the select-previous binding, so a reader who obeys a
+-- notice naming @k@ moves the selection instead of retrying the kill.
+killSelectionNotice :: Text
+killSelectionNotice = "Select a working issue or PR before pressing x"
 
 killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
 killItemWorkingProcess (PullRequestItem pullRequest) = do

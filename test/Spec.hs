@@ -179,6 +179,7 @@ import Kanban.UI
     failureActivity,
     followAfterScroll,
     followAfterTurnStarted,
+    killSelectionNotice,
     orphanMessage,
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
@@ -2749,6 +2750,16 @@ main = hspec $ do
         `shouldBe` "deadline exceeded; 1 subprocesses survived termination; press x to terminate the orphaned process tree"
       orphanMessage SolveCompleted "1" "the PR agent"
         `shouldBe` "1 subprocesses survived the PR agent; press x to terminate the orphaned process tree"
+
+    it "tells an operator with nothing selected to press the kill binding rather than the select-previous binding" $ do
+      -- The board dispatches the kill on 'x'; 'k' selects the previous card,
+      -- so a notice naming 'k' silently moves the selection instead. The Esc
+      -- and Ctrl-L halves of this keyboard-contract fix dispatch in brick's
+      -- 'EventM' (and Ctrl-L needs a live Vty handle), which no unit test
+      -- here can drive; they stay covered by the manual checks in the PR.
+      killSelectionNotice `shouldMention` "pressing x"
+      killSelectionNotice `shouldNotMention` "pressing k"
+      killSelectionNotice `shouldBe` "Select a working issue or PR before pressing x"
 
     it "suppresses a late WorkerAgentOutput/WorkerDiagnostic projection once a solve or PR session has already resolved" $ do
       -- 'applyWorkerProtocolEvent' cannot be exercised directly in a unit
