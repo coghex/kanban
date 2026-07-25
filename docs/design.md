@@ -122,6 +122,7 @@ Initial options:
 --color auto|truecolor|256|never  color policy; defaults to auto
 --border box|open                 border renderer; defaults to box
 --glyph-test                      print vertical-line candidates and exit
+--doctor                          report AI-action readiness read-only and exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -143,6 +144,15 @@ Startup sequence:
 
 If there is no cached data, the board and usage panes start empty while the
 initial update runs.
+
+`--doctor` short-circuits that sequence after step 1, before configuration
+and repository resolution, so a fresh clone with no configured remote can
+still ask why an AI action would not start. It prints readiness per
+dependency and per AI action, exits non-zero when any action is blocked, and
+is strictly read-only: status-only probes, no agent session, no login flow,
+no model quota, and no mutation of the filesystem, provider configuration,
+launchd, or GitHub. See
+[workflow-setup.md](workflow-setup.md) for the setup command it names.
 
 ## 6. Layout
 
@@ -934,6 +944,11 @@ repository at all.
 - Cached data after refresh failure: dashed/dim treatment plus snapshot time.
 - Malformed tracker checklist: tracker remains visible; unparsed children fall
   back to Standalone and the tracker gets an amber parse warning.
+- Missing Kanban-owned setup: an AI action that preflight finds definitely
+  unready never spawns an agent. It reports `cannot start` naming the cause
+  and the command that installs it, rather than a generic agent failure, and
+  its session activity reads `setup required`. Only a definite local
+  observation blocks; an inconclusive probe lets the action run.
 
 No error should clear a previous good snapshot.
 

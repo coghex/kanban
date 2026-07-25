@@ -12,27 +12,26 @@ It can also show Codex and Claude usage, run reviews, start work on issues, and 
 - Codex or Claude installed and signed in, only if you want the optional AI actions
 
 Having Codex or Claude installed and signed in is necessary but not
-sufficient for AI actions: canonical issue review (the `r` key) also needs
-`tools/install_issue_review.py` run once to install its backend. The named
-`solve`/`pr-review`/`pr-rereview`/`pr-revise` commands are Kanban-owned
-workflow assets; for Codex, install them once per checkout from
-[codex-plugin/](codex-plugin/README.md):
+sufficient for AI actions: the canonical issue-review backend and the
+Kanban-owned `solve`/`pr-review`/`pr-rereview`/`pr-revise` workflow bundles
+have to be installed once as well. One opt-in command covers all of them,
+and reports exactly what it would do before changing anything:
 
 ```console
-codex plugin marketplace add ./codex-plugin
-codex plugin add kanban@kanban
+python3 tools/setup_workflows.py --all --scope user
+python3 tools/setup_workflows.py --all --scope user --apply
 ```
 
-For Claude, install the equivalent bundle once per checkout from
-[claude-plugin/](claude-plugin/README.md):
+To see whether an AI action is ready, and what to run if it is not:
 
 ```console
-claude plugin marketplace add ./claude-plugin
-claude plugin install kanban@kanban
+cabal run kanban -- --doctor
 ```
 
-See [the agent-workflow contract](docs/agent-workflow-contract.md) for the
-full dependency list and what each action requires.
+See [workflow setup and preflight](docs/workflow-setup.md) for the
+components, scopes, recovery steps, and removal, and
+[the agent-workflow contract](docs/agent-workflow-contract.md) for the full
+dependency list and what each action requires.
 
 ## Build
 
@@ -90,6 +89,7 @@ Installation does not start the drainer. Press `d` in Kanban when you are ready 
 ## Documentation
 
 - [User guide](docs/user-guide.md)
+- [Workflow setup and preflight](docs/workflow-setup.md)
 - [PR drainer](docs/pr-drainer.md)
 - [Agent-workflow contract](docs/agent-workflow-contract.md)
 - [Development](docs/development.md)

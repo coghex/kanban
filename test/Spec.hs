@@ -40,6 +40,35 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
 import Kanban.GitHub (FetchState (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
+import Kanban.Preflight
+  ( AuthObservation (..),
+    BundleObservation (..),
+    GitHubObservation (..),
+    PreflightAction (..),
+    PreflightCheck (..),
+    PreflightEnvironment (..),
+    PreflightProblem (..),
+    PreflightReport (..),
+    PreflightStatus (..),
+    ProviderProbe (..),
+    ReviewBackendObservation (..),
+    VersionObservation (..),
+    actionLabel,
+    actionReport,
+    blockingRemediation,
+    classifyBundleListing,
+    classifyClaudeAuth,
+    classifyCodexAuth,
+    classifyVersion,
+    doctorActions,
+    doctorLines,
+    doctorReady,
+    gatherPreflightEnvironment,
+    minimumClaudeVersion,
+    minimumCodexVersion,
+    preflightDiagnostic,
+    preflightDiagnosticDetail,
+  )
 import Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
@@ -259,7 +288,7 @@ import Kanban.Worker
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeFile, removePathForcibly, setModificationTime)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (isAbsolute, (</>))
+import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
@@ -5497,6 +5526,176 @@ main = hspec $ do
     it "accounts for two-cell gutters in the open layout" $
       responsiveOpenColumnWidths 170 `shouldBe` [41, 41, 41, 41]
 
+  describe "workflow preflight" $ do
+    describe "status-only probe classification" $ do
+      it "reads a signed-in codex login status" $
+        classifyCodexAuth (Right (ExitSuccess, "Logged in using ChatGPT\n")) `shouldBe` AuthAuthenticated
+      it "reads a signed-out codex login status" $
+        classifyCodexAuth (Right (ExitFailure 1, "Not logged in\n")) `shouldSatisfy` isNotAuthenticated
+      it "reads a signed-in claude auth status from its loggedIn field" $
+        classifyClaudeAuth (Right (ExitSuccess, "{\"loggedIn\": true, \"authMethod\": \"claude.ai\"}"))
+          `shouldBe` AuthAuthenticated
+      it "reads a signed-out claude auth status from its loggedIn field" $
+        classifyClaudeAuth (Right (ExitSuccess, "{\"loggedIn\": false}")) `shouldSatisfy` isNotAuthenticated
+      -- A CLI too old to know the subcommand at all must not be reported as
+      -- signed out: that would block an action the user could still run.
+      it "never reads an unrecognized auth subcommand as a sign-out" $ do
+        classifyCodexAuth (Right (ExitFailure 2, "error: unrecognized subcommand 'login'"))
+          `shouldSatisfy` isUnknownAuth
+        classifyClaudeAuth (Right (ExitFailure 1, "error: unknown command 'auth'"))
+          `shouldSatisfy` isUnknownAuth
+      it "never reads a probe that could not run at all as a sign-out" $
+        classifyCodexAuth (Left "codex login status timed out") `shouldSatisfy` isUnknownAuth
+      it "reads the codex plugin listing envelope" $
+        classifyBundleListing
+          (Right (ExitSuccess, "{\"installed\":[{\"pluginId\":\"kanban@kanban\",\"installed\":true,\"enabled\":true}]}"))
+          `shouldBe` BundleEnabled
+      it "reads the claude plugin listing envelope" $
+        classifyBundleListing (Right (ExitSuccess, "[{\"id\":\"kanban@kanban\",\"enabled\":false}]"))
+          `shouldBe` BundleDisabled
+      it "reads a marketplace offering that is not installed as absent" $
+        classifyBundleListing
+          (Right (ExitSuccess, "{\"installed\":[{\"pluginId\":\"kanban@kanban\",\"installed\":false}]}"))
+          `shouldBe` BundleAbsent
+      it "reports an absent bundle when no listing entry names it" $
+        classifyBundleListing (Right (ExitSuccess, "[]")) `shouldBe` BundleAbsent
+      it "never reads an undecodable listing as an absent bundle" $
+        classifyBundleListing (Right (ExitSuccess, "not json")) `shouldSatisfy` isUnknownBundle
+      it "accepts the versions the tracked bundles were verified against" $ do
+        classifyVersion minimumCodexVersion (Right (ExitSuccess, "codex-cli 0.144.6\n"))
+          `shouldBe` VersionSupported "0.144.6"
+        classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.220 (Claude Code)\n"))
+          `shouldBe` VersionSupported "2.1.220"
+      it "rejects a release older than the one the bundle install path needs" $
+        classifyVersion minimumClaudeVersion (Right (ExitSuccess, "2.1.100 (Claude Code)\n"))
+          `shouldBe` VersionUnsupported "2.1.100" "2.1.216"
+      it "never reads an unparseable version banner as unsupported" $
+        classifyVersion minimumCodexVersion (Right (ExitSuccess, "dev build\n"))
+          `shouldSatisfy` isUnknownVersion
+
+    describe "per-action readiness" $ do
+      it "reports a fully provisioned environment as ready for every action" $
+        mapM_
+          (\action -> blockingRemediation (actionReport readyPreflightEnvironment action) `shouldBe` Nothing)
+          doctorActions
+      it "blocks only the actions that reach for a missing provider executable" $ do
+        let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeExecutable = Nothing}
+        blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ExecutableUnavailable]
+        blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` []
+        -- Auto-solve reviews the PR with the opposite brand itself, so a
+        -- claude auto-solve still depends on codex being installed.
+        blockedProblems environment (ActionAutoSolve ClaudeSolver) `shouldBe` [ExecutableUnavailable]
+        blockedProblems environment ActionIssueReview `shouldBe` []
+      it "distinguishes an unauthenticated provider from a missing one" $ do
+        let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
+        blockedProblems environment (ActionPullRequestFlow ClaudeSolver) `shouldBe` [ProviderUnauthenticated]
+      it "names the setup command when a workflow bundle is absent" $ do
+        let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
+        blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [WorkflowBundleUnavailable]
+        blockingRemediation (actionReport environment (ActionSolve ClaudeSolver))
+          `shouldSatisfy` maybe False (Data.Text.isInfixOf "tools/setup_workflows.py --component claude-plugin")
+      it "blocks the canonical review gate, but not issue revision, on a missing backend" $ do
+        let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendMissing "/nowhere/approve_issues.py"}
+        blockedProblems environment ActionIssueReview `shouldBe` [ReviewBackendUnavailable]
+        blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ReviewBackendUnavailable]
+        blockedProblems environment ActionIssueRevision `shouldBe` []
+      it "tells an occupied install path apart from a never-installed one" $ do
+        let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendConflicting "/occupied" "a directory"}
+        blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
+        blockingRemediation (actionReport environment ActionIssueReview)
+          `shouldSatisfy` maybe False (Data.Text.isInfixOf "never replaces something it did not install")
+      it "reports an unavailable GitHub CLI for every action" $ do
+        let environment = readyPreflightEnvironment {environmentGitHub = GitHubExecutableMissing}
+        mapM_ (\action -> blockedProblems environment action `shouldSatisfy` elem GitHubUnavailable) doctorActions
+      -- The whole point of the unknown status: a probe Kanban could not
+      -- interpret must never break a setup that actually works.
+      it "never blocks an action on an inconclusive probe" $ do
+        let inconclusive brand =
+              (readyProviderProbe brand)
+                { probeVersion = VersionUnknown "no version banner",
+                  probeAuth = AuthUnknown "unreadable",
+                  probeBundle = BundleUnknown "unreadable"
+                }
+            environment =
+              readyPreflightEnvironment
+                { environmentCodex = inconclusive CodexSolver,
+                  environmentClaude = inconclusive ClaudeSolver,
+                  environmentGitHub = GitHubUnknown "unreadable"
+                }
+        mapM_ (\action -> blockedProblems environment action `shouldBe` []) doctorActions
+        doctorReady environment `shouldBe` True
+
+    describe "board diagnostics" $ do
+      it "round-trips a remediation through the failure message" $
+        preflightDiagnosticDetail (preflightDiagnostic "install the bundle") `shouldBe` Just "install the bundle"
+      it "leaves an ordinary agent failure unclassified" $
+        preflightDiagnosticDetail "codex was not found on PATH" `shouldBe` Nothing
+      it "reports a setup gap as unavailable rather than as another failed agent" $ do
+        canonicalReviewNotice (preflightDiagnostic "no canonical issue reviewer. Run setup.")
+          `shouldSatisfy` Data.Text.isInfixOf "cannot start"
+        canonicalReviewNotice (preflightDiagnostic "no canonical issue reviewer. Run setup.")
+          `shouldSatisfy` Data.Text.isInfixOf "Run setup."
+      it "keeps a generic provider failure reading as a failure" $
+        canonicalReviewNotice "the backend crashed" `shouldSatisfy` Data.Text.isInfixOf "failed:"
+      it "distinguishes a setup gap from a generic failure in the activity text" $ do
+        failureActivity (preflightDiagnostic "bundle absent") `shouldBe` "setup required"
+        failureActivity "provider exited 1" `shouldBe` "failed"
+
+    describe "hermetic fresh-machine probing" $ do
+      it "reports a fully provisioned machine as ready for every action" $
+        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            doctorReady environment `shouldBe` True
+      it "only ever runs status-only probes, and mutates nothing" $
+        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+          \root probeLog -> do
+            snapshotBefore <- machineSnapshot root
+            _ <- gatherPreflightEnvironment root
+            snapshotAfter <- machineSnapshot root
+            snapshotAfter `shouldBe` snapshotBefore
+            invocations <- probeInvocations probeLog
+            invocations `shouldSatisfy` not . null
+            invocations `shouldSatisfy` all (`elem` allowedProbeInvocations)
+      it "reports absent provider executables without blocking the canonical gate" $
+        withPreflightMachine [readyGitHubFake, python3Fake] BackendInstalled $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ExecutableUnavailable]
+          blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [ExecutableUnavailable]
+          blockedProblems environment ActionIssueReview `shouldBe` []
+      it "reports an unauthenticated provider" $
+        withPreflightMachine [signedOutCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ProviderUnauthenticated]
+      it "reports an absent workflow bundle" $
+        withPreflightMachine [bundlelessCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [WorkflowBundleUnavailable]
+      it "reports an uninstalled canonical review backend" $
+        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendMissing $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            blockedProblems environment ActionIssueReview `shouldBe` [ReviewBackendUnavailable]
+      it "reports an install path occupied by something Kanban did not install" $
+        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendOccupied $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
+      it "reports an unauthenticated GitHub CLI" $
+        withPreflightMachine [readyCodexFake, readyClaudeFake, signedOutGitHubFake, python3Fake] BackendInstalled $
+          \root _ -> do
+            environment <- gatherPreflightEnvironment root
+            blockedProblems environment ActionIssueReview `shouldBe` [GitHubUnavailable]
+      it "renders one doctor line per supported AI action" $
+        withPreflightMachine [readyGitHubFake, python3Fake] BackendMissing $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          let rendered = Data.Text.unlines (doctorLines environment)
+          mapM_ (\action -> rendered `shouldSatisfy` Data.Text.isInfixOf (actionLabel action)) doctorActions
+          -- The drainer keeps its own dedicated install and status flow.
+          rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
+
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
   Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0
@@ -5831,6 +6030,190 @@ flagForVariable variableName =
     flaggedArguments (_ : rest) = flaggedArguments rest
     flaggedArguments [] = []
 
+-- Workflow-preflight fixtures ------------------------------------------------
+
+isNotAuthenticated :: AuthObservation -> Bool
+isNotAuthenticated (AuthNotAuthenticated _) = True
+isNotAuthenticated _ = False
+
+isUnknownAuth :: AuthObservation -> Bool
+isUnknownAuth (AuthUnknown _) = True
+isUnknownAuth _ = False
+
+isUnknownBundle :: BundleObservation -> Bool
+isUnknownBundle (BundleUnknown _) = True
+isUnknownBundle _ = False
+
+isUnknownVersion :: VersionObservation -> Bool
+isUnknownVersion (VersionUnknown _) = True
+isUnknownVersion _ = False
+
+readyProviderProbe :: SolverBrand -> ProviderProbe
+readyProviderProbe brand =
+  ProviderProbe
+    { probeBrand = brand,
+      probeExecutable = Just "/fixture/bin/agent",
+      probeVersion = VersionSupported "9.9.9",
+      probeAuth = AuthAuthenticated,
+      probeBundle = BundleEnabled
+    }
+
+readyPreflightEnvironment :: PreflightEnvironment
+readyPreflightEnvironment =
+  PreflightEnvironment
+    { environmentCodex = readyProviderProbe CodexSolver,
+      environmentClaude = readyProviderProbe ClaudeSolver,
+      environmentGitHub = GitHubReady,
+      environmentReviewBackend = ReviewBackendReadyAt "/fixture/approve_issues.py"
+    }
+
+withCodexProbe :: ProviderProbe -> PreflightEnvironment
+withCodexProbe probe = readyPreflightEnvironment {environmentCodex = probe}
+
+withClaudeProbe :: ProviderProbe -> PreflightEnvironment
+withClaudeProbe probe = readyPreflightEnvironment {environmentClaude = probe}
+
+blockedProblems :: PreflightEnvironment -> PreflightAction -> [PreflightProblem]
+blockedProblems environment action =
+  [ problem
+    | check <- (actionReport environment action).reportChecks,
+      PreflightBlocked problem _ _ <- [check.checkStatus]
+  ]
+
+-- | What the Kanban-managed canonical review backend's install path holds
+-- on the fresh machine a scenario probes.
+data BackendFixture = BackendInstalled | BackendMissing | BackendOccupied
+
+-- | A hermetic fresh machine: a PATH holding only the fake executables the
+-- scenario installs, a Kanban install directory it populates, and a log
+-- every fake appends its argument vector to so a test can assert nothing
+-- beyond a status-only probe was ever run. No credentials, network access,
+-- or model call is involved.
+withPreflightMachine ::
+  [(String, [ByteString.ByteString])] ->
+  BackendFixture ->
+  (FilePath -> FilePath -> IO result) ->
+  IO result
+withPreflightMachine executables backend action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let binaryRoot = temporaryRoot </> "bin"
+        installRoot = temporaryRoot </> "issue-review"
+        workingDirectory = temporaryRoot </> "repo"
+        probeLog = temporaryRoot </> "probes.log"
+        backendPath = installRoot </> "approve_issues.py"
+    mapM_ (createDirectoryIfMissing True) [binaryRoot, installRoot, workingDirectory]
+    mapM_ (installFakeExecutable binaryRoot) executables
+    case backend of
+      BackendInstalled -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n"
+      BackendMissing -> pure ()
+      BackendOccupied -> createDirectoryIfMissing True backendPath
+    withEnvironmentValue "PATH" binaryRoot $
+      withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installRoot $
+        withEnvironmentValue "KANBAN_TEST_PROBE_LOG" probeLog $
+          action workingDirectory probeLog
+
+installFakeExecutable :: FilePath -> (String, [ByteString.ByteString]) -> IO ()
+installFakeExecutable binaryRoot (name, body) = do
+  let path = binaryRoot </> name
+  ByteString.writeFile
+    path
+    (ByteString.unlines (["#!/bin/sh", "printf '%s\\n' \"$*\" >> \"$KANBAN_TEST_PROBE_LOG\""] <> body))
+  setFileMode path 0o700
+
+-- | Everything on the fresh machine a probe could have written to,
+-- snapshotted so a test can prove the doctor path changed none of it.
+machineSnapshot :: FilePath -> IO [(FilePath, [FilePath])]
+machineSnapshot workingDirectory = do
+  let temporaryRoot = takeDirectory workingDirectory
+  mapM
+    (\name -> (,) name . sortOn id <$> listDirectory (temporaryRoot </> name))
+    ["bin", "issue-review", "repo"]
+
+probeInvocations :: FilePath -> IO [String]
+probeInvocations probeLog = do
+  present <- doesFileExist probeLog
+  if present then lines <$> readFile probeLog else pure []
+
+-- | Exactly the status-only argument vectors 'gatherPreflightEnvironment'
+-- is allowed to run. Anything else — an agent session, a login flow, a
+-- write — would show up here as an unrecognized invocation.
+allowedProbeInvocations :: [String]
+allowedProbeInvocations =
+  ["--version", "login status", "auth status", "plugin list --json"]
+
+readyCodexFake :: (String, [ByteString.ByteString])
+readyCodexFake =
+  ( "codex",
+    [ "case \"$*\" in",
+      "  '--version') printf 'codex-cli 0.144.6\\n' ;;",
+      "  'login status') printf 'Logged in using ChatGPT\\n' ;;",
+      "  'plugin list --json') printf '%s\\n' '{\"installed\":[{\"pluginId\":\"kanban@kanban\",\"installed\":true,\"enabled\":true}]}' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+signedOutCodexFake :: (String, [ByteString.ByteString])
+signedOutCodexFake =
+  ( "codex",
+    [ "case \"$*\" in",
+      "  '--version') printf 'codex-cli 0.144.6\\n' ;;",
+      "  'login status') printf 'Not logged in\\n'; exit 1 ;;",
+      "  'plugin list --json') printf '%s\\n' '{\"installed\":[{\"pluginId\":\"kanban@kanban\",\"installed\":true,\"enabled\":true}]}' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+bundlelessCodexFake :: (String, [ByteString.ByteString])
+bundlelessCodexFake =
+  ( "codex",
+    [ "case \"$*\" in",
+      "  '--version') printf 'codex-cli 0.144.6\\n' ;;",
+      "  'login status') printf 'Logged in using ChatGPT\\n' ;;",
+      "  'plugin list --json') printf '%s\\n' '{\"installed\":[]}' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+readyClaudeFake :: (String, [ByteString.ByteString])
+readyClaudeFake =
+  ( "claude",
+    [ "case \"$*\" in",
+      "  '--version') printf '2.1.220 (Claude Code)\\n' ;;",
+      "  'auth status') printf '%s\\n' '{\"loggedIn\": true}' ;;",
+      "  'plugin list --json') printf '%s\\n' '[{\"id\":\"kanban@kanban\",\"enabled\":true}]' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+readyGitHubFake :: (String, [ByteString.ByteString])
+readyGitHubFake =
+  ( "gh",
+    [ "case \"$*\" in",
+      "  'auth status') printf 'Logged in to github.com\\n' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+signedOutGitHubFake :: (String, [ByteString.ByteString])
+signedOutGitHubFake =
+  ( "gh",
+    [ "case \"$*\" in",
+      "  'auth status') printf 'You are not logged into any GitHub hosts\\n'; exit 1 ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
+-- | Only ever resolved, never run: the canonical review backend's
+-- interpreter has to exist for the backend check to be about the backend.
+python3Fake :: (String, [ByteString.ByteString])
+python3Fake = ("python3", ["exit 0"])
+
 testOptions :: Options
 testOptions =
   Options
@@ -5839,6 +6222,7 @@ testOptions =
       optionColor = ColorAuto,
       optionBorder = BorderBox,
       optionGlyphTest = False,
+      optionDoctor = False,
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,
