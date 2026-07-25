@@ -12,6 +12,17 @@ src/Kanban/PullRequestFlow.hs actually spawn. The bundled coordinator is a
 tracked copy of the Codex plugin's coordinator (issue #76), tested here
 standalone so the Claude bundle's own coverage never requires the Codex
 plugin's assets to exist.
+
+Issue #118 added four more packaged commands — the drafting and canonical
+issue-review workflows /issue, /draft-issues, /autoissue, and /issue-review —
+so discovery and Haskell name parity are now two separate concepts here.
+EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
+commands directory (all eight); HASKELL_PARITY_COMMAND_NAMES is the strictly
+smaller set Kanban's own Haskell code spawns by name (the four above). The
+drafting workflows are user- or daemon-invoked and are deliberately excluded
+from that parity pinning; see docs/drafting-workflow-contract.md. They are
+still subject to every structural policy this module enforces: frontmatter
+description, forbidden configuration keys, and no personal paths.
 """
 
 from __future__ import annotations
@@ -40,7 +51,19 @@ PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review.hs"
 
-EXPECTED_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
+# The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
+# pins this set — and only this set — against src/Kanban/Solve.hs and
+# src/Kanban/PullRequestFlow.hs, so it must never grow to include a workflow
+# Kanban does not spawn.
+HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
+
+# The drafting and canonical issue-review workflows vendored by issue #118.
+# User- or daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# and policy-checked but excluded from Haskell name parity above.
+DRAFTING_COMMAND_NAMES = {"issue", "draft-issues", "autoissue", "issue-review"}
+
+# What a Claude Code installation must actually discover in commands/.
+EXPECTED_COMMAND_NAMES = HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES
 
 # Keys that would let a packaged command's frontmatter or manifest silently
 # override the model, reasoning effort, permission mode, or working
@@ -158,9 +181,20 @@ class MarketplaceAndPluginManifestTests(unittest.TestCase):
 
 
 class CommandDiscoveryTests(unittest.TestCase):
-    def test_commands_directory_contains_exactly_the_four_packaged_workflows(self):
+    def test_commands_directory_contains_exactly_the_packaged_workflows(self):
         found = {path.stem for path in COMMANDS_ROOT.glob("*.md")}
         self.assertEqual(found, EXPECTED_COMMAND_NAMES)
+
+    def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
+        # The two concepts must stay distinct: discovery covers every packaged
+        # workflow, while WorkflowNameParityTests pins only the ones Kanban's
+        # Haskell code spawns. Collapsing them back into one constant would
+        # either break parity or silently stop discovering the drafting
+        # commands.
+        self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
+        self.assertEqual(
+            EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES, DRAFTING_COMMAND_NAMES
+        )
 
     def test_each_command_declares_a_description_and_no_forbidden_frontmatter(self):
         for name in EXPECTED_COMMAND_NAMES:
@@ -177,10 +211,12 @@ class CommandDiscoveryTests(unittest.TestCase):
 
 
 class WorkflowNameParityTests(unittest.TestCase):
-    """Pins the packaged command names to the exact `/`-prefixed tokens
+    """Pins the Kanban-spawned command names to the exact `/`-prefixed tokens
     Kanban's Haskell invocation code spawns for the Claude brand, so a
     rename on either side fails this test instead of failing silently at
-    runtime."""
+    runtime. Scoped to HASKELL_PARITY_COMMAND_NAMES, not the full discovery
+    set: the drafting commands issue #118 packaged are user- or
+    daemon-invoked, so Kanban's Haskell code must NOT spawn them."""
 
     def test_claude_workflow_tokens_match_packaged_command_names(self):
         solve_source = SOLVE_HS.read_text(encoding="utf-8")
@@ -205,7 +241,20 @@ class WorkflowNameParityTests(unittest.TestCase):
         self.assertLessEqual(ui_tokens, pr_flow_tokens, "src/Kanban/UI.hs invokes a command PullRequestFlow.hs does not")
 
         all_tokens = solve_tokens | pr_flow_tokens
-        self.assertEqual(all_tokens, EXPECTED_COMMAND_NAMES)
+        self.assertEqual(all_tokens, HASKELL_PARITY_COMMAND_NAMES)
+
+    def test_no_drafting_command_is_spawned_by_kanbans_haskell_code(self):
+        # The other half of the discovery/parity split: a drafting workflow
+        # appearing in Kanban's own invocation surface would mean this
+        # module's parity set is wrong, not that the drafting set should grow.
+        haskell_sources = "\n".join(
+            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS, UI_HS)
+        )
+        spawned = set(re.findall(r'(?:workflowName \w+ \w+ = "|commandName ")[/$]?([\w-]+)"', haskell_sources))
+        # Non-vacuous: the same scan must still recover every name Kanban does
+        # spawn, so an extraction that silently matched nothing fails here.
+        self.assertEqual(spawned & EXPECTED_COMMAND_NAMES, HASKELL_PARITY_COMMAND_NAMES)
+        self.assertEqual(spawned & DRAFTING_COMMAND_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):

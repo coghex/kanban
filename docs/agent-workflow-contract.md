@@ -23,6 +23,13 @@ A fresh checkout can use this document to answer: "why did action X fail,"
 "what do I need to install before X works," and "is path Y something Kanban
 manages or something I must set up myself."
 
+The tracked plugins also package issue-drafting and canonical issue-review
+workflows that Kanban's own CLI never spawns — a user or the review daemon
+invokes them directly. Their responsibilities, boundaries, and inventory live
+in [drafting-workflow-contract.md](drafting-workflow-contract.md); their
+external commands and user-scoped paths are declared in §4 here, alongside
+everything else.
+
 ## 2. Supported agent actions
 
 ### 2.1 Issue solve (`$solve` / `/solve`)
@@ -253,7 +260,11 @@ bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) and the
 tracked Claude plugin's own bash surface
 (`claude-plugin/plugins/kanban/commands/*.md`) in addition to the Haskell
 invocation surface — a command a packaged workflow shells out to is as
-undocumented-if-missing as one Kanban's own Haskell code spawns.
+undocumented-if-missing as one Kanban's own Haskell code spawns. Those two
+globs include the seven drafting and canonical issue-review assets declared in
+[drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets),
+whose user-scoped paths are reconciled against the `personal-path` rows below
+by a markdown counterpart of the Haskell home-relative-path check.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
 - `kind`: `executable` (a literal command Kanban's Haskell source or the
@@ -274,12 +285,12 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
-approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs | kanban | supported | no
+approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
 drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
@@ -352,6 +363,13 @@ runs) parses the manifest in §4 and:
   above, not exempted from coverage;
 - fails if those same files build a home-relative path segment that has no
   matching `personal-path` manifest entry;
+- fails if any of the seven drafting and canonical issue-review assets
+  declared in
+  [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)
+  names a `$HOME/`- or `~/`-prefixed path with no matching `personal-path`
+  manifest entry. All seven are scanned for external commands too; the bash
+  fence extractor simply yields nothing for a prose-only contract, so an asset
+  with no executable surface is covered rather than exempted;
 - fails if a manifest entry's declared `files` no longer contain its token,
   so the manifest cannot silently drift from the code it describes;
 - fails if the issue-review backend entry (`approve-issues-backend`) is

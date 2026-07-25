@@ -1,27 +1,43 @@
 {
   "name": "kanban",
   "version": "1.0.0",
-  "description": "Kanban's tracked Codex workflows: solve, pr-review, pr-rereview, and pr-revise.",
+  "description": "Kanban's tracked Codex workflows: the Kanban-invoked solve, pr-review, pr-rereview, and pr-revise, plus the user-invoked issue, autoissue, and issue-review drafting and readiness-gate workflows.",
   "author": {
     "name": "Terry"
   },
   "homepage": "https://github.com/coghex/kanban",
   "repository": "https://github.com/coghex/kanban",
   "license": "MIT",
-  "keywords": ["kanban", "solve", "pr-review", "pr-rereview", "pr-revise"],
+  "keywords": [
+    "kanban",
+    "solve",
+    "pr-review",
+    "pr-rereview",
+    "pr-revise",
+    "issue",
+    "autoissue",
+    "issue-review"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Kanban Workflows",
-    "shortDescription": "Kanban's solve, pr-review, pr-rereview, and pr-revise workflows",
-    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, and $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md.",
+    "shortDescription": "Kanban's solve, pr-review, pr-rereview, pr-revise, issue, autoissue, and issue-review workflows",
+    "longDescription": "Packages the Codex-side workflows the Kanban board invokes by name: $solve claims and implements a GitHub issue through PR creation, $pr-review and $pr-rereview run the canonical opposite-brand pull request review, and $pr-revise repairs a changes-requested pull request and hands off to a fresh canonical rereview. It also packages the drafting and readiness-gate workflows a user or the review daemon invokes directly rather than Kanban's CLI: $issue drafts exactly one verified, deduplicated issue and stops for signoff, $autoissue delegates that drafting and then immediately runs the canonical review of the created issue, and $issue-review runs the canonical opposite-agent readiness gate for one numbered issue. Each workflow preserves Kanban's existing solver, reviewer, and revision authority boundaries described in docs/agent-workflow-contract.md and docs/drafting-workflow-contract.md.",
     "developerName": "Terry",
     "category": "Engineering",
-    "capabilities": ["Interactive", "Read", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Use $solve to claim GitHub issue #123, implement it in an isolated worktree, and open a tested PR.",
       "Use $pr-review to review pull request #38 through the canonical opposite-brand workflow.",
       "Use $pr-rereview to rereview pull request #38 after its author pushes changes.",
-      "Use $pr-revise to address the canonical changes-requested review on PR #38."
+      "Use $pr-revise to address the canonical changes-requested review on PR #38.",
+      "Use $issue to find and draft one actionable issue, stopping for my signoff before creating it.",
+      "Use $autoissue to draft one issue, create it after my signoff, and immediately run its canonical review.",
+      "Use $issue-review to run the canonical opposite-agent readiness gate for issue #123."
     ]
   }
 }

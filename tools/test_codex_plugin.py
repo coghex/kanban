@@ -9,6 +9,19 @@ $pr-revise), none of which may set its own model/effort/sandbox/approval/
 working-directory configuration, depend on an untracked personal path, or
 drift from the invocation strings src/Kanban/Solve.hs and
 src/Kanban/PullRequestFlow.hs actually spawn.
+
+Issue #118 added three more packaged skills — the drafting and canonical
+issue-review workflows $issue, $autoissue, and $issue-review — so discovery
+and Haskell name parity are now two separate concepts here.
+EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
+(all seven); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+own Haskell code spawns by name (the four above). The drafting workflows are
+user- or daemon-invoked and are deliberately excluded from that parity
+pinning; the breadth workflow /draft-issues is Claude-only and has no Codex
+counterpart here by design. See docs/drafting-workflow-contract.md. The new
+skills are still subject to every structural policy this module enforces:
+frontmatter name matching, forbidden configuration keys, and no personal
+paths.
 """
 
 from __future__ import annotations
@@ -38,7 +51,21 @@ PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
 REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review.hs"
 
-EXPECTED_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
+# The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
+# pins this set — and only this set — against src/Kanban/Solve.hs and
+# src/Kanban/PullRequestFlow.hs, so it must never grow to include a workflow
+# Kanban does not spawn.
+HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
+
+# The drafting and canonical issue-review workflows vendored by issue #118.
+# User- or daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# and policy-checked but excluded from Haskell name parity above. draft-issues
+# is deliberately absent: it is a Claude-only breadth workflow
+# (docs/drafting-workflow-contract.md §3.2).
+DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review"}
+
+# What a Codex installation must actually discover under skills/.
+EXPECTED_SKILL_NAMES = HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES
 
 # Keys that would let a packaged manifest silently override the model,
 # reasoning effort, sandbox/approval policy, or working directory Kanban's
@@ -216,9 +243,25 @@ class PackagedCodeInvocationTests(unittest.TestCase):
 
 
 class SkillDiscoveryTests(unittest.TestCase):
-    def test_skills_directory_contains_exactly_the_four_packaged_workflows(self):
+    def test_skills_directory_contains_exactly_the_packaged_workflows(self):
         found = {path.name for path in SKILLS_ROOT.iterdir() if path.is_dir()}
         self.assertEqual(found, EXPECTED_SKILL_NAMES)
+
+    def test_discovery_is_a_strict_superset_of_the_haskell_parity_set(self):
+        # The two concepts must stay distinct: discovery covers every packaged
+        # workflow, while WorkflowNameParityTests pins only the ones Kanban's
+        # Haskell code spawns. Collapsing them back into one constant would
+        # either break parity or silently stop discovering the drafting skills.
+        self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
+        self.assertEqual(EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES, DRAFTING_SKILL_NAMES)
+
+    def test_the_claude_only_breadth_workflow_is_not_packaged_here(self):
+        self.assertNotIn("draft-issues", EXPECTED_SKILL_NAMES)
+        self.assertFalse(
+            (SKILLS_ROOT / "draft-issues").exists(),
+            "draft-issues is a Claude-only breadth workflow "
+            "(docs/drafting-workflow-contract.md §3.2)",
+        )
 
     def test_each_skill_has_a_skill_md_whose_frontmatter_name_matches_its_directory(self):
         for name in EXPECTED_SKILL_NAMES:
@@ -233,9 +276,12 @@ class SkillDiscoveryTests(unittest.TestCase):
 
 
 class WorkflowNameParityTests(unittest.TestCase):
-    """Pins the packaged skill names to the exact tokens Kanban's Haskell
+    """Pins the Kanban-spawned skill names to the exact tokens Kanban's Haskell
     invocation code spawns, so a rename on either side fails this test
-    instead of failing silently at runtime."""
+    instead of failing silently at runtime. Scoped to
+    HASKELL_PARITY_SKILL_NAMES, not the full discovery set: the drafting
+    skills issue #118 packaged are user- or daemon-invoked, so Kanban's
+    Haskell code must NOT spawn them."""
 
     def test_codex_workflow_tokens_match_packaged_skill_names(self):
         solve_source = SOLVE_HS.read_text(encoding="utf-8")
@@ -255,7 +301,20 @@ class WorkflowNameParityTests(unittest.TestCase):
         self.assertLessEqual(ui_tokens, pr_flow_tokens, "src/Kanban/UI.hs invokes a command PullRequestFlow.hs does not")
 
         all_tokens = solve_tokens | pr_flow_tokens
-        self.assertEqual(all_tokens, EXPECTED_SKILL_NAMES)
+        self.assertEqual(all_tokens, HASKELL_PARITY_SKILL_NAMES)
+
+    def test_no_drafting_skill_is_spawned_by_kanbans_haskell_code(self):
+        # The other half of the discovery/parity split: a drafting workflow
+        # appearing in Kanban's own invocation surface would mean this
+        # module's parity set is wrong, not that the drafting set should grow.
+        haskell_sources = "\n".join(
+            path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS, UI_HS)
+        )
+        spawned = set(re.findall(r'(?:workflowName \w+ \w+ = "|commandName ")[/$]?([\w-]+)"', haskell_sources))
+        # Non-vacuous: the same scan must still recover every name Kanban does
+        # spawn, so an extraction that silently matched nothing fails here.
+        self.assertEqual(spawned & EXPECTED_SKILL_NAMES, HASKELL_PARITY_SKILL_NAMES)
+        self.assertEqual(spawned & DRAFTING_SKILL_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):
