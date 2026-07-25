@@ -214,17 +214,26 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
 
 
 def backend_is_installed(install_dir: Path) -> bool:
-    """Whether a usable Kanban-managed backend already occupies install_dir.
+    """Whether a Kanban-managed backend already occupies install_dir.
 
-    Both installed files are required, since `approve_issues.py` imports
-    `kanban_config.py` at module scope, and each must resolve to this
-    repository's own tracked asset rather than merely exist.
+    Exactly the shape `plan_issue_review` converges on and
+    `Kanban.Preflight` counts as installed: for each installed asset, a
+    symlink resolving to a file that carries that asset's identity marker.
+    Both are required, since `approve_issues.py` imports `kanban_config.py`
+    at module scope.
+
+    An ordinary marker-bearing copy is deliberately *not* accepted. Setup
+    refuses to manage that path and preflight reports it as a conflicting
+    installation, so treating it as ready here would install a compatibility
+    launcher pointing at something the rest of the system will not use.
     """
-    return all(
-        (install_dir / name).is_file()
-        and install_issue_review.is_managed_asset(install_dir / name, name)
-        for name in ("approve_issues.py", "kanban_config.py")
-    )
+    for name in ("approve_issues.py", "kanban_config.py"):
+        path = install_dir / name
+        if not path.is_symlink() or not path.is_file():
+            return False
+        if not install_issue_review.is_managed_asset(path, name):
+            return False
+    return True
 
 
 def plan_legacy_launcher(

@@ -364,6 +364,37 @@ class ConflictTests(HermeticSetupTests):
             )
         )
 
+    def test_an_ordinary_backend_copy_does_not_count_as_an_installation(self):
+        # Marker-bearing but hand-copied rather than linked: setup refuses to
+        # manage that path and preflight calls it a conflicting
+        # installation, so the launcher must not be pointed at it either.
+        self.install_dir.mkdir(parents=True)
+        for name in ("approve_issues.py", "kanban_config.py"):
+            (self.install_dir / name).write_text(
+                f"# kanban-managed-asset:issue-review/{name}\n", encoding="utf-8"
+            )
+        self.legacy_path.parent.mkdir(parents=True)
+        self.legacy_path.write_text("pre-kanban launcher\n", encoding="utf-8")
+
+        self.assertFalse(setup_workflows.backend_is_installed(self.install_dir))
+        code, payload = self.run_setup(
+            "--component", "legacy-launcher", "--migrate-legacy-launcher", "--apply"
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.component(payload, "legacy-launcher")["status"], "unavailable")
+        self.assertFalse(self.legacy_path.is_symlink())
+        self.assertEqual(
+            self.legacy_path.read_text(encoding="utf-8"), "pre-kanban launcher\n"
+        )
+
+    def test_a_dangling_backend_link_does_not_count_as_an_installation(self):
+        self.install_dir.mkdir(parents=True)
+        for name in ("approve_issues.py", "kanban_config.py"):
+            (self.install_dir / name).symlink_to(self.root / "gone" / name)
+
+        self.assertFalse(setup_workflows.backend_is_installed(self.install_dir))
+
     def test_the_launcher_is_installed_after_the_backend_in_the_same_run(self):
         # Requested in the damaging order; setup must still install the
         # backend first, and the resulting launcher must resolve.
