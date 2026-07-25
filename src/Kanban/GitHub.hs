@@ -21,7 +21,7 @@ module Kanban.GitHub
 where
 
 import Control.Concurrent (forkIO, forkIOWithUnmask, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
 import Control.Monad (unless, void)
 import Data.Aeson
@@ -39,7 +39,7 @@ import Data.Aeson.Types (Parser)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -164,11 +164,23 @@ setCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure . Ju
 
 fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
 fetchGitHubSnapshot guard limits workflowConfig repository = do
-  reclaimed <- reclaimRecordedGhGroups repository
+  -- Reclaim signals process groups and then confirms what it did, so it is
+  -- held to the same rule as cleanup: the refresh timer may not land between
+  -- those halves. Without that, a timeout arriving mid-freeze would leave the
+  -- record on disk, the guard unset, and the board publishing an ordinary
+  -- timeout over a group nothing had established anything about.
+  reclaimed <- uninterruptiblyBounded reclaimInterrupted (reclaimRecordedGhGroups repository)
   case reclaimed of
-    Left message -> pure (Left (ProviderError RequestFailed message))
+    -- A record was on disk -- that is what reclaim was working on -- so the
+    -- guard reports it as durably held, and the board holds off rather than
+    -- ageing into an ordinary failed refresh.
+    Left message -> do
+      setCleanupFailure guard (GhCleanupFailure message GuardRecorded)
+      pure (Left (ProviderError RequestFailed message))
     Right () -> fetchPages initialState
   where
+    reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
+
     initialState = FetchState [] [] Nothing Nothing True True False False
 
     fetchPages state
@@ -487,9 +499,28 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
 -- either. That wait cannot outlast the worker, and the worker holds itself
 -- to a budget, so refusing interruption here does not mean waiting forever.
 uninterruptibleCleanup :: IO () -> IO ()
-uninterruptibleCleanup cleanup = do
+uninterruptibleCleanup = uninterruptiblyBounded ()
+
+-- | Runs an action where the refresh timer cannot reach it, and waits for it
+-- without accepting exceptions either.
+--
+-- Anything that signals a process group and then has to confirm what it did
+-- belongs in here. Interrupted between those two halves it leaves the worst
+-- of both: processes signalled, nothing established, and -- since the caller
+-- never hears about it -- an ordinary timeout published over whatever
+-- survived. The work is bounded by its own budget, so refusing interruption
+-- does not mean waiting forever; if that budget runs out the caller is told
+-- so through `whenInterrupted` rather than by silence.
+uninterruptiblyBounded :: a -> IO a -> IO a
+uninterruptiblyBounded whenInterrupted action = do
   finished <- newEmptyMVar
-  void (forkIOWithUnmask (\unmask -> void (timeout cleanupBudgetMicros (unmask cleanup)) `finally` putMVar finished ()))
+  void
+    ( forkIOWithUnmask
+        ( \unmask ->
+            (timeout cleanupBudgetMicros (unmask action) >>= putMVar finished . fromMaybe whenInterrupted)
+              `finally` void (tryPutMVar finished whenInterrupted)
+        )
+    )
   uninterruptibleMask_ (takeMVar finished)
 
 -- | Comfortably longer than a cleanup that is behaving: three escalation

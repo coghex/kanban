@@ -5078,10 +5078,7 @@ main = hspec $ do
               ]
               $ do
                 (outcome, _) <- captureBoardRefresh temporaryRoot 30
-                case outcome of
-                  BoardRefreshCompleted (Left providerError) ->
-                    providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
-                  other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+                heldOffMessage outcome >>= (`shouldMention` "cannot be identified as this repository's")
             doesFileExist ranMarker `shouldReturn` False
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
         -- Once the saved gh exits the record has nothing left to name, so the
@@ -5118,10 +5115,7 @@ main = hspec $ do
               ]
               $ do
                 (outcome, _) <- captureBoardRefresh temporaryRoot 30
-                case outcome of
-                  BoardRefreshCompleted (Left providerError) ->
-                    providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
-                  other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+                heldOffMessage outcome >>= (`shouldMention` "cannot be identified as this repository's")
             doesFileExist ranMarker `shouldReturn` False
             -- The record survives the refusal: nothing about this attempt
             -- made the survivor any more accounted for.
@@ -5149,10 +5143,7 @@ main = hspec $ do
                     ]
                     $ do
                       (outcome, _) <- captureBoardRefresh temporaryRoot 30
-                      case outcome of
-                        BoardRefreshCompleted (Left providerError) ->
-                          providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
-                        other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+                      heldOffMessage outcome >>= (`shouldMention` "cannot be identified as this repository's")
                   doesFileExist ranMarker `shouldReturn` False
                 pure identity
         -- 'withSurvivingGroupLeader' has now killed it, so the very same
@@ -5191,10 +5182,7 @@ main = hspec $ do
             ]
             $ do
               (outcome, _) <- captureBoardRefresh temporaryRoot 30
-              case outcome of
-                BoardRefreshCompleted (Left providerError) ->
-                  providerError.providerErrorMessage `shouldMention` "refusing to start another"
-                other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+              heldOffMessage outcome >>= (`shouldMention` "refusing to start another")
           doesFileExist ranMarker `shouldReturn` False
 
     it "stops the gh it just spawned when no durable guard can be written for it, leaving nothing for a restart to overlap" $
@@ -5329,6 +5317,55 @@ main = hspec $ do
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
             Right identities -> identityForPid descendantPid identities `shouldBe` Nothing
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
+    it "finishes reclaiming a recorded group even when the refresh timer fires during it" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- Reclaim signals a process group and then confirms what it did.
+        -- Two recorded groups take comfortably longer than the one-second
+        -- timeout to work through, so the timer certainly fires part-way.
+        -- Interrupted there, reclaim would leave groups signalled but
+        -- unestablished and the record uncleared -- and, because reclaim runs
+        -- before the guard holds anything, the refresh would publish an
+        -- ordinary timeout over whatever it had not got to.
+        withSurvivingGroupLeader $ \survivorPid ->
+          withSurvivingGroupLeader $ \secondPid ->
+            withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+                Right identities -> do
+                  let membersOf pid = filter ((== pid) . processIdentityGroupPid) identities
+                  membersOf survivorPid `shouldNotBe` []
+                  membersOf secondPid `shouldNotBe` []
+                  writeGhGroupRecord
+                    repository
+                    [ OwnedProcessGroup survivorPid (membersOf survivorPid) True,
+                      OwnedProcessGroup secondPid (membersOf secondPid) True
+                    ]
+                    `shouldReturn` Right ()
+              withFakeGh
+                temporaryRoot
+                [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+                  "printf '%s' '" <> emptyGraphqlPage <> "'"
+                ]
+                $ do
+                  -- Whatever the refresh goes on to report -- it may well
+                  -- time out, and honestly so once the groups are provably
+                  -- gone -- is not the point here. Whether reclaim finished
+                  -- is.
+                  void (captureBoardRefresh temporaryRoot 1)
+              -- Both groups gone, and the record cleared: reclaim reached its
+              -- confirming census and its own conclusion, rather than being
+              -- abandoned after the signals with the record still standing.
+              reclaimed <- readProcessSnapshot
+              case reclaimed of
+                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+                Right identities -> do
+                  identityForPid survivorPid identities `shouldBe` Nothing
+                  identityForPid secondPid identities `shouldBe` Nothing
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "does not mistake a gh that is still exiting for a group it leaked" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -5520,10 +5557,7 @@ main = hspec $ do
               ]
               $ do
                 (outcome, _) <- captureBoardRefresh temporaryRoot 30
-                case outcome of
-                  BoardRefreshCompleted (Left providerError) ->
-                    providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
-                  other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+                heldOffMessage outcome >>= (`shouldMention` "cannot be identified as this repository's")
             doesFileExist ranMarker `shouldReturn` False
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
             -- The squatter is untouched: refusing must not mean signalling.
@@ -7407,6 +7441,19 @@ countOccurrences needle haystack
       (_, match)
         | ByteString.null match -> []
         | otherwise -> () : iterateWhileFound step (ByteString.drop (ByteString.length needle) match)
+
+-- | The message from an outcome that declined to fetch, insisting it was
+-- reported as an unverified cleanup rather than an ordinary failed refresh.
+-- The distinction is the whole point: a refusal means a gh may still be
+-- running, so the board has to hold off rather than age into a failure and
+-- let the next refresh through.
+heldOffMessage :: BoardRefreshOutcome -> IO Text
+heldOffMessage (BoardRefreshUnverified failure) = do
+  failure.ghCleanupGuard `shouldBe` GuardRecorded
+  pure failure.ghCleanupMessage
+heldOffMessage other = do
+  expectationFailure ("expected the fetch to be held off, got " <> show other)
+  pure ""
 
 readMarkerPid :: FilePath -> IO Int
 readMarkerPid markerPath = do
