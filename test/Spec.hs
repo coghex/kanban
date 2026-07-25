@@ -4602,6 +4602,44 @@ main = hspec $ do
       parseTrackerChildren [] body `shouldBe` []
       snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
 
+    it "keeps every documented checklist format parsing around prose that merely opens with an excluded word" $ do
+      let surrounded sentence =
+            "## Children\n"
+              <> sentence
+              <> "\n- [ ] #756 — **A1:** Define the persistence contract.\n"
+              <> "- [ ] #742 — A1: Modal ownership with debug pass-through\n"
+              <> sentence
+              <> "\n- [x] **#88 — Data-driven location definitions**\n"
+          childrenOf body = map (.trackerChildIssueNumber) (parseTrackerChildren [] body)
+      childrenOf (surrounded "Related discussion happens in #100.") `shouldBe` [756, 742, 88]
+      childrenOf (surrounded "External prerequisite work already landed.") `shouldBe` [756, 742, 88]
+      childrenOf (surrounded "Out of scope items are tracked elsewhere.") `shouldBe` [756, 742, 88]
+      snd (parseTrackerBody [] (surrounded "Related discussion happens in #100.")) `shouldBe` []
+
+    it "excludes checklists under bare, bold, and underscored excluded pseudo-headings" $ do
+      let excludedBy label = "## Children\n- [ ] #1 — A1: Kept\n" <> label <> "\n- [ ] #99 — A2: Ignored\n"
+          childrenOf body = map (.trackerChildIssueNumber) (parseTrackerChildren [] body)
+      childrenOf (excludedBy "Related:") `shouldBe` [1]
+      childrenOf (excludedBy "**Related:**") `shouldBe` [1]
+      childrenOf (excludedBy "**Related**:") `shouldBe` [1]
+      childrenOf (excludedBy "_Related:_") `shouldBe` [1]
+      childrenOf (excludedBy "*External prerequisites:*") `shouldBe` [1]
+      childrenOf (excludedBy "__Out of scope__") `shouldBe` [1]
+
+    it "ends a pseudo-heading exclusion at the next pseudo-heading or a deeper real heading" $ do
+      let resumedBy resumption =
+            "## Children\n- [ ] #1 — A1: Kept\n**Related:**\n- [ ] #99 — Ignored\n"
+              <> resumption
+              <> "\n- [ ] #2 — A2: Kept\n"
+          childrenOf body = map (.trackerChildIssueNumber) (parseTrackerChildren [] body)
+      childrenOf (resumedBy "**Remaining:**") `shouldBe` [1, 2]
+      childrenOf (resumedBy "### Remaining") `shouldBe` [1, 2]
+      childrenOf (resumedBy "## Remaining") `shouldBe` [1]
+
+    it "leaves checklist diagnostics unreported inside an excluded pseudo-heading subsection" $ do
+      let body = "## Children\n**Related:**\n- [ ] no reference\n- [?] #3\n- [ ] #2 — A1: Ignored\n"
+      parseTrackerBody [] body `shouldBe` ([], [TrackerChildrenMissing])
+
   describe "GitHub GraphQL decoding" $ do
     it "decodes issue and pull-request fields used by the workflow" $ do
       case decodeGitHubItems (LazyByteString.pack githubResponse) of
