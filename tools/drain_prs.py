@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+import drain_prs_service
 import kanban_config
 
 
@@ -28,14 +29,8 @@ DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
 CONFIG_FILENAME = ".drain-prs.json"
 STALE_APPROVAL_CHECK = "dismiss-stale-approval"
 DEFAULT_INTERVAL_SECONDS = 300
-MAX_AUTO_REPAIR_CONFLICT_FILES = 2
-MAX_CONFLICT_REVIEW_ROUNDS = 5
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
-# GitHub's read-after-write lag can hide a push that already landed, so the
-# "did the agent push?" check polls briefly instead of reading once.
-PUSH_VISIBILITY_WAIT_SECONDS = 30
-PUSH_VISIBILITY_POLL_SECONDS = 3
 MODEL_TIMEOUT_SECONDS = 60 * 60
 STATE_VERSION = 2
 FAILURES_BEFORE_BACKOFF = 2
@@ -43,10 +38,6 @@ MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
 FINALIZE_MODEL = "gpt-5.6-terra"
 FINALIZE_EFFORT = "medium"
-CONFLICT_REVIEW_MODEL = os.environ.get(
-    "DRAIN_PRS_CLAUDE_REVIEW_MODEL", "claude-opus-5"
-)
-CONFLICT_REVIEW_EFFORT = "xhigh"
 NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
 PR_REVIEW_V1_RE = re.compile(
     r"<!--\s*pr-review:v1\s+reviewer=(claude|codex)\s+"
@@ -65,34 +56,6 @@ LEGACY_CODEX_REVIEW_RE = re.compile(
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
 )
-TEXTLIKE_CONFLICT_EXTENSIONS = {
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cabal",
-    ".csv",
-    ".go",
-    ".h",
-    ".hs",
-    ".html",
-    ".java",
-    ".js",
-    ".json",
-    ".lua",
-    ".md",
-    ".py",
-    ".rb",
-    ".rs",
-    ".sh",
-    ".sql",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
 LOG_DIR: Path | None = None
 
 
@@ -645,11 +608,6 @@ def latest_review_marker(ctx: RepoContext, number: int) -> tuple[str, str] | Non
     return head, verdict
 
 
-def conflict_file_is_textlike(path: str) -> bool:
-    suffix = Path(path).suffix.lower()
-    return suffix in TEXTLIKE_CONFLICT_EXTENSIONS
-
-
 def add_approval_label(ctx: RepoContext, number: int) -> None:
     log(f"PR #{number}: re-adding {APPROVE_LABEL}")
     run(
@@ -665,62 +623,6 @@ def add_approval_label(ctx: RepoContext, number: int) -> None:
         ],
         cwd=ctx.path,
     )
-
-
-def remove_approval_label(ctx: RepoContext, number: int) -> None:
-    log(f"PR #{number}: removing stale {APPROVE_LABEL} before conflict repair")
-    run(
-        [
-            "gh",
-            "pr",
-            "edit",
-            str(number),
-            "--repo",
-            ctx.repo_slug,
-            "--remove-label",
-            APPROVE_LABEL,
-        ],
-        cwd=ctx.path,
-    )
-    refreshed = get_pr(ctx, number)
-    if has_label(refreshed, APPROVE_LABEL):
-        raise DrainError(
-            f"PR #{number}: failed to remove stale {APPROVE_LABEL!r} "
-            "before conflict repair."
-        )
-
-
-def remove_approval_label_if_present(ctx: RepoContext, number: int) -> None:
-    refreshed = get_pr(ctx, number)
-    if not has_label(refreshed, APPROVE_LABEL):
-        return
-    remove_approval_label(ctx, number)
-
-
-def mark_changes_requested(ctx: RepoContext, number: int) -> None:
-    refreshed = get_pr(ctx, number)
-    args = [
-        "gh",
-        "pr",
-        "edit",
-        str(number),
-        "--repo",
-        ctx.repo_slug,
-    ]
-    if has_label(refreshed, APPROVE_LABEL):
-        args.extend(["--remove-label", APPROVE_LABEL])
-    if not has_label(refreshed, CHANGES_LABEL):
-        args.extend(["--add-label", CHANGES_LABEL])
-    if len(args) > 7:
-        run(args, cwd=ctx.path)
-    refreshed = get_pr(ctx, number)
-    if has_label(refreshed, APPROVE_LABEL) or not has_label(
-        refreshed, CHANGES_LABEL
-    ):
-        raise DrainError(
-            f"PR #{number}: failed to leave exactly {CHANGES_LABEL!r} after "
-            "conflict repair stopped."
-        )
 
 
 def parse_check_name(item: dict[str, Any]) -> str | None:
@@ -789,31 +691,6 @@ def render_check_gate(kind: str, name: str | None, state: str) -> str:
     if name is None:
         return f"{kind}=disabled"
     return f"{name}={state}"
-
-
-def wait_for_new_head(
-    ctx: RepoContext,
-    number: int,
-    previous_head: str,
-    *,
-    timeout_seconds: int,
-    poll_seconds: int,
-    action: str,
-) -> dict[str, Any]:
-    # A single read here races GitHub's read-after-write lag: a head that was
-    # genuinely pushed can still come back stale, and treating that as "the
-    # agent never pushed" marks a valid repair as failed. Poll until the new
-    # head becomes visible, then let the caller's stricter checks run.
-    deadline = time.time() + timeout_seconds
-    while True:
-        pr = get_pr(ctx, number)
-        if pr["headRefOid"] != previous_head:
-            return pr
-        if time.time() >= deadline:
-            raise DrainError(
-                f"PR #{number}: Codex {action} finished without pushing a new head."
-            )
-        time.sleep(poll_seconds)
 
 
 def wait_for_branch_update_policy(
@@ -1442,13 +1319,6 @@ def remove_worktree(
     )
 
 
-def cleanup_repair_worktree(ctx: RepoContext, path: Path, branch: str) -> None:
-    # This is a drainer-owned disposable worktree and may contain an
-    # intentionally unfinished/conflicted merge when repair is declined.
-    remove_worktree(ctx, path, dry_run=False, allow_dirty_force=True)
-    delete_local_branch(ctx, branch, dry_run=False)
-
-
 def delete_local_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> None:
     proc = run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -1738,455 +1608,172 @@ def cleanup_after_merge(
     fast_forward_default_branch(ctx, dry_run=dry_run)
 
 
-def inspect_conflict_files(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-) -> tuple[Path, str, list[str]]:
-    tmpdir = Path(
-        tempfile.mkdtemp(prefix=f"drain-prs-conflict-{pr['number']}-")
-    )
-    repair_branch = f"drain-prs-repair-{pr['number']}-{int(time.time())}"
-    run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
-    run(
+def fetch_pr_head(ctx: RepoContext, pr: dict[str, Any]) -> bool:
+    """Make the PR's exact head commit available locally.
+
+    Identity is the head OID, never the branch name: a fork's head is not a
+    branch of this repository at all, and an unrelated local branch can share
+    a fork's `headRefName` while pointing somewhere else entirely. GitHub
+    publishes every PR head, fork or not, at `refs/pull/<number>/head`, which
+    the default fetch refspec does not cover.
+    """
+    head = pr["headRefOid"]
+    if commit_exists_locally(ctx, head):
+        return True
+    proc = run(
         [
             "git",
-            "worktree",
-            "add",
-            "-b",
-            repair_branch,
-            str(tmpdir),
-            f"{ctx.remote_name}/{pr['headRefName']}",
+            "fetch",
+            "--quiet",
+            ctx.remote_name,
+            f"refs/pull/{pr['number']}/head",
         ],
         cwd=ctx.path,
-    )
-
-    proc = run(
-        ["git", "merge", "--no-commit", "--no-ff", f"{ctx.remote_name}/{ctx.default_branch}"],
-        cwd=tmpdir,
         check=False,
     )
-    if proc.returncode == 0:
-        cleanup_repair_worktree(ctx, tmpdir, repair_branch)
-        raise DrainError(
-            f"PR #{pr['number']} is marked conflicting by GitHub, but it merged cleanly locally."
-        )
-
-    conflicts = run(
-        ["git", "diff", "--name-only", "--diff-filter=U"],
-        cwd=tmpdir,
-    ).stdout.splitlines()
-    if not conflicts:
-        cleanup_repair_worktree(ctx, tmpdir, repair_branch)
-        raise DrainError(
-            f"PR #{pr['number']} failed to merge locally, but no conflict files were detected."
-        )
-    return tmpdir, repair_branch, conflicts
+    if proc.returncode != 0:
+        return False
+    return commit_exists_locally(ctx, head)
 
 
-def codex_conflict_prompt(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    conflicts: list[str],
-) -> str:
-    conflict_lines = "\n".join(f"- {path}" for path in conflicts)
-    linked_issues = ", ".join(
-        f"#{issue['number']}" for issue in pr.get("closingIssuesReferences", [])
-    ) or "none"
-    return f"""You are repairing a merge conflict for PR #{pr['number']} in {ctx.repo_slug}.
+def merge_conflict_paths(ctx: RepoContext, pr: dict[str, Any]) -> list[str]:
+    """Repository-relative paths that conflict between the PR head and the
+    default branch.
 
-Repository main checkout: {ctx.path}
-Temporary repair worktree: current working directory
-Default branch: {ctx.default_branch}
-PR head branch on {ctx.remote_name}: {pr['headRefName']}
-Linked issues: {linked_issues}
-
-Current branch is a temporary local repair branch created from {ctx.remote_name}/{pr['headRefName']}.
-A merge of {ctx.remote_name}/{ctx.default_branch} into the current branch has already been started and is currently conflicted.
-
-Conflict files:
-{conflict_lines}
-
-Your job:
-1. Resolve the merge conflict, preserving the PR's intent while incorporating current {ctx.default_branch}.
-2. Keep the scope tightly limited to the merge repair.
-3. Run the smallest relevant validation for the files you touched.
-4. Commit the merge resolution.
-5. Push the repaired result back to {ctx.remote_name}/{pr['headRefName']} using the current HEAD.
-
-Constraints:
-- Do not merge the PR.
-- Do not close issues.
-- Do not remove any worktrees or branches.
-- Do not comment on the PR or add/remove any labels. Python owns approval state,
-  and a fresh Claude reviewer must approve the exact repaired head.
-- Never force-push.
-- Do not make unrelated refactors.
-- Use `gh`/`git` directly; assume local GitHub auth already works.
-
-When done, leave the worktree in a clean committed state and report briefly what you changed."""
-
-
-def codex_conflict_fix_prompt(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    *,
-    round_number: int,
-    expected_head: str,
-) -> str:
-    return f"""You are the Codex repair agent in conflict-review round {round_number} for PR #{pr['number']} in {ctx.repo_slug}.
-
-The current PR head must be {expected_head}. A fresh Claude reviewer requested changes to the prior merge-conflict repair.
-
-Your job:
-1. Fetch `headRefOid` (pass `--repo {ctx.repo_slug}` to the `gh` command; never rely on gh's own default-repository inference) and stop without changing anything unless it is exactly {expected_head}.
-2. Read the newest `<!-- pr-review:v1 reviewer=claude ... verdict=CHANGES_REQUESTED -->` PR comment and resolve every blocking concern.
-3. Inspect the linked issue, the complete current PR diff, and relevant code so the fix preserves both the PR's intent and current {ctx.default_branch} behavior.
-4. Keep changes minimal and limited to the review findings.
-5. Run the smallest relevant validation, commit the fixes, and push current HEAD to {ctx.remote_name}/{pr['headRefName']}.
-
-Constraints:
-- Do not merge the PR or modify/close its issue.
-- Do not comment on the PR or add/remove any labels. A fresh Claude reviewer owns the next verdict.
-- Never force-push.
-- Leave the current worktree clean and committed.
-
-Report briefly which review findings you resolved and what validation ran."""
-
-
-def claude_conflict_review_prompt(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    *,
-    round_number: int,
-    expected_head: str,
-) -> str:
-    return f"""You are a fresh independent Claude reviewer in conflict-review round {round_number} for PR #{pr['number']} in {ctx.repo_slug}.
-
-The PR was previously approved, then required an automated merge-conflict repair by Codex. Review only: do not edit files, commit, push, merge, close or modify issues, or remove worktrees.
-
-Pass `--repo {ctx.repo_slug}` to every `gh` command below (for example `gh pr view {pr['number']} --repo {ctx.repo_slug} --json headRefOid`, `gh pr comment {pr['number']} --repo {ctx.repo_slug}`, `gh pr edit {pr['number']} --repo {ctx.repo_slug}`). Never rely on gh's own default-repository inference, which can target a different repository than {ctx.repo_slug} in a checkout with more than one remote.
-
-1. Fetch `headRefOid` and require it to equal {expected_head}; if it differs, do not comment or label.
-2. Read the PR body, linked issue and authoritative comments, commits, CI, the latest prior `pr-review:v1` comment, and the complete current merge-base diff.
-3. Inspect the conflict-resolution commit and any later Codex review-fix commits especially carefully. Verify that they preserve the approved PR's intent while incorporating current {ctx.default_branch}. Recheck prior blocking concerns and inspect for regressions or unmet requirements. Nits never block.
-4. Re-fetch the head immediately before publishing. If it differs from {expected_head}, do not comment or label.
-5. Publish exactly one concise PR comment using the `gh` CLI. Use APPROVE only when no blocker remains; otherwise use CHANGES_REQUESTED with actionable file/line references. Never use a formal `gh pr review` submission because the authenticated account owns the PR. End the comment with exactly one of:
-   `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=APPROVE -->`
-   `<!-- pr-review:v1 reviewer=claude head={expected_head} verdict=CHANGES_REQUESTED -->`
-6. Re-fetch the head, then set exactly one matching label and remove the other using `gh pr edit`: `{APPROVE_LABEL}` for APPROVE or `{CHANGES_LABEL}` for CHANGES_REQUESTED. Re-fetch once more; if the head moved, remove the label you added and report the stale result.
-
-Use the `gh` CLI only for GitHub publication, always with `--repo {ctx.repo_slug}`. Report the verdict, prior-concern statuses, new findings, reviewed head, and comment/label status."""
-
-
-def run_codex_conflict_agent(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    *,
-    worktree: Path,
-    prompt: str,
-    action: str,
-    output_file: Path,
-) -> None:
+    `git merge-tree` computes the merge in the object database, so this reads
+    the conflict without creating a worktree, a branch, or an index the way
+    the removed repair path did. Inspection is best-effort: a conflict the
+    drainer cannot describe locally is still a conflict it must report, so
+    every failure degrades to an unnamed file list rather than an error.
+    """
+    number = pr["number"]
     try:
-        run(
-            [
-                "codex",
-                "exec",
-                "--ignore-user-config",
-                "--ephemeral",
-                "-m",
-                FINALIZE_MODEL,
-                "-c",
-                f'model_reasoning_effort="{FINALIZE_EFFORT}"',
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check",
-                "-o",
-                str(output_file),
-                "-",
-            ],
-            cwd=worktree,
-            input_text=prompt,
-            timeout=MODEL_TIMEOUT_SECONDS,
-        )
-    except DrainError as exc:
-        notify_model_failure(ctx, pr["number"], action, exc)
-        raise ModelUnavailableError(
-            f"{FINALIZE_MODEL}@{FINALIZE_EFFORT} failed during {action} "
-            f"for PR #{pr['number']}; no retry or fallback was attempted. "
-            f"Inspect {output_file}."
-        ) from exc
-
-
-def run_claude_conflict_reviewer(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    *,
-    worktree: Path,
-    round_number: int,
-    expected_head: str,
-) -> str:
-    prompt = claude_conflict_review_prompt(
-        ctx,
-        pr,
-        round_number=round_number,
-        expected_head=expected_head,
-    )
-    output_file = Path(tempfile.gettempdir()) / (
-        f"drain-prs-conflict-review-{pr['number']}-r{round_number}.out"
-    )
-    local_head = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
-    local_status = run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=worktree,
-    ).stdout.strip()
-    if local_status:
-        raise DrainError(
-            f"PR #{pr['number']}: conflict-review worktree was dirty before "
-            f"Claude round {round_number}."
-        )
-    if local_head != expected_head:
-        raise DrainError(
-            f"PR #{pr['number']}: conflict-review worktree head "
-            f"{local_head[:12]} did not match expected PR head {expected_head[:12]}."
-        )
-    try:
+        run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
+        if not fetch_pr_head(ctx, pr):
+            log(
+                f"PR #{number}: head {pr['headRefOid'][:12]} is not available "
+                "locally; recording the block without file names"
+            )
+            return []
         proc = run(
             [
-                "claude",
-                "-p",
-                "--model",
-                CONFLICT_REVIEW_MODEL,
-                "--effort",
-                CONFLICT_REVIEW_EFFORT,
-                "--permission-mode",
-                "bypassPermissions",
-                "--no-session-persistence",
+                "git",
+                "-c",
+                "core.quotePath=false",
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                f"{ctx.remote_name}/{ctx.default_branch}",
+                pr["headRefOid"],
             ],
-            cwd=worktree,
-            input_text=prompt,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            cwd=ctx.path,
+            check=False,
         )
-        output_file.write_text(proc.stdout or "", encoding="utf-8")
-    except (DrainError, OSError) as exc:
-        try:
-            remove_approval_label_if_present(ctx, pr["number"])
-        except DrainError as cleanup_exc:
-            log(
-                f"PR #{pr['number']}: could not verify stale approval removal "
-                f"after Claude failure: {cleanup_exc}"
-            )
-        notify_model_failure(
-            ctx,
-            pr["number"],
-            f"conflict-review round {round_number}",
-            exc,
-            model=CONFLICT_REVIEW_MODEL,
-            effort=CONFLICT_REVIEW_EFFORT,
+    except DrainError as exc:
+        log(f"PR #{number}: could not inspect the conflicting files: {exc}")
+        return []
+    if proc.returncode == 0:
+        log(
+            f"PR #{number}: GitHub reports a conflict that merges cleanly "
+            "locally; recording the block without file names"
         )
-        raise ModelUnavailableError(
-            f"{CONFLICT_REVIEW_MODEL}@{CONFLICT_REVIEW_EFFORT} failed during "
-            f"conflict-review round {round_number} for PR #{pr['number']}; "
-            f"no retry or fallback was attempted. Inspect {output_file}."
-        ) from exc
-
-    refreshed = get_pr(ctx, pr["number"])
-    final_local_head = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
-    final_local_status = run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=worktree,
-    ).stdout.strip()
-    if refreshed["headRefOid"] != expected_head:
-        remove_approval_label_if_present(ctx, pr["number"])
-        raise DrainError(
-            f"PR #{pr['number']}: head changed during Claude conflict review "
-            f"({expected_head[:12]} -> {refreshed['headRefOid'][:12]})."
-        )
-    if final_local_head != local_head or final_local_status:
-        remove_approval_label_if_present(ctx, pr["number"])
-        raise DrainError(
-            f"PR #{pr['number']}: Claude conflict review round {round_number} "
-            "modified the repair worktree; approval was removed."
-        )
-    details = latest_review_details(ctx, pr["number"])
-    approve = has_label(refreshed, APPROVE_LABEL)
-    changes = has_label(refreshed, CHANGES_LABEL)
-    if details == ("claude", expected_head.lower(), "APPROVE"):
-        if approve and not changes:
-            return "APPROVE"
-    elif details == ("claude", expected_head.lower(), "CHANGES_REQUESTED"):
-        if changes and not approve:
-            return "CHANGES_REQUESTED"
-    remove_approval_label_if_present(ctx, pr["number"])
-    raise DrainError(
-        f"PR #{pr['number']}: Claude conflict review round {round_number} "
-        "did not publish a matching current-head marker and exactly one verdict label."
-    )
+        return []
+    if proc.returncode != 1:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        log(f"PR #{number}: could not inspect the conflicting files: {detail}")
+        return []
+    # First line is the merged tree's object ID; the conflicted paths follow
+    # until the blank line that separates them from the informational messages.
+    paths: list[str] = []
+    for line in (proc.stdout or "").splitlines()[1:]:
+        if not line.strip():
+            break
+        paths.append(line)
+    return sorted(set(paths))
 
 
-def verify_codex_conflict_push(
-    ctx: RepoContext,
-    pr: dict[str, Any],
-    *,
-    worktree: Path,
-    previous_head: str,
-    action: str,
-) -> dict[str, Any]:
-    wait_for_new_head(
-        ctx,
-        pr["number"],
-        previous_head,
-        timeout_seconds=PUSH_VISIBILITY_WAIT_SECONDS,
-        poll_seconds=PUSH_VISIBILITY_POLL_SECONDS,
-        action=action,
-    )
-    refreshed = wait_for_branch_update_policy(
-        ctx,
-        pr["number"],
-        previous_head,
-        timeout_seconds=UPDATE_BRANCH_WAIT_SECONDS,
-        poll_seconds=UPDATE_BRANCH_POLL_SECONDS,
-    )
-    if has_label(refreshed, APPROVE_LABEL):
-        raise DrainError(
-            f"PR #{pr['number']}: stale {APPROVE_LABEL!r} remained after Codex {action}; "
-            "refusing to let the repair agent approve its own head."
-        )
-    local_head = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
-    if local_head != refreshed["headRefOid"]:
-        raise DrainError(
-            f"PR #{pr['number']}: Codex {action} left local HEAD "
-            f"{local_head[:12]} but pushed PR head {refreshed['headRefOid'][:12]}."
-        )
-    status = run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=worktree,
-    ).stdout.strip()
-    if status:
-        raise DrainError(
-            f"PR #{pr['number']}: Codex {action} left the repair worktree dirty."
-        )
-    return refreshed
-
-
-def repair_conflict_with_codex(
+def record_merge_conflict(
     ctx: RepoContext,
     pr: dict[str, Any],
     *,
     dry_run: bool,
-) -> bool:
-    tmpdir, repair_branch, conflicts = inspect_conflict_files(ctx, pr)
-    conflict_summary = ", ".join(conflicts)
-    approval_invalidated = False
-    try:
-        if len(conflicts) > MAX_AUTO_REPAIR_CONFLICT_FILES:
-            raise DrainError(
-                f"PR #{pr['number']} has {len(conflicts)} conflict files "
-                f"({conflict_summary}); refusing automatic repair."
-            )
-        non_text = [path for path in conflicts if not conflict_file_is_textlike(path)]
-        if non_text:
-            raise DrainError(
-                f"PR #{pr['number']} has non-text conflict files "
-                f"({', '.join(non_text)}); refusing automatic repair."
-            )
+) -> None:
+    """Stop working one conflicted PR and raise an open incident for it.
 
+    A conflict resolution is the one artifact in this pipeline no reviewer has
+    seen, so the drainer asks instead of guessing. It touches no label -- least
+    of all the approval the review gate depends on -- and merges nothing.
+    """
+    number = pr["number"]
+    if dry_run:
         log(
-            f"PR #{pr['number']}: starting cross-reviewed conflict repair for "
-            f"{conflict_summary}"
+            f"PR #{number}: merge conflict; would record an open drainer "
+            "incident and stop merging it"
         )
-        if dry_run:
+        return
+    existing = drain_prs_service.find_open_conflict_incident(ctx.path, number)
+    if existing is not None:
+        log(
+            f"PR #{number}: merge conflict already recorded as "
+            f"{existing[1]['incident_id']}; still blocked"
+        )
+        return
+    paths = merge_conflict_paths(ctx, pr)
+    incident = drain_prs_service.record_conflict_incident(
+        repo_path=ctx.path,
+        pull_request=number,
+        files=paths,
+    )
+    log(
+        f"PR #{number}: merge conflict; recorded incident "
+        f"{incident['incident_id']} and stopped merging it "
+        f"({', '.join(paths) if paths else 'conflicting files unavailable'})"
+    )
+
+
+def reconcile_conflict_incidents(ctx: RepoContext, *, dry_run: bool) -> None:
+    """Resolve conflict incidents whose PR is no longer conflicted.
+
+    Runs over the stored incidents rather than the approval queue, so an
+    incident still clears once its PR leaves the queue. Only a confirmed
+    reading closes one: an unknown mergeability or an unavailable read keeps
+    it open, and no other PR's incident is touched.
+    """
+    if dry_run:
+        return
+    for incident in drain_prs_service.open_conflict_incidents(ctx.path):
+        number = incident.get("pull_request")
+        if not isinstance(number, int):
             log(
-                f"PR #{pr['number']}: would remove stale approval, run Codex "
-                f"repair, and alternate up to {MAX_CONFLICT_REVIEW_ROUNDS} "
-                "fresh Claude review round(s)"
+                f"Incident {incident.get('incident_id')} names no pull request; "
+                "leaving it open"
             )
-            return True
-
-        approval_invalidated = True
-        remove_approval_label(ctx, pr["number"])
-        previous_head = pr["headRefOid"]
-        output_file = Path(tempfile.gettempdir()) / (
-            f"drain-prs-conflict-{pr['number']}.out"
-        )
-        run_codex_conflict_agent(
-            ctx,
-            pr,
-            worktree=tmpdir,
-            prompt=codex_conflict_prompt(ctx, pr, conflicts),
-            action="merge-conflict repair",
-            output_file=output_file,
-        )
-        current = verify_codex_conflict_push(
-            ctx,
-            pr,
-            worktree=tmpdir,
-            previous_head=previous_head,
-            action="merge-conflict repair",
-        )
-
-        for round_number in range(1, MAX_CONFLICT_REVIEW_ROUNDS + 1):
-            current_head = current["headRefOid"]
+            continue
+        try:
+            pr = get_pr(ctx, number)
+        except DrainError as exc:
             log(
-                f"PR #{pr['number']}: Claude conflict-review round "
-                f"{round_number}/{MAX_CONFLICT_REVIEW_ROUNDS} for {current_head[:12]}"
+                f"PR #{number}: could not confirm the merge conflict cleared; "
+                f"keeping its incident open: {exc}"
             )
-            verdict = run_claude_conflict_reviewer(
-                ctx,
-                pr,
-                worktree=tmpdir,
-                round_number=round_number,
-                expected_head=current_head,
+            continue
+        mergeable = pr.get("mergeable")
+        merge_state = pr.get("mergeStateStatus")
+        if pr.get("state") != "OPEN":
+            note = f"PR #{number} is no longer open."
+        elif mergeable == "CONFLICTING" or merge_state == "DIRTY":
+            continue
+        elif mergeable == "MERGEABLE":
+            note = f"PR #{number} merges cleanly again."
+        else:
+            log(
+                f"PR #{number}: mergeability is still {mergeable}; "
+                "keeping its conflict incident open"
             )
-            if verdict == "APPROVE":
-                log(
-                    f"PR #{pr['number']}: conflict repair approved by Claude "
-                    f"after {round_number} round(s)"
-                )
-                return True
-            if round_number == MAX_CONFLICT_REVIEW_ROUNDS:
-                log(
-                    f"PR #{pr['number']}: conflict repair still has requested "
-                    f"changes after {MAX_CONFLICT_REVIEW_ROUNDS} rounds; leaving "
-                    f"{CHANGES_LABEL} for human follow-up"
-                )
-                return False
-
-            fix_output = Path(tempfile.gettempdir()) / (
-                f"drain-prs-conflict-fix-{pr['number']}-r{round_number}.out"
-            )
-            run_codex_conflict_agent(
-                ctx,
-                pr,
-                worktree=tmpdir,
-                prompt=codex_conflict_fix_prompt(
-                    ctx,
-                    pr,
-                    round_number=round_number,
-                    expected_head=current_head,
-                ),
-                action=f"conflict-review fix round {round_number}",
-                output_file=fix_output,
-            )
-            current = verify_codex_conflict_push(
-                ctx,
-                pr,
-                worktree=tmpdir,
-                previous_head=current_head,
-                action=f"conflict-review fix round {round_number}",
-            )
-        return False
-    except DrainError:
-        if approval_invalidated:
-            try:
-                mark_changes_requested(ctx, pr["number"])
-            except DrainError as cleanup_exc:
-                log(
-                    f"PR #{pr['number']}: could not leave the failed conflict "
-                    f"repair safely labeled: {cleanup_exc}"
-                )
-        raise
-    finally:
-        cleanup_repair_worktree(ctx, tmpdir, repair_branch)
+            continue
+        resolved = drain_prs_service.resolve_conflict_incident(ctx.path, number, note)
+        if resolved is not None:
+            log(f"PR #{number}: resolved conflict incident {resolved['incident_id']}")
 
 
 def process_pr(
@@ -2194,7 +1781,6 @@ def process_pr(
     number: int,
     *,
     dry_run: bool,
-    repair_conflicts: bool,
     state: dict[str, Any],
     gates: GateConfig,
 ) -> bool:
@@ -2217,17 +1803,11 @@ def process_pr(
     mergeable = pr.get("mergeable")
     merge_state = pr.get("mergeStateStatus")
     if mergeable == "CONFLICTING" or merge_state == "DIRTY":
-        if repair_conflicts:
-            repaired = repair_conflict_with_codex(ctx, pr, dry_run=dry_run)
-            if repaired and not dry_run:
-                refreshed = get_pr(ctx, number)
-                if has_label(refreshed, APPROVE_LABEL):
-                    remember_approved_head(state, number, refreshed["headRefOid"])
-            return repaired
-        raise DrainError(
-            f"PR #{number} has a merge conflict "
-            f"(mergeable={mergeable}, mergeStateStatus={merge_state})."
-        )
+        # A blocked outcome for this PR alone, not a drainer failure: the queue
+        # loop records no failure and applies no cooldown, so every other
+        # approved PR keeps draining in the same run.
+        record_merge_conflict(ctx, pr, dry_run=dry_run)
+        return False
 
     if merge_state == "BEHIND":
         update_branch(ctx, pr, dry_run=dry_run)
@@ -2321,7 +1901,6 @@ def loop(
     interval: int,
     once: bool,
     dry_run: bool,
-    repair_conflicts: bool,
     gates: GateConfig,
 ) -> None:
     lock_handle = acquire_lock(ctx)
@@ -2330,6 +1909,7 @@ def loop(
     queue_refresh_failures = 0
     try:
         while True:
+            reconcile_conflict_incidents(ctx, dry_run=dry_run)
             try:
                 recovered = recover_stale_approval(ctx, state, dry_run=dry_run)
             except ModelUnavailableError:
@@ -2409,7 +1989,6 @@ def loop(
                         ctx,
                         number,
                         dry_run=dry_run,
-                        repair_conflicts=repair_conflicts,
                         state=state,
                         gates=gates,
                     )
@@ -2477,11 +2056,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--no-conflict-repair",
-        action="store_true",
-        help="Fail immediately on merge conflicts instead of invoking Codex repair.",
-    )
-    parser.add_argument(
         "--config",
         default=None,
         help=(
@@ -2524,7 +2098,6 @@ def main() -> None:
             interval=args.interval,
             once=args.once,
             dry_run=args.dry_run,
-            repair_conflicts=not args.no_conflict_repair,
             gates=gates,
         )
     except DrainError as exc:

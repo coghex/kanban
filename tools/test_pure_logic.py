@@ -623,27 +623,6 @@ class ConfiguredLabelsTests(unittest.TestCase):
             )
         self.assertEqual([pr["number"] for pr in approved], [1])
 
-    def test_mark_changes_requested_applies_the_configured_labels(self):
-        calls: list[list[str]] = []
-
-        def fake_run(args, *, cwd, **kwargs):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0, "", "")
-
-        before = {"number": 9, "labels": [{"name": "custom:approve"}]}
-        after = {"number": 9, "labels": [{"name": "custom:changes"}]}
-        with (
-            mock.patch.object(drain_prs, "APPROVE_LABEL", "custom:approve"),
-            mock.patch.object(drain_prs, "CHANGES_LABEL", "custom:changes"),
-            mock.patch.object(drain_prs, "run", side_effect=fake_run),
-            mock.patch.object(drain_prs, "get_pr", side_effect=[before, after]),
-        ):
-            drain_prs.mark_changes_requested(self._context(Path("/tmp")), 9)
-        self.assertIn("custom:changes", calls[0])
-        self.assertIn("custom:approve", calls[0])
-        self.assertNotIn("reviewed:changes", calls[0])
-        self.assertNotIn("reviewed:approve", calls[0])
-
 
 if __name__ == "__main__":
     unittest.main()

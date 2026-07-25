@@ -4928,6 +4928,18 @@ main = hspec $ do
       result `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
       result `shouldSatisfy` either (const False) drainerIsRunning
 
+    it "surfaces a per-pull-request merge-conflict incident on the board" $ do
+      let result =
+            decodeDrainerStatus
+              "{\"state\":\"running\",\"open_incident\":{\"summary\":\"PR #42 has a merge conflict in README; the drainer left it unmerged.\",\"pull_request\":42,\"kind\":\"merge-conflict\"}}"
+      result
+        `shouldBe` Right
+          ( DrainerStatus
+              DrainerWarning
+              "on · unresolved incident · PR #42 has a merge conflict in README; the drainer left it unmerged."
+          )
+      result `shouldSatisfy` either (const False) drainerIsRunning
+
     it "makes a stopped drainer with an unresolved incident an error" $
       decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")

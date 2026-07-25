@@ -167,14 +167,16 @@ everything else.
 
 ### 2.4 Incident/controller capability — the PR drainer
 
-- **Owning source:** `tools/drain_prs_service.py` (service loop and
-  incident lifecycle) and `tools/install_drainer.py` (installer), surfaced
-  read-only in-app by `src/Kanban/Drainer.hs`.
+- **Owning source:** `tools/drain_prs_service.py` (incident storage and
+  lifecycle, plus the service loop) and `tools/install_drainer.py`
+  (installer), surfaced read-only in-app by `src/Kanban/Drainer.hs`. The
+  drainer (`tools/drain_prs.py`) records and resolves its own per-pull
+  -request conflict incidents through that same storage.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
   `kill`) manages the LaunchAgent. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
-  operation, and, only for automated stale-head rereview and conflict-repair
-  rounds, to `codex exec` and `claude -p`. These Python-tool invocations sit
+  operation, and, only for automated stale-head rereview rounds, to
+  `codex exec`. These Python-tool invocations sit
   outside the manifest in §4, which reconciles the solve/PR-flow/canonical
   -review Haskell surface; they are covered by `tools/test_pure_logic.py`,
   `tools/test_drain_prs_service.py`, and `tools/test_install_drainer.py`.
@@ -186,7 +188,13 @@ everything else.
 - **Failure semantics:** an unresolved incident surfaces in Kanban's
   sidebar as `DrainerWarning`/`DrainerError` with the incident summary
   (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
-  incident rules independently of Kanban.
+  incident rules independently of Kanban. Incidents come in two kinds. A
+  crash incident says the drainer process died and is cleared per
+  repository. A merge-conflict incident says a healthy drainer stopped
+  merging one pull request; it carries that pull-request number and its
+  conflicting paths, is unique per open (repository, pull request), changes
+  no label on the pull request it names, and resolves itself once that pull
+  request is mergeable again or closed, leaving every other incident open.
 - **Required authority:** the same GitHub write scope, plus local launchd
   control for the signed-in user.
 - **Durable state:** `~/Library/LaunchAgents/com.coghex.drain-prs.plist`;
