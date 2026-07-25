@@ -133,7 +133,7 @@ import Kanban.Drainer
     queryDrainerStatus,
     setDrainerRunning,
   )
-import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
+import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( PreflightAction (..),
@@ -435,12 +435,13 @@ data AgentSessionEntry = AgentSessionEntry
   deriving stock (Eq, Show)
 
 -- | How a board refresh ended. 'BoardRefreshUnverified' is not just another
--- failure: it means the @gh@ process group the refresh spawned could not be
--- confirmed dead, so the board must stay 'Loading' and no second @gh@ may be
--- started alongside a first one that may still be running.
+-- failure: the @gh@ process group the refresh spawned could not be confirmed
+-- dead, so no second @gh@ may be started alongside one that may still be
+-- running. Which guard enforces that depends on
+-- 'ghCleanupRecorded' — see 'applyBoardRefresh'.
 data BoardRefreshOutcome
   = BoardRefreshCompleted (Either ProviderError GitHubResult)
-  | BoardRefreshUnverified Text
+  | BoardRefreshUnverified GhCleanupFailure
   deriving stock (Eq, Show)
 
 data AppEvent
@@ -4820,7 +4821,7 @@ runBoardRefreshWith publish options config repository = do
   -- is final by now, and nothing is published before it is known.
   cleanupFailure <- ghFetchCleanupFailure guard
   outcome <- case (cleanupFailure, timedResult) of
-    (Just message, _) -> pure (BoardRefreshUnverified message)
+    (Just failure, _) -> pure (BoardRefreshUnverified failure)
     (Nothing, Nothing) -> pure (BoardRefreshCompleted (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds"))))
     (Nothing, Just (Left providerError)) -> pure (BoardRefreshCompleted (Left providerError))
     (Nothing, Just (Right githubResult))
@@ -4877,12 +4878,20 @@ runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>=
 applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
 applyBoardRefresh outcome = do
   modify $ \state -> case outcome of
-    -- 'appBoardFreshness' deliberately stays 'Loading'. The gh process group
-    -- could not be confirmed dead, and 'startBoardRefresh' refusing to start
-    -- a second fetch while the board is loading is the only thing keeping a
-    -- new gh off a possibly still-live one, so releasing the gate here is
-    -- exactly what must not happen.
-    BoardRefreshUnverified message -> state {appNotice = Just (unverifiedRefreshNotice message)}
+    -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
+    -- re-verifies it before spawning anything, so a later refresh -- in this
+    -- process or in one started after a restart -- cannot overlap it, and the
+    -- board is free to sit in an ordinary failure state that self-heals as
+    -- soon as the group is confirmed gone. Without that record the in-memory
+    -- refusal is all that is left, so 'appBoardFreshness' stays 'Loading' and
+    -- 'startBoardRefresh' keeps turning further fetches away.
+    BoardRefreshUnverified failure
+      | failure.ghCleanupRecorded ->
+          state
+            { appBoardFreshness = failureFreshness state (unverifiedProviderError failure),
+              appNotice = Just (unverifiedRefreshNotice failure)
+            }
+      | otherwise -> state {appNotice = Just (unverifiedRefreshNotice failure)}
     BoardRefreshCompleted (Left providerError) ->
       state
         { appBoardFreshness = failureFreshness state providerError,
@@ -4915,15 +4924,26 @@ applyBoardRefresh outcome = do
     _ -> pure ()
 
 -- | What the board reports when a refresh's @gh@ process group could not be
--- confirmed dead. It has to name both the cause and the consequence: the
--- board is stuck loading on purpose, and the "GitHub refresh is already
--- running" that any later @u@ produces is the same fact restated, not a
--- contradiction.
-unverifiedRefreshNotice :: Text -> Text
-unverifiedRefreshNotice message =
+-- confirmed dead. It names the cause and then what will happen next, which
+-- differs by whether the group was durably recorded: a recorded group is
+-- re-checked by the next refresh and clears itself once it is gone, while an
+-- unrecorded one leaves this dashboard unable to refresh at all. In neither
+-- case is restarting offered as a fix — a restart drops only the in-memory
+-- guard, and would leave a brand-new @gh@ free to overlap the old one.
+unverifiedRefreshNotice :: GhCleanupFailure -> Text
+unverifiedRefreshNotice failure =
   "GitHub refresh timed out and its gh process could not be confirmed stopped ("
-    <> message
-    <> "); refreshing stays blocked while it may still be running — restart the dashboard to clear it"
+    <> failure.ghCleanupMessage
+    <> "); "
+    <> if failure.ghCleanupRecorded
+      then "the next refresh re-checks it and will proceed once it is gone"
+      else "refreshing is blocked until it is, including across a restart"
+
+-- | The unverified cleanup rendered as a provider error, purely so
+-- 'failureFreshness' can age the board the same way every other failed
+-- refresh does.
+unverifiedProviderError :: GhCleanupFailure -> ProviderError
+unverifiedProviderError failure = ProviderError RequestFailed (unverifiedRefreshNotice failure)
 
 reconcilePullRequestSessions :: [PullRequest] -> Map Int PullRequestReviewSession -> Map Int PullRequestReviewSession
 reconcilePullRequestSessions pullRequests = Map.mapWithKey reconcile

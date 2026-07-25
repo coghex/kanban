@@ -24,10 +24,12 @@ import Graphics.Vty.Span (SpanOp (..))
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
+    ghGroupRecordPath,
     loadRepositoryCache,
     loadUsageCache,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
+    writeGhGroupRecord,
     writeRepositoryCache,
     writeUsageCache,
   )
@@ -38,7 +40,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (FetchState (..), GitHubResult (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GitHubResult (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -77,6 +79,7 @@ import Kanban.Preflight
 import Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
+    OwnedProcessGroup (..),
     ProcessIdentity (..),
     checkGroupMembershipWith,
     descendantProcesses,
@@ -4940,15 +4943,79 @@ main = hspec $ do
                 Data.Text.unpack providerError.providerErrorMessage `shouldContain` "authentication token expired"
               other -> expectationFailure ("expected a reported gh failure, got " <> show other)
 
-    it "explains both the unverified gh and the deliberate refresh block it causes" $ do
-      -- The board is left 'Loading' on purpose after an unverified cleanup,
-      -- so the notice has to carry the reason: otherwise the user sees a
-      -- dashboard that never finishes loading and a 'u' that only ever
-      -- answers "GitHub refresh is already running".
-      let notice = unverifiedRefreshNotice "ps exited 1"
-      notice `shouldMention` "ps exited 1"
-      notice `shouldMention` "could not be confirmed stopped"
-      notice `shouldMention` "restart the dashboard"
+    it "re-kills a gh group recorded by an earlier run before it fetches again, then clears the record" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        -- Stands in for the gh a previous dashboard could not confirm dead:
+        -- still alive, still ignoring TERM, recorded on disk exactly as
+        -- 'abandonGh' would have left it. Nothing in this process has ever
+        -- seen it before -- which is the point, since the concern is a
+        -- restarted dashboard racing a survivor.
+        withSurvivingGroupLeader $ \survivorPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            snapshot <- readProcessSnapshot
+            case snapshot of
+              Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+              Right identities -> do
+                let members = filter ((== survivorPid) . processIdentityGroupPid) identities
+                members `shouldNotBe` []
+                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members] `shouldReturn` Right ()
+            withFakeGh
+              temporaryRoot
+              [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+                "printf '%s' '" <> emptyGraphqlPage <> "'"
+              ]
+              $ do
+                (outcome, _) <- captureBoardRefresh temporaryRoot 30
+                case outcome of
+                  BoardRefreshCompleted (Right _) -> pure ()
+                  other -> expectationFailure ("expected the refresh to proceed once the survivor was reclaimed, got " <> show other)
+            -- The survivor is gone, and it was dealt with by the reclaim step
+            -- rather than left to race the gh this refresh went on to spawn.
+            reclaimed <- readProcessSnapshot
+            case reclaimed of
+              Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+              Right identities -> identityForPid survivorPid identities `shouldBe` Nothing
+            doesFileExist ranMarker `shouldReturn` True
+            (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
+    it "refuses to spawn gh at all while a recorded group cannot be read back" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          recordPath <- ghGroupRecordPath repository
+          createDirectoryIfMissing True (takeDirectory recordPath)
+          -- A record that cannot be decoded means "a gh of ours may be live
+          -- and we cannot tell which": treating that as "nothing recorded"
+          -- is precisely the overlap this guard exists to prevent.
+          ByteString.writeFile recordPath "{ this is not a gh group record"
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Left providerError) ->
+                  providerError.providerErrorMessage `shouldMention` "refusing to start another"
+                other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
+          doesFileExist ranMarker `shouldReturn` False
+
+    it "explains the unverified gh and what happens next, without offering a restart as the fix" $ do
+      -- A recorded group self-heals on the next refresh; an unrecorded one
+      -- leaves this dashboard unable to refresh at all. Neither may suggest
+      -- restarting, which drops only the in-memory guard and would let a new
+      -- gh overlap the old one.
+      let recorded = unverifiedRefreshNotice (GhCleanupFailure "ps exited 1" True)
+          unrecorded = unverifiedRefreshNotice (GhCleanupFailure "ps exited 1" False)
+      mapM_ (`shouldMention` "ps exited 1") [recorded, unrecorded]
+      mapM_ (`shouldMention` "could not be confirmed stopped") [recorded, unrecorded]
+      mapM_ (`shouldNotMention` "restart the dashboard") [recorded, unrecorded]
+      recorded `shouldMention` "the next refresh re-checks it"
+      unrecorded `shouldMention` "including across a restart"
 
   describe "solve launch against a session attached while the chooser sits open" $ do
     -- 'startIssueSolve' and 'openIssueSolveChooser' both run in brick's
@@ -6661,6 +6728,28 @@ fullFixtureToml =
 isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
+
+-- | A TERM-ignoring process leading its own group, handed to the action by
+-- PID. Its standard streams go to @\/dev\/null@ and the group is force-killed
+-- on the way out whatever the action did, so a failing assertion can never
+-- leave a survivor holding the test runner's pipes open — the exact stray
+-- fixture the code under test exists to prevent.
+withSurvivingGroupLeader :: (Int -> IO result) -> IO result
+withSurvivingGroupLeader =
+  bracket spawn (\(leaderPid, _) -> ignoringIOException (signalProcessGroup sigKILL (fromIntegral leaderPid)))
+    . (. fst)
+  where
+    spawn = do
+      (_, _, _, leader) <-
+        createProcess
+          (proc "sh" ["-c", "trap '' TERM; while :; do sleep 1; done </dev/null >/dev/null 2>&1"])
+            {create_group = True}
+      leaderPid <- maybe (fail "surviving fixture reported no PID") (pure . fromIntegral) =<< getPid leader
+      threadDelay 200000
+      pure (leaderPid :: Int, leader)
+
+ignoringIOException :: IO () -> IO ()
+ignoringIOException action = void (try @IOException action)
 
 -- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
 -- it instead of the real thing.

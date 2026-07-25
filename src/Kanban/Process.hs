@@ -4,6 +4,7 @@
 module Kanban.Process
   ( IdentityPresence (..),
     ManagedProcess,
+    OwnedProcessGroup (..),
     ProcessIdentity (..),
     checkGroupMembership,
     checkGroupMembershipWith,
@@ -52,6 +53,19 @@ data ProcessIdentity = ProcessIdentity
     processIdentityGroupPid :: Int,
     processIdentityStartedAt :: Text,
     processIdentityCommand :: Text
+  }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | A process group whose termination a spawner could not confirm, captured
+-- in full so the check can be repeated later — including from a freshly
+-- started process, which is why this is serialisable and carries the member
+-- identities rather than the group id alone. 'matchingIdentities' pins each
+-- member to its start time, so a recorded group can never be confused with
+-- an unrelated process that later inherits one of its PIDs.
+data OwnedProcessGroup = OwnedProcessGroup
+  { ownedProcessGroupPid :: Int,
+    ownedProcessGroupMembers :: [ProcessIdentity]
   }
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

@@ -3,18 +3,24 @@
 
 module Kanban.Cache
   ( CacheLoad (..),
+    GhGroupRecordLoad (..),
     UsageCacheLoad (..),
+    ghGroupRecordPath,
+    loadGhGroupRecord,
     loadRepositoryCache,
     loadUsageCache,
+    removeGhGroupRecord,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
     usageCachePath,
+    writeGhGroupRecord,
     writeRepositoryCache,
     writeUsageCache,
   )
 where
 
 import Control.Exception (IOException, bracketOnError, try)
+import Control.Monad (when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Result (..),
@@ -35,6 +41,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import Kanban.Domain (RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot)
+import Kanban.Process (OwnedProcessGroup)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectoryIfMissing,
@@ -73,6 +80,29 @@ data UsageCacheEnvelope = UsageCacheEnvelope
   }
   deriving stock (Eq, Show)
 
+-- | The @gh@ process groups a board refresh spawned and then failed to
+-- confirm dead. Unlike the snapshot caches this is not an optimisation: it
+-- is the only thing that carries "a gh of ours may still be running" across
+-- a dashboard restart, so a later fetch re-verifies before spawning another.
+data GhGroupEnvelope = GhGroupEnvelope
+  { ghGroupSchemaVersion :: Int,
+    ghGroupRepositoryKey :: Text,
+    ghGroupGroups :: [OwnedProcessGroup]
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | How a 'loadGhGroupRecord' turned out. An unreadable or unrecognised
+-- record is 'GhGroupRecordUnusable', never silently treated as "nothing
+-- recorded": the whole point of the file is to refuse a fetch while a gh may
+-- still be live, and a caller that cannot read it does not know that it is
+-- not.
+data GhGroupRecordLoad
+  = GhGroupRecordAbsent
+  | GhGroupRecordLoaded [OwnedProcessGroup]
+  | GhGroupRecordUnusable Text
+  deriving stock (Eq, Show)
+
 instance FromJSON UsageCacheEnvelope where
   parseJSON = withObject "usage cache" $ \cache -> UsageCacheEnvelope <$> cache .: "schemaVersion" <*> cache .: "snapshots"
 
@@ -86,9 +116,10 @@ instance ToJSON UsageCacheEnvelope where
 -- | Version 3 added the per-check detail 'CheckSummary' retains for the §11
 -- details overlay. A version 2 file decodes its check summaries without that
 -- detail, so it is rejected as unsupported rather than silently reused.
-repositoryCacheSchemaVersion, usageCacheSchemaVersion :: Int
+repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
 repositoryCacheSchemaVersion = 3
 usageCacheSchemaVersion = 1
+ghGroupRecordSchemaVersion = 1
 
 repositoryCachePath :: Repository -> IO FilePath
 repositoryCachePath repository = do
@@ -99,6 +130,42 @@ usageCachePath :: IO FilePath
 usageCachePath = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "usage.json")
+
+ghGroupRecordPath :: Repository -> IO FilePath
+ghGroupRecordPath repository = do
+  cacheRoot <- getXdgDirectory XdgCache "kanban"
+  pure (cacheRoot </> "gh-groups" </> Text.unpack (safeKey (repositoryIdentity repository)) <> ".json")
+
+loadGhGroupRecord :: Repository -> IO GhGroupRecordLoad
+loadGhGroupRecord repository = do
+  path <- ghGroupRecordPath repository
+  exists <- doesFileExist path
+  if not exists
+    then pure GhGroupRecordAbsent
+    else do
+      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String GhGroupEnvelope))
+      pure $ case result of
+        Left exception -> GhGroupRecordUnusable ("gh group record unreadable: " <> Text.pack (show exception))
+        Right (Left message) -> GhGroupRecordUnusable ("gh group record unreadable: " <> Text.pack message)
+        Right (Right envelope)
+          | envelope.ghGroupSchemaVersion /= ghGroupRecordSchemaVersion -> GhGroupRecordUnusable "gh group record unreadable: unsupported schema version"
+          | envelope.ghGroupRepositoryKey /= repositoryIdentity repository -> GhGroupRecordUnusable "gh group record unreadable: repository identity mismatch"
+          | otherwise -> GhGroupRecordLoaded envelope.ghGroupGroups
+
+writeGhGroupRecord :: Repository -> [OwnedProcessGroup] -> IO (Either Text ())
+writeGhGroupRecord repository groups = do
+  path <- ghGroupRecordPath repository
+  writeCacheFile path (GhGroupEnvelope ghGroupRecordSchemaVersion (repositoryIdentity repository) groups)
+
+-- | Drops the record once every group in it has been confirmed gone. A
+-- missing file is success: there is nothing left to refuse a fetch over.
+removeGhGroupRecord :: Repository -> IO (Either Text ())
+removeGhGroupRecord repository = do
+  path <- ghGroupRecordPath repository
+  result <- try @IOException (doesFileExist path >>= \exists -> when exists (removeFile path))
+  pure $ case result of
+    Left exception -> Left ("gh group record could not be cleared: " <> Text.pack (show exception))
+    Right () -> Right ()
 
 loadRepositoryCache :: Repository -> IO CacheLoad
 loadRepositoryCache repository = do
