@@ -135,9 +135,9 @@ import Kanban.Preflight
     actionReport,
     blockingRemediation,
     gatherPreflightEnvironment,
+    issueOriginFromBody,
     preflightDiagnostic,
     preflightDiagnosticDetail,
-    revisionAuthorBrand,
   )
 import Kanban.Process (ManagedProcess, interruptManagedProcess, interruptThenKillManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
@@ -3909,7 +3909,7 @@ startIssueReview issue = do
             ReviewBackendStarting -> pure ()
             ReviewBackendStopped -> startReviewBackend issue
             ReviewBackendFailed _ -> startReviewBackend issue
-        else launchCanonicalIssueReview issue.issueNumber requestedStage
+        else launchCanonicalIssueReview issue requestedStage
 
 reviewPhaseActive :: ReviewPhase -> Bool
 reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
@@ -3967,12 +3967,13 @@ newReviewSession issue stage priorGeneration =
       reviewSessionFollowing = True
     }
 
-launchCanonicalIssueReview :: Int -> ReviewStage -> EventM Name AppState ()
-launchCanonicalIssueReview issueNumber stage = do
+launchCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
+launchCanonicalIssueReview issue stage = do
   state <- get
   let channel = state.appEventChannel
+      issueNumber = issue.issueNumber
   void . liftIO . forkIO $ do
-    blocked <- preflightBlocker state.appRepository ActionIssueReview
+    blocked <- preflightBlocker state.appRepository (ActionIssueReview (issueOriginFromBody issue.issueBody))
     result <- case blocked of
       Just message -> pure (Left message)
       Nothing -> runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber)
@@ -4320,7 +4321,7 @@ launchIssueReview client issue = do
         Right () -> pure ()
 
 issueRevisionPreflightAction :: Issue -> PreflightAction
-issueRevisionPreflightAction issue = ActionIssueRevision (revisionAuthorBrand issue.issueBody)
+issueRevisionPreflightAction issue = ActionIssueRevision (issueOriginFromBody issue.issueBody)
 
 applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
 applyReviewBackendStarted result = case result of

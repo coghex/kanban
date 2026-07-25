@@ -222,11 +222,15 @@ manages or something I must set up myself."
   as `refused`, preserved, and paired with its recovery step. Preflight
   blocks an action only on a definite local observation; a probe it cannot
   interpret is reported as unknown and never blocks. Its per-action
-  dependency set is exact: the canonical gate needs the backend and `gh`
-  only; a revision needs the Codex coordinator and, for a Claude-origin
-  issue, the Claude CLI its `kanban_run_claude` amendment authoring uses,
-  but no packaged bundle either way; auto-solve needs both brands, since it
-  reviews its own pull request with the opposite one.
+  dependency set is exact and follows what each action spawns: the
+  canonical gate needs both installed backend files, `gh`, and the reviewer
+  the backend itself invokes (the opposite brand from the issue's origin,
+  or both when unmarked under the dual policy Kanban passes); a revision
+  needs the Codex coordinator and, for a Claude-origin issue, the Claude
+  CLI its `kanban_run_claude` amendment authoring uses; neither needs a
+  packaged bundle, since both run their providers directly. Auto-solve
+  needs both brands, since it reviews its own pull request with the
+  opposite one.
 - **Required authority:** setup needs write access to the user's own
   provider configuration and to the Kanban-namespaced install directory.
   Preflight needs none: it is read-only and non-interactive, never starts an
@@ -277,16 +281,22 @@ commands need.
   `~/Library/Application Support/kanban/issue-review/approve_issues.py`
   (overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), in the same
   dry-run-capable, idempotent, never-overwrite-an-ordinary-file manner as
-  `tools/install_drainer.py` (§5). It re-points only a link it recognizes as
-  its own — one already naming this component's file inside some checkout's
-  `tools/` directory, which is the shape a moved checkout produces — and
-  preserves and refuses any other symlink, so an unknown installation is
-  never silently replaced. `src/Kanban/Review.hs` resolves the backend from
-  that stable link (`resolveCanonicalIssueReviewer`) and fails visibly,
-  naming this installer, when it has not been installed yet;
-  `src/Kanban/Preflight.hs` (§2.5) treats only that same symlink shape as
-  installed, so preflight and the installer can never disagree about
-  whether the path is occupied.
+  `tools/install_drainer.py` (§5). Ownership is established by identity, not
+  location: each tracked asset carries a `kanban-managed-asset:issue-review/
+  <file>` marker, and the installer re-points an existing symlink only when
+  it resolves to a file carrying that marker, or when it is already broken
+  (the state a moved or deleted checkout leaves behind, which holds no
+  content to preserve). A link resolving to any other real file is
+  preserved and refused, so an unknown installation is never silently
+  replaced — a path-shape test alone could not tell one apart, since any
+  `.../tools/approve_issues.py` satisfies it. `src/Kanban/Review.hs`
+  resolves the backend from that stable link
+  (`resolveCanonicalIssueReviewer`) and fails visibly, naming this
+  installer, when it has not been installed yet; `src/Kanban/Preflight.hs`
+  (§2.5) treats only that same marker-carrying link as installed, and
+  requires both installed files (`approve_issues.py` imports
+  `kanban_config.py`), so preflight and the installer can never disagree
+  about whether an install path is occupied.
 - **`~/work/approve-issues.py`** is now a purely optional **compatibility
   launcher** for pre-migration automation that still invokes it directly. It
   is not Kanban's source of truth and nothing in Kanban's own code resolves
@@ -294,10 +304,11 @@ commands need.
   with a symlink to the Kanban-managed link above, backing up and reporting
   the location of any pre-existing ordinary file there; without that opt-in
   flag, an ordinary file at this path is left untouched and refused, per §5.
-  A symlink already naming a canonical backend of that file name — another
-  install directory, or the pre-migration `~/.codex` skill copy — is
-  re-pointed without the opt-in; a symlink to anything else is preserved and
-  refused with or without it, since a link has no content to back up.
+  A symlink already resolving to that same tracked backend through another
+  install directory, or one left broken by an install directory that went
+  away, is re-pointed without the opt-in; a symlink resolving to any other
+  real file is preserved and refused with or without it, since a link has no
+  content to back up.
 - **`~/.codex/skills/approve-issues/...`** is no longer a dependency of any
   Kanban-supported command. The backend's incident handling
   (`open_invalid_incident` in `tools/approve_issues.py`) is now

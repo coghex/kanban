@@ -16,6 +16,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
+# Identity marker for this tracked asset; see the same constant in
+# approve_issues.py for why installed files are recognized by content
+# rather than by path.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-review/kanban_config.py"
+
+
 class KanbanConfigError(Exception):
     pass
 

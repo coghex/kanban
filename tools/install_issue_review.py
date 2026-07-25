@@ -59,17 +59,46 @@ def repository_root(requested: Path) -> Path:
     return root
 
 
-def is_prior_managed_backend_link(current_target: Path, source: Path) -> bool:
-    """Whether an existing symlink is a previous Kanban-managed install of
-    this same backend file, which a moved checkout legitimately re-points.
+MANAGED_ASSET_MARKER_PREFIX = "kanban-managed-asset:issue-review/"
 
-    Recognized narrowly, by shape: this installer only ever links a file of
-    this component's own name inside some checkout's `tools/` directory, so
-    a link of that shape is one of its own and converges on a re-run, while
-    a symlink pointing anywhere else is an unknown installation that must be
+
+def managed_asset_marker(name: str) -> str:
+    """The identity marker the tracked asset `name` carries."""
+    return MANAGED_ASSET_MARKER_PREFIX + name
+
+
+def is_managed_asset(path: Path, name: str) -> bool:
+    """Whether `path` resolves to this repository's own tracked asset.
+
+    Verified by reading the identity marker the tracked file itself carries,
+    not by where the path happens to point: a symlink to some unrelated
+    `.../tools/approve_issues.py` matches every shape test one could write
+    while being someone else's file, and only its content can tell the two
+    apart. An unreadable target is never treated as recognized.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return managed_asset_marker(name) in content
+
+
+def is_prior_managed_backend_link(current_target: Path, source: Path) -> bool:
+    """Whether an existing symlink may be re-pointed at `source`.
+
+    Two cases qualify, and refusal protects content in both. A link already
+    resolving to this same tracked asset is a duplicate install this
+    installer owns. A link whose target no longer exists at all is what a
+    moved or deleted checkout leaves behind: broken, holding nothing to
+    preserve, and exactly the state a re-run has to converge. A link
+    resolving to any other real file is someone else's installation, and is
     preserved and refused rather than silently replaced.
     """
-    return current_target.name == source.name and current_target.parent.name == "tools"
+    if current_target.name != source.name:
+        return False
+    if not os.path.exists(current_target):
+        return True
+    return is_managed_asset(current_target, source.name)
 
 
 def plan_symlink(source: Path, destination: Path) -> str:
@@ -96,8 +125,9 @@ def symlink_refusal_reason(destination: Path) -> str:
             "move or remove it yourself, then re-run."
         )
     return (
-        f"{destination} is a symlink to {os.readlink(destination)}, which is not a "
-        "Kanban-managed backend link. It is left untouched; remove it yourself, then re-run."
+        f"{destination} is a symlink to {os.readlink(destination)}, which does not "
+        "resolve to Kanban's own tracked backend file. It is left untouched; remove it "
+        "yourself, then re-run."
     )
 
 
@@ -146,21 +176,24 @@ def plan_legacy_launcher(
             current_target = Path(os.readlink(legacy_path))
             if current_target == kanban_link:
                 return {"path": str(legacy_path), "status": "unchanged", "backup_path": None}
-            if current_target.name == kanban_link.name:
-                # Already a launcher for a canonical backend of this name --
-                # under another install directory, or the pre-migration
-                # ~/.codex skill copy -- so re-pointing it at the current
-                # install location is this installer's own migration, not a
-                # replacement of someone else's file.
+            if not os.path.exists(current_target) or is_managed_asset(
+                current_target, kanban_link.name
+            ):
+                # Already a launcher for this same tracked backend reached
+                # through another install directory, or a link left broken
+                # by one that went away: re-pointing it at the current
+                # install location is this installer's own migration and
+                # destroys nothing. See is_prior_managed_backend_link.
                 return {"path": str(legacy_path), "status": "updated", "backup_path": None}
             return {
                 "path": str(legacy_path),
                 "status": "refused",
                 "backup_path": None,
                 "message": (
-                    f"{legacy_path} is a symlink to {current_target}, which is not a "
-                    "canonical issue-review backend. It is left untouched; remove it "
-                    "yourself if you want the compatibility launcher installed here."
+                    f"{legacy_path} is a symlink to {current_target}, which does not "
+                    "resolve to Kanban's own tracked issue-review backend. It is left "
+                    "untouched; remove it yourself if you want the compatibility "
+                    "launcher installed here."
                 ),
             }
         if allow_migration:
@@ -193,14 +226,15 @@ def migrate_legacy_launcher(
 ) -> dict[str, Any]:
     """Point the compatibility launcher at the Kanban-managed link.
 
-    A missing path, or a symlink that already names a canonical backend of
-    this name, is safe to (re)point without the opt-in, so reinstalls and
+    A missing path, or a symlink that already resolves to this same tracked
+    backend, is safe to (re)point without the opt-in, so reinstalls and
     repository moves stay idempotent. An ordinary pre-Kanban file is left
     untouched unless the caller explicitly opts in, in which case its
     content is preserved as a reported backup before the symlink replaces
-    it. A symlink pointing at anything else is someone else's installation:
-    it is preserved and refused outright, with or without the opt-in, since
-    there is no content to back up and no way to tell what depends on it.
+    it. A symlink resolving to anything else is someone else's
+    installation: it is preserved and refused outright, with or without the
+    opt-in, since there is no content to back up and no way to tell what
+    depends on it.
     """
     plan = plan_legacy_launcher(legacy_path, kanban_link, allow_migration=allow_migration)
     status = plan["status"]

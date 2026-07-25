@@ -21,6 +21,13 @@ from typing import Any, NoReturn
 import kanban_config
 
 
+# Identity marker for this tracked asset. tools/install_issue_review.py and
+# src/Kanban/Preflight.hs both read this literal out of an installed file to
+# confirm a link at the managed install path really resolves to this
+# backend before replacing or trusting it -- identity, not location, since a
+# path that merely looks right is not proof of what it holds.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-review/approve_issues.py"
+
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
 REVISED_LABEL = "reviewed:revised"

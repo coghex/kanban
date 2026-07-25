@@ -22,6 +22,7 @@ module Kanban.Preflight
   ( AuthObservation (..),
     BundleObservation (..),
     GitHubObservation (..),
+    IssueOrigin (..),
     PreflightAction (..),
     PreflightCheck (..),
     PreflightEnvironment (..),
@@ -34,8 +35,10 @@ module Kanban.Preflight
     VersionObservation (..),
     actionLabel,
     actionReport,
-    revisionAuthorBrand,
     blockingRemediation,
+    canonicalReviewBrands,
+    issueOriginFromBody,
+    revisionAuthorBrand,
     classifyBundleListing,
     classifyClaudeAuth,
     classifyCodexAuth,
@@ -55,6 +58,7 @@ where
 import Control.Exception (IOException, try)
 import Data.Aeson (Value (..), eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as ByteString
 import Data.Char (isDigit)
 import Data.Foldable (toList)
 import Data.List (find)
@@ -66,6 +70,7 @@ import Kanban.Review (canonicalIssueReviewerPath)
 import Kanban.Solve (SolverBrand (..))
 import System.Directory (doesFileExist, doesPathExist, findExecutable, pathIsSymbolicLink)
 import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Error (catchIOError)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
@@ -174,24 +179,45 @@ data PreflightCheck = PreflightCheck
 -- separately: an action is only as ready as the dependencies it actually
 -- reaches for. The PR drainer is deliberately absent — it keeps its own
 -- dedicated install and status flow.
+-- | Which agent authored an issue, since both issue-side actions route
+-- their provider work by it.
+data IssueOrigin = IssueOriginCodex | IssueOriginClaude | IssueOriginUnmarked
+  deriving stock (Eq, Show)
+
 data PreflightAction
-  = ActionIssueReview
-  | ActionIssueRevision SolverBrand
+  = ActionIssueReview IssueOrigin
+  | ActionIssueRevision IssueOrigin
   | ActionSolve SolverBrand
   | ActionAutoSolve SolverBrand
   | ActionPullRequestFlow SolverBrand
   deriving stock (Eq, Show)
 
--- | Which brand authors a revision's amendment content, read from the
--- issue's own origin marker. A Claude-origin issue routes that authoring
--- through @kanban_run_claude@, so its revision needs the Claude CLI as well
--- as the Codex coordinator thread; a Codex-origin or unmarked issue is
--- authored by the coordinator itself. Mirrors the REVISION rule in
+issueOriginFromBody :: Text -> IssueOrigin
+issueOriginFromBody body
+  | "<!-- issue-origin:claude -->" `Text.isInfixOf` body = IssueOriginClaude
+  | "<!-- issue-origin:codex -->" `Text.isInfixOf` body = IssueOriginCodex
+  | otherwise = IssueOriginUnmarked
+
+-- | The provider CLIs the canonical backend actually spawns for a review or
+-- rereview of this issue: the opposite brand from its origin, or — under
+-- the @--legacy-policy dual@ Kanban always passes — both for an unmarked
+-- issue. Mirrors @reviewers_for_origin@ in @tools\/approve_issues.py@,
+-- which invokes @codex exec@ and @claude -p@ directly, so no packaged
+-- workflow bundle is involved.
+canonicalReviewBrands :: IssueOrigin -> [SolverBrand]
+canonicalReviewBrands IssueOriginClaude = [CodexSolver]
+canonicalReviewBrands IssueOriginCodex = [ClaudeSolver]
+canonicalReviewBrands IssueOriginUnmarked = [CodexSolver, ClaudeSolver]
+
+-- | Which brand authors a revision's amendment content. A Claude-origin
+-- issue routes that authoring through @kanban_run_claude@, so its revision
+-- needs the Claude CLI as well as the Codex coordinator thread; a
+-- Codex-origin or unmarked issue is authored by the coordinator itself.
+-- Mirrors the REVISION rule in
 -- 'Kanban.Review.reviewDeveloperInstructions'.
-revisionAuthorBrand :: Text -> SolverBrand
-revisionAuthorBrand body
-  | "<!-- issue-origin:claude -->" `Text.isInfixOf` body = ClaudeSolver
-  | otherwise = CodexSolver
+revisionAuthorBrand :: IssueOrigin -> SolverBrand
+revisionAuthorBrand IssueOriginClaude = ClaudeSolver
+revisionAuthorBrand _ = CodexSolver
 
 data PreflightReport = PreflightReport
   { reportAction :: PreflightAction,
@@ -216,14 +242,16 @@ oppositeBrand CodexSolver = ClaudeSolver
 oppositeBrand ClaudeSolver = CodexSolver
 
 actionLabel :: PreflightAction -> Text
-actionLabel ActionIssueReview = "issue review/rereview (r)"
-actionLabel (ActionIssueRevision brand) = "issue revision (r) · " <> originLabel brand
-  where
-    originLabel CodexSolver = "codex-origin"
-    originLabel ClaudeSolver = "claude-origin"
+actionLabel (ActionIssueReview origin) = "issue review/rereview (r) · " <> originLabel origin
+actionLabel (ActionIssueRevision origin) = "issue revision (r) · " <> originLabel origin
 actionLabel (ActionSolve brand) = "solve (S) · " <> brandExecutable brand
 actionLabel (ActionAutoSolve brand) = "auto-solve (A) · " <> brandExecutable brand
 actionLabel (ActionPullRequestFlow brand) = "PR review/revise (r) · " <> brandExecutable brand
+
+originLabel :: IssueOrigin -> Text
+originLabel IssueOriginCodex = "codex-origin"
+originLabel IssueOriginClaude = "claude-origin"
+originLabel IssueOriginUnmarked = "unmarked"
 
 -- | The versions the tracked plugin bundles were verified against
 -- (@codex-plugin\/README.md@, @claude-plugin\/README.md@); older releases
@@ -508,17 +536,23 @@ providerChecks needsBundle probe =
 actionReport :: PreflightEnvironment -> PreflightAction -> PreflightReport
 actionReport environment action = PreflightReport action (checksFor action)
   where
-    checksFor ActionIssueReview = [gitHubCheck environment, reviewBackendCheck environment]
+    -- The canonical backend spawns the opposite brand itself (both, for an
+    -- unmarked issue under the dual policy Kanban passes), so a review is
+    -- only ready if that reviewer's CLI is installed and signed in. No
+    -- packaged bundle: the backend runs `codex exec`/`claude -p` directly.
+    checksFor (ActionIssueReview origin) =
+      concatMap (providerChecks False . environmentProbe environment) (canonicalReviewBrands origin)
+        <> [gitHubCheck environment, reviewBackendCheck environment]
     -- The revision coordinator is always Kanban's own @codex app-server@
     -- thread, and neither brand's packaged bundle is involved: it runs
     -- Kanban's own prompts. A Claude-origin issue additionally authors its
     -- amendment through @kanban_run_claude@, so that brand's CLI has to be
     -- installed and signed in too, or the session fails inside the tool
     -- call instead of at the door.
-    checksFor (ActionIssueRevision authorBrand) =
+    checksFor (ActionIssueRevision origin) =
       providerChecks False (environmentProbe environment CodexSolver)
         <> [ check
-             | authorBrand == ClaudeSolver,
+             | revisionAuthorBrand origin == ClaudeSolver,
                check <- providerChecks False (environmentProbe environment ClaudeSolver)
            ]
         <> [gitHubCheck environment]
@@ -550,9 +584,11 @@ blockingRemediation report = do
 
 doctorActions :: [PreflightAction]
 doctorActions =
-  [ ActionIssueReview,
-    ActionIssueRevision CodexSolver,
-    ActionIssueRevision ClaudeSolver,
+  [ ActionIssueReview IssueOriginCodex,
+    ActionIssueReview IssueOriginClaude,
+    ActionIssueReview IssueOriginUnmarked,
+    ActionIssueRevision IssueOriginCodex,
+    ActionIssueRevision IssueOriginClaude,
     ActionSolve CodexSolver,
     ActionSolve ClaudeSolver,
     ActionAutoSolve CodexSolver,
@@ -682,22 +718,63 @@ probeReviewBackend = do
     Nothing -> pure ReviewBackendInterpreterMissing
     Just _ -> do
       scriptPath <- canonicalIssueReviewerPath
-      -- Only a symlink resolving to a file is a Kanban-managed install:
-      -- that is the single shape 'tools/install_issue_review.py' ever
-      -- creates, and the only one it will converge on a re-run. Anything
-      -- else already occupying the path -- an ordinary file someone copied
-      -- there, a directory, a link whose target has gone away -- is what
-      -- setup refuses to replace, so reporting it as ready here would both
-      -- contradict setup and hand the canonical reviewer an unmanaged
-      -- script to execute.
-      managed <- catchIOError (pathIsSymbolicLink scriptPath) (const (pure False))
-      usable <- doesFileExist scriptPath
-      occupied <- doesPathExist scriptPath
-      pure $ case (managed, usable, occupied) of
-        (True, True, _) -> ReviewBackendReadyAt scriptPath
-        (True, False, _) -> ReviewBackendConflicting scriptPath "a symlink that no longer resolves to a file"
-        (False, _, True) -> ReviewBackendConflicting scriptPath "something that is not a Kanban-managed link"
-        (False, _, False) -> ReviewBackendMissing scriptPath
+      -- The backend cannot run without its config module: approve_issues.py
+      -- imports kanban_config at module scope, and the issue-review setup
+      -- component installs both. A half-installed pair fails at import
+      -- time, so both links are part of "installed" here.
+      let companionPath = takeDirectory scriptPath </> "kanban_config.py"
+      observations <- mapM probeInstalledAsset [scriptPath, companionPath]
+      pure (foldr worseObservation (ReviewBackendReadyAt scriptPath) observations)
+
+-- | Classify one installed backend file. Only a symlink resolving to a file
+-- that carries that asset's own identity marker counts as installed: that
+-- is the single shape @tools\/install_issue_review.py@ creates, and the
+-- only one it will converge on a re-run. Anything else already occupying
+-- the path — an ordinary copy, a directory, a link whose target has gone
+-- away, a link to some unrelated script — is what setup refuses to replace,
+-- so reporting it ready would both contradict setup and hand the canonical
+-- reviewer an unrecognized file to execute.
+probeInstalledAsset :: FilePath -> IO ReviewBackendObservation
+probeInstalledAsset path = do
+  linked <- catchIOError (pathIsSymbolicLink path) (const (pure False))
+  usable <- doesFileExist path
+  occupied <- doesPathExist path
+  case (linked, usable, occupied) of
+    (False, _, True) -> pure (ReviewBackendConflicting path "something that is not a Kanban-managed link")
+    (False, _, False) -> pure (ReviewBackendMissing path)
+    (True, False, _) -> pure (ReviewBackendConflicting path "a symlink that no longer resolves to a file")
+    (True, True, _) -> do
+      recognized <- isManagedAsset path
+      pure $
+        if recognized
+          then ReviewBackendReadyAt path
+          else ReviewBackendConflicting path "a symlink to a file that is not Kanban's own tracked backend"
+
+-- | Whether an installed file really is this repository's tracked asset,
+-- read from the identity marker the asset itself carries. Location proves
+-- nothing — a link to any @.../tools/approve_issues.py@ satisfies every
+-- shape test while being someone else's file — so the same marker
+-- @tools\/install_issue_review.py@ checks before replacing a link is what
+-- this checks before trusting one.
+isManagedAsset :: FilePath -> IO Bool
+isManagedAsset path = do
+  content <- try (ByteString.readFile path)
+  pure $ case content of
+    Left (_ :: IOException) -> False
+    Right bytes -> marker `ByteString.isInfixOf` bytes
+  where
+    marker = TextEncoding.encodeUtf8 (Text.pack ("kanban-managed-asset:issue-review/" <> takeFileName' path))
+
+-- | The most actionable of several install-path observations: a conflict
+-- the user must clear outranks a missing file, which outranks readiness.
+worseObservation :: ReviewBackendObservation -> ReviewBackendObservation -> ReviewBackendObservation
+worseObservation left right = case (left, right) of
+  (conflicting@(ReviewBackendConflicting _ _), _) -> conflicting
+  (_, conflicting@(ReviewBackendConflicting _ _)) -> conflicting
+  (missing@(ReviewBackendMissing _), _) -> missing
+  (_, missing@(ReviewBackendMissing _)) -> missing
+  (interpreter@ReviewBackendInterpreterMissing, _) -> interpreter
+  (_, other) -> other
 
 -- | Bounded, non-interactive, output-capturing probe. Empty stdin and a
 -- hard timeout keep a probe from ever waiting on a prompt.

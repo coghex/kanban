@@ -44,6 +44,7 @@ import Kanban.Preflight
   ( AuthObservation (..),
     BundleObservation (..),
     GitHubObservation (..),
+    IssueOrigin (..),
     PreflightAction (..),
     PreflightCheck (..),
     PreflightEnvironment (..),
@@ -56,7 +57,7 @@ import Kanban.Preflight
     actionLabel,
     actionReport,
     blockingRemediation,
-    revisionAuthorBrand,
+    canonicalReviewBrands,
     classifyBundleListing,
     classifyClaudeAuth,
     classifyCodexAuth,
@@ -65,10 +66,12 @@ import Kanban.Preflight
     doctorLines,
     doctorReady,
     gatherPreflightEnvironment,
+    issueOriginFromBody,
     minimumClaudeVersion,
     minimumCodexVersion,
     preflightDiagnostic,
     preflightDiagnosticDetail,
+    revisionAuthorBrand,
   )
 import Kanban.Process
   ( IdentityPresence (..),
@@ -5586,7 +5589,7 @@ main = hspec $ do
         -- Auto-solve reviews the PR with the opposite brand itself, so a
         -- claude auto-solve still depends on codex being installed.
         blockedProblems environment (ActionAutoSolve ClaudeSolver) `shouldBe` [ExecutableUnavailable]
-        blockedProblems environment ActionIssueReview `shouldBe` []
+        blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
       it "distinguishes an unauthenticated provider from a missing one" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
         blockedProblems environment (ActionPullRequestFlow ClaudeSolver) `shouldBe` [ProviderUnauthenticated]
@@ -5597,19 +5600,19 @@ main = hspec $ do
           `shouldSatisfy` maybe False (Data.Text.isInfixOf "tools/setup_workflows.py --component claude-plugin")
       it "blocks the canonical review gate, but not issue revision, on a missing backend" $ do
         let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendMissing "/nowhere/approve_issues.py"}
-        blockedProblems environment ActionIssueReview `shouldBe` [ReviewBackendUnavailable]
+        blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
         blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ReviewBackendUnavailable]
-        blockedProblems environment (ActionIssueRevision CodexSolver) `shouldBe` []
+        blockedProblems environment (ActionIssueRevision IssueOriginCodex) `shouldBe` []
       -- A Claude-origin revision authors its amendment through
       -- kanban_run_claude, so it needs that CLI even though no packaged
       -- bundle is involved; a Codex-origin one must not be blocked by it.
       it "requires the Claude CLI only for a Claude-origin revision" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
-        blockedProblems environment (ActionIssueRevision ClaudeSolver) `shouldBe` [ExecutableUnavailable]
-        blockedProblems environment (ActionIssueRevision CodexSolver) `shouldBe` []
+        blockedProblems environment (ActionIssueRevision IssueOriginClaude) `shouldBe` [ExecutableUnavailable]
+        blockedProblems environment (ActionIssueRevision IssueOriginCodex) `shouldBe` []
       it "requires a signed-in Claude for a Claude-origin revision" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
-        blockedProblems environment (ActionIssueRevision ClaudeSolver) `shouldBe` [ProviderUnauthenticated]
+        blockedProblems environment (ActionIssueRevision IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
       -- Revision runs Kanban's own prompts through codex app-server, so a
       -- missing packaged bundle must never block it for either origin.
       it "never requires a packaged bundle for a revision of either origin" $ do
@@ -5618,16 +5621,45 @@ main = hspec $ do
                 { environmentCodex = (readyProviderProbe CodexSolver) {probeBundle = BundleAbsent},
                   environmentClaude = (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
                 }
-        blockedProblems environment (ActionIssueRevision CodexSolver) `shouldBe` []
-        blockedProblems environment (ActionIssueRevision ClaudeSolver) `shouldBe` []
-      it "reads the revision amendment author from the issue's origin marker" $ do
-        revisionAuthorBrand "Body\n\n<!-- issue-origin:claude -->" `shouldBe` ClaudeSolver
-        revisionAuthorBrand "Body\n\n<!-- issue-origin:codex -->" `shouldBe` CodexSolver
-        revisionAuthorBrand "Body with no marker" `shouldBe` CodexSolver
+        blockedProblems environment (ActionIssueRevision IssueOriginCodex) `shouldBe` []
+        blockedProblems environment (ActionIssueRevision IssueOriginClaude) `shouldBe` []
+      it "reads an issue's origin from its marker" $ do
+        issueOriginFromBody "Body\n\n<!-- issue-origin:claude -->" `shouldBe` IssueOriginClaude
+        issueOriginFromBody "Body\n\n<!-- issue-origin:codex -->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "Body with no marker" `shouldBe` IssueOriginUnmarked
+      it "routes the revision amendment author by that origin" $ do
+        revisionAuthorBrand IssueOriginClaude `shouldBe` ClaudeSolver
+        revisionAuthorBrand IssueOriginCodex `shouldBe` CodexSolver
+        revisionAuthorBrand IssueOriginUnmarked `shouldBe` CodexSolver
+      -- approve_issues.py spawns the opposite brand itself, and both under
+      -- the dual legacy policy Kanban always passes, so the canonical gate
+      -- is only ready if that reviewer's own CLI is.
+      it "routes the canonical reviewer to the opposite brand, or both when unmarked" $ do
+        canonicalReviewBrands IssueOriginClaude `shouldBe` [CodexSolver]
+        canonicalReviewBrands IssueOriginCodex `shouldBe` [ClaudeSolver]
+        canonicalReviewBrands IssueOriginUnmarked `shouldBe` [CodexSolver, ClaudeSolver]
+      it "requires the canonical reviewer's own CLI for a review" $ do
+        let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
+        blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ExecutableUnavailable]
+        blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` []
+        blockedProblems environment (ActionIssueReview IssueOriginUnmarked) `shouldBe` [ExecutableUnavailable]
+      it "requires a signed-in canonical reviewer for a review" $ do
+        let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeAuth = AuthNotAuthenticated "signed out"}
+        blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
+        blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
+      -- The backend runs `codex exec`/`claude -p` itself, so no packaged
+      -- workflow bundle is involved in a canonical review.
+      it "never requires a packaged bundle for a canonical review" $ do
+        let environment =
+              readyPreflightEnvironment
+                { environmentCodex = (readyProviderProbe CodexSolver) {probeBundle = BundleAbsent},
+                  environmentClaude = (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
+                }
+        blockedProblems environment (ActionIssueReview IssueOriginUnmarked) `shouldBe` []
       it "tells an occupied install path apart from a never-installed one" $ do
         let environment = readyPreflightEnvironment {environmentReviewBackend = ReviewBackendConflicting "/occupied" "a directory"}
-        blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
-        blockingRemediation (actionReport environment ActionIssueReview)
+        blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
+        blockingRemediation (actionReport environment (ActionIssueReview IssueOriginCodex))
           `shouldSatisfy` maybe False (Data.Text.isInfixOf "move or remove that path yourself")
       it "reports an unavailable GitHub CLI for every action" $ do
         let environment = readyPreflightEnvironment {environmentGitHub = GitHubExecutableMissing}
@@ -5668,12 +5700,12 @@ main = hspec $ do
 
     describe "hermetic fresh-machine probing" $ do
       it "reports a fully provisioned machine as ready for every action" $
-        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+        withPreflightMachine fullyProvisionedFakes BackendInstalled $
           \root _ -> do
             environment <- gatherPreflightEnvironment root
             doctorReady environment `shouldBe` True
       it "only ever runs status-only probes, and mutates nothing" $
-        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
+        withPreflightMachine fullyProvisionedFakes BackendInstalled $
           \root probeLog -> do
             snapshotBefore <- machineSnapshot root
             _ <- gatherPreflightEnvironment root
@@ -5682,12 +5714,21 @@ main = hspec $ do
             invocations <- probeInvocations probeLog
             invocations `shouldSatisfy` not . null
             invocations `shouldSatisfy` all (`elem` allowedProbeInvocations)
-      it "reports absent provider executables without blocking the canonical gate" $
+      -- With an installed backend and no provider at all, every action's
+      -- one complaint is the missing executable — including the canonical
+      -- gate, whose reviewer the backend spawns itself.
+      it "reports absent provider executables for every action that needs one" $
         withPreflightMachine [readyGitHubFake, python3Fake] BackendInstalled $ \root _ -> do
           environment <- gatherPreflightEnvironment root
-          blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [ExecutableUnavailable]
-          blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [ExecutableUnavailable]
-          blockedProblems environment ActionIssueReview `shouldBe` []
+          environment.environmentReviewBackend `shouldSatisfy` isReadyBackend
+          mapM_
+            (\action -> blockedProblems environment action `shouldBe` [ExecutableUnavailable])
+            [ ActionSolve CodexSolver,
+              ActionSolve ClaudeSolver,
+              ActionIssueReview IssueOriginCodex,
+              ActionIssueReview IssueOriginClaude,
+              ActionIssueRevision IssueOriginCodex
+            ]
       it "reports an unauthenticated provider" $
         withPreflightMachine [signedOutCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
           \root _ -> do
@@ -5699,33 +5740,48 @@ main = hspec $ do
             environment <- gatherPreflightEnvironment root
             blockedProblems environment (ActionSolve CodexSolver) `shouldBe` [WorkflowBundleUnavailable]
       it "reports an uninstalled canonical review backend" $
-        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendMissing $
+        withPreflightMachine fullyProvisionedFakes BackendMissing $
           \root _ -> do
             environment <- gatherPreflightEnvironment root
-            blockedProblems environment ActionIssueReview `shouldBe` [ReviewBackendUnavailable]
+            blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
       it "reports an install path occupied by something Kanban did not install" $
-        withPreflightMachine [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendOccupied $
+        withPreflightMachine fullyProvisionedFakes BackendOccupied $
           \root _ -> do
             environment <- gatherPreflightEnvironment root
-            blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
+            blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
       -- Setup refuses an ordinary file on the install path, so reporting it
       -- ready here would both contradict setup and hand the canonical
       -- reviewer an unmanaged script to run.
       it "reports an ordinary file on the install path as conflicting, not ready" $
-        withPreflightMachine [readyGitHubFake, python3Fake] BackendOrdinaryFile $ \root _ -> do
+        withPreflightMachine fullyProvisionedFakes BackendOrdinaryFile $ \root _ -> do
           environment <- gatherPreflightEnvironment root
           environment.environmentReviewBackend `shouldSatisfy` isConflictingBackend
-          blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
+          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
       it "reports a dangling managed link as conflicting" $
-        withPreflightMachine [readyGitHubFake, python3Fake] BackendDanglingLink $ \root _ -> do
+        withPreflightMachine fullyProvisionedFakes BackendDanglingLink $ \root _ -> do
           environment <- gatherPreflightEnvironment root
           environment.environmentReviewBackend `shouldSatisfy` isConflictingBackend
-          blockedProblems environment ActionIssueReview `shouldBe` [ConflictingInstallation]
+          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
+      -- A link resolving to a readable script under a plausible tools/
+      -- path passes every shape test; only the tracked file's own identity
+      -- marker tells it apart from Kanban's backend.
+      it "reports a link to a file that is not Kanban's own backend as conflicting" $
+        withPreflightMachine fullyProvisionedFakes BackendForeignLink $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          environment.environmentReviewBackend `shouldSatisfy` isConflictingBackend
+          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ConflictingInstallation]
+      -- approve_issues.py imports kanban_config at module scope, so half an
+      -- installation is not an installation.
+      it "reports a missing companion config module as an unavailable backend" $
+        withPreflightMachine fullyProvisionedFakes BackendCompanionMissing $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          environment.environmentReviewBackend `shouldSatisfy` isMissingBackend
+          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
       it "reports an unauthenticated GitHub CLI" $
         withPreflightMachine [readyCodexFake, readyClaudeFake, signedOutGitHubFake, python3Fake] BackendInstalled $
           \root _ -> do
             environment <- gatherPreflightEnvironment root
-            blockedProblems environment ActionIssueReview `shouldBe` [GitHubUnavailable]
+            blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [GitHubUnavailable]
       it "renders one doctor line per supported AI action" $
         withPreflightMachine [readyGitHubFake, python3Fake] BackendMissing $ \root _ -> do
           environment <- gatherPreflightEnvironment root
@@ -6122,16 +6178,32 @@ isConflictingBackend :: ReviewBackendObservation -> Bool
 isConflictingBackend (ReviewBackendConflicting _ _) = True
 isConflictingBackend _ = False
 
--- | What the Kanban-managed canonical review backend's install path holds
--- on the fresh machine a scenario probes. Only 'BackendInstalled' is what
--- @tools\/install_issue_review.py@ actually produces: a symlink to a
--- checkout's backend file.
+isMissingBackend :: ReviewBackendObservation -> Bool
+isMissingBackend (ReviewBackendMissing _) = True
+isMissingBackend _ = False
+
+isReadyBackend :: ReviewBackendObservation -> Bool
+isReadyBackend (ReviewBackendReadyAt _) = True
+isReadyBackend _ = False
+
+-- | Every executable a fully provisioned machine resolves, so a backend
+-- scenario is only ever about the backend.
+fullyProvisionedFakes :: [(String, [ByteString.ByteString])]
+fullyProvisionedFakes = [readyCodexFake, readyClaudeFake, readyGitHubFake, python3Fake]
+
+-- | What the Kanban-managed canonical review backend's install directory
+-- holds on the fresh machine a scenario probes. Only 'BackendInstalled' is
+-- what @tools\/install_issue_review.py@ actually produces: a symlink, per
+-- installed asset, to a checkout file carrying that asset's identity
+-- marker. Every other constructor is a state setup would refuse.
 data BackendFixture
   = BackendInstalled
   | BackendMissing
   | BackendOccupied
   | BackendOrdinaryFile
   | BackendDanglingLink
+  | BackendForeignLink
+  | BackendCompanionMissing
 
 -- | A hermetic fresh machine: a PATH holding only the fake executables the
 -- scenario installs, a Kanban install directory it populates, and a log
@@ -6152,15 +6224,28 @@ withPreflightMachine executables backend action =
         backendPath = installRoot </> "approve_issues.py"
     mapM_ (createDirectoryIfMissing True) [binaryRoot, installRoot, workingDirectory]
     mapM_ (installFakeExecutable binaryRoot) executables
-    let checkoutBackend = temporaryRoot </> "checkout-approve_issues.py"
+    let installAsset name = do
+          let checkoutFile = temporaryRoot </> ("checkout-" <> name)
+          ByteString.writeFile
+            checkoutFile
+            (ByteString.pack ("# kanban-managed-asset:issue-review/" <> name <> "\n"))
+          createFileLink checkoutFile (installRoot </> name)
+        installCompanion = installAsset "kanban_config.py"
     case backend of
-      BackendInstalled -> do
-        ByteString.writeFile checkoutBackend "#!/usr/bin/env python3\n"
-        createFileLink checkoutBackend backendPath
+      BackendInstalled -> installAsset "approve_issues.py" >> installCompanion
       BackendMissing -> pure ()
-      BackendOccupied -> createDirectoryIfMissing True backendPath
-      BackendOrdinaryFile -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n"
-      BackendDanglingLink -> createFileLink (temporaryRoot </> "gone.py") backendPath
+      BackendOccupied -> createDirectoryIfMissing True backendPath >> installCompanion
+      BackendOrdinaryFile -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n" >> installCompanion
+      BackendDanglingLink -> createFileLink (temporaryRoot </> "gone.py") backendPath >> installCompanion
+      BackendForeignLink -> do
+        -- A perfectly good script that simply is not Kanban's: readable,
+        -- resolvable, and sitting under a plausible tools/ path.
+        let foreign_ = temporaryRoot </> "elsewhere" </> "tools"
+        createDirectoryIfMissing True foreign_
+        ByteString.writeFile (foreign_ </> "approve_issues.py") "#!/usr/bin/env python3\nprint('not kanban')\n"
+        createFileLink (foreign_ </> "approve_issues.py") backendPath
+        installCompanion
+      BackendCompanionMissing -> installAsset "approve_issues.py"
     withEnvironmentValue "PATH" binaryRoot $
       withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installRoot $
         withEnvironmentValue "KANBAN_TEST_PROBE_LOG" probeLog $
