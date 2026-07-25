@@ -17,6 +17,11 @@ import drain_prs
 import fake_cli
 
 
+# The paginated comment feed drain_prs reads for pr-review markers, for the
+# `acme/widgets` slug every fixture here installs.
+COMMENTS_ENDPOINT = "repos/acme/widgets/issues/42/comments?per_page=100"
+
+
 def run_git(args, *, cwd):
     proc = subprocess.run(
         ["git", *args],
@@ -438,6 +443,323 @@ class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
                 )
 
 
+class ConflictPushVisibilityTests(ProcessPrFixture):
+    """Regression coverage for issue #27: the "did the repair agent push?"
+    check must poll through GitHub's read-after-write lag rather than
+    condemning a push that already landed but is not yet visible -- while
+    keeping every refusal that follows it.
+    """
+
+    STALE_HEAD = "a" * 40
+
+    def _script_head_reads(self, *overrides):
+        # Each override scripts one queued `gh pr view 42` snapshot; once the
+        # queue is exhausted the last one repeats, so the reads made by
+        # wait_for_branch_update_policy() keep seeing the final state.
+        for override in overrides:
+            pr_json = self._base_pr_json()
+            pr_json["labels"] = []
+            pr_json["statusCheckRollup"] = [
+                {
+                    "name": drain_prs.STALE_APPROVAL_CHECK,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-07-18T00:00:02Z",
+                }
+            ]
+            pr_json.update(override)
+            self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+
+    def _verify(self):
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            return drain_prs.verify_codex_conflict_push(
+                self.ctx,
+                self._base_pr_json(),
+                worktree=self.feature_wt,
+                previous_head=self.STALE_HEAD,
+                action="merge-conflict repair",
+            )
+
+    def test_push_visible_only_on_a_later_read_verifies(self):
+        self._script_head_reads(
+            {"headRefOid": self.STALE_HEAD},
+            {"headRefOid": self.head_sha},
+        )
+
+        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
+            refreshed = self._verify()
+
+        self.assertEqual(refreshed["headRefOid"], self.head_sha)
+        # The stale first read did not decide the outcome.
+        self.assertGreaterEqual(len(self._pr_view_calls()), 2)
+
+    def test_head_that_never_appears_fails_after_the_bounded_window(self):
+        self._script_head_reads({"headRefOid": self.STALE_HEAD})
+
+        # Wide enough that several reads fit inside the window, so the
+        # assertion below distinguishes polling from a single read.
+        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_WAIT_SECONDS", 0.5):
+            with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
+                with self.assertRaises(drain_prs.DrainError) as caught:
+                    self._verify()
+
+        self.assertIn("without pushing a new head", str(caught.exception))
+        # Bounded, but genuinely polled rather than read once.
+        self.assertGreaterEqual(len(self._pr_view_calls()), 2)
+
+    def test_stale_approve_label_on_the_new_head_is_still_refused(self):
+        self._script_head_reads(
+            {
+                "headRefOid": self.head_sha,
+                "labels": [{"name": drain_prs.APPROVE_LABEL}],
+            }
+        )
+
+        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
+            with self.assertRaises(drain_prs.DrainError) as caught:
+                self._verify()
+
+        self.assertIn("refusing to let the repair agent approve", str(caught.exception))
+
+    def test_local_head_mismatch_on_the_new_head_is_still_refused(self):
+        pushed = "c" * 40
+        self._script_head_reads({"headRefOid": pushed})
+
+        with mock.patch.object(drain_prs, "PUSH_VISIBILITY_POLL_SECONDS", 0):
+            with self.assertRaises(drain_prs.DrainError) as caught:
+                self._verify()
+
+        message = str(caught.exception)
+        self.assertIn("left local HEAD", message)
+        self.assertIn(pushed[:12], message)
+
+
+class MarkerLookupPaginationTests(ProcessPrFixture):
+    """Regression coverage for issue #27: the verdict marker must be the
+    globally newest one in the comment feed, not the newest inside the
+    bounded window `gh pr view --json comments` happens to return.
+    """
+
+    def _script_comment_pages(self, pages=None, **kwargs):
+        self.fake.script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout="" if pages is None else json.dumps(pages),
+            **kwargs,
+        )
+
+    def _ordinary(self, index, created_at):
+        return {
+            "id": index,
+            "created_at": created_at,
+            "body": f"ordinary comment {index}",
+        }
+
+    def test_newest_marker_outside_the_bounded_window_wins(self):
+        old_head = "d" * 40
+        # Page one is the slice the old single-view path would have read: it
+        # ends with a stale CHANGES_REQUESTED marker. The newest marker lives
+        # on a later page, so only a globally ordered scan finds it.
+        first_page = [self._ordinary(i, f"2026-07-01T00:{i:02d}:00Z") for i in range(99)]
+        first_page.append(
+            {
+                "id": 99,
+                "created_at": "2026-07-01T23:00:00Z",
+                "body": (
+                    "<!-- pr-review:v1 reviewer=codex "
+                    f"head={old_head} verdict=CHANGES_REQUESTED -->"
+                ),
+            }
+        )
+        second_page = [
+            {
+                "id": 100,
+                "created_at": "2026-07-20T00:00:00Z",
+                "body": (
+                    "<!-- pr-review:v1 reviewer=codex "
+                    f"head={self.head_sha} verdict=APPROVE -->"
+                ),
+            }
+        ]
+        self._script_comment_pages([first_page, second_page])
+
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            details = drain_prs.latest_review_details(self.ctx, 42)
+
+        self.assertEqual(details, ("codex", self.head_sha.lower(), "APPROVE"))
+        # The capped `gh pr view --json comments` path is no longer consulted.
+        self.assertEqual(self._pr_view_calls(), [])
+
+    def test_exhausted_feed_without_a_marker_returns_none(self):
+        self._script_comment_pages(
+            [
+                [self._ordinary(i, f"2026-07-01T00:{i:02d}:00Z") for i in range(100)],
+                [self._ordinary(100, "2026-07-20T00:00:00Z")],
+            ]
+        )
+
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            details = drain_prs.latest_review_details(self.ctx, 42)
+
+        self.assertIsNone(details)
+
+    def test_fetch_failure_raises_instead_of_reporting_absence(self):
+        self._script_comment_pages(stderr="boom", exit_code=1)
+
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            with self.assertRaises(drain_prs.DrainError) as caught:
+                drain_prs.latest_review_details(self.ctx, 42)
+
+        self.assertIn("boom", str(caught.exception))
+
+    def test_unexpected_response_shape_raises_instead_of_reporting_absence(self):
+        for payload in ({"comments": []}, [{"id": 1, "body": "not a page"}]):
+            with self.subTest(payload=payload):
+                self._build_fixture()
+                self._script_comment_pages(payload)
+
+                with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+                    with self.assertRaises(drain_prs.DrainError) as caught:
+                        drain_prs.latest_review_details(self.ctx, 42)
+
+                self.assertIn("Unexpected comments", str(caught.exception))
+
+
+class OneCycleStaleEntryCleanupTests(ProcessPrFixture):
+    """Regression coverage for issue #27: forgetting departed PRs must cost
+    one cycle in total rather than one cycle per entry, and must not suppress
+    the ready PR selected in that same cycle.
+    """
+
+    def _entry(self, head):
+        return {
+            "approved_head": head,
+            "last_rereviewed_head": None,
+            "consecutive_failures": 0,
+            "retry_after_attempt": 0,
+            "last_attempt": 0,
+            "last_error": None,
+        }
+
+    def test_three_closed_entries_are_forgotten_and_the_ready_pr_still_merges(self):
+        closed = (7, 8, 9)
+        for number in closed:
+            self.fake.script(
+                "gh",
+                ["pr", "view", str(number)],
+                stdout=json.dumps(
+                    {
+                        "number": number,
+                        "state": "CLOSED",
+                        "headRefOid": "b" * 40,
+                        "labels": [],
+                    }
+                ),
+            )
+        self._script_pr_view()
+        self.fake.script(
+            "gh",
+            ["pr", "list"],
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                        "isDraft": False,
+                        "headRefOid": self.head_sha,
+                    }
+                ]
+            ),
+        )
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        state_path = drain_prs.drain_state_path(self.ctx)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {
+                        **{str(number): self._entry("b" * 40) for number in closed},
+                        "42": self._entry(self.head_sha),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        gates = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=False,
+                repair_conflicts=True,
+                gates=gates,
+            )
+
+        final = json.loads(state_path.read_text(encoding="utf-8"))
+        # All three departed entries are gone after a single cycle...
+        for number in closed:
+            self.assertNotIn(str(number), final["prs"])
+        # ...and that cleanup did not suppress the ready PR in the same cycle.
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertNotIn("42", final["prs"])
+
+
+class LockFileIntegrityTests(ProcessPrFixture):
+    """Regression coverage for issue #27: a losing contender must not
+    truncate the running instance's recorded PID, which is the only record
+    of who holds the lock it is reporting.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.lock_path = self.main / ".git" / "drain_prs.lock"
+
+    def _acquire(self):
+        handle = drain_prs.acquire_lock(self.ctx)
+        self.addCleanup(handle.close)
+        return handle
+
+    def test_failed_second_acquisition_leaves_the_holder_pid_intact(self):
+        self._acquire()
+        recorded = self.lock_path.read_bytes()
+        self.assertEqual(recorded, str(os.getpid()).encode())
+
+        with self.assertRaises(drain_prs.DrainError) as caught:
+            drain_prs.acquire_lock(self.ctx)
+
+        self.assertIn("already running", str(caught.exception))
+        self.assertEqual(self.lock_path.read_bytes(), recorded)
+
+    def test_first_run_creates_the_file_holding_exactly_the_pid(self):
+        self.assertFalse(self.lock_path.exists())
+
+        self._acquire()
+
+        self.assertEqual(
+            self.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+        )
+
+    def test_longer_stale_contents_are_replaced_by_exactly_the_pid(self):
+        self.lock_path.write_text("9" * 200, encoding="utf-8")
+
+        self._acquire()
+
+        self.assertEqual(
+            self.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+        )
+
+
 class WorktreeFixture(unittest.TestCase):
     """Shared scaffolding for worktree-selection tests: a real temporary Git
     repository whose PR #42 head lives on a pushed `issue-42-feature` branch,
@@ -612,24 +934,25 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
 
     def _script_approving_rereview(self):
         pr_json = dict(self.pr, labels=[{"name": drain_prs.APPROVE_LABEL}])
-        # Both `gh pr view 42` reads share a match prefix, so they are served
-        # in order: get_pr() first, then latest_review_marker()'s comments.
         self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        # latest_review_marker() pages the comment feed through the REST API
+        # rather than the bounded `gh pr view --json comments` window.
         self.fake.script(
             "gh",
-            ["pr", "view", "42"],
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
             stdout=json.dumps(
-                {
-                    "comments": [
+                [
+                    [
                         {
-                            "createdAt": "2026-07-20T00:00:00Z",
+                            "id": 1,
+                            "created_at": "2026-07-20T00:00:00Z",
                             "body": (
                                 "<!-- pr-review:v1 reviewer=codex "
                                 f"head={self.head_sha} verdict=APPROVE -->"
                             ),
                         }
                     ]
-                }
+                ]
             ),
         )
         self.fake.script("codex", ["exec"], stdout="")
