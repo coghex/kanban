@@ -348,8 +348,10 @@ or a background review tab never disturbs what is being read.
 ## 8. Board state model
 
 The four columns are derived from current GitHub state. Issues carrying a
-configured tracker label are never classified into a column; they appear only
-as tracker group headers (section 12).
+configured tracker label are never classified as work cards, however many
+children their checklist yielded; they appear only as tracker group headers
+(section 12), which follow their children's columns or, having none, sit in
+Issues.
 
 ### Issues
 
@@ -659,10 +661,17 @@ network requests solely to reconcile progress text.
 The same tracker header may appear in more than one column when its children
 are split across Issues, Active, Reviewing, and Done. This repetition provides
 context; it does not duplicate or change the underlying work item. An open
-tracker with no children on the live board remains visible as a header in its
-own issue column, so it can still be expanded and inspected. A labeled or
-legacy-title tracker with no recognized child list is also shown as an empty
-header with its tracker diagnostic.
+tracker with no children on the live board remains visible as an empty header,
+as does a labeled or legacy-title tracker with no recognized child list, which
+carries its tracker diagnostic in amber. Such a header has no children whose
+column it could follow, and it is structure rather than work in progress, so
+it always appears in Issues even when the tracker issue is assigned.
+
+An empty header is the one collapsed header that opens a details overlay:
+having no children to expand to, `Enter` on it opens its own tracker issue's
+details, including the tracker warnings explaining why the child list is
+empty. `Enter` on a collapsed header that does have children still asks for
+`e` first.
 
 A PR inherits tracker membership from its explicitly linked child issues. If a
 PR links children from more than one tracker, it receives an amber
