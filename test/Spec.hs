@@ -40,7 +40,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), decodeGitHubItems, ghBehindBarrier, groupConfirmedEmpty, graphqlArguments, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), confirmsOwnGroupLeadership, decodeGitHubItems, ghBehindBarrier, groupConfirmedEmpty, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -5415,6 +5415,24 @@ main = hspec $ do
           countOccurrences "ownedProcessGroupPid" secondPageRecord `shouldBe` 1
           -- And nothing is left guarded once the fetch completes.
           doesFileExist recordPath `shouldReturn` False
+
+    it "refuses to let a child that does not lead its own group proceed to gh at all" $ do
+      -- Every pgid question this module asks -- is the group empty, who is in
+      -- it, may it be signalled -- presumes the number names this fetch's own
+      -- group. When create_group has not taken effect it names nothing, and a
+      -- helper the child leaves behind lives somewhere the module cannot see.
+      -- So leadership is established while the child is parked on the barrier
+      -- and has run nothing, which is both the only moment it is certainly
+      -- observable and the only moment refusing is free.
+      --
+      -- create_group does take effect on this platform, so the two answers are
+      -- asked of the check directly.
+      withSurvivingGroupLeader $ \leaderPid -> confirmsOwnGroupLeadership leaderPid `shouldReturn` Right ()
+      withNonLeaderProcess $ \nonLeaderPid -> do
+        outcome <- confirmsOwnGroupLeadership nonLeaderPid
+        case outcome of
+          Left message -> message `shouldMention` "not the leader of its own process group"
+          Right () -> expectationFailure "a non-leader child was accepted as leading its own group"
 
     it "does not read an unoccupied pgid as proof when the process it names is not that group's leader" $
       -- The forced fallback signals the spawned PID as a process group and

@@ -5,6 +5,7 @@ module Kanban.GitHub
     GhCleanupFailure (..),
     GhCleanupGuard (..),
     ghBehindBarrier,
+    confirmsOwnGroupLeadership,
     groupConfirmedEmpty,
     GhFetchGuard,
     GitHubResult (..),
@@ -54,7 +55,7 @@ import System.Exit (ExitCode (..))
 import System.Directory (findExecutable)
 import System.IO (Handle, hClose, hFlush, hGetContents', hPutStrLn)
 import System.IO.Error (doesNotExistErrorType, mkIOError)
-import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -274,10 +275,30 @@ runGh guard repository arguments = do
         -- still unreaped: 'collect' waits on the handle, and 'getPid' goes
         -- 'Nothing' the moment it does, which would leave the entry behind.
         Right groupPid -> do
-          released <- releaseBarrier input
-          case released of
-            Left message -> throwIO (GhGuardUnwritable message)
-            Right () -> collect groupPid spawned
+          -- Asked while the child is alive and still parked on the barrier,
+          -- which is the one moment it is guaranteed observable and has done
+          -- nothing yet. Everything downstream reasons about the pgid as if
+          -- it named this fetch's group; that is only true if the child
+          -- actually leads it, and this is where that becomes a fact rather
+          -- than an assumption.
+          --
+          -- Refusing here costs nothing, because gh has not run: there are no
+          -- descendants to account for and nothing to clean up but the parked
+          -- shell itself, which is killed by PID -- the one identity that is
+          -- meaningful when the group is not ours.
+          leads <- confirmsOwnGroupLeadership groupPid
+          case leads of
+            Left message -> do
+              ignoreIOException (signalProcess sigKILL (fromIntegral groupPid))
+              void (try @IOException (waitForProcess processHandleOf))
+              throwIO (GhGroupUnresolved message)
+            Right () -> do
+              released <- releaseBarrier input
+              case released of
+                Left message -> throwIO (GhGuardUnwritable message)
+                Right () -> collect groupPid spawned
+      where
+        (_, _, _, processHandleOf) = spawned
 
     -- Writing the go-ahead is also what hands gh its (immediately closed)
     -- standard input, so the barrier costs the child nothing it would
@@ -495,6 +516,27 @@ forceKillGhGroup processHandle spawnedPid = do
 -- would survive long enough to be running when a restarted dashboard
 -- spawned its own gh. A snapshot that cannot be taken answers 'False',
 -- because "could not look" is not "nothing there".
+-- | Whether the process named by `groupPid` is alive and is the leader of the
+-- process group of the same number.
+--
+-- Every later question this module asks of a pgid — is the group empty, who
+-- is in it, is it safe to signal — presumes the number names this fetch's own
+-- group. When @create_group@ has not taken effect it does not: the child sits
+-- in some inherited group, that pgid names nothing, and "the group is empty"
+-- becomes true for the worst possible reason while a helper the child left
+-- behind runs on somewhere this module cannot see. Establishing leadership
+-- once, before anything runs, is what makes all of those questions sound.
+confirmsOwnGroupLeadership :: Int -> IO (Either Text ())
+confirmsOwnGroupLeadership groupPid = do
+  snapshot <- defaultProcessSnapshot
+  pure $ case snapshot of
+    Left message -> Left ("could not confirm gh leads its own process group: " <> message)
+    Right processes -> case identityForPid groupPid processes of
+      Nothing -> Left "gh was gone before it could be confirmed to lead its own process group"
+      Just leader
+        | leader.processIdentityGroupPid == groupPid -> Right ()
+        | otherwise -> Left "gh is not the leader of its own process group, so nothing it leaves behind could be accounted for"
+
 groupConfirmedEmpty :: Int -> IO Bool
 groupConfirmedEmpty groupPid = do
   snapshot <- defaultProcessSnapshot
