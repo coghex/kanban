@@ -139,6 +139,7 @@ import Kanban.Preflight
     issueOriginFromBody,
     preflightDiagnostic,
     preflightDiagnosticDetail,
+    reviewBackendAction,
   )
 import Kanban.Process (ManagedProcess, interruptManagedProcess, interruptThenKillManagedProcess, killManagedProcess, managedProcessGroup, managedProcessStopsWithDashboard)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
@@ -3908,8 +3909,8 @@ startIssueReview issue = do
           case updated.appReviewBackend of
             ReviewBackendReady client -> launchIssueReview client issue
             ReviewBackendStarting -> pure ()
-            ReviewBackendStopped -> startReviewBackend issue
-            ReviewBackendFailed _ -> startReviewBackend issue
+            ReviewBackendStopped -> startReviewBackend
+            ReviewBackendFailed _ -> startReviewBackend
         else launchCanonicalIssueReview issue requestedStage
 
 reviewPhaseActive :: ReviewPhase -> Bool
@@ -4281,12 +4282,15 @@ schedulePullRequestTick number = do
   channel <- (.appEventChannel) <$> get
   void . liftIO . forkIO $ threadDelay reviewAnimationIntervalMicros >> writeBChan channel (PullRequestAnimationTick number)
 
--- | The revision coordinator is shared, but its dependencies are not: the
--- issue being revised decides whether the session will reach for the Claude
--- CLI, so the issue whose 'r' press is starting the backend supplies the
--- action to preflight.
-startReviewBackend :: Issue -> EventM Name AppState ()
-startReviewBackend issue = do
+-- | One coordinator serves every revision session, so it preflights only
+-- its own origin-independent dependencies. A per-issue dependency checked
+-- here would be reported against sessions queued behind the one that
+-- started it: 'applyReviewBackendStarted' fails every 'ReviewStarting'
+-- revision on a backend failure, which is right for a shared cause and
+-- wrong for an issue-specific one. Each queued session gets its own
+-- preflight from 'launchIssueReview' once the coordinator is up.
+startReviewBackend :: EventM Name AppState ()
+startReviewBackend = do
   state <- get
   modify (\current -> current {appReviewBackend = ReviewBackendStarting})
   let eventChannel = state.appEventChannel
@@ -4295,7 +4299,7 @@ startReviewBackend issue = do
     . liftIO
     . forkIO
     $ do
-      blocked <- preflightBlocker state.appRepository (issueRevisionPreflightAction issue)
+      blocked <- preflightBlocker state.appRepository reviewBackendAction
       case blocked of
         Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
         Nothing -> startReviewClient state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted

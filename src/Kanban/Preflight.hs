@@ -52,6 +52,7 @@ module Kanban.Preflight
     preflightDiagnostic,
     preflightDiagnosticDetail,
     problemLabel,
+    reviewBackendAction,
   )
 where
 
@@ -244,6 +245,19 @@ canonicalReviewBrands IssueOriginUnmarked = [CodexSolver, ClaudeSolver]
 -- reviewer, so no provider is required. Its own error names the real
 -- problem, which is a malformed issue rather than missing setup.
 canonicalReviewBrands IssueOriginConflicting = []
+
+-- | The dependencies of the *shared* revision coordinator itself, as
+-- distinct from any one issue's amendment authoring: Kanban's own
+-- @codex app-server@ thread and @gh@.
+--
+-- Deliberately origin-independent. One coordinator serves every revision
+-- session, so anything origin-specific checked here would be reported
+-- against sessions it has nothing to do with — a Claude-origin issue with
+-- no Claude CLI would fail the backend for a Codex-origin issue queued
+-- behind it. Per-issue dependencies belong to the per-session preflight,
+-- which runs for each queued session once the coordinator is up.
+reviewBackendAction :: PreflightAction
+reviewBackendAction = ActionIssueRevision IssueOriginCodex
 
 -- | Which brand authors a revision's amendment content. A Claude-origin
 -- issue routes that authoring through @kanban_run_claude@, so its revision

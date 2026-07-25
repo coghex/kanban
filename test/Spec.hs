@@ -71,6 +71,7 @@ import Kanban.Preflight
     minimumCodexVersion,
     preflightDiagnostic,
     preflightDiagnosticDetail,
+    reviewBackendAction,
     revisionAuthorBrand,
   )
 import Kanban.Process
@@ -5618,6 +5619,20 @@ main = hspec $ do
         blockedProblems environment (ActionIssueRevision IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
       -- Revision runs Kanban's own prompts through codex app-server, so a
       -- missing packaged bundle must never block it for either origin.
+      -- One coordinator serves every revision session, and a backend
+      -- failure fails all of them. If its preflight depended on an issue's
+      -- origin, a Claude-origin issue with no Claude CLI would fail the
+      -- backend for a Codex-origin revision queued behind it, and tell that
+      -- session to install Claude.
+      it "keeps the shared revision coordinator's preflight origin-independent" $ do
+        let claudeMissing = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
+            codexMissing = withCodexProbe (readyProviderProbe CodexSolver) {probeExecutable = Nothing}
+        blockedProblems claudeMissing reviewBackendAction `shouldBe` []
+        blockedProblems claudeMissing (ActionIssueRevision IssueOriginClaude)
+          `shouldBe` [ExecutableUnavailable]
+        -- A genuinely shared cause still fails the coordinator, which is
+        -- what every queued session needs to hear.
+        blockedProblems codexMissing reviewBackendAction `shouldBe` [ExecutableUnavailable]
       it "never requires a packaged bundle for a revision of either origin" $ do
         let environment =
               readyPreflightEnvironment
