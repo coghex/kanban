@@ -23,7 +23,7 @@ where
 import Control.Concurrent (forkIO, forkIOWithUnmask, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Object,
@@ -360,7 +360,11 @@ runGh guard repository arguments = do
           void (recordGhGroup repository (OwnedProcessGroup groupPid survivors True))
           recorded <- ghGroupIsRecorded repository groupPid
           setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
-          void (try @IOException (waitForProcess processHandle))
+          -- Deliberately not reaped. Reaping is what frees the PID and with
+          -- it the pgid, and the cleanup this throw is about to trigger needs
+          -- both: with them it can escalate against the survivors and prove
+          -- what became of them, and only a cleanup that proves the group
+          -- empty is allowed to take this finding back off the guard.
           throwIO (GhGroupUnresolved message)
 
     -- Establishes what became of the group, entirely before the handle is
@@ -444,7 +448,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
   unless alreadyReported (writeIORef cleanupFailure (Just (GhCleanupFailure "gh cleanup did not run to completion" GuardInMemoryOnly)))
   outcome <- killGhGroup processHandle
   resolved <- case outcome of
-    Right () -> pure (Right ())
+    Right proven -> pure (Right proven)
     Left (message, unconfirmed) -> do
       -- Upgrading the spawn-time guard to the full census is what lets a
       -- later run re-kill the group rather than only watch it, so it is
@@ -462,7 +466,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
           forceKillGhGroup processHandle spawnedPid
           emptied <- groupConfirmedEmpty unconfirmed.ownedProcessGroupPid
           if emptied
-            then pure (Right ())
+            then pure (Right True)
             else do
               retried <- recordAndConfirm unconfirmed
               pure (Left (GhCleanupFailure message (if retried then GuardRecorded else GuardInMemoryOnly)))
@@ -472,13 +476,18 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
     -- is at most an unreaped zombie. It is skipped entirely when that
     -- confirmation failed, since waiting on a gh that is still running would
     -- block this thread and the refresh would never report anything at all.
-    Right () -> do
+    Right proven -> do
       void (try @IOException (waitForProcess processHandle))
       mapM_ (dropGhGroup repository) spawnedPid
-      -- Only now, with the group confirmed empty and its record dropped, is
-      -- the pessimistic entry above retracted -- and only if it was this
-      -- cleanup's to retract.
-      unless alreadyReported (writeIORef cleanupFailure Nothing)
+      -- A finding this cleanup did not make is retracted only by evidence
+      -- this cleanup did make: proving the group empty. Otherwise the fetch's
+      -- own finding stands, since it saw things no longer observable here.
+      --
+      -- Retracting on `proven` matters as much as keeping it otherwise. A
+      -- cleanup that has just emptied the group and dropped its record has
+      -- left nothing to hold off for, and a board held off for nothing would
+      -- never refresh again.
+      when (proven || not alreadyReported) (writeIORef cleanupFailure Nothing)
   mapM_ (ignoreIOException . hClose) input
   where
     recordAndConfirm unconfirmed = do
@@ -654,13 +663,16 @@ forcedReapTimeoutMicros = 5 * 1000 * 1000
 -- the group, and cleanup tracking only the leader would call the group dead
 -- while a descendant kept running. A failure carries the group it could not
 -- account for, so the caller can hand exactly that to the durable record.
-killGhGroup :: ProcessHandle -> IO (Either (Text, OwnedProcessGroup) ())
+killGhGroup :: ProcessHandle -> IO (Either (Text, OwnedProcessGroup) Bool)
 killGhGroup processHandle = do
   spawnedPid <- getPid processHandle
   case spawnedPid of
     -- No PID left to signal: the handle has already been reaped, which only
-    -- happens once gh has exited and been waited on.
-    Nothing -> pure (Right ())
+    -- happens once gh has exited and been waited on. Nothing was established
+    -- here -- there was nothing left to establish it against -- and 'False'
+    -- says so, because a finding another step made must not be discarded on
+    -- the strength of a check that never happened.
+    Nothing -> pure (Right False)
     Just pid -> escalate (fromIntegral pid) groupCleanupPasses
   where
     -- Re-censusing between escalations is what makes this about the group
@@ -695,8 +707,8 @@ killGhGroup processHandle = do
                   )
           _ -> case groupMembers groupPid processes of
             -- The only successful ending: the group, asked afresh, has
-            -- nobody left in it.
-            [] -> pure (Right ())
+            -- nobody left in it -- and this time that was actually checked.
+            [] -> pure (Right True)
             members
               | passesLeft <= 0 ->
                   pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True))

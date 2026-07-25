@@ -5230,12 +5230,14 @@ main = hspec $ do
         (outcome, survivors) <- forcedCleanupRun temporaryRoot 2 (Just 3)
         survivors `shouldBe` []
         case outcome of
-          -- Reported as the guard-write failure that actually stopped this
-          -- fetch, not as an unverified cleanup: the group was proven empty,
-          -- so there is nothing left for a later refresh to overlap.
-          BoardRefreshCompleted (Left providerError) -> do
-            providerError.providerErrorKind `shouldBe` RequestFailed
-            providerError.providerErrorMessage `shouldMention` "could not record the gh process it started"
+          -- Reported as an ordinary failed refresh rather than an unverified
+          -- cleanup, which is the point: the group was proven empty, so there
+          -- is nothing left for a later refresh to overlap and no reason to
+          -- hold the board off. Whether it surfaces as the guard-write
+          -- failure or as the timeout depends on which the clock reached
+          -- first, and neither is a claim about surviving processes.
+          BoardRefreshCompleted (Left providerError) ->
+            providerError.providerErrorKind `shouldSatisfy` (`elem` [RequestFailed, RequestTimedOut])
           other -> expectationFailure ("expected a plain failure once the group was proven empty, got " <> show other)
 
     it "makes no claim at all while no snapshot can confirm the group, but still takes the descendant with it" $
@@ -5266,7 +5268,7 @@ main = hspec $ do
           BoardRefreshUnverified _ -> pure ()
           other -> expectationFailure ("expected the refresh to report a stopped gh, got " <> show other)
 
-    it "keeps the record when a descendant outlives a gh that exited normally" $
+    it "cleans up a descendant that outlives a gh which exited normally, rather than deferring it" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
             lingerer = binaryRoot </> "lingerer"
@@ -5277,9 +5279,10 @@ main = hspec $ do
         setFileMode lingerer 0o700
         -- gh answers correctly and exits 0, but leaves a descendant behind in
         -- its group with the pipes closed, so nothing about the ordinary
-        -- collect path notices. Dropping the guard here would leave the next
-        -- page -- or the next refresh -- to start a gh beside it with nothing
-        -- recorded to reclaim.
+        -- collect path notices. The fetch records what it found and hands the
+        -- group to cleanup without reaping, which is what leaves cleanup a
+        -- live PID to escalate against -- so the descendant is dealt with
+        -- here rather than deferred to whatever fetch comes next.
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
           withFakeGh
             temporaryRoot
@@ -5291,31 +5294,20 @@ main = hspec $ do
             $ do
               (outcome, _) <- captureBoardRefresh temporaryRoot 30
               case outcome of
-                -- Reported through the guard rather than as a plain provider
-                -- error, because that is what a cleanup this fetch could not
-                -- verify is: the board must hold off, not merely show a
-                -- failed refresh.
-                BoardRefreshUnverified failure -> do
-                  failure.ghCleanupMessage `shouldMention` "still running"
-                  failure.ghCleanupGuard `shouldBe` GuardRecorded
+                -- The fetch failed -- it did leave a group it could not
+                -- account for -- but the board is not held off, because
+                -- cleanup went on to prove there is nothing left to hold off
+                -- for. Holding off with nothing surviving would mean never
+                -- refreshing again.
+                BoardRefreshCompleted (Left providerError) ->
+                  providerError.providerErrorMessage `shouldMention` "could not confirm stopped"
                 other -> expectationFailure ("expected the unresolved group to be reported, got " <> show other)
-          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
           descendantPid <- readMarkerPid descendantMarker
-          -- Still running, and now recorded, so the next fetch reclaims it
-          -- rather than racing it.
           snapshot <- readProcessSnapshot
           case snapshot of
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
-            Right identities -> identityForPid descendantPid identities `shouldSatisfy` isJust
-          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
-            (outcome, _) <- captureBoardRefresh temporaryRoot 30
-            case outcome of
-              BoardRefreshCompleted (Right _) -> pure ()
-              other -> expectationFailure ("expected the reclaimed group to let the next fetch proceed, got " <> show other)
-          reclaimed <- readProcessSnapshot
-          case reclaimed of
-            Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
             Right identities -> identityForPid descendantPid identities `shouldBe` Nothing
+          -- Nothing survives, so nothing is left on record either.
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "finishes reclaiming a recorded group even when the refresh timer fires during it" $
