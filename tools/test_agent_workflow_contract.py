@@ -6,6 +6,12 @@ Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, and against
 the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
 so a new external command or home-relative path cannot land undocumented.
+
+Since issue #118 that plugin surface also covers the seven vendored drafting
+and canonical issue-review assets (docs/drafting-workflow-contract.md §2),
+including a markdown counterpart of the Haskell home-relative-path check so
+the user-scoped install path those assets name is reconciled against the same
+`personal-path` manifest rows.
 """
 
 import re
@@ -43,6 +49,9 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
 ]
 
@@ -56,7 +65,29 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/pr-review.md",
     "claude-plugin/plugins/kanban/commands/pr-rereview.md",
     "claude-plugin/plugins/kanban/commands/pr-revise.md",
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "claude-plugin/plugins/kanban/commands/draft-issues.md",
+    "claude-plugin/plugins/kanban/commands/autoissue.md",
+    "claude-plugin/plugins/kanban/commands/issue-review.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
+]
+
+# The seven drafting and canonical issue-review assets vendored by issue #118.
+# All seven are scanned for external commands via the lists above — the bash
+# fence extractor simply returns an empty set for an asset with no ```bash
+# fence, so a prose-only contract is covered rather than exempted — and all
+# seven are scanned here for user-scoped paths. Scoped to these assets
+# deliberately: the pre-existing packaged workflows build home-relative paths
+# (worktrees roots, $CODEX_HOME coordinator lookups) that predate this check
+# and are not part of this contract's surface.
+DRAFTING_SURFACE_FILES = [
+    "claude-plugin/plugins/kanban/commands/issue.md",
+    "claude-plugin/plugins/kanban/commands/draft-issues.md",
+    "claude-plugin/plugins/kanban/commands/autoissue.md",
+    "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
 ]
 
 MANIFEST_ROW_RE = re.compile(
@@ -200,6 +231,35 @@ def discovered_commands_for_plugin_file(relative_path, content):
     if relative_path.endswith(".py"):
         return discovered_python_commands(content)
     return discovered_plugin_commands(content)
+
+
+# A `$HOME/`- or `~/`-prefixed path in a packaged markdown workflow, the
+# non-Haskell counterpart of HOME_PATH_EXPR_RE above. A path component may
+# contain spaces (Kanban's own install root is `Library/Application
+# Support/kanban/...`), so a component is one-or-more space-separated words
+# and the match ends at the characters that close a path inside shell
+# expansion, a quoted string, or markdown inline code — e.g. the `}` closing
+# `${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}`.
+# Allowing spaces means an undelimited path in running prose over-captures
+# trailing words rather than truncating; for a completeness gate that fails
+# loudly, which is the safe direction. The captured segment keeps its leading
+# slash so it compares against a `personal-path` manifest token exactly the
+# way the Haskell segments do.
+_MARKDOWN_PATH_WORD = r'[^\s"\'`}$)\\<>/]+'
+MARKDOWN_HOME_PATH_RE = re.compile(
+    r'(?:\$HOME|~)((?:/' + _MARKDOWN_PATH_WORD + r'(?: ' + _MARKDOWN_PATH_WORD + r')*)+)'
+)
+
+
+def markdown_home_relative_segments(content):
+    """Every user-scoped path a packaged markdown workflow names, whether in a
+    fenced bash block or in the surrounding prose that documents it."""
+    segments = set()
+    for match in MARKDOWN_HOME_PATH_RE.finditer(content):
+        segment = match.group(1).rstrip("/.,;:")
+        if segment and segment != "/":
+            segments.add(segment)
+    return segments
 
 
 def looks_like_path_segment(segment):
@@ -378,6 +438,76 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{relative_path} builds an undocumented home-relative path "
                     f"segment {segment!r}; declare it in the manifest",
                 )
+
+    def test_every_drafting_asset_bash_command_is_documented(self):
+        # Requirement 8 of issue #118: the check must scan all seven vendored
+        # drafting/issue-review assets. They are already members of the two
+        # plugin surface lists above; this pins the seven explicitly so a
+        # future edit to those lists cannot silently drop one.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in DRAFTING_SURFACE_FILES:
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+
+    def test_every_drafting_asset_home_relative_path_is_documented(self):
+        personal_tokens = [
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        ]
+        for relative_path in DRAFTING_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for segment in markdown_home_relative_segments(content):
+                self.assertTrue(
+                    any(segment in token or token in segment for token in personal_tokens),
+                    f"{relative_path} names an undocumented user-scoped path "
+                    f"segment {segment!r}; declare it in the manifest",
+                )
+
+    def test_markdown_home_path_extraction_finds_the_backend_install_path(self):
+        # Pins the extractor against the actual packaged issue-review assets
+        # rather than a synthetic snippet, so a rewrite that stops naming the
+        # Kanban-managed install path fails here instead of leaving the
+        # completeness check with nothing to discover.
+        for relative_path in (
+            "claude-plugin/plugins/kanban/commands/issue-review.md",
+            "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+        ):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = markdown_home_relative_segments(content)
+            self.assertIn("/Library/Application Support/kanban/issue-review", found, relative_path)
+            self.assertIn(
+                "/Library/Application Support/kanban/issue-review/approve_issues.py",
+                found,
+                relative_path,
+            )
+
+    def test_markdown_home_path_extraction_handles_shell_expansion_and_prose(self):
+        snippet = (
+            "resolve it the same way, otherwise `~/Library/Application Support/kanban/x.py`:\n\n"
+            "```bash\n"
+            'BACKEND="${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban}/x.py"\n'
+            "```\n"
+        )
+        self.assertEqual(
+            markdown_home_relative_segments(snippet),
+            {
+                "/Library/Application Support/kanban/x.py",
+                "/Library/Application Support/kanban",
+            },
+        )
 
     def test_issue_review_backend_is_kanban_owned_and_supported(self):
         by_id = {row["id"]: row for row in self.manifest}

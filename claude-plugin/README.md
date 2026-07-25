@@ -1,15 +1,20 @@
 # Kanban Claude plugin
 
 This directory is a Claude Code marketplace, tracked in this repository, that
-packages the Claude-side workflows Kanban invokes by name: `/solve`,
-`/pr-review`, `/pr-rereview`, and `/pr-revise`. It exists so a clean Claude
-Code installation can perform these actions without depending on any
-developer's personal command collection. See
+packages the Claude-side workflows Kanban invokes by name — `/solve`,
+`/pr-review`, `/pr-rereview`, and `/pr-revise` — plus the issue-drafting and
+canonical issue-review workflows a user or the review daemon invokes directly:
+`/issue`, `/draft-issues`, `/autoissue`, and `/issue-review`. It exists so a
+clean Claude Code installation can perform these actions without depending on
+any developer's personal command collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for the
 full dependency contract these workflows implement, including the
 `solve`/PR-flow authority boundaries and the canonical issue-review backend
-they call into. See [codex-plugin/](../codex-plugin/README.md) for the
-equivalent Codex-side packaging.
+they call into, and
+[docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md)
+for the drafting and issue-review responsibility matrix. See
+[codex-plugin/](../codex-plugin/README.md) for the equivalent Codex-side
+packaging.
 
 ## Install
 
@@ -40,7 +45,7 @@ running the two commands above from a freshly initialized, unrelated
 scratch repository (no relation to this repository) produces a
 `.claude/settings.json` there with `"enabledPlugins": {"kanban@kanban":
 true}`, and `claude plugin details kanban@kanban` run from that same
-repository lists all four commands. The embedded marketplace path is
+repository lists every packaged command. The embedded marketplace path is
 specific to the machine and checkout it was added from, the same caveat
 [codex-plugin/](../codex-plugin/README.md) documents for its own
 git-sourced install form; commit the resulting `.claude/settings.json` to
@@ -63,7 +68,7 @@ every repository Kanban might point `--path` at without a separate install
 per target repository. Verified directly: after a default install from this
 checkout, `claude plugin details kanban@kanban` run with the working
 directory set to an unrelated scratch directory (no relation to this
-repository, and not separately configured) still lists all four commands
+repository, and not separately configured) still lists every packaged command
 under `kanban@kanban`, and `claude plugin list --json` shows the install
 with no `projectPath` tying it to this checkout.
 
@@ -79,8 +84,9 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and the four workflow names should be
-available as `/solve`, `/pr-review`, `/pr-rereview`, and `/pr-revise`.
+`kanban@kanban` should be listed, and all eight workflow names should be
+available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
+`/draft-issues`, `/autoissue`, and `/issue-review`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -89,12 +95,26 @@ those subcommands cannot install this plugin.
 
 ## What's packaged
 
+Kanban's own CLI spawns the first four by name. The last four are drafting and
+readiness-gate workflows a user or the review daemon invokes directly, which is
+why they are excluded from the Haskell invocation-parity pinning in
+`tools/test_claude_plugin.py`; see
+[docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
+
 | Command | Invocation | Boundary |
 | --- | --- | --- |
 | `commands/solve.md` | `/solve` | Claims an issue, implements it in an isolated worktree, opens a PR. Stops after opening the PR; never reviews or merges. |
 | `commands/pr-review.md` | `/pr-review` | Review-only. Runs the canonical issue-gated, opposite-brand (or dual, for unknown origin) review and publishes one verdict. Never edits, labels beyond the verdict, or merges. |
 | `commands/pr-rereview.md` | `/pr-rereview` | Same as `/pr-review` for a changed PR; also removes a lingering `reviewed:revised` label after publishing, the one label mutation Kanban's own invocation prompts require of a review-only workflow. |
 | `commands/pr-revise.md` | `/pr-revise` | Repairs a `reviewed:changes` PR in an isolated worktree, pushes safely, then hands off to exactly one canonical rereview. Never self-approves or merges. |
+| `commands/issue.md` | `/issue` | Finds, verifies, and deduplicates **exactly one** candidate and drafts it to hand-off quality. Stops for explicit signoff; never creates without it. |
+| `commands/draft-issues.md` | `/draft-issues` | The **breadth** counterpart: surveys many candidates repo-wide, stops to ask which to create, then expands only those to the same bar. Claude-only — there is deliberately no Codex equivalent. |
+| `commands/autoissue.md` | `/autoissue` | Delegates drafting to `/issue`, and on signoff creates the issue and immediately runs `/issue-review` with no second confirmation. Stops without reviewing if drafting stops before creation. |
+| `commands/issue-review.md` | `/issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
+
+`/epic` is deliberately **not** packaged: it decomposes a user-supplied feature
+arc rather than independently hunting for discretionary work, so it is not part
+of this drafting contract.
 
 `pr-review`, `pr-rereview`, and `pr-revise` all delegate publication to the
 bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
@@ -109,10 +129,21 @@ starts from. The coordinator resolves the canonical issue-review backend the
 same way `Kanban.Review.canonicalIssueReviewerPath` does
 (`KANBAN_ISSUE_REVIEW_INSTALL_DIR`, falling back to the Kanban-managed install
 directory under `~/Library/Application Support/kanban/issue-review/`); it
-never hard-codes a personal path. None of the four commands set their own
+never hard-codes a personal path. None of the packaged commands set their own
 model, reasoning effort, permission mode, or working directory — Kanban's own
 CLI invocation pins those per action, and `tools/test_claude_plugin.py`
 asserts none of the packaged manifests override them.
+
+`/issue-review` — and `/autoissue`'s immediate review handoff — resolve the
+same canonical backend the same portable way, at
+`${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}/approve_issues.py`,
+installed by `python3 tools/install_issue_review.py` from a Kanban checkout.
+They never reference the pre-migration compatibility launcher described in
+[docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary),
+and they never pin a reviewer model or display name:
+selecting the opposite-agent reviewer is the backend's job, and its own
+default already resolves the canonical one. The personal model pins carried by
+the pre-vendoring sources were dropped for exactly that reason.
 
 For known-origin `/pr-review`/`/pr-rereview` — the case Kanban's own
 invocation always produces — the calling session already *is* the
@@ -151,10 +182,14 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the four packaged command names exactly match the `/`-prefixed tokens
-  `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn;
+- the commands directory contains exactly the eight packaged workflows, and
+  the four Kanban spawns exactly match the `/`-prefixed tokens
+  `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
+  two separate assertions, since Kanban's Haskell code must *not* spawn the
+  four drafting commands;
 - no packaged manifest sets model/effort/permission-mode/working-directory
-  configuration;
+  configuration, and every packaged command — drafting commands included —
+  declares a `description:` and no forbidden frontmatter key;
 - no packaged asset references a personal absolute path or the pre-migration
   compatibility launcher path (see
   [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary));
@@ -165,7 +200,32 @@ runs) checks that:
   invocation, so the two cannot silently drift apart.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (`claude-plugin/plugins/kanban/commands/*.md`) and bundled
-coordinator against the same manifest in
+surface (`claude-plugin/plugins/kanban/commands/*.md`, all eight commands) and
+bundled coordinator against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
-that the Codex plugin and Kanban's Haskell source are reconciled against.
+that the Codex plugin and Kanban's Haskell source are reconciled against,
+including the user-scoped backend install path the drafting and issue-review
+commands name.
+
+`tools/test_drafting_workflow_contract.py` reconciles the four drafting
+commands against the responsibility matrix in
+[docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md):
+every declared asset must exist, no undeclared drafting command may appear,
+the exact `<!-- issue-origin:claude -->` marker literal must be present in each
+issue-creating command, and the Claude-only `/draft-issues` and unpackaged
+`/epic` boundaries must remain stated. It also pins the optional scope gate
+([docs/drafting-workflow-contract.md §4](../docs/drafting-workflow-contract.md#4-scope-gate)):
+`/issue`, `/draft-issues`, and `/autoissue` must state the same gate and
+exemption rules as the document, each gate instruction must follow the guard
+that makes it apply only when the consuming repo declares a gate, and
+`/issue-review` must stay free of gate language.
+
+## Project-scoped locations
+
+The packaged commands live at `claude-plugin/plugins/kanban/commands/`,
+discovered through this plugin's own `"commands": "./commands/"` manifest
+declaration — adding a workflow needs no manifest schema change. That
+project-scoped location is the surface the planned opt-in cross-project setup
+work (issue #78) installs or links into other repositories; the `--scope
+project` and `--scope local` install forms above are the manual equivalents
+available today.

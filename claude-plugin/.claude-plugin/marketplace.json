@@ -1,6 +1,6 @@
 {
   "name": "kanban",
-  "description": "Kanban's tracked Claude Code marketplace, packaging the /solve and PR review/rereview/revise workflows Kanban invokes by name.",
+  "description": "Kanban's tracked Claude Code marketplace, packaging the /solve and PR review/rereview/revise workflows Kanban invokes by name plus the user-invoked issue-drafting and canonical issue-review workflows.",
   "owner": {
     "name": "Kanban"
   },
@@ -8,7 +8,7 @@
     {
       "name": "kanban",
       "version": "1.0.0",
-      "description": "Kanban's Claude-side workflow bundle: /solve, /pr-review, /pr-rereview, /pr-revise.",
+      "description": "Kanban's Claude-side workflow bundle: the Kanban-invoked /solve, /pr-review, /pr-rereview, /pr-revise, plus the user-invoked drafting and canonical issue-review workflows /issue, /draft-issues, /autoissue, /issue-review.",
       "author": {
         "name": "Kanban"
       },
