@@ -5186,7 +5186,7 @@ main = hspec $ do
         -- attempts, the retry budget of 'defaultProcessSnapshot') and then
         -- works again, so the forced fallback runs and its own whole-group
         -- check is the thing that gets to answer.
-        (outcome, survivors) <- forcedCleanupRun temporaryRoot (Just 3)
+        (outcome, survivors) <- forcedCleanupRun temporaryRoot 2 (Just 3)
         case outcome of
           BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardForciblyTerminated
           other -> expectationFailure ("expected a forcibly terminated gh, got " <> show other)
@@ -5197,11 +5197,27 @@ main = hspec $ do
         -- ps never works, so whole-group absence can never be shown. The
         -- guard must not claim a restart is safe -- but SIGKILL still went to
         -- the group, so the TERM-ignoring descendant is gone regardless.
-        (outcome, survivors) <- forcedCleanupRun temporaryRoot Nothing
+        (outcome, survivors) <- forcedCleanupRun temporaryRoot 2 Nothing
         case outcome of
           BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardInMemoryOnly
           other -> expectationFailure ("expected an unguarded gh, got " <> show other)
         survivors `shouldBe` []
+
+    it "finishes cleanup even when the refresh timer fires part-way through it" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- One second is a legal github_seconds, and cleanup needs longer than
+        -- that: two 750ms grace windows plus snapshots. The timer therefore
+        -- lands inside it. 'mask' does not stop that -- every one of those
+        -- waits is an interruptible point -- so cleanup abandoned half-way
+        -- would leave the TERM-resistant descendant running while the fetch
+        -- reported an ordinary timeout. The store is unwritable throughout,
+        -- so no durable record can paper over it either.
+        (outcome, survivors) <- forcedCleanupRun temporaryRoot 1 (Just 0)
+        survivors `shouldBe` []
+        case outcome of
+          BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+          BoardRefreshUnverified _ -> pure ()
+          other -> expectationFailure ("expected the refresh to report a stopped gh, got " <> show other)
 
     it "explains the unverified gh and what happens next, without offering a restart as the fix" $ do
       -- A recorded group self-heals on the next refresh; an unrecorded one
@@ -6945,8 +6961,8 @@ isInvalidCache _ = False
 -- and anything of this fixture's still alive once the real @ps@ is back —
 -- answers both halves of the question: what the guard claimed, and whether
 -- the descendant actually died.
-forcedCleanupRun :: FilePath -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
-forcedCleanupRun temporaryRoot psFailures = do
+forcedCleanupRun :: FilePath -> Int -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
+forcedCleanupRun temporaryRoot githubSeconds psFailures = do
   let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
       binaryRoot = temporaryRoot </> "bin"
       psCounter = temporaryRoot </> "ps.count"
@@ -6973,9 +6989,7 @@ forcedCleanupRun temporaryRoot psFailures = do
                 ]
             )
           setFileMode (binaryRoot </> "ps") 0o700
-          -- Short only so a regression fails fast: the guard write fails
-          -- before gh is used, long before this matters.
-          fst <$> captureBoardRefresh temporaryRoot 2
+          fst <$> captureBoardRefresh temporaryRoot githubSeconds
   -- Asked with the real ps, now that the fake is off PATH again.
   snapshot <- readProcessSnapshot
   case snapshot of

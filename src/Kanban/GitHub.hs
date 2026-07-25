@@ -17,9 +17,9 @@ module Kanban.GitHub
   )
 where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, forkIOWithUnmask)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (Exception, IOException, bracketOnError, throwIO, try)
+import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
 import Control.Monad (unless, void)
 import Data.Aeson
   ( FromJSON (parseJSON),
@@ -238,8 +238,10 @@ fetchPage guard limits repository state = do
 -- outlive the timeout that reported it dead and still be running when the
 -- next refresh starts another one.
 runGh :: GhFetchGuard -> Repository -> [String] -> IO (ExitCode, String, String)
-runGh guard repository arguments = bracketOnError (createProcess ghProcess) (abandonGh guard repository) run
+runGh guard repository arguments = bracketOnError (createProcess ghProcess) cleanUp run
   where
+    cleanUp spawned = uninterruptibleCleanup (abandonGh guard repository spawned)
+
     ghProcess =
       (proc "gh" arguments)
         { std_in = CreatePipe,
@@ -308,6 +310,11 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
   -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
   -- the moment it is reaped and the guard entry is keyed by this PID.
   spawnedPid <- fmap fromIntegral <$> getPid processHandle
+  -- Written before any of the work below, all of which can be cut short by
+  -- the cleanup budget running out. Whatever happens after this point, the
+  -- fetch cannot end up reporting an ordinary clean timeout for a gh whose
+  -- death was never actually established.
+  writeIORef cleanupFailure (Just (GhCleanupFailure "gh cleanup did not run to completion" GuardInMemoryOnly))
   outcome <- killGhGroup processHandle
   case outcome of
     Left (message, unconfirmed) -> do
@@ -320,7 +327,36 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
     Right () -> do
       void (try @IOException (waitForProcess processHandle))
       mapM_ (dropGhGroup repository) spawnedPid
+      -- Only now, with the group confirmed empty and its record dropped, is
+      -- the pessimistic entry above retracted.
+      writeIORef cleanupFailure Nothing
   mapM_ (ignoreIOException . hClose) input
+
+-- | Runs a cleanup that must not be cut short by the refresh timer.
+--
+-- 'bracketOnError' masks its handler, but 'mask' still admits an exception
+-- at every interruptible point, and this cleanup is little else: two grace
+-- windows and several subprocess waits. A refresh timeout landing in one of
+-- them would abandon the work half-done — signalled but never confirmed,
+-- nothing recorded — and the fetch would go on to report an ordinary
+-- timeout for a process that is still running.
+--
+-- So the work happens on a thread of its own, where the timer's exception
+-- cannot reach it, and this thread waits for it without accepting exceptions
+-- either. That wait cannot outlast the worker, and the worker holds itself
+-- to a budget, so refusing interruption here does not mean waiting forever.
+uninterruptibleCleanup :: IO () -> IO ()
+uninterruptibleCleanup cleanup = do
+  finished <- newEmptyMVar
+  void (forkIOWithUnmask (\unmask -> void (timeout cleanupBudgetMicros (unmask cleanup)) `finally` putMVar finished ()))
+  uninterruptibleMask_ (takeMVar finished)
+
+-- | Comfortably longer than a cleanup that is behaving: three escalation
+-- rounds of grace windows and snapshots, plus the forced fallback's own
+-- bounded reap. It exists only so that a cleanup wedged on something
+-- unexpected cannot hold the refresh thread indefinitely.
+cleanupBudgetMicros :: Int
+cleanupBudgetMicros = 30 * 1000 * 1000
 
 ghGroupIsRecorded :: Repository -> Int -> IO Bool
 ghGroupIsRecorded repository groupPid =
