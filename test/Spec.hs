@@ -5077,6 +5077,40 @@ main = hspec $ do
                 other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
           doesFileExist ranMarker `shouldReturn` False
 
+    it "stops the gh it just spawned when no durable guard can be written for it, leaving nothing for a restart to overlap" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
+        -- An unwritable cache is the case where the guard cannot be
+        -- persisted at all. Since it is written before gh is used for
+        -- anything, the failure is caught while gh is still this process's
+        -- to terminate -- rather than after a timeout, when only an
+        -- in-memory gate would be left and a restart would drop it.
+        ByteString.writeFile unwritableCacheRoot "not a directory"
+        withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
+          withFakeGh
+            temporaryRoot
+            ["trap '' TERM", "while :; do sleep 1; done"]
+            $ do
+              -- The refresh timeout is short only so that a regression here
+              -- fails fast: the guard is written before gh runs, so the real
+              -- path never gets near it.
+              (outcome, _) <- captureBoardRefresh temporaryRoot 2
+              case outcome of
+                BoardRefreshCompleted (Left providerError) -> do
+                  providerError.providerErrorKind `shouldBe` RequestFailed
+                  providerError.providerErrorMessage `shouldMention` "could not record the gh process it started"
+                other -> expectationFailure ("expected the unguarded gh to be refused, got " <> show other)
+              -- Asked of the process table rather than of a marker file the
+              -- fake would have to win a race to write: whether it got as far
+              -- as running or was stopped before it did, nothing from this
+              -- fetch may still be alive for a restart to collide with.
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+                Right identities ->
+                  filter (Data.Text.isInfixOf (Data.Text.pack (temporaryRoot </> "bin")) . processIdentityCommand) identities
+                    `shouldBe` []
+
     it "explains the unverified gh and what happens next, without offering a restart as the fix" $ do
       -- A recorded group self-heals on the next refresh; an unrecorded one
       -- leaves this dashboard unable to refresh at all. Neither may suggest

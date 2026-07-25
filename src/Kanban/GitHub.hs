@@ -18,7 +18,7 @@ where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, bracketOnError, throwIO, try)
+import Control.Exception (Exception, IOException, bracketOnError, throwIO, try)
 import Control.Monad (unless, void)
 import Data.Aeson
   ( FromJSON (parseJSON),
@@ -176,21 +176,32 @@ decodeGitHubItems input = do
 
 fetchPage :: GhFetchGuard -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
 fetchPage guard limits repository state = do
-  processResult <- try @IOException (runGh guard repository (graphqlArguments limits repository state))
-  pure $ case processResult of
-    Left exception ->
+  -- The unwritable-guard failure is deliberately not folded in with the
+  -- IOExceptions below: those mean gh could not be run, while this means gh
+  -- ran and was then stopped again because nothing durable could account for
+  -- it. Reporting it as a missing executable would send the user looking in
+  -- entirely the wrong place.
+  guarded <- try @GhGuardUnwritable (try @IOException (runGh guard repository (graphqlArguments limits repository state)))
+  pure $ case guarded of
+    Left (GhGuardUnwritable message) ->
+      Left
+        ProviderError
+          { providerErrorKind = RequestFailed,
+            providerErrorMessage = "GitHub refresh could not record the gh process it started (" <> message <> "), so it was stopped again"
+          }
+    Right (Left exception) ->
       Left
         ProviderError
           { providerErrorKind = ExecutableMissing,
             providerErrorMessage = Text.pack (show exception)
           }
-    Right (ExitFailure _, _, stderrText) ->
+    Right (Right (ExitFailure _, _, stderrText)) ->
       Left
         ProviderError
           { providerErrorKind = classifyFailure (Text.pack stderrText),
             providerErrorMessage = compactError stderrText
           }
-    Right (ExitSuccess, stdoutText, _) ->
+    Right (Right (ExitSuccess, stdoutText, _)) ->
       case eitherDecode (LazyTextEncoding.encodeUtf8 (LazyText.pack stdoutText)) of
         Left message ->
           Left
@@ -208,7 +219,7 @@ fetchPage guard limits repository state = do
 -- outlive the timeout that reported it dead and still be running when the
 -- next refresh starts another one.
 runGh :: GhFetchGuard -> Repository -> [String] -> IO (ExitCode, String, String)
-runGh guard repository arguments = bracketOnError (createProcess ghProcess) (abandonGh guard repository) collect
+runGh guard repository arguments = bracketOnError (createProcess ghProcess) (abandonGh guard repository) run
   where
     ghProcess =
       (proc "gh" arguments)
@@ -217,6 +228,27 @@ runGh guard repository arguments = bracketOnError (createProcess ghProcess) (aba
           std_err = CreatePipe,
           create_group = True
         }
+
+    -- The durable guard is written before this gh is used for anything, so
+    -- it exists for as long as the process does. Nothing later has to
+    -- succeed for a crash, a kill, or a quit at any point from here on to
+    -- leave a record behind: the only write that must work is this one, and
+    -- if it does not, the gh it would have covered is terminated instead of
+    -- being allowed to run unguarded.
+    run spawned = do
+      registered <- registerSpawnedGh repository spawned
+      case registered of
+        Left message -> throwIO (GhGuardUnwritable message)
+        -- The PID comes from the registration, captured while gh was still
+        -- unreaped: 'collect' waits on the handle, and 'getPid' goes
+        -- 'Nothing' the moment it does, which would leave the entry behind.
+        Right groupPid -> do
+          result <- collect spawned
+          -- gh has exited, so the guard covering it has nothing left to
+          -- cover. A failure to drop it is harmless: the next fetch finds
+          -- that pgid unoccupied and clears the record itself.
+          dropGhGroup repository groupPid
+          pure result
 
     collect (input, output, errors, processHandle) = do
       mapM_ (ignoreIOException . hClose) input
@@ -254,17 +286,32 @@ runGh guard repository arguments = bracketOnError (createProcess ghProcess) (aba
 -- restarted in between.
 abandonGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
 abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) = do
+  -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
+  -- the moment it is reaped and the guard entry is keyed by this PID.
+  spawnedPid <- fmap fromIntegral <$> getPid processHandle
   outcome <- killGhGroup processHandle
   case outcome of
     Left (message, unconfirmed) -> do
-      recorded <- recordUnconfirmedGhGroup repository unconfirmed
+      -- Upgrading the spawn-time guard to the full census is what lets a
+      -- later run re-kill the group rather than only watch it, so it is
+      -- worth attempting -- but nothing depends on it succeeding, because
+      -- the entry written at spawn time already covers this pgid. What the
+      -- caller is told is simply whether a guard is on disk now.
+      void (recordGhGroup repository unconfirmed)
+      recorded <- ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
       writeIORef cleanupFailure (Just (GhCleanupFailure message recorded))
     -- Reaping cannot block here: the group was just confirmed empty, so gh
     -- is at most an unreaped zombie. It is skipped entirely when that
     -- confirmation failed, since waiting on a gh that is still running would
     -- block this thread and the refresh would never report anything at all.
-    Right () -> void (try @IOException (waitForProcess processHandle))
+    Right () -> do
+      void (try @IOException (waitForProcess processHandle))
+      mapM_ (dropGhGroup repository) spawnedPid
   mapM_ (ignoreIOException . hClose) input
+
+ghGroupIsRecorded :: Repository -> Int -> IO Bool
+ghGroupIsRecorded repository groupPid =
+  any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository
 
 -- | Terminates the process group led by a spawned @gh@ and confirms nothing
 -- from it survives. The group is censused first so the confirmation covers
@@ -310,18 +357,53 @@ killGhGroup processHandle = do
 groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
 groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
 
--- | Adds a group that could not be confirmed dead to the durable record,
--- reporting whether it actually landed there. Every unconfirmed group is
--- recorded, signallable or not: one that cannot be signalled is exactly the
--- one a later run must not assume away.
-recordUnconfirmedGhGroup :: Repository -> OwnedProcessGroup -> IO Bool
-recordUnconfirmedGhGroup repository group = do
+-- | Raised when the durable guard covering a freshly spawned @gh@ cannot be
+-- written. It is raised rather than returned so the spawn unwinds through
+-- 'abandonGh' and that @gh@ is terminated: a process this fetch started must
+-- never outlive the record that would have accounted for it.
+newtype GhGuardUnwritable = GhGuardUnwritable Text
+  deriving stock (Show)
+
+instance Exception GhGuardUnwritable
+
+-- | Writes the guard for a @gh@ that has just been spawned, before it is
+-- used for anything. The entry names only the process group, because that is
+-- all that is known this early and all a later run needs: an uncensused
+-- entry is watched until its pgid is unoccupied, which is exactly the
+-- question "did that gh outlive us?".
+registerSpawnedGh :: Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text Int)
+registerSpawnedGh repository (_, _, _, processHandle) = do
+  spawnedPid <- getPid processHandle
+  case spawnedPid of
+    Nothing -> pure (Left "gh reported no process id, so no guard could be written for it")
+    Just pid -> do
+      let groupPid = fromIntegral pid
+      written <- recordGhGroup repository (OwnedProcessGroup groupPid [] False)
+      pure (groupPid <$ written)
+
+-- | Replaces whatever is recorded for a group with `group`, keeping every
+-- other repository entry.
+recordGhGroup :: Repository -> OwnedProcessGroup -> IO (Either Text ())
+recordGhGroup repository group = do
+  existing <- recordedGhGroups repository
+  writeGhGroupRecord repository (group : withoutGroup group.ownedProcessGroupPid existing)
+
+dropGhGroup :: Repository -> Int -> IO ()
+dropGhGroup repository groupPid = do
+  existing <- recordedGhGroups repository
+  case withoutGroup groupPid existing of
+    [] -> void (removeGhGroupRecord repository)
+    remaining -> void (writeGhGroupRecord repository remaining)
+
+withoutGroup :: Int -> [OwnedProcessGroup] -> [OwnedProcessGroup]
+withoutGroup groupPid = filter ((/= groupPid) . ownedProcessGroupPid)
+
+recordedGhGroups :: Repository -> IO [OwnedProcessGroup]
+recordedGhGroups repository = do
   existing <- loadGhGroupRecord repository
-  let alreadyRecorded = case existing of
-        GhGroupRecordLoaded groups -> groups
-        _ -> []
-  written <- writeGhGroupRecord repository (group : filter (/= group) alreadyRecorded)
-  pure (either (const False) (const True) written)
+  pure $ case existing of
+    GhGroupRecordLoaded groups -> groups
+    _ -> []
 
 -- | Re-verifies, and where it is safe to do so re-kills, every @gh@ group a
 -- previous fetch failed to confirm dead — including ones recorded by an
