@@ -40,7 +40,7 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
-import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GitHubResult (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
+import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), decodeGitHubItems, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -5111,18 +5111,55 @@ main = hspec $ do
                   filter (Data.Text.isInfixOf (Data.Text.pack (temporaryRoot </> "bin")) . processIdentityCommand) identities
                     `shouldBe` []
 
+    it "force-kills the gh when neither the guard can be written nor its death confirmed, so a restart still has nothing to collide with" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
+            binaryRoot = temporaryRoot </> "bin"
+        ByteString.writeFile unwritableCacheRoot "not a directory"
+        -- Both facilities the ordinary guards depend on are gone at once: no
+        -- durable record can be written, and no process snapshot can be taken
+        -- to verify a kill. What is left is the child handle itself, which
+        -- needs neither.
+        withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
+          withFakeGh
+            temporaryRoot
+            ["trap '' TERM", "while :; do sleep 1; done"]
+            $ do
+              createDirectoryIfMissing True binaryRoot
+              ByteString.writeFile (binaryRoot </> "ps") (ByteString.unlines ["#!/bin/sh", "exit 1"])
+              setFileMode (binaryRoot </> "ps") 0o700
+              (outcome, _) <- captureBoardRefresh temporaryRoot 2
+              case outcome of
+                -- Not a clean timeout and not a recorded group: the one
+                -- guard left is that the process was actually killed.
+                BoardRefreshUnverified failure -> failure.ghCleanupGuard `shouldBe` GuardForciblyTerminated
+                other -> expectationFailure ("expected a forcibly terminated gh, got " <> show other)
+        -- Asked with the real ps, now that the fake is off PATH again.
+        snapshot <- readProcessSnapshot
+        case snapshot of
+          Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+          Right identities ->
+            filter (Data.Text.isInfixOf (Data.Text.pack binaryRoot) . processIdentityCommand) identities
+              `shouldBe` []
+
     it "explains the unverified gh and what happens next, without offering a restart as the fix" $ do
       -- A recorded group self-heals on the next refresh; an unrecorded one
       -- leaves this dashboard unable to refresh at all. Neither may suggest
       -- restarting, which drops only the in-memory guard and would let a new
       -- gh overlap the old one.
-      let recorded = unverifiedRefreshNotice (GhCleanupFailure "ps exited 1" True)
-          unrecorded = unverifiedRefreshNotice (GhCleanupFailure "ps exited 1" False)
-      mapM_ (`shouldMention` "ps exited 1") [recorded, unrecorded]
-      mapM_ (`shouldMention` "could not be confirmed stopped") [recorded, unrecorded]
-      mapM_ (`shouldNotMention` "restart the dashboard") [recorded, unrecorded]
+      let noticeFor = unverifiedRefreshNotice . GhCleanupFailure "ps exited 1"
+          recorded = noticeFor GuardRecorded
+          forced = noticeFor GuardForciblyTerminated
+          inMemory = noticeFor GuardInMemoryOnly
+      mapM_ (`shouldMention` "ps exited 1") [recorded, forced, inMemory]
+      mapM_ (`shouldMention` "could not be confirmed stopped") [recorded, forced, inMemory]
       recorded `shouldMention` "the next refresh re-checks it"
-      unrecorded `shouldMention` "including across a restart"
+      -- Only the case that actually killed the process may call a restart
+      -- safe; the case that could promise nothing has to say so, and send
+      -- the user looking for the stray itself.
+      forced `shouldMention` "restarting is safe"
+      inMemory `shouldMention` "check for a stray gh process"
+      inMemory `shouldNotMention` "restarting is safe"
 
   describe "solve launch against a session attached while the chooser sits open" $ do
     -- 'startIssueSolve' and 'openIssueSolveChooser' both run in brick's

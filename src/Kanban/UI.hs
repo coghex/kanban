@@ -133,7 +133,7 @@ import Kanban.Drainer
     queryDrainerStatus,
     setDrainerRunning,
   )
-import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
+import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( PreflightAction (..),
@@ -4882,11 +4882,11 @@ applyBoardRefresh outcome = do
     -- re-verifies it before spawning anything, so a later refresh -- in this
     -- process or in one started after a restart -- cannot overlap it, and the
     -- board is free to sit in an ordinary failure state that self-heals as
-    -- soon as the group is confirmed gone. Without that record the in-memory
-    -- refusal is all that is left, so 'appBoardFreshness' stays 'Loading' and
+    -- soon as the group is confirmed gone. Every other guard is only as good
+    -- as this dashboard, so 'appBoardFreshness' stays 'Loading' and
     -- 'startBoardRefresh' keeps turning further fetches away.
     BoardRefreshUnverified failure
-      | failure.ghCleanupRecorded ->
+      | GuardRecorded <- failure.ghCleanupGuard ->
           state
             { appBoardFreshness = failureFreshness state (unverifiedProviderError failure),
               appNotice = Just (unverifiedRefreshNotice failure)
@@ -4924,20 +4924,20 @@ applyBoardRefresh outcome = do
     _ -> pure ()
 
 -- | What the board reports when a refresh's @gh@ process group could not be
--- confirmed dead. It names the cause and then what will happen next, which
--- differs by whether the group was durably recorded: a recorded group is
--- re-checked by the next refresh and clears itself once it is gone, while an
--- unrecorded one leaves this dashboard unable to refresh at all. In neither
--- case is restarting offered as a fix — a restart drops only the in-memory
--- guard, and would leave a brand-new @gh@ free to overlap the old one.
+-- confirmed dead: the cause, and then exactly what is holding the line,
+-- because the three cases leave the user in genuinely different positions.
+-- Only the recorded one is offered as self-healing; only the forcibly
+-- terminated one says a restart is safe; and the last says plainly that it
+-- is not, and that a stray process has to be dealt with by hand.
 unverifiedRefreshNotice :: GhCleanupFailure -> Text
 unverifiedRefreshNotice failure =
   "GitHub refresh timed out and its gh process could not be confirmed stopped ("
     <> failure.ghCleanupMessage
     <> "); "
-    <> if failure.ghCleanupRecorded
-      then "the next refresh re-checks it and will proceed once it is gone"
-      else "refreshing is blocked until it is, including across a restart"
+    <> case failure.ghCleanupGuard of
+      GuardRecorded -> "the next refresh re-checks it and will proceed once it is gone"
+      GuardForciblyTerminated -> "it was killed outright and its main process confirmed gone, but this dashboard will not refresh again; restarting is safe"
+      GuardInMemoryOnly -> "this dashboard will not refresh again, and a restart cannot know to hold back — check for a stray gh process first"
 
 -- | The unverified cleanup rendered as a provider error, purely so
 -- 'failureFreshness' can age the board the same way every other failed

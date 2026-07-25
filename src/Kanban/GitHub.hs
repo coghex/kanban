@@ -3,6 +3,7 @@ module Kanban.GitHub
     -- suite can assert the exact argv handed to gh without a live request.
     FetchState (..),
     GhCleanupFailure (..),
+    GhCleanupGuard (..),
     GhFetchGuard,
     GitHubResult (..),
     decodeGitHubItems,
@@ -49,6 +50,7 @@ import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose, hGetContents')
+import System.Posix.Signals (sigKILL, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -58,6 +60,7 @@ import System.Process
     proc,
     waitForProcess,
   )
+import System.Timeout (timeout)
 
 data GitHubResult = GitHubResult
   { githubSnapshot :: RepoSnapshot,
@@ -123,13 +126,28 @@ newtype GhFetchGuard = GhFetchGuard (IORef (Maybe GhCleanupFailure))
 -- | A cleanup that could not confirm its @gh@ group is gone.
 data GhCleanupFailure = GhCleanupFailure
   { ghCleanupMessage :: Text,
-    -- | Whether the unconfirmed group was durably recorded. When it was,
-    -- every later fetch — including one from a freshly started dashboard —
-    -- re-verifies it before spawning @gh@, so no in-memory gate has to be
-    -- held to prevent an overlap. When it was not, that in-memory refusal is
-    -- the only guard left and the caller must keep holding it.
-    ghCleanupRecorded :: Bool
+    ghCleanupGuard :: GhCleanupGuard
   }
+  deriving stock (Eq, Show)
+
+-- | What is keeping a possibly-live @gh@ from being overlapped, now that
+-- confirming its death did not work. These are in descending order of how
+-- much they can promise, and the caller has to treat them differently:
+-- only the first survives this dashboard without also needing it to refuse
+-- refreshing.
+data GhCleanupGuard
+  = -- | The group is on disk. Any later fetch re-checks it before spawning
+    -- anything, in this dashboard or one started long afterwards.
+    GuardRecorded
+  | -- | Nothing could be recorded, so the group was killed outright and its
+    -- leader reaped. No durable guard is needed because nothing survivable
+    -- is known to be left — though the members that could not be censused
+    -- are still only presumed dead, so this dashboard stops refreshing.
+    GuardForciblyTerminated
+  | -- | Nothing could be recorded and the forced kill could not be confirmed
+    -- either. This dashboard's refusal to refresh is all that remains, and
+    -- it is worth nothing once the dashboard exits.
+    GuardInMemoryOnly
   deriving stock (Eq, Show)
 
 newGhFetchGuard :: IO GhFetchGuard
@@ -295,11 +313,18 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
       -- Upgrading the spawn-time guard to the full census is what lets a
       -- later run re-kill the group rather than only watch it, so it is
       -- worth attempting -- but nothing depends on it succeeding, because
-      -- the entry written at spawn time already covers this pgid. What the
-      -- caller is told is simply whether a guard is on disk now.
+      -- the entry written at spawn time already covers this pgid.
       void (recordGhGroup repository unconfirmed)
       recorded <- ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
-      writeIORef cleanupFailure (Just (GhCleanupFailure message recorded))
+      guard <-
+        if recorded
+          then pure GuardRecorded
+          else -- Nothing is on disk and nothing was verified, so a restart
+          -- would find no reason to hold back. Force is the only thing
+          -- left that does not depend on the two facilities that just
+          -- failed.
+            forceKillGhGroup processHandle spawnedPid
+      writeIORef cleanupFailure (Just (GhCleanupFailure message guard))
     -- Reaping cannot block here: the group was just confirmed empty, so gh
     -- is at most an unreaped zombie. It is skipped entirely when that
     -- confirmation failed, since waiting on a gh that is still running would
@@ -312,6 +337,32 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
 ghGroupIsRecorded :: Repository -> Int -> IO Bool
 ghGroupIsRecorded repository groupPid =
   any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository
+
+-- | The last resort for a fetch that could neither verify its @gh@ group nor
+-- record it: kill the group outright and reap the leader.
+--
+-- Neither step consults the process table or the filesystem, which is
+-- precisely why this is still available when both of those have failed.
+-- SIGKILL cannot be caught, blocked, or deferred, so it reaches every member
+-- the group currently has; and waiting on the leader — this fetch's own
+-- child — confirms /it/ is gone directly, rather than inferring it from a
+-- snapshot that is not to be had. The wait is bounded anyway, so a process
+-- wedged in an uninterruptible state cannot strand the refresh.
+--
+-- What this buys is a restart that has nothing to collide with. What it
+-- cannot buy is a census: members other than the leader are only presumed
+-- dead, which is why even success here leaves this dashboard refusing to
+-- refresh again.
+forceKillGhGroup :: ProcessHandle -> Maybe Int -> IO GhCleanupGuard
+forceKillGhGroup processHandle spawnedPid = do
+  mapM_ (ignoreIOException . signalProcessGroup sigKILL . fromIntegral) spawnedPid
+  reaped <- timeout forcedReapTimeoutMicros (try @IOException (waitForProcess processHandle))
+  pure $ case reaped of
+    Just (Right _) -> GuardForciblyTerminated
+    _ -> GuardInMemoryOnly
+
+forcedReapTimeoutMicros :: Int
+forcedReapTimeoutMicros = 5 * 1000 * 1000
 
 -- | Terminates the process group led by a spawned @gh@ and confirms nothing
 -- from it survives. The group is censused first so the confirmation covers
