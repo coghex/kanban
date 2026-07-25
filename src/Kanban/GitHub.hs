@@ -56,7 +56,7 @@ import System.Exit (ExitCode (..))
 import System.Directory (findExecutable)
 import System.IO (Handle, hClose, hFlush, hGetContents', hPutStrLn)
 import System.IO.Error (doesNotExistErrorType, mkIOError)
-import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
+import System.Posix.Signals (sigCONT, sigKILL, sigSTOP, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -538,6 +538,49 @@ forceKillGhGroup processHandle spawnedPid = do
 -- would survive long enough to be running when a restarted dashboard
 -- spawned its own gh. A snapshot that cannot be taken answers 'False',
 -- because "could not look" is not "nothing there".
+-- | Empties a process group that has just been proven to be this
+-- repository's, by freezing it before looking at it.
+--
+-- The problem this solves is that a census and a signal cannot be made
+-- simultaneous. 'killVerifiedGroup' answers only for the identities it was
+-- handed, and TERM invites exactly the behaviour that defeats that: a member
+-- whose handler forks a replacement and exits leaves a process that is
+-- genuinely ours but appears in no list, and by the time any census could
+-- notice it, the member that proved ownership is gone. Polling faster does
+-- not fix it -- a fork and an exit are quicker than a process listing.
+--
+-- SIGSTOP does fix it, because it cannot be caught, blocked, or handled.
+-- Once the group is frozen it cannot fork, cannot exit, and therefore cannot
+-- empty, so its pgid cannot be reissued: the census that follows is complete
+-- and every member in it is provably ours. SIGKILL then applies to that exact
+-- set, and is equally uncatchable, so nothing survives to be missed.
+--
+-- Reclaim is where this belongs and TERM is not: this group was already asked
+-- to stop gracefully by the fetch that abandoned it. Skipping the courtesy
+-- second time is also what stops a TERM handler from forking anything new.
+freezeThenKillOwnedGroup :: Int -> IO (Either Text [ProcessIdentity])
+freezeThenKillOwnedGroup groupPid = do
+  ignoreIOException (signalProcessGroup sigSTOP (fromIntegral groupPid))
+  frozen <- defaultProcessSnapshot
+  case frozen of
+    Left message -> do
+      -- Nothing was killed, so nothing may be left frozen either.
+      ignoreIOException (signalProcessGroup sigCONT (fromIntegral groupPid))
+      pure (Left ("could not census the frozen gh process group: " <> message))
+    Right processes -> do
+      let members = groupMembers groupPid processes
+      ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid))
+      threadDelay terminationGraceMicros
+      settled <- defaultProcessSnapshot
+      pure $ case settled of
+        Left message -> Left ("could not confirm the gh process group was emptied: " <> message)
+        Right after
+          | null (matchingIdentities after members) && null (groupMembers groupPid after) -> Right members
+          | otherwise -> Left "the gh process group did not empty after SIGKILL"
+
+terminationGraceMicros :: Int
+terminationGraceMicros = 750 * 1000
+
 -- | Whether the process named by `groupPid` is alive and is the leader of the
 -- process group of the same number.
 --
@@ -787,14 +830,10 @@ reclaimGhGroup group = go group.ownedProcessGroupMembers groupCleanupPasses
               | not (provablyOurs processes known) -> pure (Left (unprovable (length survivors)))
               | passesLeft <= 0 -> pure (Left exhausted)
               | otherwise -> do
-                  -- Signalling the whole current census, not just the
-                  -- recorded members: ownership is proven as of this
-                  -- snapshot, so everyone in the group right now is ours --
-                  -- including a descendant that appears in no earlier list.
-                  result <- killVerifiedGroup groupPid occupants
+                  result <- freezeThenKillOwnedGroup groupPid
                   case result of
                     Left message -> pure (Left message)
-                    Right () -> go (known <> occupants) (passesLeft - 1)
+                    Right adopted -> go (known <> adopted) (passesLeft - 1)
 
     -- An uncensused record never pins anything, so its group can only ever
     -- be watched; a censused one is ours to signal exactly while one of the

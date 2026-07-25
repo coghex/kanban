@@ -5009,7 +5009,7 @@ main = hspec $ do
             doesFileExist ranMarker `shouldReturn` True
             (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
-    it "refuses rather than clearing when a recorded member forks a replacement from its TERM handler and exits" $
+    it "empties a recorded group whose member would fork a replacement from its TERM handler, without giving it the chance" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
             lateChild = binaryRoot </> "late-child"
@@ -5018,16 +5018,16 @@ main = hspec $ do
         createDirectoryIfMissing True binaryRoot
         ByteString.writeFile lateChild (ByteString.unlines ["#!/bin/sh", "trap '' TERM", "while :; do sleep 1; done"])
         setFileMode lateChild 0o700
-        -- The recorded member forks its replacement from its TERM handler and
-        -- exits, so reclaim's escalation sees every identity it knows go away
-        -- while the group is still occupied. Trusting that as success would
-        -- clear the record and let the next gh start beside the newcomer.
+        -- This member would fork a replacement from its TERM handler and
+        -- exit. Under a TERM-first escalation that newcomer is unanswerable:
+        -- it appears in no census taken while ownership was provable, and the
+        -- member that proved ownership is gone by the time any census could
+        -- see it -- a fork and an exit being quicker than a process listing.
         --
-        -- Nor may the newcomer simply be signalled: it appears in no census
-        -- taken while ownership was provable, and the one member that proved
-        -- ownership is now gone -- so between those two observations the group
-        -- could have emptied and its pgid been reissued. Refusing, and keeping
-        -- the record, is the only sound answer left.
+        -- Freezing the group first removes the opening rather than racing it.
+        -- SIGSTOP cannot be handled, so the trap never runs, nothing is
+        -- forked, and the census taken while the group is frozen is both
+        -- complete and provably ours.
         (_, _, _, recordedLeader) <-
           createProcess
             (proc "sh" ["-c", "trap '" <> lateChild <> " </dev/null >/dev/null 2>&1 & printf \"%s\" \"$!\" > " <> descendantMarker <> "; exit 0' TERM; while :; do sleep 1; done </dev/null >/dev/null 2>&1"])
@@ -5044,27 +5044,14 @@ main = hspec $ do
           withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
             case outcome of
-              BoardRefreshCompleted (Left providerError) ->
-                providerError.providerErrorMessage `shouldMention` "cannot be identified as this repository's"
-              other -> expectationFailure ("expected the fetch to be refused, got " <> show other)
-          descendantPid <- readMarkerPid descendantMarker
+              BoardRefreshCompleted (Right _) -> pure ()
+              other -> expectationFailure ("expected the reclaimed group to let the fetch proceed, got " <> show other)
           reclaimed <- readProcessSnapshot
           case reclaimed of
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
-            Right identities -> do
-              identityForPid leaderPid identities `shouldBe` Nothing
-              -- Left alone rather than signalled, and still on record.
-              identityForPid descendantPid identities `shouldSatisfy` isJust
-          (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
-          -- Once it exits of its own accord the record has nothing left to
-          -- name, and the refusal lifts.
-          ignoringIOException (signalProcess sigKILL (fromIntegral descendantPid))
-          threadDelay 300000
-          withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
-            (outcome, _) <- captureBoardRefresh temporaryRoot 30
-            case outcome of
-              BoardRefreshCompleted (Right _) -> pure ()
-              other -> expectationFailure ("expected the refresh to proceed once the descendant exited, got " <> show other)
+            Right identities -> identityForPid leaderPid identities `shouldBe` Nothing
+          -- The trap never ran, so there is no replacement to account for.
+          doesFileExist descendantMarker `shouldReturn` False
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "refuses to spawn gh while a non-leader record's saved gh is alive in some other process group" $
@@ -5370,18 +5357,38 @@ main = hspec $ do
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
             repository = Repository temporaryRoot "coghex" "kanban"
-        -- gh answers and exits perfectly, but ps is unavailable, so nothing
-        -- can establish that the group it led is empty. Reading "no census"
-        -- as "nothing there" is what would drop the guard here.
+        -- gh answers and exits perfectly, but by the time its group must be
+        -- censused ps has stopped working, so nothing can establish that the
+        -- group is empty. Reading "no census" as "nothing there" is what would
+        -- drop the guard here.
+        --
+        -- ps is allowed to work for the first two calls -- the pre-release
+        -- leadership check and the wait for gh to leave the table -- so the
+        -- failure lands on the census itself rather than on an earlier guard
+        -- that would refuse for an entirely different reason.
+        let psCounter = temporaryRoot </> "ps.count"
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
           withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
             createDirectoryIfMissing True binaryRoot
-            ByteString.writeFile (binaryRoot </> "ps") (ByteString.unlines ["#!/bin/sh", "exit 1"])
+            ByteString.writeFile
+              (binaryRoot </> "ps")
+              ( ByteString.unlines
+                  [ "#!/bin/sh",
+                    ByteString.pack ("attempt=$(cat " <> psCounter <> " 2>/dev/null || echo 0)"),
+                    "attempt=$((attempt + 1))",
+                    ByteString.pack ("printf '%s' \"$attempt\" > " <> psCounter),
+                    "[ \"$attempt\" -gt 2 ] && exit 1",
+                    "exec /bin/ps \"$@\""
+                  ]
+              )
             setFileMode (binaryRoot </> "ps") 0o700
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
             case outcome of
-              BoardRefreshCompleted (Left providerError) ->
-                providerError.providerErrorMessage `shouldMention` "could not confirm stopped"
+              BoardRefreshUnverified failure ->
+                -- The inner message, not the wrapper: the wrapper reads the
+                -- same whichever guard refused, which would let this pass
+                -- while testing an entirely different one.
+                failure.ghCleanupMessage `shouldMention` "could not confirm gh's process group was empty"
               other -> expectationFailure ("expected the uncensusable group to be reported, got " <> show other)
           (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
 
