@@ -75,6 +75,36 @@ class InstallSymlinkTests(unittest.TestCase):
             install_issue_review.install_symlink(self.source_a, self.destination)
         self.assertEqual(Path(os.readlink(self.destination)), unrelated)
 
+    def test_refuses_a_working_relative_link_to_someone_elses_file(self):
+        # os.readlink returns "../someone-elses-project/tools/approve_issues.py",
+        # which only resolves against the link's own directory. Checking it
+        # against the process working directory would call this working
+        # link broken -- and broken links are the ones this installer
+        # replaces.
+        unrelated = self.root / "someone-elses-project" / "tools" / "approve_issues.py"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        self.destination.parent.mkdir()
+        relative = Path(os.path.relpath(unrelated, self.destination.parent))
+        self.destination.symlink_to(relative)
+        self.assertTrue(self.destination.exists(), "fixture link must actually resolve")
+
+        self.assertEqual(
+            install_issue_review.plan_symlink(self.source_a.resolve(), self.destination),
+            "refused",
+        )
+        self.assertEqual(Path(os.readlink(self.destination)), relative)
+
+    def test_repoints_a_working_relative_link_to_the_same_tracked_asset(self):
+        self.destination.parent.mkdir()
+        relative = Path(os.path.relpath(self.source_a, self.destination.parent))
+        self.destination.symlink_to(relative)
+
+        self.assertEqual(
+            install_issue_review.install_symlink(self.source_b, self.destination), "updated"
+        )
+        self.assertEqual(self.destination.resolve(), self.source_b.resolve())
+
     def test_repoints_a_link_left_broken_by_a_vanished_checkout(self):
         # The state a moved or deleted checkout leaves behind. Refusal
         # exists to protect content, and a broken link holds none, so this
@@ -195,6 +225,21 @@ class LegacyLauncherMigrationTests(unittest.TestCase):
         self.assertFalse(
             os.path.lexists(self.legacy_path.with_name(self.legacy_path.name + ".pre-kanban-backup"))
         )
+
+    def test_refuses_a_working_relative_launcher_link_even_with_opt_in(self):
+        unrelated = self.root / "my-own-install" / "approve_issues.py"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        relative = Path(os.path.relpath(unrelated, self.legacy_path.parent))
+        self.legacy_path.symlink_to(relative)
+        self.assertTrue(self.legacy_path.exists(), "fixture link must actually resolve")
+
+        for allow_migration in (False, True):
+            result = install_issue_review.migrate_legacy_launcher(
+                self.legacy_path, self.kanban_link, allow_migration=allow_migration
+            )
+            self.assertEqual(result["status"], "refused", allow_migration)
+        self.assertEqual(Path(os.readlink(self.legacy_path)), relative)
 
     def test_refuses_an_ordinary_file_without_opt_in(self):
         self.legacy_path.write_text("pre-kanban\n", encoding="utf-8")

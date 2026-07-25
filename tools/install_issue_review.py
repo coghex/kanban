@@ -62,6 +62,19 @@ def repository_root(requested: Path) -> Path:
 MANAGED_ASSET_MARKER_PREFIX = "kanban-managed-asset:issue-review/"
 
 
+def resolved_link_target(link: Path, target: Path) -> Path:
+    """A symlink's target as this process can reach it.
+
+    `os.readlink` returns the target exactly as written, and a relative one
+    is resolved by the kernel against the *link's own directory* -- not
+    against this process's working directory. Checking a raw relative
+    target directly would report a perfectly working link as broken, and
+    this installer replaces broken links, so that mistake would silently
+    destroy someone else's working installation.
+    """
+    return target if target.is_absolute() else link.parent / target
+
+
 def managed_asset_marker(name: str) -> str:
     """The identity marker the tracked asset `name` carries."""
     return MANAGED_ASSET_MARKER_PREFIX + name
@@ -110,7 +123,9 @@ def plan_symlink(source: Path, destination: Path) -> str:
         current_target = Path(os.readlink(destination))
         if current_target == source:
             return "unchanged"
-        if is_prior_managed_backend_link(current_target, source):
+        if is_prior_managed_backend_link(
+            resolved_link_target(destination, current_target), source
+        ):
             return "updated"
         return "refused"
     return "created"
@@ -176,8 +191,9 @@ def plan_legacy_launcher(
             current_target = Path(os.readlink(legacy_path))
             if current_target == kanban_link:
                 return {"path": str(legacy_path), "status": "unchanged", "backup_path": None}
-            if not os.path.exists(current_target) or is_managed_asset(
-                current_target, kanban_link.name
+            resolved_target = resolved_link_target(legacy_path, current_target)
+            if not os.path.exists(resolved_target) or is_managed_asset(
+                resolved_target, kanban_link.name
             ):
                 # Already a launcher for this same tracked backend reached
                 # through another install directory, or a link left broken
