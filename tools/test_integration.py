@@ -1001,6 +1001,36 @@ class MergeConflictIncidentTests(ProcessPrFixture):
         run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
         return head
 
+    def _build_fork_pull_request(self):
+        """A fork PR: its head is published only at refs/pull/78/head, never as
+        a branch of this repository, and an unrelated upstream branch happens
+        to share its headRefName while conflicting in a different file.
+        """
+        run_git(["checkout", "-q", "-b", "shared-name", "master"], cwd=self.upstream_sim)
+        (self.upstream_sim / "NOTES").write_text("decoy notes\n", encoding="utf-8")
+        run_git(["add", "NOTES"], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "decoy notes"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "origin", "shared-name"], cwd=self.upstream_sim)
+
+        run_git(["checkout", "-q", "--detach", "master"], cwd=self.upstream_sim)
+        (self.upstream_sim / "README").write_text("fork side\n", encoding="utf-8")
+        run_git(["add", "README"], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "fork side"], cwd=self.upstream_sim)
+        fork_head = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        # Reachable only from the pull ref, exactly as a fork head is.
+        run_git(
+            ["push", "-q", "origin", f"{fork_head}:refs/pull/78/head"],
+            cwd=self.upstream_sim,
+        )
+
+        run_git(["checkout", "-q", "master"], cwd=self.upstream_sim)
+        (self.upstream_sim / "README").write_text("master again\n", encoding="utf-8")
+        (self.upstream_sim / "NOTES").write_text("master notes\n", encoding="utf-8")
+        run_git(["add", "README", "NOTES"], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "master notes"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "origin", "master"], cwd=self.upstream_sim)
+        return fork_head
+
     @contextlib.contextmanager
     def _drainer(self):
         with (
@@ -1127,6 +1157,74 @@ class MergeConflictIncidentTests(ProcessPrFixture):
         self.assertEqual(self._mutating_gh_calls(), [])
         self.assertEqual(self.fake.calls("codex"), [])
         self.assertEqual(self.fake.calls("claude"), [])
+
+    def test_a_fork_head_is_named_by_oid_not_by_branch_name(self):
+        fork_head = self._build_fork_pull_request()
+        self.fake.script(
+            "gh",
+            ["pr", "view", "78"],
+            stdout=json.dumps(
+                self._conflicted_pr_json(
+                    number=78,
+                    headRefOid=fork_head,
+                    # An upstream branch of this name exists and conflicts in
+                    # NOTES; resolving by name would report the wrong paths.
+                    headRefName="shared-name",
+                )
+            ),
+        )
+
+        with self._drainer():
+            drain_prs.process_pr(
+                self.ctx,
+                78,
+                dry_run=False,
+                state={
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {"78": self._entry(fork_head)},
+                },
+                gates=self._gates(),
+            )
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["pull_request"], 78)
+        self.assertEqual(incidents[0]["files"], ["README"])
+        self.assertIn("README", incidents[0]["summary"])
+        self.assertEqual(self._mutating_gh_calls(), [])
+
+    def test_an_unavailable_head_still_raises_an_incident(self):
+        missing_head = "e" * 40
+        self.fake.script(
+            "gh",
+            ["pr", "view", "79"],
+            stdout=json.dumps(
+                self._conflicted_pr_json(
+                    number=79, headRefOid=missing_head, headRefName="gone"
+                )
+            ),
+        )
+
+        with self._drainer():
+            drain_prs.process_pr(
+                self.ctx,
+                79,
+                dry_run=False,
+                state={
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {"79": self._entry(missing_head)},
+                },
+                gates=self._gates(),
+            )
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["pull_request"], 79)
+        self.assertEqual(incidents[0]["files"], [])
+        self.assertIn("#79", incidents[0]["summary"])
+        self.assertEqual(self._mutating_gh_calls(), [])
 
     def test_a_conflict_blocks_only_its_own_pr(self):
         self._script_pr_view()

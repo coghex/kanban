@@ -1608,6 +1608,34 @@ def cleanup_after_merge(
     fast_forward_default_branch(ctx, dry_run=dry_run)
 
 
+def fetch_pr_head(ctx: RepoContext, pr: dict[str, Any]) -> bool:
+    """Make the PR's exact head commit available locally.
+
+    Identity is the head OID, never the branch name: a fork's head is not a
+    branch of this repository at all, and an unrelated local branch can share
+    a fork's `headRefName` while pointing somewhere else entirely. GitHub
+    publishes every PR head, fork or not, at `refs/pull/<number>/head`, which
+    the default fetch refspec does not cover.
+    """
+    head = pr["headRefOid"]
+    if commit_exists_locally(ctx, head):
+        return True
+    proc = run(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            ctx.remote_name,
+            f"refs/pull/{pr['number']}/head",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return False
+    return commit_exists_locally(ctx, head)
+
+
 def merge_conflict_paths(ctx: RepoContext, pr: dict[str, Any]) -> list[str]:
     """Repository-relative paths that conflict between the PR head and the
     default branch.
@@ -1619,9 +1647,14 @@ def merge_conflict_paths(ctx: RepoContext, pr: dict[str, Any]) -> list[str]:
     every failure degrades to an unnamed file list rather than an error.
     """
     number = pr["number"]
-    head_ref = pr.get("headRefName")
     try:
         run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
+        if not fetch_pr_head(ctx, pr):
+            log(
+                f"PR #{number}: head {pr['headRefOid'][:12]} is not available "
+                "locally; recording the block without file names"
+            )
+            return []
         proc = run(
             [
                 "git",
@@ -1631,7 +1664,7 @@ def merge_conflict_paths(ctx: RepoContext, pr: dict[str, Any]) -> list[str]:
                 "--write-tree",
                 "--name-only",
                 f"{ctx.remote_name}/{ctx.default_branch}",
-                f"{ctx.remote_name}/{head_ref}",
+                pr["headRefOid"],
             ],
             cwd=ctx.path,
             check=False,

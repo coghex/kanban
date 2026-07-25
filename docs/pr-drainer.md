@@ -79,7 +79,10 @@ and asks instead of guessing.
 When a conflict is detected, the drainer:
 
 - records an open incident naming the pull request and its conflicting files,
-  which Kanban shows in the sidebar next to the drainer state;
+  which Kanban shows in the sidebar next to the drainer state. The files are
+  read from the pull request's exact head commit, so a fork's head is named
+  correctly; a head that cannot be fetched at all is still reported, without
+  the file list;
 - changes no label — in particular it never removes `reviewed:approve`, which
   the `review-approved` gate requires, and never applies `reviewed:changes`;
 - keeps running and keeps draining every other approved pull request;
