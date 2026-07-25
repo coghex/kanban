@@ -5592,7 +5592,9 @@ main = hspec $ do
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
       it "distinguishes an unauthenticated provider from a missing one" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
-        blockedProblems environment (ActionPullRequestFlow ClaudeSolver) `shouldBe` [ProviderUnauthenticated]
+        -- A Codex-origin PR is reviewed by Claude.
+        blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestReview)
+          `shouldBe` [ProviderUnauthenticated]
       it "names the setup command when a workflow bundle is absent" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
         blockedProblems environment (ActionSolve ClaudeSolver) `shouldBe` [WorkflowBundleUnavailable]
@@ -5647,6 +5649,36 @@ main = hspec $ do
         let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeAuth = AuthNotAuthenticated "signed out"}
         blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
+      -- pr-revise runs on the PR's own brand and then spawns the opposite
+      -- one for its single nested canonical rereview, so a revision needs
+      -- both CLIs even though review and rereview need only the reviewer's.
+      it "requires the nested cross-brand reviewer for a PR revision" $ do
+        let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
+        blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestRevision)
+          `shouldBe` [ExecutableUnavailable]
+        blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestRevision)
+          `shouldBe` [ExecutableUnavailable]
+        -- A Claude-origin PR is reviewed by Codex, which is present here.
+        blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestReview)
+          `shouldBe` []
+        blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestRereview)
+          `shouldBe` []
+      it "requires the nested reviewer to be signed in for a PR revision" $ do
+        let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
+        blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestRevision)
+          `shouldBe` [ProviderUnauthenticated]
+        blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestReview)
+          `shouldBe` []
+      -- The nested rereview is a direct `codex exec`/`claude -p` spawn by
+      -- the bundled coordinator, so only the launched brand needs a bundle.
+      it "requires a bundle only for the brand the PR action itself launches" $ do
+        let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeBundle = BundleAbsent}
+        blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestRevision)
+          `shouldBe` [WorkflowBundleUnavailable]
+        blockedProblems environment (ActionPullRequestFlow PullRequestCodex PullRequestReview)
+          `shouldBe` []
+        blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestRevision)
+          `shouldBe` []
       -- The backend runs `codex exec`/`claude -p` itself, so no packaged
       -- workflow bundle is involved in a canonical review.
       it "never requires a packaged bundle for a canonical review" $ do

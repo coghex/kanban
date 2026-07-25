@@ -66,6 +66,7 @@ import Data.Maybe (isNothing, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction)
 import Kanban.Review (canonicalIssueReviewerPath)
 import Kanban.Solve (SolverBrand (..))
 import System.Directory (doesFileExist, doesPathExist, findExecutable, pathIsSymbolicLink)
@@ -189,7 +190,7 @@ data PreflightAction
   | ActionIssueRevision IssueOrigin
   | ActionSolve SolverBrand
   | ActionAutoSolve SolverBrand
-  | ActionPullRequestFlow SolverBrand
+  | ActionPullRequestFlow PullRequestOrigin PullRequestAction
   deriving stock (Eq, Show)
 
 issueOriginFromBody :: Text -> IssueOrigin
@@ -246,7 +247,17 @@ actionLabel (ActionIssueReview origin) = "issue review/rereview (r) · " <> orig
 actionLabel (ActionIssueRevision origin) = "issue revision (r) · " <> originLabel origin
 actionLabel (ActionSolve brand) = "solve (S) · " <> brandExecutable brand
 actionLabel (ActionAutoSolve brand) = "auto-solve (A) · " <> brandExecutable brand
-actionLabel (ActionPullRequestFlow brand) = "PR review/revise (r) · " <> brandExecutable brand
+actionLabel (ActionPullRequestFlow origin action) =
+  "PR " <> pullRequestActionLabel action <> " (r) · " <> pullRequestOriginLabel origin
+
+pullRequestActionLabel :: PullRequestAction -> Text
+pullRequestActionLabel PullRequestReview = "review"
+pullRequestActionLabel PullRequestRereview = "rereview"
+pullRequestActionLabel PullRequestRevision = "revise"
+
+pullRequestOriginLabel :: PullRequestOrigin -> Text
+pullRequestOriginLabel PullRequestCodex = "codex-origin"
+pullRequestOriginLabel PullRequestClaude = "claude-origin"
 
 originLabel :: IssueOrigin -> Text
 originLabel IssueOriginCodex = "codex-origin"
@@ -563,9 +574,22 @@ actionReport environment action = PreflightReport action (checksFor action)
       providerChecks True (environmentProbe environment brand)
         <> providerChecks True (environmentProbe environment (oppositeBrand brand))
         <> [gitHubCheck environment, reviewBackendCheck environment]
-    checksFor (ActionPullRequestFlow brand) =
-      providerChecks True (environmentProbe environment brand)
+    -- Review and rereview run on the opposite brand from the PR's origin
+    -- and are themselves the canonical reviewer, so they need only that
+    -- brand. Revision is the exception: it runs on the PR's *own* brand,
+    -- then hands off to exactly one canonical rereview by spawning the
+    -- opposite brand from inside that session (agent-workflow-contract
+    -- §2.2). That nested call is a direct `codex exec`/`claude -p`, so it
+    -- needs the executable and a sign-in but no packaged bundle.
+    checksFor (ActionPullRequestFlow origin pullRequestAction) =
+      providerChecks True (environmentProbe environment launched)
+        <> [ check
+             | pullRequestAction == PullRequestRevision,
+               check <- providerChecks False (environmentProbe environment (oppositeBrand launched))
+           ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
+      where
+        launched = agentForAction origin pullRequestAction
 
 -- | The one-line diagnostic for the first blocking check, or 'Nothing' when
 -- nothing definite stands in the action's way.
@@ -593,8 +617,12 @@ doctorActions =
     ActionSolve ClaudeSolver,
     ActionAutoSolve CodexSolver,
     ActionAutoSolve ClaudeSolver,
-    ActionPullRequestFlow CodexSolver,
-    ActionPullRequestFlow ClaudeSolver
+    -- Rereview's dependency set is identical to review's, so listing
+    -- review and revise per origin already covers every distinct set.
+    ActionPullRequestFlow PullRequestCodex PullRequestReview,
+    ActionPullRequestFlow PullRequestClaude PullRequestReview,
+    ActionPullRequestFlow PullRequestCodex PullRequestRevision,
+    ActionPullRequestFlow PullRequestClaude PullRequestRevision
   ]
 
 doctorReady :: PreflightEnvironment -> Bool

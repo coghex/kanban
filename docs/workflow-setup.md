@@ -125,6 +125,13 @@ actually spawns:
 - **Solve** needs its own brand's CLI and bundle, `gh`, and the backend for
   its read-only readiness gate. **Auto-solve** reviews its own pull request
   with the opposite brand, so it needs both brands.
+- **PR review and rereview** run on the opposite brand from the PR's origin
+  marker and are themselves the canonical reviewer, so they need only that
+  brand's CLI and bundle. **PR revise** runs on the PR's *own* brand and
+  then hands off to exactly one canonical rereview by spawning the opposite
+  brand from inside that session, so it also needs that brand's CLI and
+  sign-in — but not its bundle, since the nested call is a direct
+  `codex exec` / `claude -p`.
 
 The doctor path is read-only and non-interactive. It resolves executables,
 reads `--version`, and asks each provider its own status-only questions

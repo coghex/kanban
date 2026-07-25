@@ -230,7 +230,10 @@ manages or something I must set up myself."
   CLI its `kanban_run_claude` amendment authoring uses; neither needs a
   packaged bundle, since both run their providers directly. Auto-solve
   needs both brands, since it reviews its own pull request with the
-  opposite one.
+  opposite one, and so does `pr-revise`: it runs on the PR's own brand and
+  spawns the opposite one for its single nested canonical rereview (§2.2),
+  which is a direct provider call and therefore needs that brand's
+  executable and sign-in but not its bundle.
 - **Required authority:** setup needs write access to the user's own
   provider configuration and to the Kanban-namespaced install directory.
   Preflight needs none: it is read-only and non-interactive, never starts an

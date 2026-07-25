@@ -4105,13 +4105,13 @@ pullRequestSessionReusable forceFresh active sessionAction currentAction launche
   not forceFresh && (active || (sessionAction == currentAction && launchedForUpdatedAt == currentUpdatedAt))
 
 launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchPullRequestFlow number origin action brand existingSession provenance input = do
+launchPullRequestFlow number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.pullRequestSessionLogPath)
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
-    blocked <- preflightBlocker state.appRepository (ActionPullRequestFlow brand)
+    blocked <- preflightBlocker state.appRepository (ActionPullRequestFlow origin action)
     case blocked of
       Just message -> do
         writeBChan eventChannel (PullRequestProtocolEvent (PullRequestFlowDiagnostic number message))
