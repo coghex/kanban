@@ -8,6 +8,7 @@ module Kanban.PullRequestFlow
     PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
+    flowOutcome,
     originFromBody,
     pullRequestArguments,
     pullRequestVerdictForLabels,
@@ -29,7 +30,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), parseSolveOutputLine, resumeProvenanceHeader)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), agentOutcome, parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
@@ -318,11 +319,12 @@ stderrOnLine sessionLog eventSink number line
       mapM_ (\value -> logRawLine value "stderr" line) sessionLog
       eventSink (PullRequestFlowDiagnostic number (decodeBytes line))
 
+-- | This flow's terminal-outcome classification. The marker anchoring and
+-- exit-status precedence live in 'agentOutcome', shared with "Kanban.Solve"
+-- so the two workflows cannot drift apart again; only the failure
+-- diagnostic's agent label is this flow's own.
 flowOutcome :: ExitCode -> Text -> SolveOutcome
-flowOutcome ExitSuccess message = case Text.breakOnEnd "KANBAN_NEEDS_INPUT:" message of
-  (prefix, question) | not (Text.null prefix) && not (Text.null (Text.strip question)) -> SolveNeedsInput (Text.strip (Text.takeWhile (/= '\n') question))
-  _ -> SolveCompleted
-flowOutcome (ExitFailure code) message = SolveFailed ("PR agent exited with status " <> Text.pack (show code) <> if Text.null (Text.strip message) then "" else ": " <> Text.take 1000 (Text.strip message))
+flowOutcome = agentOutcome "PR agent"
 
 decodeBytes :: ByteString.ByteString -> Text
 decodeBytes = Text.strip . TextEncoding.decodeUtf8With lenientDecode
