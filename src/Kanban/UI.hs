@@ -47,6 +47,7 @@ module Kanban.UI
     githubRefreshTimeoutMicros,
     itemHasAmberWarning,
     killSelectionNotice,
+    liveReviewSessions,
     mergeExplanation,
     mergeText,
     neutralAttr,
@@ -67,11 +68,14 @@ module Kanban.UI
     resolveProcessSelection,
     resolveReviewDigitAction,
     reusableSolveSession,
+    reviewAgentSessionEntry,
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
+    reviewSessionLive,
     reviewSessionReusable,
     reviewSessionsNeedingArm,
+    reviewTurnInterruptible,
     revisedAttr,
     runBoardRefreshWith,
     runDashboard,
@@ -1521,6 +1525,64 @@ drawProcesses state =
           widget = clickable (ProcessTarget entry.agentSessionRef) (withAttr attribute (txt line))
        in if selected then visible widget else widget
 
+-- | The single "is this review session live?" decision, shared by the
+-- processes-overlay rows ('reviewAgentSessionEntry'), the @x@ gate that
+-- dispatches on them ('killSelectedAgentSession'), and the dashboard quit
+-- guard ('liveReviewSessions'). Live means /currently killable/: the
+-- session has a kill target 'killReviewAgent' can actually act on, so the
+-- overlay never reports a row live that the kill would then refuse, and @q@
+-- is never refused for a session nothing can stop (issue #151).
+--
+-- 'reviewPhaseActive' still expresses phase semantics elsewhere in the UI,
+-- but it is not this decision. A canonical stage is inserted before its
+-- process is registered, and an 'IssueRevision' session is phase-active
+-- before its backend is ready and before it has both IDs; in those startup
+-- intervals there is no kill target, so the session is not live and does
+-- not block quitting.
+reviewSessionLive :: Bool -> Bool -> ReviewSession -> Bool
+reviewSessionLive backendReady hasCanonicalProcess session =
+  hasCanonicalProcess || hasInterruptibleTurn
+  where
+    hasInterruptibleTurn =
+      backendReady
+        && isJust session.reviewSessionThreadId
+        && isJust session.reviewSessionTurnId
+        && reviewTurnInterruptible session.reviewSessionStage session.reviewSessionPhase
+
+-- | The stage/phase half of "has an interruptible turn", shared with
+-- 'killReviewAgent' so the liveness gate and the kill it dispatches to
+-- cannot drift apart. Only an 'IssueRevision' session runs on the shared
+-- review backend ('startIssueReview' sends every other stage down the
+-- canonical subprocess path), and only a phase-active one still owns a turn
+-- that backend can interrupt: 'killReviewAgent' leaves a killed session
+-- 'ReviewFailed' with its turn ID intact until the turn-completion handler
+-- clears it, so without the phase condition a just-killed session would
+-- stay live and keep refusing @q@.
+reviewTurnInterruptible :: ReviewStage -> ReviewPhase -> Bool
+reviewTurnInterruptible stage phase = stage == IssueRevision && reviewPhaseActive phase
+
+reviewBackendReady :: ReviewBackend -> Bool
+reviewBackendReady backend = case backend of
+  ReviewBackendReady _ -> True
+  _ -> False
+
+-- | One processes-overlay row for a review session. Split out of
+-- 'agentSessionEntries' so the row a user actually sees -- in particular
+-- its liveness, which the @x@ gate dispatches on -- is decided by the
+-- shared 'reviewSessionLive' and is testable without an 'AppState'.
+reviewAgentSessionEntry :: Bool -> Bool -> Int -> ReviewSession -> AgentSessionEntry
+reviewAgentSessionEntry backendReady hasCanonicalProcess issueNumber session =
+  AgentSessionEntry
+    { agentSessionRef = ReviewAgent issueNumber,
+      agentSessionLabel = "issue " <> Text.toLower (reviewStageLabel session.reviewSessionStage) <> " #" <> showText issueNumber,
+      agentSessionProvider = reviewProvider session.reviewSessionStage,
+      agentSessionStatus = reviewProcessStatus session.reviewSessionPhase,
+      agentSessionActivity = session.reviewSessionActivity,
+      agentSessionId = shortSessionId <$> session.reviewSessionThreadId,
+      agentSessionLive = reviewSessionLive backendReady hasCanonicalProcess session,
+      agentSessionProblem = session.reviewSessionPhase == ReviewFailed
+    }
+
 agentSessionEntries :: AppState -> [AgentSessionEntry]
 agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <> reviewEntries <> unattachedWorkerEntries)
   where
@@ -1556,16 +1618,11 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
         , let isLive = Map.member number state.appPullRequestProcesses || worker /= Nothing
       ]
     reviewEntries =
-      [ AgentSessionEntry
-          { agentSessionRef = ReviewAgent issueNumber,
-            agentSessionLabel = "issue " <> Text.toLower (reviewStageLabel session.reviewSessionStage) <> " #" <> showText issueNumber,
-            agentSessionProvider = reviewProvider session.reviewSessionStage,
-            agentSessionStatus = reviewProcessStatus session.reviewSessionPhase,
-            agentSessionActivity = session.reviewSessionActivity,
-            agentSessionId = shortSessionId <$> session.reviewSessionThreadId,
-            agentSessionLive = Map.member issueNumber state.appCanonicalReviewProcesses || reviewSessionHasLiveTurn session,
-            agentSessionProblem = session.reviewSessionPhase == ReviewFailed
-          }
+      [ reviewAgentSessionEntry
+          (reviewBackendReady state.appReviewBackend)
+          (Map.member issueNumber state.appCanonicalReviewProcesses)
+          issueNumber
+          session
         | (issueNumber, session) <- Map.toList state.appReviewSessions
       ]
     unattachedWorkerEntries =
@@ -1589,7 +1646,6 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
     workerTaskLabel (PullRequestWorkerTaskKind task) = "pr " <> pullRequestActionText task.pullRequestWorkerAction <> " #" <> showText task.pullRequestWorkerNumber
     workerTaskProvider (SolveWorkerTaskKind task) = solverLabel task.solveWorkerBrand
     workerTaskProvider (PullRequestWorkerTaskKind task) = pullRequestAgentLabel task.pullRequestWorkerAction (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
-    reviewSessionHasLiveTurn session = session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning] && session.reviewSessionStage == IssueRevision
 
 -- | Resolves a processes-overlay selection against the current entries: if
 -- the tracked identity is still present, follow it to its (possibly
@@ -2317,14 +2373,24 @@ forceTerminalRepaint = do
   liftIO (Vty.refresh vty)
   setNotice "Terminal repainted"
 
+-- | The review sessions the quit guard refuses to leave running: exactly
+-- those the shared 'reviewSessionLive' decision reports live, so the guard
+-- and the processes overlay cannot disagree about the same session.
+liveReviewSessions :: Bool -> Set Int -> Map Int ReviewSession -> [Int]
+liveReviewSessions backendReady canonicalProcesses sessions =
+  [ issueNumber
+    | (issueNumber, session) <- Map.toList sessions,
+      reviewSessionLive backendReady (Set.member issueNumber canonicalProcesses) session
+  ]
+
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
   state <- get
   let liveInteractiveReviews =
-        [ issueNumber
-          | (issueNumber, session) <- Map.toList state.appReviewSessions,
-            reviewSessionHasLiveTurn session || Map.member issueNumber state.appCanonicalReviewProcesses
-        ]
+        liveReviewSessions
+          (reviewBackendReady state.appReviewBackend)
+          (Map.keysSet state.appCanonicalReviewProcesses)
+          state.appReviewSessions
   if null liveInteractiveReviews
     then halt
     else
@@ -2341,9 +2407,6 @@ requestDashboardQuit = do
                     )
               }
         )
-  where
-    reviewSessionHasLiveTurn session =
-      session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
 
 closeOverlay :: EventM Name AppState ()
 closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
@@ -2513,7 +2576,9 @@ killReviewAgent issueNumber = do
           _ -> Nothing
         threadId <- session.reviewSessionThreadId
         turnId <- session.reviewSessionTurnId
-        if reviewSessionActive session then Just (client, threadId, turnId) else Nothing
+        if reviewTurnInterruptible session.reviewSessionStage session.reviewSessionPhase
+          then Just (client, threadId, turnId)
+          else Nothing
   case (canonicalProcess, activeTurn) of
     (Nothing, Nothing) -> setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
     _ -> do
