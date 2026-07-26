@@ -52,6 +52,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/repair/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
 ]
 
@@ -69,6 +70,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/draft-issues.md",
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "claude-plugin/plugins/kanban/commands/repair.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
 ]
 

@@ -84,9 +84,9 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all eight workflow names should be
+`kanban@kanban` should be listed, and all nine workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
-`/draft-issues`, `/autoissue`, and `/issue-review`.
+`/draft-issues`, `/autoissue`, `/issue-review`, and `/repair`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -95,11 +95,14 @@ those subcommands cannot install this plugin.
 
 ## What's packaged
 
-Kanban's own CLI spawns the first four by name. The last four are drafting and
-readiness-gate workflows a user or the review daemon invokes directly, which is
-why they are excluded from the Haskell invocation-parity pinning in
-`tools/test_claude_plugin.py`; see
+Kanban's own CLI spawns the first four by name. The next four are drafting and
+readiness-gate workflows a user or the review daemon invokes directly; see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
+`/repair` is packaged ahead of the Done-column repair action that will spawn
+it, and is deliberately *not* part of that declared drafting surface. None of
+the last five is included in the Haskell invocation-parity pinning in
+`tools/test_claude_plugin.py`, which covers only the names Kanban's own code
+spawns.
 
 | Command | Invocation | Boundary |
 | --- | --- | --- |
@@ -111,6 +114,7 @@ why they are excluded from the Haskell invocation-parity pinning in
 | `commands/draft-issues.md` | `/draft-issues` | The **breadth** counterpart: surveys many candidates repo-wide, stops to ask which to create, then expands only those to the same bar. Claude-only — there is deliberately no Codex equivalent. |
 | `commands/autoissue.md` | `/autoissue` | Delegates drafting to `/issue`, and on signoff creates the issue and immediately runs `/issue-review` with no second confirmation. Stops without reviewing if drafting stops before creation. |
 | `commands/issue-review.md` | `/issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
+| `commands/repair.md` | `/repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
 
 `/epic` is deliberately **not** packaged: it decomposes a user-supplied feature
 arc rather than independently hunting for discretionary work, so it is not part
@@ -182,11 +186,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the eight packaged workflows, and
+- the commands directory contains exactly the nine packaged workflows, and
   the four Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  four drafting commands;
+  four drafting commands or the packaged-only `/repair`;
 - no packaged manifest sets model/effort/permission-mode/working-directory
   configuration, and every packaged command — drafting commands included —
   declares a `description:` and no forbidden frontmatter key;
@@ -200,12 +204,18 @@ runs) checks that:
   invocation, so the two cannot silently drift apart.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (`claude-plugin/plugins/kanban/commands/*.md`, all eight commands) and
+surface (`claude-plugin/plugins/kanban/commands/*.md`, all nine commands) and
 bundled coordinator against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
 that the Codex plugin and Kanban's Haskell source are reconciled against,
 including the user-scoped backend install path the drafting and issue-review
 commands name.
+
+`tools/test_repair_workflow_contract.py` pins `/repair`'s own behavioral
+contract — the ordered diagnosis branches, worktree selection and safe push,
+the never-merge/never-label authority limits, and the exactly-one-rereview
+handoff — against both this command and its Codex counterpart, so the two
+brands' copies cannot diverge.
 
 `tools/test_drafting_workflow_contract.py` reconciles the four drafting
 commands against the responsibility matrix in

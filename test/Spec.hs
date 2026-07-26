@@ -8,8 +8,9 @@ import Control.Monad (void, when)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Char (isControl)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sortOn)
+import Data.List (dropWhileEnd, find, findIndex, findIndices, intercalate, isInfixOf, isPrefixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -165,10 +166,16 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    StreamEvent (..),
+    UnknownAggregator,
     claudeReviewerModel,
     claudeSolverModel,
     codexReviewerModel,
     codexSolverModel,
+    emitStreamEvent,
+    sealUnknownAggregates,
+    maxUnknownNoticeLength,
+    newUnknownAggregator,
     parseSolveOutputLine,
     renderAgentEvent,
     resumeProvenanceHeader,
@@ -176,6 +183,7 @@ import Kanban.Solve
     runSolveWith,
     solveArguments,
     solveOutcome,
+    unknownNoticeSamples,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.StreamReader
@@ -714,6 +722,98 @@ main = hspec $ do
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerProviderStarted"
             eventBytes `shouldSatisfy` ByteString.isInfixOf "fixture-session"
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+    it "waits out a sample already being written before the seal returns, and refuses every one after" $ do
+      -- The interleaving a bare compare-and-swap cannot cover: the stream
+      -- thread has already been told to emit a sample and is part-way
+      -- through writing it. If the seal could return here, a supervisor
+      -- would write the aggregate and the terminal envelope while that
+      -- sample was still in flight, landing it after the envelope where
+      -- replay stops — or losing it to the cancellation that follows.
+      aggregator <- newUnknownAggregator
+      written <- newIORef []
+      writing <- newEmptyMVar
+      release <- newEmptyMVar
+      let blockingEmit agentEvent = do
+            putMVar writing ()
+            takeMVar release
+            modifyIORef written (agentEvent.agentEventSummary :)
+      telemetry <- case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
+        Right (_, streamEvents) -> pure streamEvents
+        Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
+      void . forkIO $ mapM_ (emitStreamEvent aggregator blockingEmit) telemetry
+      takeMVar writing
+      sealed <- newEmptyMVar
+      void . forkIO $ sealUnknownAggregates aggregator (const (pure ())) >> putMVar sealed ()
+      -- The seal is blocked on the in-flight write, not racing past it.
+      timeout 200000 (readMVar sealed) `shouldReturn` Nothing
+      readIORef written `shouldReturn` []
+      putMVar release ()
+      void (timeout 5000000 (takeMVar sealed) >>= requireJust "seal never completed")
+      -- The sample admitted before the seal was fully written before the
+      -- seal returned, so it can never trail the terminal envelope.
+      readIORef written `shouldReturn` ["[event] telemetry {\"tick\":1,\"type\":\"telemetry\"}"]
+      -- ...and nothing gets through afterwards.
+      mapM_ (emitStreamEvent aggregator blockingEmit) telemetry
+      readIORef written `shouldReturn` ["[event] telemetry {\"tick\":1,\"type\":\"telemetry\"}"]
+
+    it "blocks a terminalizing seal until the seal that won has finished writing its summaries" $ do
+      -- The flow and its supervisor race the same seal. If the loser could
+      -- return the instant it saw an already-sealed aggregator, it would
+      -- write the terminal envelope while the winner's summaries were still
+      -- in flight — appending them past the envelope, where replay stops, or
+      -- losing them to the cancellation that follows a deadline.
+      aggregator <- newUnknownAggregator
+      telemetry <- case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
+        Right (_, streamEvents) -> pure streamEvents
+        Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
+      -- Enough occurrences that the seal actually has a summary to write.
+      mapM_ (const (mapM_ (emitStreamEvent aggregator (const (pure ()))) telemetry)) [1 .. unknownNoticeSamples + 5]
+      journal <- newIORef []
+      writing <- newEmptyMVar
+      release <- newEmptyMVar
+      let winnerEmit agentEvent = do
+            putMVar writing ()
+            takeMVar release
+            modifyIORef journal (agentEvent.agentEventSummary :)
+      void . forkIO $ sealUnknownAggregates aggregator winnerEmit
+      takeMVar writing
+      -- The losing side reaches its seal while the winner is mid-write, then
+      -- would go on to write its terminal envelope.
+      terminalized <- newEmptyMVar
+      void . forkIO $ do
+        sealUnknownAggregates aggregator (\agentEvent -> modifyIORef journal (agentEvent.agentEventSummary :))
+        modifyIORef journal ("WorkerFinished" :)
+        putMVar terminalized ()
+      timeout 200000 (readMVar terminalized) `shouldReturn` Nothing
+      putMVar release ()
+      void (timeout 5000000 (takeMVar terminalized) >>= requireJust "terminalizing seal never completed")
+      -- One summary, written before the terminal envelope, exactly once.
+      reverse <$> readIORef journal
+        `shouldReturn` ["[event] telemetry ×" <> Data.Text.pack (show (unknownNoticeSamples + 5)), "WorkerFinished"]
+
+    it "bounds a chatty unknown type in a real solve worker's journal, replay, and session log" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = (workerFixtureSpec repository (WorkerId "solve-930-chatty") 930) {workerCreatedAt = now}
+        surfaces <- runChattyWorker temporaryRoot spec "solve-930-chatty"
+        assertBoundedWorkerSurfaces surfaces
+
+    it "bounds a chatty unknown type in a real PR worker's journal, replay, and session log" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The PR flow owns a separate stdout loop and a separate terminal
+        -- path, so it needs its own end-to-end proof rather than inheriting
+        -- the solve worker's.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec =
+              (workerFixtureSpec repository (WorkerId "pr-931-chatty") 931)
+                { workerCreatedAt = now,
+                  workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 931 PullRequestClaude PullRequestReview)
+                }
+        surfaces <- runChattyWorker temporaryRoot spec "pr-931-chatty"
+        assertBoundedWorkerSurfaces surfaces
 
     it "marks a completed provider orphaned until its surviving child exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -1616,7 +1716,7 @@ main = hspec $ do
           case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
             Nothing -> expectationFailure "worker fixture was not discoverable"
             Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
-          let stallForever _spec _rememberProvider _emit = threadDelay (120 * 1000000)
+          let stallForever _spec _aggregator _rememberProvider _emit = threadDelay (120 * 1000000)
           result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot stallForever specPath)
           result `shouldBe` Just (Right ())
           terminalState <- waitForWorkerState statePath isTerminal 10
@@ -1646,7 +1746,7 @@ main = hspec $ do
           -- to wall-clock deadline elapsed-ness, so a task finishing this
           -- fast must not be able to claim a normal outcome ahead of an
           -- already-overdue deadline just because it got scheduled first.
-          let finishInstantly _spec _rememberProvider emit = emit (WorkerFinished SolveCompleted)
+          let finishInstantly _spec _aggregator _rememberProvider emit = emit (WorkerFinished SolveCompleted)
           result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot finishInstantly specPath)
           result `shouldBe` Just (Right ())
           terminalState <- waitForWorkerState statePath isTerminal 10
@@ -1671,7 +1771,7 @@ main = hspec $ do
           case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
             Nothing -> expectationFailure "worker fixture was not discoverable"
             Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
-          let hangForever _spec _rememberProvider _emit = threadDelay (300 * 1000000)
+          let hangForever _spec _aggregator _rememberProvider _emit = threadDelay (300 * 1000000)
           finished <- newEmptyMVar
           void . forkIO $ runWorkerWithTask readProcessSnapshot hangForever specPath >>= putMVar finished
           timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
@@ -1679,6 +1779,100 @@ main = hspec $ do
           terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
           leaseReleased <- doesDirectoryExist leasePath
           leaseReleased `shouldBe` False
+
+    it "journals the unknown-event aggregate summary before the terminal envelope when the deadline cancels the task" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- A deadline emits the terminal envelope from the watchdog thread
+        -- and then cancels the task outright, so the task can neither run
+        -- its own flush first nor be trusted to run one at all. The
+        -- aggregator is the supervisor's for exactly this reason: replay
+        -- stops at the terminal envelope, so a summary written after it —
+        -- or lost with the cancelled thread — is a suppressed count nobody
+        -- ever sees.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-813-deadline-aggregate") 813 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-813-deadline-aggregate.spec.json"
+            statePath = workerRoot </> "solve-813-deadline-aggregate.state.json"
+            eventPath = workerRoot </> "solve-813-deadline-aggregate.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          -- Streams enough repeats of one unknown type to leave suppressed
+          -- occupancy in the shared aggregator, then hangs so the deadline
+          -- is what ends it.
+          let chattyThenHang _spec aggregator _rememberProvider emit = do
+                admitTelemetry aggregator emit chattyProviderLines
+                threadDelay (300 * 1000000)
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot chattyThenHang specPath >>= putMVar finished
+          timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          journal <- ByteString.lines <$> ByteString.readFile eventPath
+          let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+              terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+          -- The samples plus exactly one summary, and no more: the
+          -- cancellation neither dropped the count nor re-reported it.
+          length noticeIndices `shouldBe` unknownNoticeSamples + 1
+          case (reverse noticeIndices, terminalIndex) of
+            (lastNotice : _, Just terminal) -> do
+              lastNotice `shouldSatisfy` (< terminal)
+              -- The samples carry a payload prefix; the aggregate summary
+              -- carries only the count.
+              (journal !! lastNotice) `shouldNotSatisfy` ByteString.isInfixOf "tick"
+            _ -> expectationFailure "expected bounded notices and a terminal envelope in the journal"
+
+    it "seals aggregation against a stream still draining unknown events when the deadline cancels the task" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The harder race: the stream loop is still admitting unknown events
+        -- when the watchdog flushes, and keeps admitting until 'killThread'
+        -- finally lands. An unsealed aggregator would restart from zero
+        -- after the flush and emit fresh notices after the final summary —
+        -- and after the terminal envelope, where replay stops — while the
+        -- occurrences those suppressed died counted but never reported.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-815-deadline-drain") 815 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-815-deadline-drain.spec.json"
+            statePath = workerRoot </> "solve-815-deadline-drain.state.json"
+            eventPath = workerRoot </> "solve-815-deadline-drain.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          let drainUntilKilled _spec aggregator _rememberProvider emit =
+                let keepDraining = admitTelemetry aggregator emit 5 >> threadDelay 20000 >> keepDraining
+                 in keepDraining
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot drainUntilKilled specPath >>= putMVar finished
+          timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          journal <- ByteString.lines <$> ByteString.readFile eventPath
+          let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+              terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+          -- Still exactly the samples plus one summary, no matter how long
+          -- the drain kept running past the flush.
+          length noticeIndices `shouldBe` unknownNoticeSamples + 1
+          case (reverse noticeIndices, terminalIndex) of
+            (lastNotice : _, Just terminal) -> do
+              -- Nothing from the drain reaches the journal after the
+              -- terminal envelope, where replay would never see it.
+              lastNotice `shouldSatisfy` (< terminal)
+              (journal !! lastNotice) `shouldNotSatisfy` ByteString.isInfixOf "tick"
+            _ -> expectationFailure "expected bounded notices and a terminal envelope in the journal"
 
     it "kills the current provider and records the deadline outcome when it is still running at the deadline" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -1698,7 +1892,7 @@ main = hspec $ do
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             managed <- managedProcessFor providerProcess
-            let registerThenHang _spec rememberProvider _emit = do
+            let registerThenHang _spec _aggregator rememberProvider _emit = do
                   rememberProvider managed
                   threadDelay (300 * 1000000)
             finished <- newEmptyMVar
@@ -1730,7 +1924,7 @@ main = hspec $ do
           -- the same 'WorkerProviderStarted' event a genuine late
           -- registration would: this must never revert the already-terminal
           -- status back to 'WorkerRunning'.
-          let lateRegister _spec _rememberProvider emit = uninterruptibleMask_ $ do
+          let lateRegister _spec _aggregator _rememberProvider emit = uninterruptibleMask_ $ do
                 _ <- waitForWorkerState statePath isTerminal 50
                 emit (WorkerProviderStarted 999999)
           finished <- newEmptyMVar
@@ -1763,7 +1957,7 @@ main = hspec $ do
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             managed <- managedProcessFor providerProcess
-            let registerThenHang _spec rememberProvider _emit = do
+            let registerThenHang _spec _aggregator rememberProvider _emit = do
                   rememberProvider managed
                   threadDelay (300 * 1000000)
             -- The provider and census kills the watchdog attempts are real
@@ -1821,7 +2015,7 @@ main = hspec $ do
             -- deadline. It exits on its own well before the slow snapshot
             -- resolves, so this always lands on the real completion's
             -- 'WorkerFinished' rather than an orphan-pending detour.
-            let completeThenSlow _spec rememberProvider emit = do
+            let completeThenSlow _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
                 slowSnapshot = threadDelay 2000000 >> readProcessSnapshot
@@ -1853,7 +2047,7 @@ main = hspec $ do
           -- completion slot and committed its outcome: the deadline must
           -- keep ownership, not be silently replaced by a later-arriving
           -- ordinary 'WorkerFinished'.
-          let completeAfterDeadline _spec _rememberProvider emit = uninterruptibleMask_ $ do
+          let completeAfterDeadline _spec _aggregator _rememberProvider emit = uninterruptibleMask_ $ do
                 _ <- waitForWorkerState statePath isTerminal 50
                 emit (WorkerFinished SolveCompleted)
           finished <- newEmptyMVar
@@ -1897,7 +2091,7 @@ main = hspec $ do
             -- losing the already-claimed slot — well before the watchdog's
             -- own mandatory grace wait lets it finish verifying and
             -- committing.
-            let registerThenWaitAndFinish _spec rememberProvider emit = do
+            let registerThenWaitAndFinish _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   _ <- waitForProcess providerProcess
                   emit (WorkerFinished SolveCompleted)
@@ -2003,7 +2197,7 @@ main = hspec $ do
             -- deterministically lands while the provider slot is still
             -- 'ProviderSlotSpawning' (not yet registered) and a real, live
             -- process is already running unrecorded.
-            let spawningThenRegister _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let spawningThenRegister _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
                   rememberProvider managed
@@ -2058,7 +2252,7 @@ main = hspec $ do
             -- 'rememberProvider' would hand a real, live process to a
             -- worker that has already released its lease; 'registeredRef'
             -- proves that never happens.
-            let lateSpawnClaim _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let lateSpawnClaim _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   _ <- waitForWorkerState statePath isTerminal 80
                   emit (WorkerProviderSpawning True)
                   rememberProvider managed
@@ -2200,7 +2394,7 @@ main = hspec $ do
             -- (now 'terminateProviderRefWith' rather than a bare
             -- 'killManagedProcess') stays correctly wired end to end and
             -- still confirms the descendant gone before the lease releases.
-            let lateRegistrationWithDescendant _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let lateRegistrationWithDescendant _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
                   rememberProvider managed
@@ -2339,7 +2533,7 @@ main = hspec $ do
             -- confirmation that an orphan-pending completion resolves to
             -- the deadline outcome once genuinely past it, alongside the
             -- more targeted unit coverage below.
-            let completeThenOrphan _spec rememberProvider emit = do
+            let completeThenOrphan _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
             finished <- newEmptyMVar
@@ -2483,7 +2677,7 @@ main = hspec $ do
                   armed <- atomicModifyIORef' armedRef (\wasArmed -> (False, wasArmed))
                   when armed (throwIO (userError "process snapshot exploded"))
                   pure (Right [])
-                registerThenReturn _spec rememberProvider _emit = rememberProvider managed
+                registerThenReturn _spec _aggregator rememberProvider _emit = rememberProvider managed
             result <- timeout 15000000 (runWorkerWithTask explodingSnapshot registerThenReturn specPath)
             -- The supervisor reports the failure instead of dying silently.
             failure <- requireJust "supervisor did not return" result >>= requireLeft "supervisor hid its own failure"
@@ -3472,23 +3666,196 @@ main = hspec $ do
       parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
         `shouldBe` Right (Just "019f-session", [])
       parseSolveOutputLine "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #42\"}}"
-        `shouldBe` Right (Nothing, [AgentEvent "message" "Created PR #42" "" (Just "Created PR #42")])
+        `shouldBe` Right (Nothing, [StreamEvent Nothing (AgentEvent "message" "Created PR #42" "" (Just "Created PR #42"))])
 
     it "extracts Claude session ids and assistant text" $ do
       parseSolveOutputLine "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}"
         `shouldBe` Right (Just "claude-session", [])
       parseSolveOutputLine "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Working in issue-42\"}]}}"
-        `shouldBe` Right (Nothing, [AgentEvent "message" "Working in issue-42" "" (Just "Working in issue-42")])
+        `shouldBe` Right (Nothing, [StreamEvent Nothing (AgentEvent "message" "Working in issue-42" "" (Just "Working in issue-42"))])
 
     it "promotes Claude Bash tools to visible running commands while retaining full input" $ do
       let toolLine = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git status --short\"}}]}}"
       case parseSolveOutputLine toolLine of
-        Right (_, [agentEvent]) -> do
+        Right (_, [streamEvent]) -> do
+          let agentEvent = streamEvent.streamEventAgent
           agentEvent.agentEventKind `shouldBe` "command"
           renderAgentEvent CompactChat agentEvent `shouldBe` Just "[command] git status --short"
           renderAgentEvent StandardChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "git status --short")
           renderAgentEvent FullChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "command")
         result -> expectationFailure ("unexpected parsed tool event: " <> show result)
+
+    it "bounds every unrecognized payload to a single-line notice instead of embedding its whole JSON" $ do
+      -- One chatty unrecognized type per parser fallback, each carrying a
+      -- payload far larger than the notice budget.
+      let blob = Data.Text.replicate 400 "0123456789"
+          topLevel = "{\"type\":\"telemetry\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}"
+          item = "{\"type\":\"item.completed\",\"item\":{\"type\":\"heartbeat\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}}"
+          content = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"telemetry_delta\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}]}}"
+      notices <- traverse (\(line, tag) -> (,) tag <$> singleNotice (ByteString.pack line)) [(topLevel, "[event] telemetry"), (item, "[item] heartbeat"), (content, "[content] telemetry_delta")]
+      mapM_
+        ( \(tag, agentEvent) -> do
+            let summary = agentEvent.agentEventSummary
+            summary `shouldSatisfy` Data.Text.isPrefixOf tag
+            Data.Text.length summary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            Data.Text.lines summary `shouldSatisfy` ((== 1) . length)
+            -- A prefix of the payload is kept for diagnosis; the payload
+            -- itself never is.
+            summary `shouldSatisfy` Data.Text.isInfixOf "0123456789"
+            summary `shouldNotSatisfy` Data.Text.isInfixOf blob
+            -- The detail lives inside the one-line summary, so even the Full
+            -- rendering (which would otherwise indent a detail onto its own
+            -- lines) stays one bounded line.
+            agentEvent.agentEventDetail `shouldBe` ""
+            case renderAgentEvent FullChat agentEvent of
+              Nothing -> expectationFailure "expected the Full rendering to keep the unknown notice"
+              Just rendered -> do
+                rendered `shouldBe` summary
+                Data.Text.length rendered `shouldSatisfy` (<= maxUnknownNoticeLength)
+        )
+        notices
+
+    it "gives a missing, non-string, blank, multi-line, or overlong type a bounded one-line label" $ do
+      -- Every shape of unusable or hostile 'type' across all three
+      -- fallbacks. None may escape the whole-notice bound or the one-line
+      -- rule, and none may be dropped.
+      let payloads =
+            [ "{\"detail\":\"no type at all\"}",
+              "{\"type\":42,\"detail\":\"numeric type\"}",
+              "{\"type\":{\"nested\":\"object\"},\"detail\":\"object type\"}",
+              "{\"type\":[\"array\"],\"detail\":\"array type\"}",
+              "{\"type\":\"   \",\"detail\":\"blank type\"}",
+              "{\"type\":\"first\\nsecond\\rthird\\ttab\",\"detail\":\"multi-line type\"}",
+              "{\"type\":\"bell\\u0007bidi\\u202e\",\"detail\":\"control type\"}",
+              "{\"type\":\"" <> replicate 500 'z' <> "\",\"detail\":\"overlong type\"}"
+            ]
+          wrapped payload =
+            [ ByteString.pack payload,
+              ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload <> "}"),
+              ByteString.pack ("{\"type\":\"assistant\",\"message\":{\"content\":[" <> payload <> "]}}")
+            ]
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            let summary = agentEvent.agentEventSummary
+            summary `shouldSatisfy` (not . Data.Text.null)
+            Data.Text.length summary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            Data.Text.lines summary `shouldSatisfy` ((== 1) . length)
+            summary `shouldSatisfy` Data.Text.all (not . isControl)
+        )
+        (concatMap wrapped payloads)
+
+    it "treats a non-string type naming a recognized type as unrecognized rather than letting it reach an unbounded branch" $ do
+      -- A permissive type discriminator would coerce these into recognized
+      -- branches and hand back exactly what the bound exists to prevent: an
+      -- unbounded 'error' message, and 'tool_result' 's whole-payload
+      -- fallback. Only a literal JSON string names a recognized type.
+      let blob = Data.Text.replicate 400 "0123456789"
+          coerced = ["[\"error\"]", "{\"text\":\"error\"}", "[\"tool_result\"]", "{\"text\":\"agent_message\"}", "[\"assistant\"]"]
+          payload typeValue = "{\"type\":" <> typeValue <> ",\"message\":\"" <> Data.Text.unpack blob <> "\",\"text\":\"" <> Data.Text.unpack blob <> "\",\"content\":\"" <> Data.Text.unpack blob <> "\"}"
+          wrapped typeValue =
+            [ ByteString.pack (payload typeValue),
+              ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload typeValue <> "}"),
+              ByteString.pack ("{\"type\":\"assistant\",\"message\":{\"content\":[" <> payload typeValue <> "]}}")
+            ]
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            agentEvent.agentEventKind `shouldBe` "event"
+            agentEvent.agentEventSummary `shouldSatisfy` Data.Text.isInfixOf "unknown"
+            Data.Text.length agentEvent.agentEventSummary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            agentEvent.agentEventSummary `shouldNotSatisfy` Data.Text.isInfixOf blob
+            agentEvent.agentEventDetail `shouldBe` ""
+        )
+        (concatMap wrapped coerced)
+
+    it "reports the first three occurrences of an unknown key and collapses the rest into one counted summary" $ do
+      -- The exact boundary: three occurrences are all reported and leave no
+      -- summary behind; a fourth suppresses itself and redeems the key as a
+      -- single total-count summary.
+      let telemetry = "{\"type\":\"telemetry\",\"n\":1}"
+      atBoundary <- aggregatedNotices (replicate unknownNoticeSamples telemetry)
+      length atBoundary `shouldBe` unknownNoticeSamples
+      atBoundary `shouldSatisfy` all (Data.Text.isPrefixOf "[event] telemetry ")
+      atBoundary `shouldSatisfy` all (not . Data.Text.isInfixOf "×")
+
+      pastBoundary <- aggregatedNotices (replicate (unknownNoticeSamples + 1) telemetry)
+      length pastBoundary `shouldBe` unknownNoticeSamples + 1
+      last pastBoundary `shouldBe` "[event] telemetry ×4"
+
+      -- A chatty type stays O(1) per invocation however long it runs.
+      chatty <- aggregatedNotices (replicate 418 telemetry)
+      length chatty `shouldBe` unknownNoticeSamples + 1
+      last chatty `shouldBe` "[event] telemetry ×418"
+
+    it "counts each category, type, and prefix-sharing type apart, and lets recognized events pass between repeats" $ do
+      -- 'foo' arriving as a top-level event, a Codex item, and a Claude
+      -- content block is three independent keys, not one; two distinct long
+      -- types that share a bounded display prefix are two keys, not one; and
+      -- recognized output interleaved with the repeats neither resets a
+      -- count nor is itself suppressed.
+      let longPrefix = replicate 60 'p'
+          typeA = longPrefix <> "-alpha"
+          typeB = longPrefix <> "-beta"
+          eventFoo = "{\"type\":\"foo\"}"
+          itemFoo = "{\"type\":\"item.completed\",\"item\":{\"type\":\"foo\"}}"
+          contentFoo = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"foo\"}]}}"
+          recognizedLine = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"still working\"}}"
+          longA = "{\"type\":\"" <> typeA <> "\"}"
+          longB = "{\"type\":\"" <> typeB <> "\"}"
+      notices <-
+        aggregatedNotices
+          ( concat (replicate 5 [eventFoo, itemFoo, contentFoo])
+              <> [recognizedLine]
+              <> concat (replicate 5 [eventFoo, itemFoo, contentFoo])
+              <> replicate 5 longA
+              <> replicate 7 longB
+          )
+      let summaries = filter (Data.Text.isInfixOf "×") notices
+      -- Each of the five keys is counted on its own; the interleaved
+      -- recognized event did not restart 'foo' at one.
+      sort summaries
+        `shouldBe` sort
+          [ "[content] foo ×10",
+            "[event] " <> Data.Text.pack (take 47 typeA) <> "… ×5",
+            "[event] " <> Data.Text.pack (take 47 typeB) <> "… ×7",
+            "[event] foo ×10",
+            "[item] foo ×10"
+          ]
+      notices `shouldSatisfy` elem "still working"
+
+    it "keeps a textual error message in full while bounding an error payload that has no usable message" $ do
+      -- The one exemption stays: a literal string 'message' is never
+      -- truncated. Anything else about an 'error' payload — missing,
+      -- non-string, or blank message — is bounded like any other
+      -- unrecognized payload rather than embedding the raw JSON.
+      let longMessage = Data.Text.replicate 120 "failure detail "
+          textualError = ByteString.pack ("{\"type\":\"error\",\"message\":\"" <> Data.Text.unpack longMessage <> "\"}")
+          textualItemError = ByteString.pack ("{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":\"" <> Data.Text.unpack longMessage <> "\"}}")
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            agentEvent.agentEventKind `shouldBe` "error"
+            agentEvent.agentEventSummary `shouldBe` "[error] " <> longMessage
+            agentEvent.agentEventOutcomeText `shouldBe` Just longMessage
+        )
+        [textualError, textualItemError]
+
+      let blob = Data.Text.replicate 400 "0123456789"
+          unusable suffix = "{\"type\":\"error\"," <> suffix <> ",\"blob\":\"" <> Data.Text.unpack blob <> "\"}"
+          messageShapes = map unusable ["\"detail\":\"no message\"", "\"message\":123", "\"message\":{\"text\":\"coerced\"}", "\"message\":\"  \""]
+      mapM_
+        ( \payload ->
+            mapM_
+              ( \line -> do
+                  agentEvent <- singleNotice line
+                  agentEvent.agentEventKind `shouldBe` "event"
+                  Data.Text.length agentEvent.agentEventSummary `shouldSatisfy` (<= maxUnknownNoticeLength)
+                  agentEvent.agentEventSummary `shouldNotSatisfy` Data.Text.isInfixOf blob
+              )
+              [ByteString.pack payload, ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload <> "}")]
+        )
+        messageShapes
 
     it "identifies the session before forwarding agent output, and reports normal completion" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3511,7 +3878,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isSolveSessionIdentifiedEvent collected, findIndex isSolveOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -3543,7 +3911,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (SolveProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which branch?"
@@ -3574,7 +3943,8 @@ main = hspec $ do
                   SolveDiagnostic _ message
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
-            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3618,7 +3988,8 @@ main = hspec $ do
                 stdoutOnlyFails tag handle
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
-            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | SolveDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -3633,6 +4004,76 @@ main = hspec $ do
                 case snapshotAfter of
                   Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
                   Right identities -> matchingIdentities identities [recorded] `shouldBe` []
+
+    it "records every raw line of a chatty unknown event type while forwarding only bounded, collapsed notices" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile fakeCodex (chattyProvider "unknown-stream-session" "Created PR #999" [])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            aggregator <- newUnknownAggregator
+            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            -- Only a constant number of records reach the sink the worker
+            -- journals: the samples plus one counted summary, however many
+            -- occurrences the provider streamed.
+            let notices = [agentEvent | SolveOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+            length notices `shouldBe` unknownNoticeSamples + 1
+            notices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length . (.agentEventSummary))
+            -- The summary lands before the terminal event, which is where
+            -- replay stops reading the journal.
+            case reverse collected of
+              (SolveProcessFinished _ SolveCompleted : SolveOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
+            -- Full fidelity still lives in the session log, untouched.
+            rawTelemetryLines [path | SolveLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
+
+    it "still emits exactly one aggregate summary when the provider is interrupted mid-stream" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        -- The provider stays alive after its chatty burst, so the kill below
+        -- lands as a real interruption rather than racing a normal exit. The
+        -- sentinel is only reached once every telemetry line before it has
+        -- already been read and aggregated, which is what makes the expected
+        -- count deterministic.
+        ByteString.writeFile fakeCodex (chattyProvider "interrupted-stream-session" "READY" ["sleep 30"])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            managedRef <- newIORef Nothing
+            let sink event = do
+                  modifyIORef events (event :)
+                  case event of
+                    SolveProcessStarted _ _ managed -> writeIORef managedRef (Just managed)
+                    SolveOutput _ agentEvent
+                      | agentEvent.agentEventSummary == "READY" -> readIORef managedRef >>= mapM_ killManagedProcess
+                    _ -> pure ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
+            collected <- reverse <$> readIORef events
+            [agentEvent.agentEventSummary | SolveOutput _ agentEvent <- collected, Data.Text.isInfixOf "×" agentEvent.agentEventSummary]
+              `shouldBe` ["[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)]
+            case reverse collected of
+              (SolveProcessFinished _ (SolveFailed _) : SolveOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the interrupted terminal event"
+            rawTelemetryLines [path | SolveLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
 
   describe "settings" $ do
     it "defaults chat output to standard and persists a selected verbosity" $
@@ -3791,7 +4232,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isPullRequestSessionIdentifiedEvent collected, findIndex isPullRequestFlowOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -3823,7 +4265,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which reviewer wins?"
@@ -3854,7 +4297,8 @@ main = hspec $ do
                   PullRequestFlowDiagnostic _ message
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
-            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3898,7 +4342,8 @@ main = hspec $ do
                 stdoutOnlyFails tag handle
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
-            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | PullRequestFlowDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -3913,6 +4358,35 @@ main = hspec $ do
                 case snapshotAfter of
                   Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
                   Right identities -> matchingIdentities identities [recorded] `shouldBe` []
+
+    it "records every raw line of a chatty unknown event type while forwarding only bounded, collapsed notices" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The PR flow owns its own stdout loop, so it needs its own proof
+        -- that the shared parser's bounding and this flow's own aggregation
+        -- are wired together the same way the solve flow's are.
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile fakeCodex (chattyProvider "pr-unknown-stream-session" "Reviewed" [])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            let notices = [agentEvent | PullRequestFlowOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+            length notices `shouldBe` unknownNoticeSamples + 1
+            notices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length . (.agentEventSummary))
+            case reverse collected of
+              (PullRequestProcessFinished _ SolveCompleted : PullRequestFlowOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
+            rawTelemetryLines [path | PullRequestLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
 
   describe "review overlay digit dispatch" $ do
     let requestId = ReviewRequestId (String "req-1")
@@ -7976,6 +8450,140 @@ isDiagnosticEvent _ = False
 isWorkerFailedEvent :: WorkerEvent -> Bool
 isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
 isWorkerFailedEvent _ = False
+
+-- | How many occurrences of the unrecognized @telemetry@ type
+-- 'chattyProvider' streams. Comfortably past 'unknownNoticeSamples', so a
+-- run proves collapsing rather than merely staying under the sample budget.
+chattyProviderLines :: Int
+chattyProviderLines = 40
+
+-- | A fake provider that streams 'chattyProviderLines' occurrences of one
+-- unrecognized event type, each with a payload far larger than a bounded
+-- notice, then a recognized agent message. @tailCommands@ can keep it alive
+-- afterwards so a test can interrupt it deterministically once that
+-- recognized sentinel proves every telemetry line has been read.
+chattyProvider :: ByteString.ByteString -> ByteString.ByteString -> [ByteString.ByteString] -> ByteString.ByteString
+chattyProvider sessionId sentinel tailCommands =
+  ByteString.unlines
+    ( [ "#!/bin/sh",
+        "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"" <> sessionId <> "\"}'",
+        "i=0",
+        "while [ $i -lt " <> ByteString.pack (show chattyProviderLines) <> " ]; do",
+        "  printf '{\"type\":\"telemetry\",\"tick\":%s,\"blob\":\"" <> ByteString.pack (replicate 400 'x') <> "\"}\\n' \"$i\"",
+        "  i=$((i + 1))",
+        "done",
+        "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"" <> sentinel <> "\"}}'"
+      ]
+        <> tailCommands
+    )
+
+-- | Drives a real worker — the real supervisor, the real solve or PR flow,
+-- and a real provider process — over a 'chattyProvider' run, then reports
+-- the three surfaces the bound has to hold on: the durable worker journal,
+-- what a replay of that journal delivers, and how many raw provider lines
+-- the session log kept. Collecting sinks would prove none of these; only
+-- 'appendWorkerEvent' and 'monitorWorker' running for real do.
+runChattyWorker :: FilePath -> WorkerSpec -> String -> IO ([ByteString.ByteString], [AgentEvent], Int)
+runChattyWorker temporaryRoot spec identifier = do
+  let repository = spec.workerRepository
+      binaryRoot = temporaryRoot </> "bin"
+      fakeCodex = binaryRoot </> "codex"
+      workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+      specPath = workerRoot </> identifier <> ".spec.json"
+      statePath = workerRoot </> identifier <> ".state.json"
+      eventPath = workerRoot </> identifier <> ".events.jsonl"
+  createDirectory repository.repositoryRoot
+  createDirectory binaryRoot
+  createDirectoryIfMissing True workerRoot
+  ByteString.writeFile fakeCodex (chattyProvider "chatty-worker-session" "Created PR #999" [])
+  setFileMode fakeCodex 0o700
+  LazyByteString.writeFile specPath (encode spec)
+  originalPath <- maybe "" id <$> lookupEnv "PATH"
+  withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+      runWorker specPath `shouldReturn` Right ()
+      journal <- ByteString.lines <$> ByteString.readFile eventPath
+      replayed <- newIORef []
+      descriptors <- discoverWorkerHistory repository
+      case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+        Nothing -> throwIO (userError "worker was not discoverable for replay")
+        Just descriptor -> void (timeout 15000000 (monitorWorker descriptor (\_ _ event -> modifyIORef replayed (event :))))
+      replayedEvents <- reverse <$> readIORef replayed
+      stateBytes <- LazyByteString.readFile statePath
+      logPath <- case eitherDecode stateBytes :: Either String WorkerState of
+        Right state -> requireJust "worker state recorded no session log path" state.workerStateLogPath
+        Left message -> throwIO (userError ("undecodable worker state: " <> message))
+      rawCount <- rawTelemetryLines [logPath]
+      pure (journal, [agentEvent | WorkerAgentOutput agentEvent <- replayedEvents], rawCount)
+
+-- | The bound, asserted on all three of a real worker's surfaces at once:
+-- the journal holds only the samples and one summary, ordered before the
+-- terminal envelope; replay delivers exactly those same bounded notices; and
+-- the session log still holds every raw provider line.
+assertBoundedWorkerSurfaces :: ([ByteString.ByteString], [AgentEvent], Int) -> IO ()
+assertBoundedWorkerSurfaces (journal, replayedOutputs, rawCount) = do
+  let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+      terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+  length noticeIndices `shouldBe` unknownNoticeSamples + 1
+  case (reverse noticeIndices, terminalIndex) of
+    (lastNotice : _, Just terminal) -> lastNotice `shouldSatisfy` (< terminal)
+    _ -> expectationFailure "expected bounded notices and a terminal envelope in the worker journal"
+  let replayedNotices = [agentEvent.agentEventSummary | agentEvent <- replayedOutputs, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+  length replayedNotices `shouldBe` unknownNoticeSamples + 1
+  replayedNotices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length)
+  last replayedNotices `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+  rawCount `shouldBe` chattyProviderLines
+
+-- | Pushes @count@ occurrences of one unrecognized event type through a
+-- supervisor's shared aggregator, emitting whatever it admits — the stream
+-- loop's half of the deadline tests, without needing a real provider whose
+-- output would race the deadline unpredictably.
+admitTelemetry :: UnknownAggregator -> (WorkerEvent -> IO ()) -> Int -> IO ()
+admitTelemetry aggregator emit count = mapM_ (const admitOne) [1 .. count]
+  where
+    admitOne = case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
+      Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
+      Right (_, streamEvents) -> mapM_ (emitStreamEvent aggregator (emit . WorkerAgentOutput)) streamEvents
+
+-- | How many raw stdout records a 'chattyProvider' run left in its session
+-- log, given the log paths the invocation reported opening. The §16 contract
+-- is that this stays at full fidelity no matter how aggressively the parsed
+-- notices are bounded and collapsed.
+rawTelemetryLines :: [FilePath] -> IO Int
+rawTelemetryLines [path] = do
+  contents <- ByteString.readFile path
+  pure (length (filter (ByteString.isInfixOf "\\\"telemetry\\\"") (ByteString.lines contents)))
+rawTelemetryLines paths = throwIO (userError ("expected exactly one opened session log, got " <> show paths))
+
+-- | The single agent event one provider line parses into. Anything else is
+-- a broken fixture rather than an assertion worth reporting, so it aborts
+-- the example with the shape actually produced.
+singleNotice :: ByteString.ByteString -> IO AgentEvent
+singleNotice line = case parseSolveOutputLine line of
+  Right (_, [streamEvent]) -> pure streamEvent.streamEventAgent
+  result -> throwIO (userError ("expected exactly one parsed event from " <> show line <> ", got " <> show result))
+
+-- | Runs provider lines through one invocation's unknown-payload aggregator
+-- and returns the notice summaries that invocation would journal: the events
+-- it admitted, in order, followed by the aggregate summaries it flushes
+-- before its terminal event. This is the pure-side stand-in for a full
+-- provider run, so aggregation boundaries can be asserted without spawning
+-- hundreds of lines through a real process.
+aggregatedNotices :: [String] -> IO [Text]
+aggregatedNotices providerLines = do
+  aggregator <- newUnknownAggregator
+  admitted <- concat <$> traverse (admitLine aggregator) providerLines
+  summaries <- newIORef []
+  sealUnknownAggregates aggregator (\agentEvent -> modifyIORef summaries (agentEvent :))
+  flushed <- reverse <$> readIORef summaries
+  pure (map (.agentEventSummary) (admitted <> flushed))
+  where
+    admitLine aggregator line = case parseSolveOutputLine (ByteString.pack line) of
+      Left message -> throwIO (userError ("unparsable fixture line " <> line <> ": " <> Data.Text.unpack message))
+      Right (_, events) -> do
+        admitted <- newIORef []
+        mapM_ (emitStreamEvent aggregator (\agentEvent -> modifyIORef admitted (agentEvent :))) events
+        reverse <$> readIORef admitted
 
 isSolveSessionIdentifiedEvent :: SolveEvent -> Bool
 isSolveSessionIdentifiedEvent (SolveSessionIdentified _ _) = True
