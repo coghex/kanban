@@ -748,11 +748,16 @@ Nested connections that return nodes — labels, assignees, and closing-issue
 references — carry explicit `first:` limits and request `totalCount`; cards and
 details show a `+N` overflow indicator when GitHub reports omitted nodes. The
 status-check rollup requests up to 100 context nodes and deduplicates reruns by
-check app/name (or status creator/context), retaining the newest start time.
-This avoids treating superseded failures as current and permits real
-passed/total counts. A rollup beyond that cap fails closed as unknown. GitHub
-scores GraphQL cost by requested node count, so these caps keep the single-query
-refresh inside rate and node limits.
+check app/name (or status creator/context), retaining the newest entry and
+breaking a tie in favor of the one GitHub listed last. A check run GitHub has
+been asked for but has neither started nor completed carries no timestamp yet
+and ranks newest under its key, so a queued rerun supersedes the failure it
+replaces immediately rather than once it starts; a status context missing its
+`createdAt` says nothing about its age and ranks oldest, so it cannot displace a
+timestamped context of the same key. This avoids treating superseded failures as
+current and permits real passed/total counts. A rollup beyond that cap fails
+closed as unknown. GitHub scores GraphQL cost by requested node count, so these
+caps keep the single-query refresh inside rate and node limits.
 
 An anomaly attributable to a single item degrades that item rather than the
 refresh. A rollup context the build cannot decode — an unrecognized

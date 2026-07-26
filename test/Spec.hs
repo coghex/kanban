@@ -5494,6 +5494,68 @@ main = hspec $ do
               ]
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
+    -- A rerun GitHub has queued but not started reports no timestamps at all,
+    -- so ranking it by an empty-string timestamp let the completed failure it
+    -- supersedes stay current and the card stay red. It is the newest run of
+    -- its key by definition.
+    it "supersedes a completed failure with the queued rerun that has no timestamps yet" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ checkRunJson "review-approved" "FAILURE" "2026-07-17T14:43:13Z",
+                queuedCheckRunJson "review-approved"
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) ->
+          pullRequest.pullRequestChecks `shouldBe` ChecksPending 0 1 [CheckDetail "review-approved" CheckPending]
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Only a run with neither timestamp is a fresh rerun: one reporting just
+    -- @completedAt@ has run, and keeps that timestamp as its effective one.
+    it "ranks a run reporting only completedAt by that timestamp rather than as unstarted" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ completedOnlyCheckRunJson "review-approved" "FAILURE" "2026-07-17T14:50:00Z",
+                checkRunJson "review-approved" "SUCCESS" "2026-07-17T14:55:00Z"
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksPassed 1
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Two runs of one key that are equally untimestamped have no age to
+    -- separate them, so the dedup keeps the one GitHub listed last. Reversing
+    -- the payload reverses the winner, which is what makes the rule a rule and
+    -- not an accident of which state happens to sort higher.
+    it "resolves two untimestamped runs of one check by the order GitHub listed them" $ do
+      let response nodes = githubChecksResponse 2 nodes
+          queued = queuedCheckRunJson "review-approved"
+          failed = undatedCheckRunJson "review-approved" "FAILURE"
+          checksOf payload = case decodeGitHubItems (LazyByteString.pack (response payload)) of
+            Left message -> Left message
+            Right ([], [pullRequest]) -> Right pullRequest.pullRequestChecks
+            Right values -> Left ("unexpected decoded values: " <> show values)
+      checksOf [queued, failed] `shouldBe` Right (ChecksFailed 0 1 [CheckDetail "review-approved" CheckFailed])
+      checksOf [failed, queued] `shouldBe` Right (ChecksPending 0 1 [CheckDetail "review-approved" CheckPending])
+
+    -- The other rollup kind reads its age from @createdAt@, and a status
+    -- context that arrives without one says nothing about being newer. It has
+    -- to rank oldest, or a later payload entry would displace a timestamped
+    -- context of the same key purely by position.
+    it "does not let a status context with no createdAt displace the timestamped one" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ statusContextJson "ci/build" "SUCCESS" (Just "2026-07-17T14:43:00Z"),
+                statusContextJson "ci/build" "FAILURE" Nothing
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksPassed 1
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
     it "keeps a rollup past the context cap unknown rather than retaining the partial nodes it saw" $ do
       case decodeGitHubItems (LazyByteString.pack githubCappedChecksResponse) of
         Left message -> expectationFailure message
@@ -9129,6 +9191,52 @@ futureCheckContextJson = "{\"__typename\":\"SomeFutureType\",\"name\":\"future\"
 namelessCheckRunJson :: String
 namelessCheckRunJson =
   "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-01-03T00:00:00Z\"}"
+
+-- | A rerun GitHub has accepted but not started: @QUEUED@, with the null
+-- conclusion and null @startedAt@/@completedAt@ that state actually reports.
+queuedCheckRunJson :: String -> String
+queuedCheckRunJson name =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"QUEUED\",\"conclusion\":null,\"startedAt\":null,\"completedAt\":null"
+    <> ",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A finished run reporting only @completedAt@, which is the case the
+-- effective-timestamp fallback exists for.
+completedOnlyCheckRunJson :: String -> String -> String -> String
+completedOnlyCheckRunJson name conclusion completedAt =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"COMPLETED\",\"conclusion\":\""
+    <> conclusion
+    <> "\",\"startedAt\":null,\"completedAt\":\""
+    <> completedAt
+    <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A finished run carrying no timestamps. GitHub does not report one, but it
+-- is the only way to give two untimestamped runs of a key different states and
+-- so observe which of them the tie-break keeps.
+undatedCheckRunJson :: String -> String -> String
+undatedCheckRunJson name conclusion =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"COMPLETED\",\"conclusion\":\""
+    <> conclusion
+    <> "\",\"startedAt\":null,\"completedAt\":null"
+    <> ",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A commit status context, the rollup's other kind. Its @createdAt@ is
+-- optional because the query always asks for it and GitHub answers null when
+-- it has none.
+statusContextJson :: String -> String -> Maybe String -> String
+statusContextJson name state createdAt =
+  "{\"__typename\":\"StatusContext\",\"context\":\""
+    <> name
+    <> "\",\"state\":\""
+    <> state
+    <> "\",\"createdAt\":"
+    <> maybe "null" (\stamp -> "\"" <> stamp <> "\"") createdAt
+    <> ",\"creator\":{\"login\":\"ci\"}}"
 
 runningCheckRunJson :: String -> String -> String
 runningCheckRunJson name startedAt =
