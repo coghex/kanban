@@ -44,10 +44,28 @@ They are ordered so each lands cleanly on the last.
 | # | Filed | Working title | From | Size | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | A | **#145** | Let the drainer start from a dirty checkout, using the autostash it already has | 12 | Small — mostly deletion | — |
-| B | — | Define the drainer's launchd label once instead of three times | 6a | Small — pure refactor | A (same files) |
-| C | — | Give each repository its own drainer instance instead of one machine-wide singleton | 6 | Large — **design decision** | B |
-| D | — | Split `test/Spec.hs` into per-subsystem modules | 1 | Large — mechanical, behavior-free | — (independent) |
-| E | — | Report why the drainer is unavailable instead of surfacing a raw `IOException` | 11 | Small | A |
+| B | **#146** | Resolve the drainer's LaunchAgent through an installer-written record instead of a hardcoded label | 6a, 11 | Medium | A (same files) |
+| C | **#147** | Give each repository its own drainer instead of one machine-wide singleton | 6 | **Contract change** | B |
+| D | **#148** | Split `test/Spec.hs` into per-subsystem spec modules | 1 | Large — mechanical, behavior-free | — (independent) |
+| ~~E~~ | absorbed | ~~Report why the drainer is unavailable instead of a raw `IOException`~~ | 11 | — | folded into B |
+
+**Resolved along the way — where the label should live.** B was originally scoped
+as "define the label once," which is impossible as stated: Haskell cannot import a
+Python constant. What crosses the language boundary must be a string both sides
+hardcode, an algorithm both sides implement, or data one side writes and the other
+reads. Only the third survives making the label per-repository, since a derived
+label would otherwise force Haskell and Python to implement identical sanitization
+and length rules, with disagreement presenting as "drainer not found" while both
+sides look correct in isolation.
+
+The chosen shape: the installer writes the label and plist path into the
+`config.json` record that already exists at
+`~/Library/Application Support/kanban/pr-drainer/`, and `Drainer.hs` reads the
+record to locate the plist — then still reads the plist itself via `plutil` for the
+controller argv, so the plist stays authoritative for what launchd actually runs.
+This is the pattern `Review.hs:541` already uses for the issue-review backend;
+`Drainer.hs` was the outlier. Finding 11 folded in because it rewrites the same
+function.
 
 Notes on the order:
 
@@ -66,6 +84,16 @@ Notes on the order:
 - **E last** of the drainer group, since it edits the same `Drainer.hs` function
   region A touches.
 
+**Resolved along the way — what identifies a drainer.** #147 keys a drainer by its
+GitHub `owner/name` slug rather than its checkout path. Two clones of the same
+repository then resolve to the same label, which makes it structurally impossible
+to run two drainers merging the same pull requests — a failure the existing
+per-path run lock cannot catch, because the two checkouts really are different
+paths. The lock is kept as a second guard. The accepted cost: two checkouts of one
+repository cannot be drained independently. The sharp edge for implementation is
+case — `Coghex/Kanban` and `coghex/kanban` are distinct to GitHub, so a
+lowercasing derivation would collapse them.
+
 ### Wave 2 — hold until the audit is further along
 
 Findings 2, 3, 4, 5, 7, 8, 9, and 10. Each is real and each has its fix shape
@@ -82,7 +110,7 @@ The single most visible artifact of an automated build process: every file grew
 by accretion, and nothing was ever split, because no agent's task was ever "make
 this smaller."
 
-### 1. `test/Spec.hs` is a 9,060-line single-file test suite
+### 1. `test/Spec.hs` is a 9,200-line single-file test suite
 
 **Severity: High** — this is the largest file in the repository by a factor of
 1.6, and it is the one every behavior change has to touch.
@@ -593,7 +621,10 @@ What has actually been read, so the audit can resume without repeating work.
 | `src/Kanban/UI.hs` | Structure only — exports, type declarations, `AppState`. Bodies not read. |
 | `src/Kanban/Process.hs` | Export list only. |
 | `tools/drain_prs.py` | Read the clean-tree gate, the autostash, `fast_forward_default_branch`, and every main-checkout command site. The other ~2,900 lines not read. |
-| `tools/drain_prs_service.py` | Read `start_service`, the launchd calls, and the child-spawn loop. Remainder not read. |
+| `tools/drain_prs_service.py` | Read the module constants, `launch_target`, `status_snapshot`, `incident_files`, `install_job`, `start_service`, and the child-spawn loop. Remainder not read. |
+| `tools/install_drainer.py` | Read the header, constants, and install/config-merge surface. Remainder not read. |
+| `test/Spec.hs` | Structure mapped — 330 lines of imports, 48 `describe` blocks in one `main`, 149 trailing helpers. Test bodies not read. |
+| `src/Kanban/Paths.hs` | **Read fully** — landed 2026-07-26, mid-audit. |
 | Plugin bundles | `review_pr.py` divergence diffed. Command/skill Markdown not read. |
 | `test/Spec.hs` | Size and cabal wiring only. Contents not read. |
 | Everything else in `src/`, `tools/`, `app/`, `docs/` | Not yet read |
@@ -624,3 +655,21 @@ read as uniformly negative:
   coverage gaps are findings 6a and 9, but the mechanism itself — regex extractors
   per surface language, reconciled against a parsed table, with `mandatory` and
   `owner` columns — is better than most hand-maintained projects manage.
+- **`tools/drain_prs.py`'s autostash is the best code in the repository.** See
+  finding 12 for the detail. It is careful in ways that only come from having
+  thought about concurrent use: it avoids `git stash` proper so it cannot collide
+  with a stash the user runs in another terminal, anchors its snapshot to a ref
+  before anything destructive, and fails closed — `git stash create` exits
+  non-zero on an unmerged index, so `reset --hard` is unreachable during a
+  conflicted merge and a user's unresolved work cannot be destroyed. Verified
+  empirically, not just read.
+- **Per-repository plumbing is further along than the singleton language implies.**
+  The drainer's run lock is already per-checkout, and incidents already carry a
+  `repo` field and filter on it. That is why #147 is a contained change rather
+  than a rewrite.
+- **The module-splitting instinct is already present.** `src/Kanban/Paths.hs`
+  landed during this audit: a small, focused module extracted to own `0700`
+  enforcement across the XDG directory chain, with a comment explaining the bug
+  that motivated it (`createDirectoryIfMissing` creating parents at the process
+  umask). This is exactly the direction findings 1–5 argue for, applied
+  unprompted.
