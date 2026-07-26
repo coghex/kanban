@@ -108,10 +108,18 @@ REQUIRED_PHRASES = {
         "resolved repository, so never fetch or push that name there"
     ),
     "pushes-only-to-the-head-repositorys-own-branch": (
-        "push only to the head repository's own `headRefName`. When that head "
-        "repository is not writable — `maintainerCanModify` is false, or the push is "
-        "rejected — stop and report that the pull request's head cannot be safely "
-        "written, without pushing anything."
+        "push only to the head repository's own `headRefName`."
+    ),
+    "writability-is-decided-by-the-push-not-maintainer-can-modify": (
+        "Decide whether that push is possible from the head repository itself, never "
+        "from `maintainerCanModify`: that field reports whether the *base* "
+        "repository's maintainers may modify the branch, which is neither necessary "
+        "nor sufficient for the account running this workflow"
+    ),
+    "an-unwritable-head-stops-without-changing-the-remote": (
+        "When it is rejected for lack of write access, stop and report that the pull "
+        "request's head cannot be safely written, having changed nothing on the "
+        "remote, and never fall back to pushing anywhere else."
     ),
     "selects-the-worktree-by-head-branch": (
         "Select the worktree by that branch, not by an issue number: reuse any "
@@ -157,11 +165,15 @@ REQUIRED_PHRASES = {
     ),
     # Inputs.
     "requires-one-positive-pr-number": "Require one positive pull request number.",
-    "scopes-every-github-operation-to-the-resolved-repository": (
-        "Use that resolved repository for every GitHub read and write in this "
-        "workflow: pass it to `gh` as `-R <owner/name>` rather than letting `gh` "
-        "infer the repository from the local checkout, and fetch and push the pull "
-        "request's head branch against that same repository."
+    "scopes-github-metadata-to-the-resolved-repository": (
+        "Use that resolved repository for the pull request's own GitHub metadata and "
+        "for the coordinator handoff: pass it to `gh` as `-R <owner/name>` rather "
+        "than letting `gh` infer the repository from the local checkout."
+    ),
+    "head-operations-do-not-use-the-resolved-repository": (
+        "The resolved repository is where the pull request lives, not necessarily "
+        "where its head lives. Every fetch and push of the head branch goes to the "
+        "head repository recorded in step 3 instead"
     ),
     "forwards-repo-and-config-to-the-coordinator": (
         "Forward the resolved repository and configuration to the canonical "
@@ -342,15 +354,24 @@ class RepairWorkflowContractTests(unittest.TestCase):
         # workflow cannot tell a same-repository PR from a fork PR, so it would
         # fetch or push headRefName against the base repository — missing the
         # recorded head, or clobbering an unrelated same-named branch there.
+        # maintainerCanModify is deliberately absent (round-3 finding): it
+        # answers whether BASE-repository maintainers may modify the branch, not
+        # whether this workflow's own account can push it, so the workflow must
+        # not read it as a writability signal.
         for path in REPAIR_ASSETS:
             fences = " ".join(bash_fence_bodies(read(path)))
+            self.assertNotIn(
+                "maintainerCanModify",
+                fences,
+                f"{path} queries maintainerCanModify, which is not a writability "
+                "test for the account running this workflow",
+            )
             for field in (
                 "headRefName",
                 "headRefOid",
                 "headRepository",
                 "headRepositoryOwner",
                 "isCrossRepository",
-                "maintainerCanModify",
             ):
                 self.assertIn(
                     field,

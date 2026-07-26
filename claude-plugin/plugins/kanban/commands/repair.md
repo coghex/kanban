@@ -17,7 +17,9 @@ Whenever two reasonable resolutions would differ in behaviour, scope, or user-vi
 
 Require one positive pull request number. Accept the repository and configuration context the caller supplies alongside it, and resolve the repository identity from that context rather than from the local checkout directory name. When the caller supplies none, resolve it from the checkout's own configured remote.
 
-Use that resolved repository for every GitHub read and write in this workflow: pass it to `gh` as `-R <owner/name>` rather than letting `gh` infer the repository from the local checkout, and fetch and push the pull request's head branch against that same repository. A fork checkout whose remote points at the fork would otherwise diagnose, or fail on, a same-numbered pull request in the wrong repository.
+Use that resolved repository for the pull request's own GitHub metadata and for the coordinator handoff: pass it to `gh` as `-R <owner/name>` rather than letting `gh` infer the repository from the local checkout. A fork checkout whose remote points at the fork would otherwise diagnose, or fail on, a same-numbered pull request in the wrong repository.
+
+The resolved repository is where the pull request lives, not necessarily where its head lives. Every fetch and push of the head branch goes to the head repository recorded in step 3 instead, which for a cross-repository pull request is a different repository.
 
 Forward the resolved repository and configuration to the canonical coordinator through the coordinator's own `--repo` and `--config` options, so a fork checkout or a non-default config path repairs and rereviews the same repository the board displays. Omit an option the caller did not supply.
 
@@ -26,7 +28,7 @@ Forward the resolved repository and configuration to the canonical coordinator t
 Read the pull request's merge state, its complete status-check rollup, its labels, its linked issues, and its comments before deciding anything:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
+gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
 ```
 
 Address the highest-priority blocking cause you find, in the same order and with the same breadth as `pullRequestStatus` in `src/Kanban/Workflow.hs`, so every state that can make a Done card red has a defined branch:
@@ -41,7 +43,9 @@ If none of the three is present, report what you found and stop without pushing.
 
 Resolve the pull request's head repository, head branch, and exact head SHA before editing anything, and record all three. `headRepositoryOwner` and `headRepository` identify the head repository; `isCrossRepository` reports whether it differs from the resolved repository the diagnosis above used.
 
-A cross-repository pull request is fail-closed. When the head repository differs from the resolved repository, `headRefName` is not a branch of the resolved repository, so never fetch or push that name there: doing so would miss the recorded head, or overwrite an unrelated branch that merely shares its name. Fetch the head commit from the head repository itself, or read-only from the resolved repository's `pull/<pr>/head` ref, and push only to the head repository's own `headRefName`. When that head repository is not writable — `maintainerCanModify` is false, or the push is rejected — stop and report that the pull request's head cannot be safely written, without pushing anything.
+A cross-repository pull request is fail-closed. When the head repository differs from the resolved repository, `headRefName` is not a branch of the resolved repository, so never fetch or push that name there: doing so would miss the recorded head, or overwrite an unrelated branch that merely shares its name. Fetch the head commit from the head repository itself, or read-only from the resolved repository's `pull/<pr>/head` ref, and push only to the head repository's own `headRefName`.
+
+Decide whether that push is possible from the head repository itself, never from `maintainerCanModify`: that field reports whether the *base* repository's maintainers may modify the branch, which is neither necessary nor sufficient for the account running this workflow — a fork owner repairing their own pull request routinely has it false and can still push. Attempt the ordinary non-force push to the head repository and let its outcome answer the question. When it is rejected for lack of write access, stop and report that the pull request's head cannot be safely written, having changed nothing on the remote, and never fall back to pushing anywhere else.
 
 Select the worktree by that branch, not by an issue number: reuse any worktree registered to this repository that is already on the pull request's exact head branch, and confirm it tracks the recorded head repository's `headRefName` rather than merely a local branch of the same name. A `solve` worktree named `issue-<n>-<slug>` matches naturally, by branch rather than by name, so this is well defined whether the pull request links zero, one, or several issues.
 

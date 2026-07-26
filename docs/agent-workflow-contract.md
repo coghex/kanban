@@ -305,7 +305,10 @@ everything else.
   scopes every `gh` call (`-R <owner/name>`) rather than being inferred from
   the local checkout, and both are forwarded to the bundled coordinator through
   its own `--repo` and `--config` options, so a fork checkout or a non-default
-  config path repairs and rereviews the same repository the board displays.
+  config path repairs and rereviews the same repository the board displays. It
+  scopes pull-request *metadata* only: the head branch's fetches and pushes go
+  to the head repository instead, which is not the same repository for a
+  cross-repository pull request.
 - **Outputs:** at most one pushed commit on the pull request's own head
   branch, followed by exactly one canonical rereview when — and only when — a
   new head was pushed. The rereview publishes the `pr-review:v2` comment and
@@ -323,9 +326,13 @@ everything else.
   compensated for with a label. A cross-repository head is fail-closed: when
   `isCrossRepository` reports a head repository other than the resolved one,
   `headRefName` names no branch of the resolved repository, so the workflow
-  fetches and pushes only against the recorded head repository and stops
-  without pushing when that repository is not writable
-  (`maintainerCanModify` false, or a rejected push).
+  fetches and pushes only against the recorded head repository. Writability is
+  decided by the ordinary non-force push's own outcome, never by
+  `maintainerCanModify` — that field reports whether the *base* repository's
+  maintainers may modify the branch, which is neither necessary nor sufficient
+  for the account running the workflow, so a fork owner repairing their own
+  pull request is not turned away. A push rejected for lack of write access
+  stops the run with nothing changed on the remote.
 - **Required authority:** GitHub read on the pull request and write to push to
   its head branch **in the head repository** — which for a fork pull request is
   not the repository the board is pointed at. It never merges, never closes an
