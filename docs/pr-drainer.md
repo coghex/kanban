@@ -105,6 +105,7 @@ vocabulary:
 | `run_locked` | Another drainer run holds the repository. The message names it. |
 | `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the default-branch and clean-checkout requirements above. |
 | `post_merge_audit_failed` | The merge landed but the post-merge audit found a gate violation. `merged` is `true`. |
+| `post_merge_cleanup_failed` | The merge landed but its post-merge cleanup is still outstanding. The message names the remaining steps, the drainer keeps retrying them, and `merged` is `true`. |
 | `operational_error` | Anything else went wrong. |
 
 ### Exit status

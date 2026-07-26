@@ -612,6 +612,37 @@ class SinglePrErrorTests(SinglePrCliFixture):
         )
         self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
 
+    def test_an_outstanding_post_merge_cleanup_is_an_error_that_still_reports_the_merge(
+        self,
+    ):
+        # The queue would retry this next cycle. A single caller has no next
+        # cycle, so it must be told the merge landed and what it still owes.
+        self.script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout="", stderr="gh: boom", exit_code=1
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assert_result(
+            result,
+            outcome="error",
+            reason="post_merge_cleanup_failed",
+            merged=True,
+            would_merge=False,
+            dry_run=False,
+        )
+        self.assertIn("99", result["message"])
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+        # The debt is durably recorded for the drainer to retry, and the steps
+        # that did succeed are not owed again.
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        pending = state["prs"]["42"]["cleanup"]["pending"]
+        self.assertEqual([item["kind"] for item in pending], ["issue"])
+        self.assertFalse(self.feature_wt.exists())
+
     def test_a_checkout_off_the_default_branch_is_a_precondition_failure(self):
         run_git(["checkout", "-q", "-b", "hotfix"], cwd=self.main)
 

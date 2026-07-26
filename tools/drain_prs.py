@@ -97,6 +97,7 @@ ERROR_REASONS = frozenset(
         "run_locked",
         "repository_precondition_failed",
         "post_merge_audit_failed",
+        "post_merge_cleanup_failed",
         "operational_error",
     }
 )
@@ -2392,11 +2393,28 @@ def process_pr(
     entry["cleanup"] = record
     save_drain_state(ctx, state, dry_run=dry_run)
 
+    outstanding: list[dict[str, Any]] = []
     if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
         forget_pr(state, number)
+    else:
+        entry = state["prs"].get(str(number)) or {}
+        outstanding = (entry.get("cleanup") or {}).get("pending") or []
     # Persist what the pass achieved rather than leaving it to the caller: the
     # obligations that remain are the ones the next cycle must retry.
     save_drain_state(ctx, state, dry_run=dry_run)
+    if outstanding:
+        # The queue treats this as an ordinary debt to retry next cycle. A
+        # single caller cannot wait for a next cycle, so it is told the merge
+        # landed and what it still owes -- recorded only once the debt is
+        # durably persisted above.
+        steps = ", ".join(describe_cleanup_obligation(item) for item in outstanding)
+        set_outcome(
+            report,
+            "post_merge_cleanup_failed",
+            f"PR #{number} merged, but its post-merge cleanup is still "
+            f"outstanding ({steps}). The drainer keeps retrying it.",
+            merged=True,
+        )
     return True
 
 
