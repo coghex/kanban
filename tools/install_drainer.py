@@ -5,6 +5,10 @@
 The installer never starts the drainer. It only installs stable script links and
 loads a stopped LaunchAgent definition for the selected repository. An optional
 --config path is persisted and forwarded to the installed drain_prs.py runs.
+
+Installing runs drain_prs_service.py's own install step, which writes the plist
+and records where it put it. Re-running this installer therefore also repairs a
+missing or stale discovery record in place.
 """
 
 from __future__ import annotations
@@ -16,16 +20,16 @@ import re
 import secrets
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
+import drain_prs_service
 
-LABEL = "com.coghex.drain-prs"
-DEFAULT_INSTALL_DIR = (
-    Path.home() / "Library" / "Application Support" / "kanban" / "pr-drainer"
-)
-PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+# The controller writes the plist, so it owns the label, the plist path, and
+# the launchd target derived from them; this installer reads all three from
+# there rather than restating any of them.
+DEFAULT_INSTALL_DIR = drain_prs_service.DEFAULT_INSTALL_DIR
 
 
 class InstallError(RuntimeError):
@@ -64,12 +68,8 @@ def repository_root(requested: Path) -> Path:
     return root
 
 
-def launch_target() -> str:
-    return f"gui/{os.getuid()}/{LABEL}"
-
-
 def launchd_job_running() -> bool:
-    proc = run(["launchctl", "print", launch_target()], check=False)
+    proc = run(["launchctl", "print", drain_prs_service.launch_target()], check=False)
     if proc.returncode != 0:
         return False
     output = proc.stdout + proc.stderr
@@ -146,35 +146,30 @@ def validate_symlink_destination(destination: Path) -> None:
 def merge_installed_config_json(install_dir: Path, updates: dict[str, Any]) -> Path:
     """Merge `updates` into the shared config.json (ntfy_url, config_path)
     rather than overwriting it, so a later installer run that sets one key
-    does not delete a different key persisted by an earlier run."""
-    path = install_dir / "config.json"
-    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
-        raise InstallError(f"Refusing unsafe notification config path: {path}")
-    install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    install_dir.chmod(0o700)
-    existing: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict):
-            existing = loaded
-    existing.update(updates)
-    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
-    temporary = Path(temporary_name)
+    does not delete a different key persisted by an earlier run. The merge
+    itself lives with the controller, which records the installed LaunchAgent
+    in that same document and must not clobber these keys either."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(existing, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            temporary.unlink()
-    return path
+        return drain_prs_service.merge_json_document(
+            install_dir / "config.json", updates
+        )
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(str(exc)) from exc
+
+
+def installed_ntfy_url(install_dir: Path) -> str | None:
+    """The notification endpoint a previous run persisted, if any. Read out of
+    the document rather than inferred from its existence: the controller now
+    records the installed LaunchAgent in that same file, so config.json is
+    present after every install whether or not notifications were configured."""
+    try:
+        value = json.loads((install_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    url = value.get("ntfy_url")
+    return url if isinstance(url, str) and url else None
 
 
 def write_notification_config(install_dir: Path, ntfy_url: str) -> Path:
@@ -229,7 +224,8 @@ def install(
                 key: {"source": str(sources[key]), "destination": str(destination)}
                 for key, destination in destinations.items()
             },
-            "plist": str(PLIST_PATH),
+            "plist": str(drain_prs_service.PLIST_PATH),
+            "record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
             "config_path": resolved_config_path,
             "started": False,
         }
@@ -269,7 +265,7 @@ def install(
         "install_dir": str(install_dir),
         "links": link_results,
         "notifications_configured": notification_config is not None
-        or (install_dir / "config.json").is_file(),
+        or installed_ntfy_url(install_dir) is not None,
         "config_path": resolved_config_path,
         "controller": controller_result,
         "started": False,

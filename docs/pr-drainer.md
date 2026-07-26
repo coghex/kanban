@@ -26,9 +26,15 @@ The installer:
 - refuses to overwrite ordinary files;
 - creates stable links under `~/Library/Application Support/kanban/pr-drainer/`;
 - installs `~/Library/LaunchAgents/com.coghex.drain-prs.plist`;
+- records that job's label, plist path, and repository in
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, which is how
+  Kanban finds it;
 - loads the job without starting it.
 
-Rerun the installer after moving the repository checkout.
+Rerun the installer after moving the repository checkout. Rerun it as well if
+Kanban reports that the drainer is not installed or that its install record is
+unreadable — an installation predating the record is repaired in place, with no
+uninstall first and no change to the LaunchAgent's identity.
 
 ## Start and stop
 
@@ -275,6 +281,7 @@ The endpoint is stored in a private configuration file and is not written into t
 ## Files and logs
 
 - Installed links and private configuration: `~/Library/Application Support/kanban/pr-drainer/`
+- Install record Kanban resolves the LaunchAgent through: `~/Library/Application Support/kanban/pr-drainer/config.json`
 - Logs: `~/Library/Logs/kanban/pr-drainer/`
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`

@@ -43,13 +43,17 @@ import Kanban.Config
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerController (..),
+    DrainerRecord (..),
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
     controllerFromProgramArguments,
     decodeDrainerStatus,
     drainerIsRunning,
+    drainerRecordFromBytes,
+    drainerRecordPath,
     drainerToggle,
+    resolveDrainerPlist,
     runDrainerCommand,
     statusFromControllerExit,
   )
@@ -6643,6 +6647,94 @@ main = hspec $ do
     it "fails closed when the interactive usage request fails" $
       decodeClaudeUsageText (minutesToTimeZone (-420)) epoch "Current session\nFailed to load usage data"
         `shouldSatisfy` isLeft
+
+  describe "PR drainer LaunchAgent discovery" $ do
+    let recordDocument label plist =
+          ByteString.pack
+            ( "{\"launchd_label\":\""
+                <> label
+                <> "\",\"plist_path\":\""
+                <> plist
+                <> "\",\"repository\":\"/tmp/example-project\"}"
+            )
+        failureFor = either id (\plist -> "unexpectedly resolved " <> Data.Text.pack plist)
+
+    it "reads the label, plist path, and repository the installer recorded" $
+      drainerRecordFromBytes
+        (recordDocument "com.example.drain" "/Users/example/Library/LaunchAgents/com.example.drain.plist")
+        `shouldBe` Right
+          ( DrainerRecord
+              "com.example.drain"
+              "/Users/example/Library/LaunchAgents/com.example.drain.plist"
+              "/tmp/example-project"
+          )
+
+    it "rejects a record that cannot name the installed job" $ do
+      -- Each of these parses as JSON, or as an object, without identifying a
+      -- launchd job — so each has to be an unreadable record rather than a
+      -- lookup that proceeds on a value it cannot use.
+      let rejects document = drainerRecordFromBytes document `shouldSatisfy` isLeft
+      rejects "[\"com.example.drain\"]"
+      rejects "\"com.example.drain\""
+      rejects "{\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+      rejects "{\"launchd_label\":\"com.example.drain\",\"repository\":\"/tmp/r\"}"
+      rejects "{\"launchd_label\":\"com.example.drain\",\"plist_path\":\"/tmp/x.plist\"}"
+      rejects "{\"launchd_label\":42,\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+      rejects "{\"launchd_label\":\"com.example.drain\",\"plist_path\":[],\"repository\":\"/tmp/r\"}"
+      rejects (recordDocument "   " "/tmp/x.plist")
+      rejects (recordDocument "com.example.drain" "Library/LaunchAgents/x.plist")
+
+    it "looks for that record where the installer fixes it, not where --install-dir moved" $ do
+      recordPath <- drainerRecordPath
+      Data.Text.pack recordPath
+        `shouldMention` "/Library/Application Support/kanban/pr-drainer/config.json"
+
+    it "names macOS rather than a missing /usr/bin/plutil on another host" $ do
+      outcome <- resolveDrainerPlist "linux" "/nonexistent/pr-drainer/config.json"
+      failureFor outcome `shouldMention` "macOS"
+
+    it "says the drainer is not installed when no record was written" $
+      withTemporaryCacheRoot $ \root -> do
+        outcome <- resolveDrainerPlist "darwin" (root </> "config.json")
+        failureFor outcome `shouldMention` "not installed"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "distinguishes an unreadable record from an absent one" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        ByteString.writeFile recordPath (recordDocument "" "/tmp/x.plist")
+        outcome <- resolveDrainerPlist "darwin" recordPath
+        failureFor outcome `shouldMention` "unreadable"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "reports an installation predating the record without Aeson's JSONPath" $
+      withTemporaryCacheRoot $ \root -> do
+        -- What an install made before the record existed actually looks like:
+        -- the installer's config.json is there, holding only the keys it
+        -- always wrote.
+        let recordPath = root </> "config.json"
+        ByteString.writeFile recordPath "{\"ntfy_url\":\"https://notify.example.test/topic\"}"
+        outcome <- resolveDrainerPlist "darwin" recordPath
+        failureFor outcome `shouldMention` "launchd_label"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+        failureFor outcome `shouldNotMention` "Error in $"
+
+    it "reports a stale install when the recorded plist is gone" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+            plist = root </> "com.example.drain.plist"
+        ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
+        outcome <- resolveDrainerPlist "darwin" recordPath
+        failureFor outcome `shouldMention` "LaunchAgent is missing"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "resolves the plist the record names, wherever the installer put it" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+            plist = root </> "com.example.drain.plist"
+        ByteString.writeFile plist "<plist/>"
+        ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
+        resolveDrainerPlist "darwin" recordPath `shouldReturn` Right plist
 
   describe "PR drainer status decoding" $ do
     it "replaces the LaunchAgent's managed repository with the current one" $ do

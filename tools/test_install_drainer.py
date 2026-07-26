@@ -145,6 +145,24 @@ class InstallerPolicyTests(unittest.TestCase):
             )
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep\n")
 
+    def test_a_record_only_config_is_not_a_configured_notification_endpoint(self):
+        # The controller records the installed LaunchAgent in this same file,
+        # so config.json now exists after every install. Reporting
+        # notifications as configured because the file is present would be
+        # wrong for every install that never passed --ntfy-url.
+        install_drainer.merge_installed_config_json(
+            self.install_dir,
+            {"launchd_label": "com.example.drain", "plist_path": "/tmp/x.plist"},
+        )
+        self.assertIsNone(install_drainer.installed_ntfy_url(self.install_dir))
+        install_drainer.write_notification_config(
+            self.install_dir, "https://notify.example.test/topic"
+        )
+        self.assertEqual(
+            install_drainer.installed_ntfy_url(self.install_dir),
+            "https://notify.example.test/topic",
+        )
+
     def test_writing_the_notification_url_preserves_a_previously_persisted_config_path(
         self,
     ):
