@@ -1,6 +1,7 @@
 module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    BoardRefreshOutcome (..),
     CardEnv (..),
     ChatTranscript (..),
     DetailsEnv (..),
@@ -69,6 +70,7 @@ module Kanban.UI
     reviewSessionReusable,
     reviewSessionsNeedingArm,
     revisedAttr,
+    runBoardRefreshWith,
     runDashboard,
     solveSessionAlreadyResolved,
     themeFor,
@@ -76,6 +78,7 @@ module Kanban.UI
     trackerHeaderAttribute,
     transcriptScrollKey,
     transcriptShouldTail,
+    unverifiedRefreshNotice,
     visibleSelectionRows,
   )
 where
@@ -130,7 +133,7 @@ import Kanban.Drainer
     queryDrainerStatus,
     setDrainerRunning,
   )
-import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, snapshotWarnings)
+import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
   ( PreflightAction (..),
@@ -431,8 +434,18 @@ data AgentSessionEntry = AgentSessionEntry
   }
   deriving stock (Eq, Show)
 
+-- | How a board refresh ended. 'BoardRefreshUnverified' is not just another
+-- failure: the @gh@ process group the refresh spawned could not be confirmed
+-- gone, so no second @gh@ may be started alongside one that may still be
+-- running. Which guard enforces that depends on 'ghCleanupGuard' — see
+-- 'applyBoardRefresh'.
+data BoardRefreshOutcome
+  = BoardRefreshCompleted (Either ProviderError GitHubResult)
+  | BoardRefreshUnverified GhCleanupFailure
+  deriving stock (Eq, Show)
+
 data AppEvent
-  = BoardRefreshFinished (Either ProviderError GitHubResult)
+  = BoardRefreshFinished BoardRefreshOutcome
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerStatus)
@@ -4791,20 +4804,34 @@ codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds 
 claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
 
 runBoardRefresh :: Options -> ResolvedConfig -> Repository -> BChan AppEvent -> IO ()
-runBoardRefresh options config repository eventChannel = do
+runBoardRefresh options config repository eventChannel =
+  runBoardRefreshWith (writeBChan eventChannel . BoardRefreshFinished) options config repository
+
+-- | 'runBoardRefresh' with the publish step injected, so the suite can
+-- observe the process table at exactly the instant the outcome is published
+-- and prove the abandoned @gh@ group is already gone by then — something no
+-- assertion made after reading a 'BChan' could establish.
+runBoardRefreshWith :: (BoardRefreshOutcome -> IO ()) -> Options -> ResolvedConfig -> Repository -> IO ()
+runBoardRefreshWith publish options config repository = do
   let timeoutMicros = githubRefreshTimeoutMicros config
-  timedResult <- timeout timeoutMicros (fetchGitHubSnapshot config.resolvedLimits config.resolvedWorkflow repository)
-  result <- case timedResult of
-    Nothing -> pure (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds")))
-    Just (Left providerError) -> pure (Left providerError)
-    Just (Right githubResult)
-      | not (cacheEnabled options config) -> pure (Right githubResult)
+  guard <- newGhFetchGuard
+  timedResult <- timeout timeoutMicros (fetchGitHubSnapshot guard config.resolvedLimits config.resolvedWorkflow repository)
+  -- Read after the fetch has fully unwound, so the abandoned group's
+  -- verified cleanup has already run to completion: whatever it recorded is
+  -- final by now, and nothing is published before it is known.
+  cleanupFailure <- ghFetchCleanupFailure guard
+  outcome <- case (cleanupFailure, timedResult) of
+    (Just failure, _) -> pure (BoardRefreshUnverified failure)
+    (Nothing, Nothing) -> pure (BoardRefreshCompleted (Left (ProviderError RequestTimedOut ("GitHub refresh timed out after " <> Text.pack (show config.resolvedTimeouts.timeoutsGithubSeconds) <> " seconds"))))
+    (Nothing, Just (Left providerError)) -> pure (BoardRefreshCompleted (Left providerError))
+    (Nothing, Just (Right githubResult))
+      | not (cacheEnabled options config) -> pure (BoardRefreshCompleted (Right githubResult))
       | otherwise -> do
           cacheResult <- writeRepositoryCache repository githubResult.githubSnapshot
-          pure . Right $ case cacheResult of
+          pure . BoardRefreshCompleted . Right $ case cacheResult of
             Left warning -> githubResult {githubWarnings = githubResult.githubWarnings <> [warning]}
             Right () -> githubResult
-  writeBChan eventChannel (BoardRefreshFinished result)
+  publish outcome
 
 startCodexRefresh :: EventM Name AppState ()
 startCodexRefresh = do
@@ -4848,15 +4875,29 @@ startClaudeRefresh = do
 runClaudeRefresh :: Int -> BChan AppEvent -> IO ()
 runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>= writeBChan eventChannel . ClaudeRefreshFinished
 
-applyBoardRefresh :: Either ProviderError GitHubResult -> EventM Name AppState ()
-applyBoardRefresh result = do
-  modify $ \state -> case result of
-    Left providerError ->
+applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
+applyBoardRefresh outcome = do
+  modify $ \state -> case outcome of
+    -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
+    -- re-verifies it before spawning anything, so a later refresh -- in this
+    -- process or in one started after a restart -- cannot overlap it, and the
+    -- board is free to sit in an ordinary failure state that self-heals as
+    -- soon as the group is confirmed gone. Without that record the in-memory
+    -- refusal is all that is left, so 'appBoardFreshness' stays 'Loading' and
+    -- 'startBoardRefresh' keeps turning further fetches away.
+    BoardRefreshUnverified failure
+      | GuardRecorded <- failure.ghCleanupGuard ->
+          state
+            { appBoardFreshness = failureFreshness state (unverifiedProviderError failure),
+              appNotice = Just (unverifiedRefreshNotice failure)
+            }
+      | otherwise -> state {appNotice = Just (unverifiedRefreshNotice failure)}
+    BoardRefreshCompleted (Left providerError) ->
       state
         { appBoardFreshness = failureFreshness state providerError,
           appNotice = Just (renderProviderError providerError)
         }
-    Right githubResult ->
+    BoardRefreshCompleted (Right githubResult) ->
       let snapshot = githubResult.githubSnapshot
           refreshedBoard = deriveBoard state.appConfig.resolvedWorkflow snapshot
           (selectedColumn, selectedRows) = preserveSelection state refreshedBoard
@@ -4878,9 +4919,31 @@ applyBoardRefresh result = do
               appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
             }
   startPendingWorkerMonitors
-  case result of
-    Right githubResult -> advanceAutoSolves githubResult.githubSnapshot
-    Left _ -> pure ()
+  case outcome of
+    BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
+    _ -> pure ()
+
+-- | What the board reports when a refresh's @gh@ process group could not be
+-- confirmed gone. It names the cause and then what will happen next, which
+-- differs by whether the group was durably recorded: a recorded group is
+-- re-checked by the next refresh and clears itself once it is gone, while an
+-- unrecorded one leaves this dashboard unable to refresh at all. Restarting
+-- is never offered as a fix — a restart drops the in-memory guard, and only
+-- the recorded case has anything left to stop a new @gh@ overlapping the old.
+unverifiedRefreshNotice :: GhCleanupFailure -> Text
+unverifiedRefreshNotice failure =
+  "GitHub refresh timed out and its gh process could not be confirmed stopped ("
+    <> failure.ghCleanupMessage
+    <> "); "
+    <> case failure.ghCleanupGuard of
+      GuardRecorded -> "the next refresh re-checks it and will proceed once it is gone"
+      GuardInMemoryOnly -> "this dashboard will not refresh again, and a restart cannot know to hold back -- check for a stray gh process first"
+
+-- | The unverified cleanup rendered as a provider error, purely so
+-- 'failureFreshness' can age the board the same way every other failed
+-- refresh does.
+unverifiedProviderError :: GhCleanupFailure -> ProviderError
+unverifiedProviderError failure = ProviderError RequestFailed (unverifiedRefreshNotice failure)
 
 reconcilePullRequestSessions :: [PullRequest] -> Map Int PullRequestReviewSession -> Map Int PullRequestReviewSession
 reconcilePullRequestSessions pullRequests = Map.mapWithKey reconcile
