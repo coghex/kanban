@@ -1,0 +1,182 @@
+-- | Configuration loading and global remote resolution.
+module Spec.Data.Config (spec) where
+
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import qualified Data.Text
+import Kanban.Config
+import Kanban.Domain
+import Kanban.Repository (resolveRepository)
+import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Expect (errorContains, isLeftText, isRight, rejectsWithGuidance, unsafeConfig)
+import Spec.Support.Fixtures (fullFixtureToml)
+import System.Directory (doesFileExist)
+import System.FilePath (isAbsolute, (</>))
+import System.Process (readProcessWithExitCode)
+import Test.Hspec
+
+spec :: Spec
+spec = do
+  describe "configuration loading" $ do
+    it "yields the stable defaults when no configuration file exists" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          path <- defaultConfigPath
+          doesFileExist path `shouldReturn` False
+          loadRawConfig Nothing `shouldReturn` Right (defaultRawConfig, [])
+          defaultRawConfig.rawCache `shouldBe` True
+          defaultRawConfig.rawRemoteName `shouldBe` "origin"
+          defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
+          defaultRawConfig.rawLimits `shouldBe` LimitsConfig 250 100 3
+          defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
+
+    it "honors an explicit --config path pointing at a fixture" $
+      withTemporaryCacheRoot $ \configRoot -> do
+        let fixturePath = configRoot </> "fixture.toml"
+        writeFile fixturePath "remote_name = \"upstream\"\n"
+        loaded <- loadRawConfig (Just fixturePath)
+        let (config, warnings) = unsafeConfig loaded
+        warnings `shouldBe` []
+        config.rawRemoteName `shouldBe` "upstream"
+
+    it "resolves an explicit --config path to an absolute path so a worker spawned from a different directory still finds it" $ do
+      resolveConfigPathOption Nothing `shouldReturn` Nothing
+      absolutePath <- resolveConfigPathOption (Just "/already/absolute/config.toml")
+      absolutePath `shouldBe` Just "/already/absolute/config.toml"
+      relativeResult <- resolveConfigPathOption (Just "relative-config.toml")
+      case relativeResult of
+        Just resolved -> isAbsolute resolved `shouldBe` True
+        Nothing -> expectationFailure "expected a resolved path"
+
+    it "decodes a full-file fixture covering every documented key and warns on an unknown top-level key" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText fullFixtureToml)
+      config.rawCache `shouldBe` False
+      config.rawRemoteName `shouldBe` "upstream"
+      config.rawWorkflow
+        `shouldBe` WorkflowConfig
+          { approvalLabel = "lgtm",
+            changesRequestedLabel = "needs-work",
+            blockedLabels = Set.fromList ["blocked", "urgent"],
+            trackerLabels = Set.fromList ["epic", "tracker"],
+            additionalTrackerSectionHeadings = ["Milestones"],
+            approvalMode = ApprovalByEither,
+            blockingSeverity = SeverityAmber
+          }
+      config.rawLimits `shouldBe` LimitsConfig 500 200 5
+      config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
+      config.rawUsage
+        `shouldBe` UsageConfig
+          (Just (UsageCommandConfig ["/usr/local/bin/my-codex-usage", "--json"]))
+          (Just (UsageCommandConfig ["/usr/local/bin/my-claude-usage", "--json"]))
+      Map.member "coghex/kanban" config.rawRepositories `shouldBe` True
+      Map.member "other/repo" config.rawRepositories `shouldBe` True
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unknown_top_level_key"
+
+    it "merges a matching repository override onto the global table, leaving unset fields inherited" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
+      resolved.resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+      resolved.resolvedCache `shouldBe` False
+      resolved.resolvedRemoteName `shouldBe` "upstream"
+
+    it "selects the repository table by an exact, case-sensitive owner/name match" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+      (resolveConfig "COGHEX/KANBAN" config).resolvedWorkflow.approvalLabel `shouldBe` "lgtm"
+
+    it "leaves an unrelated repository table without effect on a different repository's resolution" $ do
+      let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
+          resolved = resolveConfig "coghex/kanban" config
+      resolved.resolvedWorkflow.approvalLabel `shouldNotBe` "should-not-apply"
+
+    it "replaces rather than extends a global array when a repository override sets it" $ do
+      let toml =
+            "[workflow]\n"
+              <> "blocked_labels = [\"blocked\", \"urgent\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "blocked_labels = [\"custom-block\"]\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+          resolved = resolveConfig "acme/widgets" config
+      resolved.resolvedWorkflow.blockedLabels `shouldBe` Set.fromList ["custom-block"]
+
+    it "fails on syntactically malformed TOML" $
+      decodeConfigText "this is not [valid toml" `shouldSatisfy` isLeftText
+
+    it "rejects each semantically invalid known value, naming the full key path" $ do
+      decodeConfigText "[workflow]\napproval_label = \"\"\n" `shouldSatisfy` errorContains ["workflow", "approval_label"]
+      decodeConfigText "remote_name = \"\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[workflow]\napproval_mode = \"bogus\"\n" `shouldSatisfy` errorContains ["approval_mode"]
+      decodeConfigText "[workflow]\nblocking_severity = \"purple\"\n" `shouldSatisfy` errorContains ["blocking_severity"]
+      decodeConfigText "[limits]\nmax_open_issues = 0\n" `shouldSatisfy` errorContains ["limits", "max_open_issues"]
+      decodeConfigText "[limits]\nexcerpt_lines = -1\n" `shouldSatisfy` errorContains ["excerpt_lines"]
+      decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
+      decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
+      decodeConfigText "[usage.codex]\ncommand = [\"\"]\n" `shouldSatisfy` errorContains ["command"]
+
+    it "rejects a timeout large enough to overflow when converted to microseconds, but accepts the boundary" $ do
+      let overflowingSeconds = (maxBound :: Int) `div` 1000000 + 1
+          largestSafeSeconds = (maxBound :: Int) `div` 1000000
+      decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show overflowingSeconds) <> "\n")
+        `shouldSatisfy` errorContains ["github_seconds"]
+      (decodeConfigText ("[timeouts]\ngithub_seconds = " <> Data.Text.pack (show largestSafeSeconds) <> "\n"))
+        `shouldSatisfy` isRight
+
+    it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
+      decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
+      decodeConfigText "[repositories.\"a/b\"]\nremote_name = \"origin\"\n" `shouldSatisfy` errorContains ["remote_name"]
+      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".usage]\n" `shouldSatisfy` errorContains ["usage"]
+
+    it "warns, rather than fails, on an unrecognized key while still loading" $ do
+      let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
+      Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
+
+    it "rejects a global approval_label and changes_requested_label that resolve to the same label" $
+      decodeConfigText "[workflow]\napproval_label = \"lgtm\"\nchanges_requested_label = \"LGTM\"\n"
+        `shouldSatisfy` errorContains ["workflow.approval_label", "workflow.changes_requested_label"]
+
+    it "rejects a configured label that collides with the reserved reviewed:revised protocol label" $ do
+      decodeConfigText "[workflow]\napproval_label = \"reviewed:revised\"\n"
+        `shouldSatisfy` errorContains ["approval_label", "reviewed:revised"]
+      decodeConfigText "[workflow]\nchanges_requested_label = \"Reviewed:Revised\"\n"
+        `shouldSatisfy` errorContains ["changes_requested_label", "reviewed:revised"]
+
+    it "rejects a repository override whose merged labels collide, even though neither table alone does" $ do
+      let toml =
+            "[workflow]\n"
+              <> "approval_label = \"lgtm\"\n"
+              <> "changes_requested_label = \"needs-work\"\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "changes_requested_label = \"lgtm\"\n"
+      decodeConfigText toml `shouldSatisfy` errorContains ["repositories.\"acme/widgets\".workflow"]
+
+  describe "global remote resolution" $ do
+    it "resolves the repository through a configured non-origin remote" $
+      withTemporaryCacheRoot $ \projectRoot -> do
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "init", "--quiet"] ""
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "remote", "add", "upstream", "https://github.com/coghex/kanban.git"] ""
+        result <- resolveRepository "upstream" projectRoot Nothing
+        case result of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right repository -> do
+            repository.repositoryOwner `shouldBe` "coghex"
+            repository.repositoryName `shouldBe` "kanban"
+
+    it "fails startup rather than querying GitHub for a bare mirror's owner" $
+      withTemporaryCacheRoot $ \projectRoot -> do
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "init", "--quiet"] ""
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "remote", "add", "origin", "/srv/git/team/myrepo.git"] ""
+        result <- resolveRepository "origin" projectRoot Nothing
+        result `shouldSatisfy` rejectsWithGuidance "/srv/git/team/myrepo.git"
+
+    it "honors an explicit --repo value when the remote cannot be used" $
+      withTemporaryCacheRoot $ \projectRoot -> do
+        _ <- readProcessWithExitCode "git" ["-C", projectRoot, "init", "--quiet"] ""
+        result <- resolveRepository "origin" projectRoot (Just "coghex/kanban")
+        case result of
+          Left message -> expectationFailure (Data.Text.unpack message)
+          Right repository -> do
+            repository.repositoryOwner `shouldBe` "coghex"
+            repository.repositoryName `shouldBe` "kanban"

@@ -107,6 +107,43 @@ test-suite kanban-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Spec.hs
+  other-modules:
+    Spec.Agent.ManagedProcess
+    Spec.Agent.ManagedProcess.Deadline
+    Spec.Agent.ManagedProcess.Lifecycle
+    Spec.Agent.Preflight
+    Spec.Agent.Protocol
+    Spec.Agent.ProviderUsage
+    Spec.Agent.PullRequestFlow
+    Spec.Agent.ReviewProcess
+    Spec.Agent.ReviewReconciliation
+    Spec.Agent.Solve
+    Spec.Agent.SolveSessionReuse
+    Spec.Agent.Transcript
+    Spec.Agent.WorkerDeadline
+    Spec.Data.BoardRefresh
+    Spec.Data.Cache
+    Spec.Data.Config
+    Spec.Data.GitHub
+    Spec.Data.Repository
+    Spec.Data.Settings
+    Spec.Domain.Tracker
+    Spec.Domain.Workflow
+    Spec.Drainer
+    Spec.Presentation.Cards
+    Spec.Presentation.Layout
+    Spec.Presentation.OverlayDispatch
+    Spec.Presentation.ReviewOverlay
+    Spec.Presentation.Text
+    Spec.Presentation.TranscriptFollow
+    Spec.Support.Board
+    Spec.Support.Env
+    Spec.Support.Expect
+    Spec.Support.Fixtures
+    Spec.Support.Json
+    Spec.Support.Preflight
+    Spec.Support.Process
+    Spec.Support.Render
   ghc-options: -threaded -with-rtsopts=-N1
   build-depends:
     aeson,
