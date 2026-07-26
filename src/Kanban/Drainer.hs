@@ -26,13 +26,13 @@ import Kanban.Domain (Repository (..))
 import Kanban.Process
   ( ProcessIdentity (..),
     defaultProcessSnapshot,
-    identityForPid,
     killVerifiedGroup,
   )
 import System.Directory (getHomeDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hClose, hGetContents')
+import System.Posix.Process (getProcessGroupIDOf, setProcessGroupIDOf)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -233,14 +233,16 @@ runProcess seconds executable arguments = do
   case spawned of
     Left exception -> pure (Left (InvocationFailed (Text.pack (show exception))))
     Right handles -> do
+      -- Taken before the invocation can finish, so it is still answerable.
+      owned <- confirmOwnedGroup (processHandleOf handles)
       completed <- try @IOException (timeout (seconds * 1000 * 1000) (collect handles))
       case completed of
         Left exception -> do
-          void (abandonController (processHandleOf handles))
+          void (abandonController owned)
           pure (Left (InvocationFailed (Text.pack (show exception))))
         Right (Just outcome) -> pure (Right outcome)
         Right Nothing -> do
-          terminated <- abandonController (processHandleOf handles)
+          terminated <- abandonController owned
           case terminated of
             Left message -> pure (Left (InvocationNotTerminated message))
             -- Confirmed gone, so the handle is at most an unreaped zombie and
@@ -288,36 +290,59 @@ runProcess seconds executable arguments = do
         putMVar captured (either (const "") id text)
       pure captured
 
--- | Terminates a timed-out controller and everything it left running, then
--- proves the group is empty rather than inferring it from having signalled.
--- Every branch that cannot establish what happened fails closed with a
--- message, because the caller's alternative — reporting a settled timeout —
--- would be a claim about a process this never actually accounted for.
-abandonController :: ProcessHandle -> IO (Either Text ())
-abandonController processHandle = do
+-- | Establishes that the controller leads the process group named by its own
+-- PID, while it is still known alive and before anything depends on the
+-- answer. Taking ownership here rather than at cleanup time is what lets a
+-- timeout terminate the group even after the controller itself has exited:
+-- a leader that exits into a zombie is gone from every process snapshot, yet
+-- a descendant holding the inherited pipes open is exactly what kept the
+-- read blocked long enough to time out. Asked only at cleanup, that case is
+-- indistinguishable from a pgid this process never owned, and refusing it
+-- would leave the descendant running for the next poll to overlap.
+--
+-- The recorded pgid stays valid for the rest of the invocation because the
+-- handle is not reaped until after cleanup: the leader keeps its PID, and a
+-- zombie remains a member of its own group, so neither the PID nor the group
+-- id it names can be recycled underneath this.
+confirmOwnedGroup :: ProcessHandle -> IO (Either Text Int)
+confirmOwnedGroup processHandle = do
   spawnedPid <- getPid processHandle
   case spawnedPid of
-    Nothing -> pure (Left "the timed-out drainer controller no longer had a PID to terminate")
+    Nothing -> pure (Left "the drainer controller reported no PID to take ownership of")
     Just pid -> do
-      let groupPid = fromIntegral pid
-      snapshot <- defaultProcessSnapshot
-      case snapshot of
-        Left message -> pure (Left ("could not take a process snapshot to terminate it: " <> message))
-        Right processes -> case identityForPid groupPid processes of
-          -- Fail closed. The handle is unreaped, so the PID cannot have been
-          -- reused — but without the controller itself in the snapshot
-          -- nothing here can show that @groupPid@ names its group rather
-          -- than the dashboard's own, and a TERM/KILL aimed at the wrong
-          -- group would take the dashboard down with it. Reaching this at
-          -- all means something outlived the controller and is holding its
-          -- pipes open, which is the case worth refusing on.
-          Nothing -> pure (Left "the timed-out drainer controller left the process table before its process group could be identified")
-          Just identity
-            | identity.processIdentityGroupPid /= groupPid ->
-                pure (Left "the timed-out drainer controller did not lead its own process group, so what it started could not be terminated with it")
-            | otherwise -> do
-                killed <- killVerifiedGroup groupPid (groupMembers groupPid processes)
-                either (pure . Left) (const (confirmGroupEmpty groupPid)) killed
+      -- @create_group@ has the child call @setpgid(0, 0)@ itself, but that
+      -- happens after the fork, so a read taken right now could still see
+      -- the old group and wrongly conclude the child leads nothing. POSIX
+      -- allows the parent to set the same group for a child that has not
+      -- exec'd, which closes precisely that window. The attempt is not
+      -- itself the verdict — failing with EACCES only means the child got
+      -- there first — so the read below is the sole authority either way.
+      void (try @IOException (setProcessGroupIDOf pid pid))
+      actual <- try @IOException (getProcessGroupIDOf pid)
+      pure $ case actual of
+        Left exception -> Left ("could not read the drainer controller's process group: " <> Text.pack (show exception))
+        Right groupId
+          | groupId == pid -> Right (fromIntegral pid)
+          | otherwise -> Left "the drainer controller did not lead its own process group, so what it starts cannot be terminated with it"
+
+-- | Terminates a timed-out controller and everything it left running, then
+-- proves the group is empty rather than inferring it from having signalled.
+-- An ownership failure carried in from 'confirmOwnedGroup' fails closed
+-- here, because the caller's alternative — reporting a settled timeout —
+-- would be a claim about a process this never actually accounted for.
+abandonController :: Either Text Int -> IO (Either Text ())
+abandonController (Left ownership) = pure (Left ownership)
+abandonController (Right groupPid) = do
+  snapshot <- defaultProcessSnapshot
+  case snapshot of
+    Left message -> pure (Left ("could not take a process snapshot to terminate it: " <> message))
+    Right processes -> do
+      -- The census can legitimately be empty — the leader may already be a
+      -- zombie, which every snapshot here excludes — so this neither
+      -- requires the leader to be present nor treats its absence as proof
+      -- the group is clear. 'confirmGroupEmpty' is what settles that.
+      killed <- killVerifiedGroup groupPid (groupMembers groupPid processes)
+      either (pure . Left) (const (confirmGroupEmpty groupPid)) killed
 
 groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
 groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)

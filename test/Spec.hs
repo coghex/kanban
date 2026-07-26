@@ -6619,6 +6619,34 @@ main = hspec $ do
         message `shouldMention` "the outcome is unknown"
         message `shouldMention` "the next status poll will reconcile it"
 
+    it "terminates a descendant still holding the pipes after the controller itself exits" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let descendantFile = temporaryRoot </> "orphan-pid"
+        -- The controller exits promptly and cleanly; what keeps the read
+        -- blocked to the timeout is the TERM-resistant descendant holding
+        -- the inherited pipes open. Its leader is a zombie by then and so is
+        -- absent from every process snapshot -- which is exactly why group
+        -- ownership has to be established at spawn. Deciding it here instead
+        -- could not tell this case apart from a pgid this process never
+        -- owned, and refusing would leave the descendant running for the
+        -- next ten-second poll to overlap.
+        controller <-
+          fakeController
+            temporaryRoot
+            [ "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
+              ByteString.pack ("echo $! > " <> descendantFile),
+              "exit 0"
+            ]
+        outcome <- runDrainerCommand 1 controller "status"
+        snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the orphaned-descendant timeout"
+        descendantPid <- readRecordedPid descendantFile
+        identityForPid descendantPid snapshot `shouldBe` Nothing
+        message <- requireLeft "an orphaned descendant reported success" outcome
+        message `shouldMention` "drainer status timed out after 1 seconds"
+        -- A terminated group is a settled timeout, not a cleanup failure.
+        message `shouldNotMention` "could not"
+        message `shouldNotMention` "still running"
+
     it "keeps the outcome-unknown wording generic for a timed-out status query" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         -- A killed status query changed nothing, so there is no transition
