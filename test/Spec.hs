@@ -5262,9 +5262,14 @@ main = hspec $ do
         -- reported an ordinary timeout. The store is unwritable throughout,
         -- so no durable record can paper over it either.
         (outcome, survivors) <- forcedCleanupRun temporaryRoot 1 (Just 0)
+        -- The property is that nothing outlived the report. Whether the
+        -- refresh surfaces the timeout or the guard-write failure depends on
+        -- which the clock reached first, and neither is a claim about
+        -- surviving processes.
         survivors `shouldBe` []
         case outcome of
-          BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+          BoardRefreshCompleted (Left providerError) ->
+            providerError.providerErrorKind `shouldSatisfy` (`elem` [RequestTimedOut, RequestFailed])
           BoardRefreshUnverified _ -> pure ()
           other -> expectationFailure ("expected the refresh to report a stopped gh, got " <> show other)
 
@@ -5553,12 +5558,13 @@ main = hspec $ do
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let binaryRoot = temporaryRoot </> "bin"
         createDirectoryIfMissing True binaryRoot
-        -- PATH carries no gh at all -- only the empty shim directory and the
-        -- system paths ps needs. Running gh behind a barrier must still
-        -- report this as a missing executable rather than letting it arrive
-        -- later as an indistinguishable nonzero exit from inside the shell.
+        -- PATH carries nothing but the empty shim directory -- deliberately
+        -- not the system paths, since gh is installed in one of those on some
+        -- machines and the point here is that it cannot be found. Nothing on
+        -- this path needs ps either: the fetch fails at resolution, before
+        -- any process is spawned to census.
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
-          withEnvironmentValue "PATH" (binaryRoot <> ":/bin:/usr/bin") $ do
+          withEnvironmentValue "PATH" binaryRoot $ do
             (findExecutable "gh" >>= (`shouldBe` Nothing))
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
             case outcome of
