@@ -2270,22 +2270,25 @@ def process_pr(
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
 
+    # Every configured check and its state travels with each message, so a
+    # caller shown one blocking gate is never left guessing about the other.
+    gate_detail = describe_check_gates(gates, build_state, review_state)
     if build_state == "failure":
         message = (
-            f"PR #{number}: required CI check {gates.required_ci_check} failed."
+            f"PR #{number}: required CI check {gates.required_ci_check} failed "
+            f"({gate_detail})."
         )
         set_outcome(report, "checks_failed", message)
         raise DrainError(message)
     if review_state == "failure":
         message = (
             f"PR #{number}: required review gate "
-            f"{gates.required_review_check} failed."
+            f"{gates.required_review_check} failed ({gate_detail})."
         )
         set_outcome(report, "checks_failed", message)
         raise DrainError(message)
 
     if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
-        gate_detail = describe_check_gates(gates, build_state, review_state)
         log(
             f"PR #{number}: waiting "
             f"({gate_detail}, mergeStateStatus={merge_state})"
@@ -2333,23 +2336,24 @@ def process_pr(
             )
         return True
     final_build_state = configured_check_state(pr, gates.required_ci_check)
+    final_review_state = configured_check_state(pr, gates.required_review_check)
+    final_detail = describe_check_gates(gates, final_build_state, final_review_state)
     if not check_gate_satisfied(final_build_state):
         log(f"PR #{number}: CI changed before merge; deferring")
         set_outcome(
             report,
-            check_gate_reason(final_build_state, "success"),
+            check_gate_reason(final_build_state, final_review_state),
             f"PR #{number}: its required CI check changed before the merge "
-            f"({render_check_gate('ci', gates.required_ci_check, final_build_state)}).",
+            f"({final_detail}).",
         )
         return True
-    final_review_state = configured_check_state(pr, gates.required_review_check)
     if not check_gate_satisfied(final_review_state):
         log(f"PR #{number}: review gate changed before merge; deferring")
         set_outcome(
             report,
-            check_gate_reason("success", final_review_state),
+            check_gate_reason(final_build_state, final_review_state),
             f"PR #{number}: its required review gate changed before the merge "
-            f"({render_check_gate('review', gates.required_review_check, final_review_state)}).",
+            f"({final_detail}).",
         )
         return True
 
@@ -2793,12 +2797,27 @@ def prepare_single_pr(
     return True
 
 
+def new_single_pr_report(number: int | None) -> dict[str, Any]:
+    """The mutable record a single-PR run fills in as it decides.
+
+    Owned by main() rather than by drain_one_pr(), so that whatever ends the
+    run -- an interrupt in the final state write included -- the result still
+    reports what was already known, above all a merge that landed.
+    """
+    return {
+        "reason": "operational_error",
+        "message": f"PR #{number}: the run ended without recording an outcome.",
+        "merged": False,
+    }
+
+
 def drain_one_pr(
     ctx: RepoContext,
     number: int,
     *,
     dry_run: bool,
     gates: GateConfig,
+    report: dict[str, Any],
 ) -> dict[str, Any]:
     """Process exactly one pull request and describe what happened.
 
@@ -2806,11 +2825,6 @@ def drain_one_pr(
     cycle -- it is the queue's own process_pr(), not a second implementation
     of it -- and merges nothing the queue would refuse.
     """
-    report: dict[str, Any] = {
-        "reason": "operational_error",
-        "message": f"PR #{number}: the run ended without recording an outcome.",
-        "merged": False,
-    }
     # Stays None until the queue state is read back successfully, so a state
     # file this run could not parse is reported rather than overwritten with
     # an empty one -- it holds other PRs' cooldowns and unfinished cleanups.
@@ -2858,6 +2872,13 @@ def drain_one_pr(
                 report["reason"] = "operational_error"
                 report["message"] = (
                     f"PR #{number}: could not persist the drainer queue state: {exc}"
+                )
+        except KeyboardInterrupt:
+            if report["reason"] not in ERROR_REASONS:
+                report["reason"] = "operational_error"
+                report["message"] = (
+                    f"PR #{number}: interrupted while persisting the drainer "
+                    "queue state."
                 )
     return single_pr_result(
         number,
@@ -2940,6 +2961,9 @@ def main() -> None:
     # log directory either.
     LOG_DIR = None if args.dry_run else Path(args.log_dir).expanduser().resolve()
     lock_handle = None
+    # Built before anything can fail, and handed to drain_one_pr() rather than
+    # created inside it, so every handler below reports what was already known.
+    report = new_single_pr_report(number)
     try:
         try:
             raw_config, config_warnings = kanban_config.load_raw_config(args.config)
@@ -2975,7 +2999,11 @@ def main() -> None:
             if single:
                 emit_single_pr_result(
                     drain_one_pr(
-                        ctx, number, dry_run=args.dry_run, gates=gates
+                        ctx,
+                        number,
+                        dry_run=args.dry_run,
+                        gates=gates,
+                        report=report,
                     )
                 )
             loop(
@@ -3016,6 +3044,7 @@ def main() -> None:
                         number,
                         "operational_error",
                         f"drain_prs.py could not start: {exc}",
+                        merged=report["merged"],
                         dry_run=args.dry_run,
                     )
                 )
@@ -3026,7 +3055,8 @@ def main() -> None:
                     single_pr_result(
                         number,
                         "operational_error",
-                        f"PR #{number}: interrupted before the run started.",
+                        f"PR #{number}: interrupted before the run finished.",
+                        merged=report["merged"],
                         dry_run=args.dry_run,
                     )
                 )
@@ -3044,6 +3074,7 @@ def main() -> None:
                     number,
                     "operational_error",
                     f"drain_prs.py failed unexpectedly: {exc!r}",
+                    merged=report["merged"],
                     dry_run=args.dry_run,
                 )
             )

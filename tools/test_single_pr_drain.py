@@ -410,6 +410,24 @@ class SinglePrOutcomeTests(SinglePrCliFixture):
         self.assertIn(drain_prs.DEFAULT_REQUIRED_CI_CHECK, result["message"])
         self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
 
+    def test_two_failing_checks_are_both_named_in_one_message(self):
+        rollup = [
+            {**item, "conclusion": "FAILURE"}
+            for item in self.base_pr_json()["statusCheckRollup"]
+        ]
+        self.script_pr_view({"statusCheckRollup": rollup})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "checks_failed")
+        # CI is still named first, but the review gate's state travels with it.
+        self.assertIn(f"{drain_prs.DEFAULT_REQUIRED_CI_CHECK}=failure", result["message"])
+        self.assertIn(
+            f"{drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK}=failure", result["message"]
+        )
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
     def test_a_conflicted_pr_is_reported_and_left_alone(self):
         self.script_pr_view(
             {"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}
@@ -859,6 +877,37 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         self.assertEqual(result["outcome"], "error")
         self.assertTrue(result["merged"])
         self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+
+    def test_an_interrupt_while_persisting_after_a_merge_still_reports_it(self):
+        self.script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "CLOSED"})
+        )
+        with mock.patch.object(
+            drain_prs, "save_drain_state", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertTrue(result["merged"])
+
+    def test_an_interrupt_escaping_the_run_entirely_still_reports_a_merge(self):
+        # The report belongs to main(), so nothing that ends the run can throw
+        # away the fact that GitHub already accepted the merge.
+        def interrupt_after_merging(ctx, number, *, dry_run, gates, report):
+            report["merged"] = True
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            drain_prs, "drain_one_pr", side_effect=interrupt_after_merging
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertTrue(result["merged"])
 
     def test_valid_json_that_is_not_a_valid_queue_state_is_reported(self):
         # These decode cleanly and used to blow up as AttributeError or
