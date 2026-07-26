@@ -80,12 +80,12 @@ import Kanban.Process
     matchingIdentities,
     readProcessSnapshot,
   )
+import Kanban.Paths (createPrivateDirectory)
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, newUnknownAggregator, runSolve, sealUnknownAggregates)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectory,
-    createDirectoryIfMissing,
     doesDirectoryExist,
     doesFileExist,
     getModificationTime,
@@ -365,8 +365,7 @@ launchWorker :: WorkerSpec -> IO (Either Text WorkerDescriptor)
 launchWorker spec = do
   descriptor <- descriptorForSpec spec
   directory <- workerDirectory spec.workerRepository
-  createDirectoryIfMissing True directory
-  setFileMode directory 0o700
+  createPrivateDirectory XdgCache directory
   leased <- acquireWorkerLease descriptor
   case leased of
     Left message -> pure (Left message)
@@ -637,8 +636,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
     Right spec -> do
       descriptor <- descriptorForSpec spec
       directory <- workerDirectory spec.workerRepository
-      createDirectoryIfMissing True directory
-      setFileMode directory 0o700
+      createPrivateDirectory XdgCache directory
       pid <- fromIntegral <$> getProcessID
       now <- getCurrentTime
       selfSnapshot <- readProcessSnapshot

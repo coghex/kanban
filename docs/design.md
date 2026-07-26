@@ -748,11 +748,16 @@ Nested connections that return nodes — labels, assignees, and closing-issue
 references — carry explicit `first:` limits and request `totalCount`; cards and
 details show a `+N` overflow indicator when GitHub reports omitted nodes. The
 status-check rollup requests up to 100 context nodes and deduplicates reruns by
-check app/name (or status creator/context), retaining the newest start time.
-This avoids treating superseded failures as current and permits real
-passed/total counts. A rollup beyond that cap fails closed as unknown. GitHub
-scores GraphQL cost by requested node count, so these caps keep the single-query
-refresh inside rate and node limits.
+check app/name (or status creator/context), retaining the newest entry and
+breaking a tie in favor of the one GitHub listed last. A check run GitHub has
+been asked for but has neither started nor completed carries no timestamp yet
+and ranks newest under its key, so a queued rerun supersedes the failure it
+replaces immediately rather than once it starts; a status context missing its
+`createdAt` says nothing about its age and ranks oldest, so it cannot displace a
+timestamped context of the same key. This avoids treating superseded failures as
+current and permits real passed/total counts. A rollup beyond that cap fails
+closed as unknown. GitHub scores GraphQL cost by requested node count, so these
+caps keep the single-query refresh inside rate and node limits.
 
 An anomaly attributable to a single item degrades that item rather than the
 refresh. A rollup context the build cannot decode — an unrecognized
@@ -941,13 +946,21 @@ Defaults:
   and Full display modes.
 - Record every managed agent provider line before parsing or display filtering.
   Raw workflow logs always remain full; changing display verbosity never
-  changes their contents. Directories use `0700` and files use `0600`.
+  changes their contents. Directories use `0700` and files use `0600`. Every
+  directory level Kanban creates below the XDG cache and config roots carries
+  `0700`, whatever the umask and whichever writer created it first; the roots
+  themselves are shared and keep their own modes.
 - Create cache files with user-only permissions (`0600`).
 - Cache issue and PR bodies regardless of repository visibility so startup can
   render rich cards without network access; user-only permissions protect
   private content.
 - Include a `schemaVersion` in every snapshot. A snapshot with an unknown
-  version is treated as absent rather than as corruption.
+  version is treated as absent rather than as corruption: the version is read
+  before the payload, so a file another release wrote is silent even when its
+  contents no longer fit the current shape. A file that is unreadable, carries
+  no integer version, or fails to decode under a version Kanban does recognise
+  is corruption and keeps its warning. Settings follow the same rule, falling
+  back to the defaults silently for an unknown version.
 - Permit `--no-cache` and a global `cache = false` setting.
 - Key repository settings by `owner/name`; do not require modifying the target
   repository.

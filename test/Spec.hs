@@ -30,6 +30,7 @@ import Kanban.Cache
     loadUsageCache,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
+    usageCachePath,
     writeGhGroupRecord,
     writeRepositoryCache,
     writeUsageCache,
@@ -196,7 +197,7 @@ import Kanban.Solve
     solveOutcome,
     unknownNoticeSamples,
   )
-import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
+import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings, settingsPath)
 import Kanban.StreamReader
   ( StreamOutcome (..),
     handleReadLine,
@@ -206,7 +207,7 @@ import Kanban.StreamReader
     runStreamReaderWith,
   )
 import Kanban.Text (excerpt, sanitizeText)
-import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath)
+import Kanban.Transcript (closeSessionLog, logRawLine, openSessionLog, sessionLogPath, transcriptRoot)
 import Kanban.Tracker (implementationSortKey, parseTrackerBody, parseTrackerChildren, renderTrackerDiagnostic)
 import Kanban.UI
   ( AgentSessionEntry (..),
@@ -330,8 +331,9 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (Handle, hClose, openTempFile)
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (accessModes, fileMode, getFileStatus, intersectFileModes, setFileCreationMask, setFileMode)
 import System.Posix.Process (getProcessID)
+import System.Posix.Types (FileMode)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe), createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
@@ -4095,6 +4097,33 @@ main = hspec $ do
           saveSettings (Settings FullChat) `shouldReturn` Right ()
           loadSettings `shouldReturn` (Settings FullChat, Nothing)
 
+    -- The version the writer has always stamped is now read, and it follows
+    -- the cache's rule: a file from another version of the format is silently
+    -- the defaults, however little of its payload this build understands.
+    it "falls back to the defaults silently for a settings file from another schema version" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          saveSettings (Settings FullChat) `shouldReturn` Right ()
+          path <- settingsPath
+          ByteString.writeFile path "{\"schemaVersion\":999,\"chatVerbosity\":{\"mode\":\"full\",\"density\":3}}"
+          loadSettings `shouldReturn` (defaultSettings, Nothing)
+
+    it "still warns for settings it cannot decode under a version it does recognise" $
+      withTemporaryCacheRoot $ \configRoot ->
+        withEnvironmentValue "XDG_CONFIG_HOME" configRoot $ do
+          saveSettings (Settings FullChat) `shouldReturn` Right ()
+          path <- settingsPath
+          let expectWarnedDefaults = do
+                (settings, warning) <- loadSettings
+                settings `shouldBe` defaultSettings
+                warning `shouldSatisfy` isJust
+          ByteString.writeFile path "{\"schemaVersion\":1,\"chatVerbosity\":\"deafening\"}"
+          expectWarnedDefaults
+          ByteString.writeFile path "not JSON"
+          expectWarnedDefaults
+          ByteString.writeFile path "{\"chatVerbosity\":\"full\"}"
+          expectWarnedDefaults
+
   describe "full agent transcripts" $ do
     it "records raw provider lines independently of display verbosity" $
       withTemporaryCacheRoot $ \cacheRoot ->
@@ -5477,6 +5506,68 @@ main = hspec $ do
               ]
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
+    -- A rerun GitHub has queued but not started reports no timestamps at all,
+    -- so ranking it by an empty-string timestamp let the completed failure it
+    -- supersedes stay current and the card stay red. It is the newest run of
+    -- its key by definition.
+    it "supersedes a completed failure with the queued rerun that has no timestamps yet" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ checkRunJson "review-approved" "FAILURE" "2026-07-17T14:43:13Z",
+                queuedCheckRunJson "review-approved"
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) ->
+          pullRequest.pullRequestChecks `shouldBe` ChecksPending 0 1 [CheckDetail "review-approved" CheckPending]
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Only a run with neither timestamp is a fresh rerun: one reporting just
+    -- @completedAt@ has run, and keeps that timestamp as its effective one.
+    it "ranks a run reporting only completedAt by that timestamp rather than as unstarted" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ completedOnlyCheckRunJson "review-approved" "FAILURE" "2026-07-17T14:50:00Z",
+                checkRunJson "review-approved" "SUCCESS" "2026-07-17T14:55:00Z"
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksPassed 1
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Two runs of one key that are equally untimestamped have no age to
+    -- separate them, so the dedup keeps the one GitHub listed last. Reversing
+    -- the payload reverses the winner, which is what makes the rule a rule and
+    -- not an accident of which state happens to sort higher.
+    it "resolves two untimestamped runs of one check by the order GitHub listed them" $ do
+      let response nodes = githubChecksResponse 2 nodes
+          queued = queuedCheckRunJson "review-approved"
+          failed = undatedCheckRunJson "review-approved" "FAILURE"
+          checksOf payload = case decodeGitHubItems (LazyByteString.pack (response payload)) of
+            Left message -> Left message
+            Right ([], [pullRequest]) -> Right pullRequest.pullRequestChecks
+            Right values -> Left ("unexpected decoded values: " <> show values)
+      checksOf [queued, failed] `shouldBe` Right (ChecksFailed 0 1 [CheckDetail "review-approved" CheckFailed])
+      checksOf [failed, queued] `shouldBe` Right (ChecksPending 0 1 [CheckDetail "review-approved" CheckPending])
+
+    -- The other rollup kind reads its age from @createdAt@, and a status
+    -- context that arrives without one says nothing about being newer. It has
+    -- to rank oldest, or a later payload entry would displace a timestamped
+    -- context of the same key purely by position.
+    it "does not let a status context with no createdAt displace the timestamped one" $ do
+      let response =
+            githubChecksResponse
+              2
+              [ statusContextJson "ci/build" "SUCCESS" (Just "2026-07-17T14:43:00Z"),
+                statusContextJson "ci/build" "FAILURE" Nothing
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksPassed 1
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
     it "keeps a rollup past the context cap unknown rather than retaining the partial nodes it saw" $ do
       case decodeGitHubItems (LazyByteString.pack githubCappedChecksResponse) of
         Left message -> expectationFailure message
@@ -6752,29 +6843,41 @@ main = hspec $ do
           writeRepositoryCache repository snapshot `shouldReturn` Right ()
           loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
 
+    -- §16: an unknown version is absent, not corruption. Meeting a file
+    -- written by another version of the binary is the expected outcome of an
+    -- upgrade or a downgrade, so it must start up exactly as it would with no
+    -- cache at all -- no warning, nothing for the user to act on.
+    it "treats a future schema version as absent rather than as corruption" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+          cachePath <- repositoryCachePath repository
+          ByteString.writeFile cachePath (versionThreeCacheFile 999)
+          loadRepositoryCache repository `shouldReturn` CacheAbsent
+
     -- Version 3 knew nothing of those gaps, so reusing one of its entries
-    -- would restore a card as though every field had arrived. §17's contract
-    -- for an unknown version is to treat the snapshot as absent.
-    it "rejects a genuine version 3 file as unsupported rather than as malformed" $
+    -- would restore a card as though every field had arrived.
+    it "treats a genuine version 3 file as absent rather than as malformed" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
           writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
           ByteString.writeFile cachePath (versionThreeCacheFile 3)
-          loadRepositoryCache repository `shouldReturn` CacheInvalid "cache ignored: unsupported schema version"
-          -- The version gate, not the decoder, is what rejected it: relabelled
-          -- as current, the same file fails on its missing gap fields instead.
+          loadRepositoryCache repository `shouldReturn` CacheAbsent
+          -- The version gate, not the decoder, is what turned it away:
+          -- relabelled as current, the same file fails on its missing gap
+          -- fields and keeps the warning a real corruption earns.
           ByteString.writeFile cachePath (versionThreeCacheFile repositoryCacheSchemaVersion)
           relabeled <- loadRepositoryCache repository
           relabeled `shouldSatisfy` isInvalidCache
-          relabeled `shouldNotBe` CacheInvalid "cache ignored: unsupported schema version"
 
     -- A real version 2 file wrote its check summaries as two aggregate counts,
     -- so its snapshot cannot decode under the current schema at all. The
     -- version has to be read before the snapshot, or the user is told the file
     -- is malformed JSON when the truthful answer is that it is simply old.
-    it "rejects a genuine version 2 file as unsupported rather than as malformed" $
+    it "treats a genuine version 2 file as absent rather than as malformed" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
@@ -6783,13 +6886,40 @@ main = hspec $ do
           writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
           ByteString.writeFile cachePath (versionTwoCacheFile 2)
-          loadRepositoryCache repository `shouldReturn` CacheInvalid "cache ignored: unsupported schema version"
-          -- Proof the version gate is what rejected it: relabel that same
+          loadRepositoryCache repository `shouldReturn` CacheAbsent
+          -- Proof the version gate is what turned it away: relabel that same
           -- old-shaped file as current, and the snapshot decode fails instead.
           ByteString.writeFile cachePath (versionTwoCacheFile repositoryCacheSchemaVersion)
           relabeled <- loadRepositoryCache repository
           relabeled `shouldSatisfy` isInvalidCache
-          relabeled `shouldNotBe` CacheInvalid "cache ignored: unsupported schema version"
+
+    -- Only a version is silent. A file with no integer version to read is not
+    -- "from another release", it is unreadable, and still warns.
+    it "keeps warning for a file with no usable schema version" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+          cachePath <- repositoryCachePath repository
+          ByteString.writeFile cachePath "{\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{}}"
+          missing <- loadRepositoryCache repository
+          missing `shouldSatisfy` isInvalidCache
+          ByteString.writeFile cachePath "{\"schemaVersion\":\"four\",\"repositoryKey\":\"coghex/kanban\"}"
+          notAnInteger <- loadRepositoryCache repository
+          notAnInteger `shouldSatisfy` isInvalidCache
+
+    -- A recognised version that names someone else's repository is a real
+    -- mix-up rather than a version skew, so it keeps the warning.
+    it "still reports a recognised-version file belonging to another repository as invalid" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let mine = Repository "/tmp/project" "coghex" "kanban"
+              theirs = Repository "/tmp/other" "coghex" "other"
+          writeRepositoryCache mine (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+          minePath <- repositoryCachePath mine
+          theirsPath <- repositoryCachePath theirs
+          ByteString.readFile minePath >>= ByteString.writeFile theirsPath
+          loadRepositoryCache theirs `shouldReturn` CacheInvalid "cache ignored: repository identity mismatch"
 
     it "round-trips global usage snapshots" $
       withTemporaryCacheRoot $ \cacheRoot ->
@@ -6799,6 +6929,91 @@ main = hspec $ do
               snapshots = Map.fromList [(Codex, codexUsage), (Claude, claudeUsage)]
           writeUsageCache snapshots `shouldReturn` Right ()
           loadUsageCache `shouldReturn` UsageCacheLoaded snapshots
+
+    -- The usage cache follows the same policy, and needs the same
+    -- version-before-payload order to do so: its snapshots are decoded from a
+    -- shape that a future version is free to change.
+    it "treats an unknown usage schema version as absent, whatever its payload looks like" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          writeUsageCache (Map.fromList [(Codex, UsageSnapshot [UsageWindow "week" 77 epoch] epoch)]) `shouldReturn` Right ()
+          path <- usageCachePath
+          ByteString.writeFile path "{\"schemaVersion\":999,\"snapshots\":\"whatever this came to mean\"}"
+          loadUsageCache `shouldReturn` UsageCacheAbsent
+          -- Relabelled as current, that same payload is a genuine decode
+          -- failure -- so the version, not the decoder, produced the silence.
+          ByteString.writeFile path "{\"schemaVersion\":1,\"snapshots\":\"whatever this came to mean\"}"
+          relabeled <- loadUsageCache
+          relabeled `shouldSatisfy` isInvalidUsageCache
+
+    it "keeps warning for a corrupt or version-less usage cache" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          writeUsageCache Map.empty `shouldReturn` Right ()
+          path <- usageCachePath
+          ByteString.writeFile path "not JSON"
+          corrupt <- loadUsageCache
+          corrupt `shouldSatisfy` isInvalidUsageCache
+          ByteString.writeFile path "{\"snapshots\":{}}"
+          missing <- loadUsageCache
+          missing `shouldSatisfy` isInvalidUsageCache
+
+  -- 'createDirectoryIfMissing' gives a parent it creates the process umask,
+  -- so chmodding only the leaf left ~/.cache/kanban at whatever mode the
+  -- writer that happened to run first was given -- and the cache holds issue
+  -- and pull request bodies from private repositories.
+  describe "private state directory permissions" $ do
+    it "creates every cache level it owns as 0700 under a permissive umask, and leaves the XDG root alone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let xdgRoot = temporaryRoot </> "cache"
+            repository = Repository "/tmp/project" "coghex" "kanban"
+        createDirectory xdgRoot
+        setFileMode xdgRoot 0o755
+        withEnvironmentValue "XDG_CACHE_HOME" xdgRoot $
+          withFileCreationMask 0o000 $ do
+            writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+            cachePath <- repositoryCachePath repository
+            permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
+            permissionsOf (takeDirectory cachePath) `shouldReturn` 0o700
+            permissionsOf cachePath `shouldReturn` 0o600
+            permissionsOf xdgRoot `shouldReturn` 0o755
+
+    -- The transcript root is three levels deep, so the intermediate "logs"
+    -- directory is one no writer ever chmodded; here both it and a kanban
+    -- directory an earlier version left loose are tightened.
+    it "tightens intermediate levels an earlier writer left loose" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let xdgRoot = temporaryRoot </> "cache"
+            repository = Repository "/tmp/project" "coghex" "kanban"
+        createDirectory xdgRoot
+        setFileMode xdgRoot 0o755
+        createDirectoryIfMissing True (xdgRoot </> "kanban" </> "logs")
+        setFileMode (xdgRoot </> "kanban") 0o755
+        setFileMode (xdgRoot </> "kanban" </> "logs") 0o755
+        withEnvironmentValue "XDG_CACHE_HOME" xdgRoot $
+          withFileCreationMask 0o000 $ do
+            opened <- openSessionLog repository "solve-claude" 45 Nothing
+            case opened of
+              Left message -> expectationFailure (Data.Text.unpack message)
+              Right sessionLog -> closeSessionLog sessionLog
+            logsRoot <- transcriptRoot repository
+            permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
+            permissionsOf (xdgRoot </> "kanban" </> "logs") `shouldReturn` 0o700
+            permissionsOf logsRoot `shouldReturn` 0o700
+            permissionsOf xdgRoot `shouldReturn` 0o755
+
+    it "creates the config level it owns as 0700 under a permissive umask" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let xdgRoot = temporaryRoot </> "config"
+        createDirectory xdgRoot
+        setFileMode xdgRoot 0o755
+        withEnvironmentValue "XDG_CONFIG_HOME" xdgRoot $
+          withFileCreationMask 0o000 $ do
+            saveSettings (Settings FullChat) `shouldReturn` Right ()
+            path <- settingsPath
+            permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
+            permissionsOf path `shouldReturn` 0o600
+            permissionsOf xdgRoot `shouldReturn` 0o755
 
   describe "pull request status" $ do
     it "makes conflicts red even when approved and CI passed" $ do
@@ -8364,6 +8579,18 @@ isInvalidCache :: CacheLoad -> Bool
 isInvalidCache (CacheInvalid _) = True
 isInvalidCache _ = False
 
+isInvalidUsageCache :: UsageCacheLoad -> Bool
+isInvalidUsageCache (UsageCacheInvalid _) = True
+isInvalidUsageCache _ = False
+
+-- | Runs @action@ under @mask@, restoring the process-wide umask afterwards:
+-- it is shared by every later test in this (sequential) suite.
+withFileCreationMask :: FileMode -> IO result -> IO result
+withFileCreationMask mask action = bracket (setFileCreationMask mask) setFileCreationMask (const action)
+
+permissionsOf :: FilePath -> IO FileMode
+permissionsOf path = (`intersectFileModes` accessModes) . fileMode <$> getFileStatus path
+
 -- | Drives a board refresh in which both facilities the ordinary guards rest
 -- on are broken at once: the cache is unwritable, so no durable record can be
 -- made, and @ps@ fails, so no kill can be verified. That combination is what
@@ -9167,6 +9394,52 @@ futureCheckContextJson = "{\"__typename\":\"SomeFutureType\",\"name\":\"future\"
 namelessCheckRunJson :: String
 namelessCheckRunJson =
   "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-01-03T00:00:00Z\"}"
+
+-- | A rerun GitHub has accepted but not started: @QUEUED@, with the null
+-- conclusion and null @startedAt@/@completedAt@ that state actually reports.
+queuedCheckRunJson :: String -> String
+queuedCheckRunJson name =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"QUEUED\",\"conclusion\":null,\"startedAt\":null,\"completedAt\":null"
+    <> ",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A finished run reporting only @completedAt@, which is the case the
+-- effective-timestamp fallback exists for.
+completedOnlyCheckRunJson :: String -> String -> String -> String
+completedOnlyCheckRunJson name conclusion completedAt =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"COMPLETED\",\"conclusion\":\""
+    <> conclusion
+    <> "\",\"startedAt\":null,\"completedAt\":\""
+    <> completedAt
+    <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A finished run carrying no timestamps. GitHub does not report one, but it
+-- is the only way to give two untimestamped runs of a key different states and
+-- so observe which of them the tie-break keeps.
+undatedCheckRunJson :: String -> String -> String
+undatedCheckRunJson name conclusion =
+  "{\"__typename\":\"CheckRun\",\"name\":\""
+    <> name
+    <> "\",\"status\":\"COMPLETED\",\"conclusion\":\""
+    <> conclusion
+    <> "\",\"startedAt\":null,\"completedAt\":null"
+    <> ",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | A commit status context, the rollup's other kind. Its @createdAt@ is
+-- optional because the query always asks for it and GitHub answers null when
+-- it has none.
+statusContextJson :: String -> String -> Maybe String -> String
+statusContextJson name state createdAt =
+  "{\"__typename\":\"StatusContext\",\"context\":\""
+    <> name
+    <> "\",\"state\":\""
+    <> state
+    <> "\",\"createdAt\":"
+    <> maybe "null" (\stamp -> "\"" <> stamp <> "\"") createdAt
+    <> ",\"creator\":{\"login\":\"ci\"}}"
 
 runningCheckRunJson :: String -> String -> String
 runningCheckRunJson name startedAt =

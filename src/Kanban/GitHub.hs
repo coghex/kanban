@@ -20,6 +20,7 @@ module Kanban.GitHub
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO, forkIOWithUnmask, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try, uninterruptibleMask_)
@@ -110,10 +111,30 @@ data FetchState = FetchState
 data CheckContext = CheckContext
   { checkContextKey :: Text,
     checkContextName :: Text,
-    checkContextStartedAt :: Text,
+    checkContextRecency :: CheckRecency,
     checkContextState :: CheckState
   }
   deriving stock (Eq, Show)
+
+-- | Where a rollup context ranks among the others sharing its dedup key, from
+-- oldest to newest. A missing timestamp gets a rank of its own rather than the
+-- empty string it used to be defaulted to, because the two context kinds mean
+-- opposite things by one: a check run with neither @startedAt@ nor
+-- @completedAt@ is a rerun GitHub has only just been asked for, which is
+-- exactly the entry the dedup exists to prefer over the failure it supersedes,
+-- while a status context with no @createdAt@ told us nothing about its age and
+-- must not displace one that did. The @check:@ and @status:@ prefixes
+-- 'parseCheckContext' builds keys from keep the kinds in separate dedup keys,
+-- so the two rules never compete with each other.
+data CheckRecency
+  = -- | A status context that arrived without a @createdAt@.
+    RecencyUndated
+  | -- | The context's own timestamp. GitHub reports fixed-format UTC ISO-8601,
+    -- so comparing the text lexicographically orders them chronologically.
+    RecencyAt Text
+  | -- | A check run that has neither started nor completed.
+    RecencyUnstarted
+  deriving stock (Eq, Ord, Show)
 
 pageLimit :: Int
 pageLimit = 100
@@ -1215,29 +1236,39 @@ parseCheckContext = withObject "status check context" $ \context -> do
       name <- context .: "name"
       status <- context .: "status"
       conclusion <- context .:? "conclusion"
-      startedAt <- context .:? "startedAt" .!= ""
-      completedAt <- context .:? "completedAt" .!= ""
+      startedAt <- optionalTimestamp <$> context .:? "startedAt"
+      completedAt <- optionalTimestamp <$> context .:? "completedAt"
       app <- parseCheckRunApp context
       pure
         CheckContext
           { checkContextKey = "check:" <> app <> ":" <> name,
             checkContextName = name,
-            checkContextStartedAt = if Text.null startedAt then completedAt else startedAt,
+            -- A run reporting only @completedAt@ has still run, so that
+            -- timestamp stays its effective one; only a run with neither is
+            -- the just-requested rerun 'RecencyUnstarted' means.
+            checkContextRecency = maybe RecencyUnstarted RecencyAt (startedAt <|> completedAt),
             checkContextState = classifyCheckRun status conclusion
           }
     "StatusContext" -> do
       name <- context .: "context"
       state <- context .: "state"
-      createdAt <- context .:? "createdAt" .!= ""
+      createdAt <- optionalTimestamp <$> context .:? "createdAt"
       creator <- parseStatusCreator context
       pure
         CheckContext
           { checkContextKey = "status:" <> creator <> ":" <> name,
             checkContextName = name,
-            checkContextStartedAt = createdAt,
+            checkContextRecency = maybe RecencyUndated RecencyAt createdAt,
             checkContextState = classifyStatusContext state
           }
     other -> fail ("unsupported status check context type: " <> Text.unpack other)
+
+-- | GitHub reports a timestamp it has no value for as JSON null, and can leave
+-- the field off entirely; treat an empty string the same way so \"not stamped
+-- yet\" reaches 'CheckRecency' as one representation rather than three.
+optionalTimestamp :: Maybe Text -> Maybe Text
+optionalTimestamp (Just timestamp) | not (Text.null timestamp) = Just timestamp
+optionalTimestamp _ = Nothing
 
 parseCheckRunApp :: Object -> Parser Text
 parseCheckRunApp context = do
@@ -1290,8 +1321,13 @@ summarizeChecks contexts
         | context <- latest,
           context.checkContextState /= CheckPassed
       ]
+    -- The authoritative dedup comparator. 'CheckRecency' carries the rule for
+    -- a context with no timestamp -- newest for a check run, oldest for a
+    -- status context -- so all this decides is the tie: equal recencies keep
+    -- @left@, which 'Map.fromListWith' hands the entry appearing later in the
+    -- decoded @contexts.nodes@ order.
     latestContext left right
-      | left.checkContextStartedAt >= right.checkContextStartedAt = left
+      | left.checkContextRecency >= right.checkContextRecency = left
       | otherwise = right
 
 graphqlQuery :: Text

@@ -41,10 +41,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import Kanban.Domain (RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot)
+import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (OwnedProcessGroup)
 import System.Directory
   ( XdgDirectory (XdgCache),
-    createDirectoryIfMissing,
     doesFileExist,
     getXdgDirectory,
     removeFile,
@@ -115,12 +115,12 @@ instance ToJSON UsageCacheEnvelope where
 
 -- | Version 3 added the per-check detail 'CheckSummary' retains for the §11
 -- details overlay. A version 2 file decodes its check summaries without that
--- detail, so it is rejected as unsupported rather than silently reused.
+-- detail, so it is not silently reused.
 --
 -- Version 4 added the per-item 'Kanban.Domain.DataGap' list. Reusing a
 -- version 3 entry would restore a card as though every field had arrived,
--- dropping the amber marker and the warning that explain what is missing, so
--- an older file is treated as absent -- the §17 contract for an unknown
+-- dropping the amber marker and the warning that explain what is missing.
+-- Either older file is treated as absent -- the §16 contract for an unknown
 -- schema version -- and the next refresh rebuilds it.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
 repositoryCacheSchemaVersion = 4
@@ -189,12 +189,19 @@ loadRepositoryCache repository = do
 -- | The schema version is read on its own, before the snapshot is decoded at
 -- all. An older file's snapshot no longer matches the current shape, so
 -- decoding the whole envelope first would report a JSON parse error where the
--- version gate should have said the schema is unsupported.
+-- version gate should have answered.
+--
+-- §16 makes an unrecognised version absent rather than corrupt: after an
+-- upgrade or a downgrade a file the running binary cannot read is expected,
+-- and greeting the user with a corruption notice would misdescribe it. Only a
+-- file we cannot make sense of at all -- unparseable JSON, no integer version,
+-- or a payload that fails under a version we do claim to understand -- keeps
+-- the warning.
 loadDecodedCache :: Repository -> Value -> CacheLoad
 loadDecodedCache repository value = case parse (withObject "cache" (.: "schemaVersion")) value :: Result Int of
   Error message -> CacheInvalid ("cache ignored: " <> Text.pack message)
   Success version
-    | version /= repositoryCacheSchemaVersion -> CacheInvalid "cache ignored: unsupported schema version"
+    | version /= repositoryCacheSchemaVersion -> CacheAbsent
     | otherwise -> case fromJSON value :: Result CacheEnvelope of
         Error message -> CacheInvalid ("cache ignored: " <> Text.pack message)
         Success envelope
@@ -208,13 +215,23 @@ loadUsageCache = do
   if not exists
     then pure UsageCacheAbsent
     else do
-      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String UsageCacheEnvelope))
+      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String Value))
       pure $ case result of
         Left exception -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack (show exception))
         Right (Left message) -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
-        Right (Right envelope)
-          | envelope.usageSchemaVersion /= usageCacheSchemaVersion -> UsageCacheInvalid "usage cache ignored: unsupported schema version"
-          | otherwise -> UsageCacheLoaded envelope.usageSnapshots
+        Right (Right value) -> loadDecodedUsageCache value
+
+-- | The same version-before-payload gate as 'loadDecodedCache', for the same
+-- reason: a usage file from another version is absent, not corrupt, however
+-- little of its payload the current decoder recognises.
+loadDecodedUsageCache :: Value -> UsageCacheLoad
+loadDecodedUsageCache value = case parse (withObject "usage cache" (.: "schemaVersion")) value :: Result Int of
+  Error message -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
+  Success version
+    | version /= usageCacheSchemaVersion -> UsageCacheAbsent
+    | otherwise -> case fromJSON value :: Result UsageCacheEnvelope of
+        Error message -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
+        Success envelope -> UsageCacheLoaded envelope.usageSnapshots
 
 writeRepositoryCache :: Repository -> RepoSnapshot -> IO (Either Text ())
 writeRepositoryCache repository repoSnapshot = do
@@ -231,8 +248,7 @@ writeCacheFile :: ToJSON value => FilePath -> value -> IO (Either Text ())
 writeCacheFile path value = do
   let directory = takeDirectory path
   result <- try @IOException $ do
-    createDirectoryIfMissing True directory
-    setFileMode directory 0o700
+    createPrivateDirectory XdgCache directory
     bracketOnError
       (openBinaryTempFile directory (takeFileName path <> ".tmp"))
       cleanupTemporaryFile
