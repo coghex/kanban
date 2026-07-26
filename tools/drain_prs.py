@@ -198,7 +198,12 @@ def notify_model_failure(
 
 def fail(message: str) -> "NoReturn":
     print(message, file=sys.stderr, flush=True)
-    append_log_line(message)
+    try:
+        append_log_line(message)
+    except OSError:
+        # Reporting a failure must never fail: an unwritable log directory is
+        # often the very thing being reported.
+        pass
     raise SystemExit(1)
 
 
@@ -2326,7 +2331,6 @@ def process_pr(
         )
         return True
 
-    record = plan_cleanup(pr)
     if dry_run:
         # Records nothing and mutates nothing, exactly as before: the pass only
         # reports what a real run would clean up.
@@ -2336,18 +2340,19 @@ def process_pr(
             f"PR #{number} passed every gate; a real run would merge "
             f"{pr['headRefOid'][:12]}.",
         )
-        run_cleanup_pass(ctx, record, dry_run=True)
+        run_cleanup_pass(ctx, plan_cleanup(pr), dry_run=True)
         return True
 
-    # Recorded before the cleanup below rather than after it: the merge is
-    # durable on GitHub from here on, so every later failure must still report
-    # merged=true to the caller.
+    # Recorded the instant the merge returns, before any further step: the
+    # merge is durable on GitHub from here on, so everything that can still
+    # go wrong -- an interrupt included -- must report merged=true.
     set_outcome(
         report,
         "merged",
         f"PR #{number} merged {pr['headRefOid'][:12]} into {ctx.default_branch}.",
         merged=True,
     )
+    record = plan_cleanup(pr)
 
     # The merge is durable on GitHub the moment it returns, so record what it
     # still owes *before* attempting any of it. A cleanup step that fails after
@@ -2404,50 +2409,55 @@ def describe_lock_holder(root: Path) -> str:
     return f"the polling drainer (pid {pid})"
 
 
-def acquire_lock(
-    root: Path,
-    *,
-    mode: str = "polling",
-    pull_request: int | None = None,
-    dry_run: bool = False,
-):
-    """Take the repository's exclusive run lock, or refuse naming the holder.
+class RunLock:
+    """The repository's exclusive run lock, held for the process's lifetime."""
 
-    One lock covers both modes, so a single-PR run and the polling service can
-    never act on the same repository at once: whichever starts second fails
-    here. A dry run creates and rewrites nothing -- it takes the lock only if
-    the file already exists, and an absent file means there is no holder to
-    collide with.
-    """
-    lock_path = lock_path_for(root)
-    if dry_run:
-        if not lock_path.exists():
-            return None
-        handle = open(lock_path, "r", encoding="utf-8")
-    else:
-        # Never truncate before flock: mode "w" erased the running instance's
-        # recorded PID as soon as a second instance tried, destroying the only
-        # record of who holds the lock the failed contender is reporting.
-        handle = open(lock_path, "a+", encoding="utf-8")
+    def __init__(self, fds: list[int]):
+        self._fds = fds
+
+    def close(self) -> None:
+        # Released in reverse acquisition order, and never allowed to raise:
+        # this runs while the process is already on its way out.
+        for fd in reversed(self._fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds = []
+
+
+def _take_flock(fd: int, root: Path) -> int:
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
-        handle.close()
+        os.close(fd)
         raise RunLockedError(
             f"Another drain_prs.py instance is already running for {root}: "
             f"{describe_lock_holder(root)} holds the lock."
         ) from exc
-    if dry_run:
-        return handle
-    handle.seek(0)
-    handle.truncate()
-    handle.write(str(os.getpid()))
-    handle.flush()
+    except OSError as exc:
+        os.close(fd)
+        raise DrainError(f"Could not lock {root} for a drainer run: {exc}") from exc
+    return fd
+
+
+def _publish_lock_owner(
+    fd: int, root: Path, mode: str, pull_request: int | None
+) -> None:
+    """Publish who holds the lock, for a contender and for the controller."""
+    # The lock file holds nothing but the bare PID, because
+    # drain_prs_service.lock_pid() and
+    # install_drainer.repository_drainer_running() both parse it that way.
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, str(os.getpid()).encode("utf-8"))
     owner_path = lock_owner_path_for(root)
-    fd, tmp_name = tempfile.mkstemp(prefix=f"{owner_path.name}.", dir=owner_path.parent)
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{owner_path.name}.", dir=owner_path.parent
+    )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as owner_handle:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as owner_handle:
             json.dump(
                 {"pid": os.getpid(), "mode": mode, "pull_request": pull_request},
                 owner_handle,
@@ -2458,7 +2468,48 @@ def acquire_lock(
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    return handle
+
+
+def acquire_lock(
+    root: Path,
+    *,
+    mode: str = "polling",
+    pull_request: int | None = None,
+    dry_run: bool = False,
+) -> RunLock:
+    """Take the repository's exclusive run lock, or refuse naming the holder.
+
+    One lock covers both modes, so a single-PR run and the polling service can
+    never act on the same repository at once: whichever starts second fails
+    here rather than proceeding.
+
+    Two descriptors, always taken in this order so no pair of runs can
+    deadlock. The `.git` directory is the rendezvous that always exists, which
+    is what lets a dry run -- which must create nothing at all -- still
+    exclude a concurrent run, and be excluded by one, even in a repository
+    where no lock file has ever been written. The lock file is then locked too
+    whenever there is one, because it is the only object a drainer already
+    running from an older version of this script takes.
+    """
+    held: list[int] = []
+    lock_path = lock_path_for(root)
+    try:
+        held.append(_take_flock(os.open(root / ".git", os.O_RDONLY), root))
+        if dry_run:
+            if lock_path.exists():
+                held.append(_take_flock(os.open(lock_path, os.O_RDONLY), root))
+            return RunLock(held)
+        # Opened without O_TRUNC and rewritten only after the lock is won: a
+        # losing contender must never erase the PID of the holder it is about
+        # to report.
+        held.append(
+            _take_flock(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644), root)
+        )
+        _publish_lock_owner(held[-1], root, mode, pull_request)
+        return RunLock(held)
+    except BaseException:
+        RunLock(held).close()
+        raise
 
 
 def loop(
@@ -2748,6 +2799,12 @@ def drain_one_pr(
     except OSError as exc:
         report["reason"] = "operational_error"
         report["message"] = f"PR #{number}: {exc}"
+    except KeyboardInterrupt:
+        # Swallowed rather than propagated so the caller still gets its one
+        # JSON result. Whatever was already recorded stands -- above all a
+        # merge that landed before the interrupt arrived.
+        report["reason"] = "operational_error"
+        report["message"] = f"PR #{number}: interrupted before the run finished."
 
     # Persisted last and separately so a state-write failure can never mask
     # what already happened on GitHub -- above all a merge that landed.
@@ -2907,7 +2964,30 @@ def main() -> None:
                     )
                 )
             fail(f"drain_prs.py error: {exc}")
+        except OSError as exc:
+            # An unwritable log directory or lock file fails before any pull
+            # request is read. A single-PR caller must still get its result
+            # document rather than a traceback and empty stdout.
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number,
+                        "operational_error",
+                        f"drain_prs.py could not start: {exc}",
+                        dry_run=args.dry_run,
+                    )
+                )
+            fail(f"drain_prs.py error: {exc}")
         except KeyboardInterrupt:
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number,
+                        "operational_error",
+                        f"PR #{number}: interrupted before the run started.",
+                        dry_run=args.dry_run,
+                    )
+                )
             log("Interrupted; exiting")
     finally:
         if lock_handle is not None:

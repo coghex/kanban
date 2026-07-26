@@ -221,11 +221,12 @@ everything else.
   JSON file, which records both the approved head each queued pull request
   was cleared at and the post-merge obligations a merged pull request still
   owes, and which migrates forward from the shapes earlier versions wrote; and
-  a per-repository run lock at `.git/drain_prs.lock` holding the holder's bare
-  PID, beside a `.git/drain_prs.lock.owner.json` sidecar recording whether that
-  PID is the polling service or a single-PR run. One lock covers both modes, so
-  whichever starts second fails immediately naming the holder rather than
-  acting.
+  a per-repository run lock held on the `.git` directory and on
+  `.git/drain_prs.lock` — which holds the holder's bare PID — beside a
+  `.git/drain_prs.lock.owner.json` sidecar recording whether that PID is the
+  polling service or a single-PR run. One lock covers both modes, so whichever
+  starts second fails immediately naming the holder rather than acting; the
+  directory is what a dry run, which creates nothing, locks.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.

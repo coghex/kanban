@@ -14,7 +14,9 @@ resolves its own repository context without a GitHub URL or any rewriting.
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -23,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import drain_prs
 import drain_prs_service
@@ -694,6 +697,34 @@ class SinglePrRunLockTests(SinglePrCliFixture):
         self.assertIn("single-PR run for PR #42", proc.stderr)
         self.assertEqual(self.fake.calls("gh"), [])
 
+    def test_a_dry_run_holding_the_lock_still_excludes_a_real_run(self):
+        # The exclusion cannot depend on a lock file existing: a dry run
+        # creates none, and a repository the drainer has never run in has
+        # none either.
+        self.assertFalse(self.lock_path.exists())
+        self.hold(dry_run=True)
+        self.assertFalse(self.lock_path.exists())
+        self.script_pr_view()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "run_locked")
+        self.assertEqual(self.fake.calls("gh"), [])
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_dry_run_is_excluded_by_a_real_run_that_left_no_lock_file_yet(self):
+        self.assertFalse(self.lock_path.exists())
+        self.hold(mode="polling")
+        self.script_pr_view()
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "run_locked")
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self.fake.calls("gh"), [])
+
     def test_the_lock_file_still_holds_exactly_the_bare_pid(self):
         # drain_prs_service.lock_pid() and
         # install_drainer.repository_drainer_running() both read it that way.
@@ -713,6 +744,91 @@ class SinglePrRunLockTests(SinglePrCliFixture):
         # Rewritten by the acquisition above, so the holder is described
         # correctly rather than from the leftover record.
         self.assertIn("polling drainer", drain_prs.describe_lock_holder(self.main))
+
+
+class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
+    """Nothing gets to end a `--pr` run without a result document: not an
+    interrupt, and not a failure in the drainer's own startup."""
+
+    def run_main(self, *argv_extra):
+        """Drive main() in-process, so an interrupt can be placed exactly."""
+        saved = (
+            drain_prs.LOG_DIR,
+            drain_prs.LOG_TO_STDERR,
+            drain_prs.APPROVE_LABEL,
+            drain_prs.CHANGES_LABEL,
+        )
+
+        def restore():
+            (
+                drain_prs.LOG_DIR,
+                drain_prs.LOG_TO_STDERR,
+                drain_prs.APPROVE_LABEL,
+                drain_prs.CHANGES_LABEL,
+            ) = saved
+
+        self.addCleanup(restore)
+        argv = [
+            "drain_prs.py",
+            "--path",
+            str(self.main),
+            "--config",
+            str(self.absent_config),
+            "--log-dir",
+            str(self.log_dir),
+            *argv_extra,
+        ]
+        env = {
+            **self.fake.environ_overrides(),
+            "KANBAN_DRAINER_INSTALL_DIR": str(self.install_dir),
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(
+            os.environ, env
+        ), contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                drain_prs.main()
+        return json.loads(stdout.getvalue().strip()), raised.exception.code
+
+    def test_an_interrupt_before_the_pull_request_is_read_still_reports(self):
+        with mock.patch.object(drain_prs, "repo_root", side_effect=KeyboardInterrupt):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertFalse(result["merged"])
+
+    def test_an_interrupt_after_the_merge_landed_still_reports_it_as_merged(self):
+        self.script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        # Interrupts the very first step after the merge call returns.
+        with mock.patch.object(
+            drain_prs, "plan_cleanup", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertTrue(result["merged"])
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+
+    def test_an_unwritable_log_directory_is_reported_rather_than_raised(self):
+        blocked = self.root / "not-a-directory"
+        blocked.write_text("", encoding="utf-8")
+        self.script_pr_view()
+
+        proc = self.run_cli(
+            "--pr", "42", "--log-dir", str(blocked), log_dir=False
+        )
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertNotIn("Traceback", proc.stderr)
+        result = json.loads(proc.stdout.strip())
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
 
 
 class SinglePrIsolationTests(SinglePrCliFixture):

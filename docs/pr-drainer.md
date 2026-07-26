@@ -133,8 +133,14 @@ That purity covers the whole process in either mode: a polling dry run
 A single-PR run and the polling service share one exclusive lock per
 repository, so they can never act on the same repository at once. Whichever
 starts second fails immediately without acting, naming the holder — the
-polling drainer, or the single-PR run and its pull request number. A dry run
-takes that lock too, without creating or rewriting it.
+polling drainer, or the single-PR run and its pull request number.
+
+The lock is taken on the repository's `.git` directory and, whenever one
+exists, on `.git/drain_prs.lock` as well. The directory is what always exists
+to be locked, so a dry run — which creates no file at all — is still excluded
+by a concurrent run and still excludes one. The lock file is locked too
+because it is the only object a drainer already running from an older version
+of the script takes.
 
 ## Approval and checks
 
@@ -220,9 +226,9 @@ The endpoint is stored in a private configuration file and is not written into t
 - Logs: `~/Library/Logs/kanban/pr-drainer/`
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`
-- Repository run lock: `.git/drain_prs.lock`, holding the holder's PID, beside
-  `.git/drain_prs.lock.owner.json`, which records whether that PID is the
-  polling service or a single-PR run
+- Repository run lock: the `.git` directory, plus `.git/drain_prs.lock` holding
+  the holder's PID, beside `.git/drain_prs.lock.owner.json`, which records
+  whether that PID is the polling service or a single-PR run
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
 
