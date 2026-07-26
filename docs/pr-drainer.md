@@ -49,6 +49,93 @@ keeps its post-merge fast-forward from moving a feature branch.
 After each successful merge, the drainer fast-forwards its managed default
 branch to the current remote tip.
 
+## Merging one pull request
+
+Besides the polling service, the drainer can process exactly one named pull
+request and exit:
+
+```console
+python3 tools/drain_prs.py --path /path/to/project --pr 42
+```
+
+This applies the same gates, guards, ordering and post-merge audit as a poll
+cycle — it runs the queue's own per-pull-request code, not a second copy of it
+— so it merges nothing the queue would refuse. It reads and touches only the
+named pull request: no other pull request is listed, recovered, or moved
+through the queue's fair rotation, and no failure cooldown is advanced.
+
+`--pr` and `--once` are mutually exclusive.
+
+### Output
+
+Exactly one JSON document is written to stdout, and nothing else; every human
+log line goes to stderr and the log file. A caller can present `message`
+verbatim.
+
+```json
+{
+  "schema": "drain-prs-single-pr",
+  "version": 1,
+  "pull_request": 42,
+  "outcome": "no_action",
+  "merged": false,
+  "would_merge": false,
+  "reason": "checks_pending",
+  "message": "PR #42 is waiting on its required checks (build-test=pending, review-approved=success, mergeStateStatus=BLOCKED).",
+  "dry_run": false
+}
+```
+
+`outcome` is `merged`, `no_action`, or `error`. `reason` is one of a fixed
+vocabulary:
+
+| `reason` | Meaning |
+| --- | --- |
+| `merged` | The pull request was merged. |
+| `would_merge` | Dry run only: every gate passed, so a real run would merge it. |
+| `not_approved` | The approval label is missing. |
+| `changes_requested` | The changes-requested label is attached. It takes precedence when both labels are. |
+| `checks_pending` | A required check has not reported a result yet. The message names each configured check and its state, including `missing` for one that has not run at all. |
+| `checks_failed` | A required check failed. |
+| `merge_conflict` | The pull request conflicts with the default branch. It was recorded as an incident and left alone. |
+| `behind_base` | The branch was behind the default branch. The update was requested; merging waits for a later run. |
+| `mergeability_computing` | GitHub has not finished computing mergeability. |
+| `approved_head_changed` | The approval belongs to an older head. The pull request needs a fresh review. |
+| `not_eligible` | The pull request is closed, still a draft, or targets another branch. |
+| `run_locked` | Another drainer run holds the repository. The message names it. |
+| `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the default-branch and clean-checkout requirements above. |
+| `post_merge_audit_failed` | The merge landed but the post-merge audit found a gate violation. `merged` is `true`. |
+| `operational_error` | Anything else went wrong. |
+
+### Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | A merge completed. |
+| `2` | No merge happened. A non-dry run may still have updated a branch behind its base or recorded a conflict incident. |
+| `1` | An error. `merged` may still be `true` if the merge landed before the failure. |
+
+A usage error exits `2` with nothing on stdout, so treat empty stdout as a
+startup failure rather than as a no-merge result.
+
+### Dry run
+
+`--dry-run` reports the same outcome and makes no GitHub, filesystem, or git
+mutation — no merge, no branch update, no incident, no queue-state write, no
+log file, no lock file, and no bytecode cache. A dry run that passes every gate
+reports `would_merge` and exits `2`, because no merge completed.
+
+That purity covers the whole process in either mode: a polling dry run
+(`--once --dry-run`) writes no log file and creates no lock file either.
+
+### One run at a time
+
+A single-PR run and the polling service share one exclusive lock per
+repository, so they can never act on the same repository at once. Whichever
+starts second fails immediately without acting, naming the holder — the
+polling drainer, or the single-PR run and its pull request number. A dry run
+takes that lock too, without creating or rewriting it.
+
 ## Approval and checks
 
 A pull request must have the `reviewed:approve` label and must not have `reviewed:changes`.
@@ -133,6 +220,9 @@ The endpoint is stored in a private configuration file and is not written into t
 - Logs: `~/Library/Logs/kanban/pr-drainer/`
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`
+- Repository run lock: `.git/drain_prs.lock`, holding the holder's PID, beside
+  `.git/drain_prs.lock.owner.json`, which records whether that PID is the
+  polling service or a single-PR run
 
 The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
 
@@ -146,4 +236,5 @@ python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 ```
 
-Do not run `drain_prs.py` directly during normal operation.
+Do not run `drain_prs.py` directly during normal operation, apart from the
+single-pull-request mode above, which is meant to be invoked on request.

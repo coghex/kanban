@@ -635,8 +635,8 @@ class LockFileIntegrityTests(ProcessPrFixture):
         super().setUp()
         self.lock_path = self.main / ".git" / "drain_prs.lock"
 
-    def _acquire(self):
-        handle = drain_prs.acquire_lock(self.ctx)
+    def _acquire(self, **kwargs):
+        handle = drain_prs.acquire_lock(self.ctx.path, **kwargs)
         self.addCleanup(handle.close)
         return handle
 
@@ -646,7 +646,7 @@ class LockFileIntegrityTests(ProcessPrFixture):
         self.assertEqual(recorded, str(os.getpid()).encode())
 
         with self.assertRaises(drain_prs.DrainError) as caught:
-            drain_prs.acquire_lock(self.ctx)
+            drain_prs.acquire_lock(self.ctx.path)
 
         self.assertIn("already running", str(caught.exception))
         self.assertEqual(self.lock_path.read_bytes(), recorded)
