@@ -12,6 +12,7 @@ module Kanban.Domain
     CheckState (..),
     CheckSummary (..),
     ColumnEntry (..),
+    DataGap (..),
     Freshness (..),
     Issue (..),
     ItemId (..),
@@ -67,6 +68,24 @@ newtype Assignee = Assignee {assigneeLogin :: Text}
   deriving stock (Eq, Ord, Show, Generic)
   deriving newtype (FromJSON, ToJSON)
 
+-- | One part of an item GitHub's response did not deliver in a form this build
+-- can use: a nested connection left absent or nulled, or a status-check rollup
+-- holding a context that could not be decoded.
+--
+-- These are per-item on purpose. An anomaly attributable to one issue or pull
+-- request degrades that card -- amber, with a snapshot warning naming it --
+-- rather than failing the page decode and leaving the board on a stale
+-- snapshot. A gap is also what keeps the card honest about what it does not
+-- know: an item whose assignees never arrived is not the same as one that has
+-- none, and must not be shown as @unassigned@ or @UNLINKED@.
+data DataGap
+  = LabelsUnavailable
+  | AssigneesUnavailable
+  | LinkedIssuesUnavailable
+  | ChecksUndecodable
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data Issue = Issue
   { issueNumber :: Int,
     issueTitle :: Text,
@@ -77,7 +96,8 @@ data Issue = Issue
     issueCreatedAt :: UTCTime,
     issueUpdatedAt :: UTCTime,
     issueLabelOverflow :: Int,
-    issueAssigneeOverflow :: Int
+    issueAssigneeOverflow :: Int,
+    issueDataGaps :: [DataGap]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -151,7 +171,8 @@ data PullRequest = PullRequest
     pullRequestCreatedAt :: UTCTime,
     pullRequestUpdatedAt :: UTCTime,
     pullRequestLabelOverflow :: Int,
-    pullRequestLinkedIssueOverflow :: Int
+    pullRequestLinkedIssueOverflow :: Int,
+    pullRequestDataGaps :: [DataGap]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

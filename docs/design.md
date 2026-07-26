@@ -754,6 +754,18 @@ passed/total counts. A rollup beyond that cap fails closed as unknown. GitHub
 scores GraphQL cost by requested node count, so these caps keep the single-query
 refresh inside rate and node limits.
 
+An anomaly attributable to a single item degrades that item rather than the
+refresh. A rollup context the build cannot decode — an unrecognized
+`__typename`, or a recognized one missing a field its decode needs — fails
+closed to unknown exactly as the cap does. A nested connection GitHub leaves
+absent or null, which is how a partial-error response reports a field that
+errored, decodes as no nodes and marks that item incomplete. Both cases mark
+the card and name it in a snapshot warning (§17). Everything else stays strict:
+a `errors` array, a malformed top-level connection or page info, a missing
+required scalar, a malformed rollup container, and a nested connection that is
+present but malformed — including one whose `totalCount` is below its own node
+list — all still fail the refresh, which retains the last good snapshot.
+
 No request is retried in a tight loop. Rate limits and transient failures are
 shown to the user while retaining the last good snapshot.
 
@@ -955,6 +967,12 @@ repository at all.
 - Cached data after refresh failure: dashed/dim treatment plus snapshot time.
 - Malformed tracker checklist: tracker remains visible; unparsed children fall
   back to Standalone and the tracker gets an amber parse warning.
+- Item-local decode anomaly: the affected card is amber and an amber banner
+  names it as `Issue #N`/`PR #N: incomplete data`, naming the first few and
+  counting the rest. The card states what is unknown rather than asserting the
+  absence — an item whose assignees never arrived is not shown as `unassigned`
+  and does not fall into the backlog column, and a pull request whose closing
+  references never arrived is not shown as `UNLINKED`.
 - Missing Kanban-owned setup: an AI action that preflight finds definitely
   unready never spawns an agent. It reports `cannot start` naming the cause
   and the command that installs it, rather than a generic agent failure, and
