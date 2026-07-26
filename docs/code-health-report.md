@@ -27,6 +27,54 @@ Status: **in progress.** This audit is being done deliberately, a few files at a
 time, rather than in one sweep. The "Coverage log" at the bottom records exactly
 what has been read so far, so the audit can resume without re-reading.
 
+### Status markers
+
+Each finding heading carries its disposition, so this file is the durable cursor
+and `/process-report` can resume from it without conversation history:
+
+- **`[#N]`** — linked to GitHub issue N, whether newly filed or pre-existing.
+- **`[no-issue]`** — reviewed and deliberately never to be filed. Carries a
+  `> **Disposition:**` note giving the evidence-backed reason and the consequence
+  of leaving the code unchanged.
+- **`[deferred]`** — real, should be filed, but blocked. Carries a
+  `> **Deferred:**` note naming what blocks it and the concrete precondition that
+  clears it. `/process-report` skips these until no unmarked finding remains, then
+  promotes the first whose precondition is satisfied.
+- **no marker** — unprocessed.
+
+`[no-issue]` and `[deferred]` are not interchangeable: the first closes a finding,
+the second keeps it open. Nothing here is marked `[no-issue]` merely for being
+unclear.
+
+Issue numbers appearing in prose, in a `Related` list, or inside a fix shape are
+not dispositions — only a bracketed marker in a heading is.
+
+## Status
+
+A box is checked only for a terminal disposition — filed or closed. `[deferred]`
+and unmarked findings stay unchecked, so the unchecked count is the work this
+report still owes.
+
+- [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
+- [ ] 2. `UI.hs` is a god-module — [deferred]: bodies unread
+- [ ] 3. `AppState` has seven parallel session tables — [deferred]: with finding 2
+- [ ] 4. `drain_prs.py` is 3,152 lines — [deferred]: after #147 lands
+- [ ] 5. `Worker.hs` and `Review.hs` exceed 2,000 lines — [deferred]: unread
+- [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
+- [x] 6a. Launchd label defined three times — [#146]
+- [ ] 7. `.drain-prs.json` is repo-specific at the root — [deferred]: read `kanban_config` repositories table
+- [ ] 8. `review_pr.py` duplicated and diverged — [deferred]: read the two plugin sync tests
+- [x] 9. `launchctl` is undeclared — [#149]
+- [x] 10. Process-group hardening not swept — [no-issue]
+- [x] 11. `Drainer.hs` has no platform guard — [#146]
+- [x] 12. Drainer refuses to start on a dirty tree — [#145]
+- [x] 13. Repository override key matched exactly and silently — [#150]
+
+**8 of 14 resolved. 6 deferred, 0 unprocessed.** Every unmarked finding has been
+processed; what remains is blocked, not untouched. Findings 2, 3, and 5 clear
+together once `UI.hs`, `Worker.hs`, and `Review.hs` have been read; 7 and 8 each
+clear on reading one named file; 4 clears when #147 merges.
+
 ---
 
 ## Filing plan
@@ -69,20 +117,24 @@ function.
 
 Notes on the order:
 
-- **A first** because it is the one blocking the maintainer's daily routine, and
-  because it is subtractive — it shrinks the surface B and C then modify.
-- **B before C.** C looks like a one-line change and is not: the label literal
-  lives in three places, and the contract doc wrongly claims it lives in one.
-  Consolidating first turns C into an actual one-place change.
-- **C is a design issue, not a bug fix.** Per-repository drainers make
-  `statusFromRaw`'s `"foreign"` state unreachable and require rewriting
-  `docs/pr-drainer.md`'s single-drainer model. It should be filed for discussion,
-  not handed straight to a solve agent.
-- **D is independent** and can run in parallel with A–C — it touches no drainer
-  file. It should be filed early regardless of when it is worked, because every
-  later refactor in Part 1 lands against it.
-- **E last** of the drainer group, since it edits the same `Drainer.hs` function
-  region A touches.
+- **#145 → #146 → #147 is a strict serial chain.** All three edit
+  `tools/drain_prs_service.py` and `src/Kanban/Drainer.hs`; #145 and #146 also
+  both edit `tools/drain_prs.py`. Working them out of order will conflict.
+- **#145 first** because it is the one blocking the maintainer's daily routine,
+  and because it is subtractive — it shrinks the surface the other two modify.
+- **#146 before #147.** #147 looks like a one-line label change and is not. Until
+  the discovery record exists, making the label per-repository would force Haskell
+  and Python to independently derive the same string.
+- **#147 is a contract change**, not only an implementation change:
+  `docs/design.md` Milestone 6 and `docs/pr-drainer.md:38` both state the
+  singleton model as designed behavior. It is the only Wave 1 issue that edits the
+  authoritative contract.
+- **#148 and #149 are independent** of the chain and of each other, and can run in
+  parallel with everything. #148 should land before the source-side splits in
+  Part 1, since those need a suite that can be built selectively.
+- **The former issue E was absorbed into #146** rather than filed. Both rewrite
+  `discoverDrainerController`, so two back-to-back PRs over the same function
+  would only have created a conflict.
 
 **Resolved along the way — what identifies a drainer.** #147 keys a drainer by its
 GitHub `owner/name` slug rather than its checkout path. Two clones of the same
@@ -94,13 +146,33 @@ repository cannot be drained independently. The sharp edge for implementation is
 case — `Coghex/Kanban` and `coghex/kanban` are distinct to GitHub, so a
 lowercasing derivation would collapse them.
 
-### Wave 2 — hold until the audit is further along
+### Also filed
 
-Findings 2, 3, 4, 5, 7, 8, 9, and 10. Each is real and each has its fix shape
-written down above, but none blocks daily work, and several will read differently
-once `Worker.hs`, `Review.hs`, `Config.hs`, and the plugin Markdown have been
-gone through. Finding 8 (the duplicated `review_pr.py`) is the strongest Wave 2
-candidate to promote early if the divergence starts causing trouble.
+| Filed | Title | From | Depends on |
+| --- | --- | --- | --- |
+| **#149** | Declare `launchctl` and bring `tools/` into the agent-workflow contract's scanned surface | 9 | — (independent) |
+
+Promoted out of Wave 2 because it was already fully evidenced, small, and — unlike
+everything else remaining — independent of the #145 → #146 → #147 chain. With that
+chain strictly serial, the board otherwise had only #148 as parallel work.
+
+### Wave 2 — deferred
+
+Findings **2, 3, 4, 5, 7, and 8**, each marked `[deferred]` with a note stating
+precisely what has to happen before it can be filed. Three distinct reasons, worth
+separating:
+
+- **Not read yet** (2, 3, 5) — structure and export lists only. An issue written
+  from those would hand a solve agent a guess dressed as a plan.
+- **Blocked on sequencing** (4) — evidence is adequate, but it would be a fourth
+  conflicting change to `tools/drain_prs.py` and `tools/drain_prs_service.py`.
+  File after #147 lands.
+- **Premise unverified** (7, 8) — each rests on something not yet checked that
+  could materially shrink or invalidate it. Finding 8's claim that nothing
+  enforces the shared `review_pr.py` portion is the one most worth verifying
+  early, since it is otherwise the strongest remaining finding.
+
+Finding **10** is closed as `[no-issue]`; see its Disposition note.
 
 ---
 
@@ -110,7 +182,7 @@ The single most visible artifact of an automated build process: every file grew
 by accretion, and nothing was ever split, because no agent's task was ever "make
 this smaller."
 
-### 1. `test/Spec.hs` is a 9,200-line single-file test suite
+### [#148] 1. `test/Spec.hs` is a 9,200-line single-file test suite
 
 **Severity: High** — this is the largest file in the repository by a factor of
 1.6, and it is the one every behavior change has to touch.
@@ -141,7 +213,12 @@ them to `other-modules` in the test target. This is a mechanical, behavior-free
 change and should be sequenced *before* the source-side splits below, so that
 those splits land against a suite that can be selectively built.
 
-### 2. `src/Kanban/UI.hs` is a 5,705-line god-module
+### [deferred] 2. `src/Kanban/UI.hs` is a 5,705-line god-module
+
+> **Deferred:** Structure only — exports, type declarations, and `AppState` have
+> been read; no function bodies have. The seams named below are inferred from the
+> export list, which is enough to argue the problem but not enough to specify a
+> safe cut. Clears once the module's bodies have been read.
 
 **Severity: High** — it is the widest blast radius in the codebase.
 
@@ -180,7 +257,12 @@ order, smallest-risk first, each as its own PR:
 Leave `Kanban.UI` as the app wiring plus a re-export shim so downstream imports
 and the test suite do not churn.
 
-### 3. `AppState` tracks seven parallel `Map Int` session tables
+### [deferred] 3. `AppState` tracks seven parallel `Map Int` session tables
+
+> **Deferred:** Same reason as finding 2 — the record and the five reusability
+> predicates were read, but not the insertion and cleanup sites that would have to
+> collapse into one `AgentSlot`. Should be filed together with finding 2, since a
+> single PR would touch the same declarations.
 
 **Severity: Medium** — a live correctness hazard rather than a style complaint.
 
@@ -212,7 +294,13 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### 4. `tools/drain_prs.py` is a 3,152-line script
+### [deferred] 4. `tools/drain_prs.py` is a 3,152-line script
+
+> **Deferred:** Blocked on sequencing rather than evidence. #145, #146, and #147
+> already form a three-deep serial chain through `tools/drain_prs.py` and
+> `tools/drain_prs_service.py`; a split filed now would be a fourth conflicting
+> change to the same files. File after #147 lands. Roughly 250 of 3,152 lines read
+> so far, so the phase boundaries proposed below still need confirming.
 
 **Severity: High** — this is the component that merges pull requests, and it is
 the least structured code in the repository.
@@ -236,7 +324,12 @@ most-tested module of the set. The Python suite is already large enough
 (`test_integration.py` at 2,038 lines, plus eight other `test_*.py`) to support
 this refactor safely.
 
-### 5. `src/Kanban/Worker.hs` and `src/Kanban/Review.hs` exceed 2,000 lines
+### [deferred] 5. `src/Kanban/Worker.hs` and `src/Kanban/Review.hs` exceed 2,000 lines
+
+> **Deferred:** Line counts and import surfaces only; neither module has been
+> read. Filing now would produce a issue whose entire content is "this file is
+> big." Revisit after findings 2 and 3, which establish whether the god-module
+> pattern here is the same one `UI.hs` has.
 
 **Severity: Medium.**
 
@@ -250,7 +343,7 @@ read — see the coverage log.
 
 ## Part 2 — Portability and "install on a new machine"
 
-### 6. The LaunchAgent label hardcodes a personal namespace
+### [#147] 6. The LaunchAgent label hardcodes a personal namespace
 
 **Severity: High** for the project-agnostic goal.
 
@@ -296,7 +389,7 @@ per-repository drainers mean the `"foreign"` state becomes unreachable and
 `docs/pr-drainer.md` needs rewriting. Worth deciding deliberately before anyone
 implements it.
 
-### 6a. The launchd label is defined three times, and the contract says it is defined once
+### [#146] 6a. The launchd label is defined three times, and the contract says it is defined once
 
 **Severity: Medium** — a documentation claim that is verifiably false, which
 makes finding 6 harder to fix than it looks.
@@ -329,7 +422,13 @@ either reading it or having its literal pinned by a test that reads the Python
 value. Then update the manifest row's `files` column to list all sites, so the
 existing check enforces it.
 
-### 7. `.drain-prs.json` is a tracked, repo-specific config at the root
+### [deferred] 7. `.drain-prs.json` is a tracked, repo-specific config at the root
+
+> **Deferred:** The finding rests on not knowing where per-target drainer config
+> is *supposed* to live. `tools/kanban_config.py` has a repositories table
+> (`_parse_repositories_table`) that has not been read, and it may already answer
+> this — in which case the finding is about a stale root file rather than a
+> missing mechanism, and the fix is much smaller. Read that first.
 
 **Severity: Medium.**
 
@@ -357,7 +456,13 @@ config directory), and the tracked copy at the root should be renamed to
 
 ## Part 3 — Duplicated logic across the two plugin bundles
 
-### 8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
+### [deferred] 8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
+
+> **Deferred:** Strongest Wave 2 candidate, but one premise is unverified. The
+> claim that *nothing* enforces the shared portion rests on not having read
+> `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py`, which are known
+> to pin plugin/Haskell name parity and may already pin more. If they cross-check
+> the two copies, this finding is materially wrong. Verify before filing.
 
 **Severity: High.**
 
@@ -417,7 +522,7 @@ patterns. (`Worker.hs` is not listed and does spawn processes, but only via
 `createProcess`, which is not one of the scanned idioms, and its only
 home-relative path is `getXdgDirectory`. It is out of scope rather than missed.)
 
-### 9. `launchctl` is an undeclared dependency of the drainer
+### [#149] 9. `launchctl` is an undeclared dependency of the drainer
 
 **Severity: Medium.**
 
@@ -453,7 +558,15 @@ A recognizable signature of issue-at-a-time automated development: a hazard gets
 diagnosed properly, fixed thoroughly at the one call site the issue named, and
 the identical hazard is left standing everywhere else.
 
-### 10. Process-group hardening was applied to `GitHub.hs` only
+### [no-issue] 10. Process-group hardening was applied to `GitHub.hs` only
+
+> **Disposition:** No issue — the `Drainer.hs:122` half is rewritten by #146,
+> which replaces `discoverDrainerController` and its `runProcess` helper outright.
+> The residual is `Repository.hs:45`'s missing timeout alone, whose realistic
+> trigger is a stalled network mount and whose fix converts "hang forever" into
+> "error after N seconds" — too thin to justify tracker and PR overhead. Left
+> unfixed, `kanban` can hang at startup with no output on a stalled filesystem;
+> that is the accepted consequence. Reasonable to revisit as a `good first issue`.
 
 **Severity: Medium.**
 
@@ -493,7 +606,7 @@ the startup-hang path. Routing both through `Kanban.Process` is the more complet
 fix and worth doing, but it is a larger change and should be judged against the
 fact that neither command touches the network.
 
-### 11. `Drainer.hs` has no platform guard, so a non-macOS host gets a raw exception
+### [#146] 11. `Drainer.hs` has no platform guard, so a non-macOS host gets a raw exception
 
 **Severity: Low.**
 
@@ -528,7 +641,7 @@ return a purpose-written `Text` for each. This is a small change with a
 disproportionate effect on how a fresh install feels, which makes it a good
 candidate to do early despite the Low severity.
 
-### 12. The drainer refuses to start on a dirty tree, using a rationale its own autostash had already made obsolete
+### [#145] 12. The drainer refuses to start on a dirty tree, using a rationale its own autostash had already made obsolete
 
 **Severity: High** — this one blocks the maintainer's actual daily workflow, and
 the fix is mostly deletion.
@@ -606,6 +719,85 @@ documented rather than discovered.
 
 ---
 
+## Part 6 — Configuration and per-repository setup
+
+`Kanban.Config` is the mechanism the whole portability goal rests on: it is where
+"point this at a different repository" is actually decided. The layer is good —
+see the clean list below — and has exactly one hole, but it is in the worst
+possible place for a tool meant to be set up on a new machine.
+
+### [#150] 13. A `[repositories."owner/name"]` key that does not match exactly is silently ignored
+
+**Severity: High** for the new-machine goal. Nothing is wrong with the code's
+logic; the problem is that the most likely setup mistake produces no signal at
+all.
+
+Repository overrides are selected by exact string equality:
+
+```haskell
+repositoryIdentity owner name = owner <> "/" <> name
+
+resolveConfig ownerName raw = ... where
+  override = Map.findWithDefault emptyRepositoryOverride ownerName raw.rawRepositories
+```
+
+`Map Text` compares by `Ord Text` — byte equality, no case folding. Three
+consequences compound:
+
+- **No structural validation of the key.** `parseRepositories` is
+  `mapOf (\_ key -> pure key) …`, which accepts *any* string as a repository
+  identity. `[repositories."kanban"]` with no owner, or
+  `[repositories."https://github.com/coghex/kanban"]`, parse successfully and are
+  simply never selected. Compare `Kanban.Repository.parseRepositoryName`, which
+  validates identities rigorously and fails closed — that validation is not
+  applied to config keys.
+- **No warning when a key matches nothing.** `decodeConfigText` does surface
+  warnings, and a typo'd *scalar* key produces one — the test fixture's
+  `unknown_top_level_key = 1` is warned about. But `mapOf` consumes every
+  repository key, so a typo'd *repository identity* never becomes an unknown key.
+  Kanban therefore warns about the harmless mistake and stays silent about the
+  consequential one.
+- **The required case comes from your git remote, not from GitHub.** Owner and
+  name flow from `parseRemoteRepository`, which preserves the case in the remote
+  URL and never folds the path. A checkout cloned from
+  `git@github.com:Coghex/Kanban.git` needs `[repositories."Coghex/Kanban"]`; the
+  same repository cloned as `coghex/kanban` needs the lowercase key. **The same
+  `config.toml` can therefore work on one machine and silently do nothing on
+  another** — precisely the failure the portability goal cannot tolerate.
+
+The blast radius is the whole workflow contract. A repository override carries
+`approval_label`, `changes_requested_label`, `blocked_labels`, and
+`tracker_labels` — the labels the board reads state off. Silently falling back to
+global defaults means the board renders confidently and wrongly, with no
+indication that an entire configuration block was discarded.
+
+This is also internally inconsistent. The same codebase deliberately case-folds
+user input in two other places — `validateWorkflowLabelDistinctness` folds labels
+before comparing, and `Settings.hs`'s `ChatVerbosity` parser folds the verbosity
+name — so the one place that does not fold is the one that fails silently.
+
+**Fix shape:** validate and report, in that order.
+
+1. Validate every `[repositories.*]` key at decode time against the same identity
+   rules `Kanban.Repository.parseRepositoryName` enforces. A key that cannot be an
+   `owner/name` is a config error, not a table to ignore.
+2. Warn — through the existing warning channel `loadRawConfig` already threads to
+   `Main.hs` — when a well-formed repository key matches no selectable repository
+   for this run. Word it so the near-miss is obvious, e.g. naming the resolved
+   identity alongside the unmatched key.
+3. Decide case explicitly. Either match case-insensitively (consistent with how
+   this codebase treats every other user-supplied string), or keep exact matching
+   and make the near-miss warning specifically call out a case-only difference.
+   The second is safer, since GitHub identities are case-preserving.
+
+Note what the fix cannot be: `--doctor` is not the place. `app/Main.hs` runs it
+*before* configuration and repository resolution on purpose — "a fresh clone with
+no configured remote still needs to be able to ask why an AI action would not
+start" — and `doctorLines` reports only dependencies and action readiness. Moving
+config reporting into doctor would mean giving up that property.
+
+---
+
 ## Coverage log
 
 What has actually been read, so the audit can resume without repeating work.
@@ -625,6 +817,11 @@ What has actually been read, so the audit can resume without repeating work.
 | `tools/install_drainer.py` | Read the header, constants, and install/config-merge surface. Remainder not read. |
 | `test/Spec.hs` | Structure mapped — 330 lines of imports, 48 `describe` blocks in one `main`, 149 trailing helpers. Test bodies not read. |
 | `src/Kanban/Paths.hs` | **Read fully** — landed 2026-07-26, mid-audit. |
+| `src/Kanban/Config.hs` (523 lines) | **Read fully** |
+| `src/Kanban/Settings.hs` (111 lines) | **Read fully** |
+| `app/Main.hs` (58 lines) | **Read fully** |
+| `src/Kanban/Preflight.hs` | `doctorLines` and its config-blindness only. The other ~850 lines not read. |
+| `config.toml.example`, config tests in `test/Spec.hs` | Read the `[repositories.*]` surface and its override tests. |
 | Plugin bundles | `review_pr.py` divergence diffed. Command/skill Markdown not read. |
 | `test/Spec.hs` | Size and cabal wiring only. Contents not read. |
 | Everything else in `src/`, `tools/`, `app/`, `docs/` | Not yet read |
@@ -667,6 +864,27 @@ read as uniformly negative:
   The drainer's run lock is already per-checkout, and incidents already carry a
   `repo` field and filter on it. That is why #147 is a contained change rather
   than a rewrite.
+- **The configuration layer is strong apart from finding 13.** Every scalar is
+  validated rather than merely decoded: non-empty strings, positive integers, a
+  timeout bound that specifically prevents overflow when converted to
+  microseconds, and enum values that name the accepted alternatives on failure.
+  `forbidRepositoryKey` actively rejects `cache`, `remote_name`, and `usage` inside
+  a repository table rather than silently ignoring them. Best of all,
+  `validateRawConfig` checks approval/changes-requested label distinctness for
+  *every* repository override after merging, not just the global table — catching
+  the case where an override sets only one of the pair and collides with the
+  inherited other. That is a genuinely subtle bug class, closed deliberately.
+- **`remote_name` being global-only is correct by necessity, not an oversight.**
+  `app/Main.hs` must call `resolveRepository rawConfig.rawRemoteName` to *discover*
+  the repository identity before `resolveConfig` can select that repository's
+  override table. A per-repository `remote_name` would be needed to find the
+  identity that selects it. The `--repo OWNER/NAME` flag is the escape hatch.
+- **`Settings.hs` is a small, correct file.** Atomic write through
+  `openBinaryTempFile` + `renameFile` under `bracketOnError`, `0600` on both the
+  temporary and final path, and a schema version that is actually *checked* on
+  read — with a documented policy distinguishing "written by another version"
+  (silent defaults) from "claims this version and will not decode" (warn). The
+  comment notes the previous version stamped a version it never read.
 - **The module-splitting instinct is already present.** `src/Kanban/Paths.hs`
   landed during this audit: a small, focused module extracted to own `0700`
   enforcement across the XDG directory chain, with a comment explaining the bug
