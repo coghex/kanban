@@ -49,6 +49,7 @@ library
     Kanban.Card
     Kanban.Claude
     Kanban.Codex
+    Kanban.CommandCapture
     Kanban.Config
     Kanban.Domain
     Kanban.Drainer

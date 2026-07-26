@@ -26,6 +26,7 @@ module Kanban.Review
     canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    claudeCommandBounds,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -51,6 +52,7 @@ module Kanban.Review
     reserveToolSlot,
     resolveCanonicalIssueReviewer,
     reviewStageForLabels,
+    runAuthenticatedClaude,
     runCanonicalCommand,
     runCanonicalIssueReview,
     runGitHubIssueTool,
@@ -62,8 +64,8 @@ module Kanban.Review
   )
 where
 
-import Control.Concurrent (MVar, ThreadId, forkIO, killThread, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import Control.Concurrent.MVar (readMVar, tryReadMVar)
+import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (readMVar)
 import Control.Exception (Exception, IOException, displayException, try)
 import Control.Monad (forever, unless, void)
 import Data.Aeson
@@ -84,7 +86,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -93,6 +95,18 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
+import Kanban.CommandCapture
+  ( CommandBounds (..),
+    CommandOutcome (..),
+    StreamCaptureResult (..),
+    awaitCommandOutcome,
+    captureGraceMicros,
+    capturedBytes,
+    commandRanToCompletion,
+    releaseCapture,
+    renderWindow,
+    startCapture,
+  )
 import Kanban.Domain (Repository (..), WorkflowConfig (..), defaultWorkflowConfig)
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
@@ -237,20 +251,6 @@ data GitHubIssueToolRequest = GitHubIssueToolRequest
   }
   deriving stock (Eq, Show)
 
--- | The two independent bounds every review subprocess runs under: how long
--- it may take to *exit*, and how much longer than that its output capture
--- may lag before the call gives up on a stream something still holds open.
--- Keeping them separate is what stops an already-observed exit from being
--- reported as a timeout (issue #15). Production uses 'githubCommandBounds'
--- and 'canonicalCommandBounds'; tests inject sub-second values so the
--- deadline and grace paths are reachable without waiting out the real 30 s
--- and one-hour deadlines.
-data CommandBounds = CommandBounds
-  { commandDeadlineMicros :: Int,
-    commandCaptureGraceMicros :: Int
-  }
-  deriving stock (Eq, Show)
-
 data ReviewClient = ReviewClient
   { reviewInput :: Handle,
     reviewProcess :: ProcessHandle,
@@ -288,7 +288,12 @@ data ReviewClient = ReviewClient
     -- mutation-specific wrappers above 'runGitHubCommand' -- which is where
     -- the verify-before-retry guidance is chosen -- are all reachable from a
     -- test that injects short bounds.
-    reviewCommandBounds :: CommandBounds
+    reviewCommandBounds :: CommandBounds,
+    -- | The bounds the @claude@ subprocess behind @kanban_run_claude@ runs
+    -- under, carried here for the same reason: 'runAuthenticatedClaude' is
+    -- only reachable through the client, so its deadline and capture-grace
+    -- paths would otherwise cost ten real minutes to reach from a test.
+    reviewClaudeBounds :: CommandBounds
   }
 
 -- | Tracks every externally spawned review-tool child process (each
@@ -655,7 +660,8 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewSessionLog = sessionLog,
                 reviewOutputDone = outputDone,
                 reviewErrorDone = errorDone,
-                reviewCommandBounds = githubCommandBounds
+                reviewCommandBounds = githubCommandBounds,
+                reviewClaudeBounds = claudeCommandBounds
               }
       initialized <- timeout initializationTimeoutMicros (initializeClient client outputHandle)
       case initialized of
@@ -691,6 +697,11 @@ startReviewClient workflowConfig repository eventSink = do
 -- placeholder process (@git --version@, already an audited invocation of
 -- this codebase's own workflow) so shutdown still has a real, killable
 -- process to operate on.
+--
+-- The injected bounds stand in for *both* production sets, so a fake
+-- @claude@ reaches the deadline and capture-grace paths as cheaply as a
+-- fake @gh@ does. No test needs the two to differ; one that did could
+-- override 'reviewClaudeBounds' on the result.
 newReviewClientForTesting :: CommandBounds -> FilePath -> Text -> (ReviewEvent -> IO ()) -> IO ReviewClient
 newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
   (Just inputHandle, Just _outputHandle, Just _errorHandle, processHandle) <-
@@ -728,7 +739,8 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
         reviewSessionLog = Nothing,
         reviewOutputDone = outputDone,
         reviewErrorDone = errorDone,
-        reviewCommandBounds = bounds
+        reviewCommandBounds = bounds,
+        reviewClaudeBounds = bounds
       }
 
 -- | A 'newReviewClientForTesting' whose "app-server" stdin is a pipe the
@@ -1495,116 +1507,6 @@ renderGitHubCommandResult bounds outcome = case outcome of
       GitHubCommandUnobserved ("The GitHub CLI exited but its output was still incomplete after " <> renderWindow bounds.commandCaptureGraceMicros)
     (ExitSuccess, StreamComplete outputBytes, _) -> GitHubCommandSucceeded (decodeClaudeBytes outputBytes)
 
--- | The result of running one review subprocess under 'CommandBounds':
--- either it exited (with each stream's capture flagged complete, truncated
--- or unreadable *independently*) or it outlived its deadline entirely.
-data CommandOutcome
-  = CommandExited ExitCode StreamCaptureResult StreamCaptureResult
-  | CommandUnfinished
-
-commandRanToCompletion :: CommandOutcome -> Bool
-commandRanToCompletion (CommandExited _ StreamComplete {} StreamComplete {}) = True
-commandRanToCompletion _ = False
-
-data StreamCaptureResult
-  = StreamComplete ByteString.ByteString
-  | StreamTruncated ByteString.ByteString
-  | StreamUnreadable IOException
-
-capturedBytes :: StreamCaptureResult -> ByteString.ByteString
-capturedBytes (StreamComplete bytes) = bytes
-capturedBytes (StreamTruncated bytes) = bytes
-capturedBytes (StreamUnreadable _) = ByteString.empty
-
--- | Bounds process exit and output capture *separately*. Once the process
--- has exited within its deadline its status is a fact, so a capture that
--- cannot finish only downgrades that call's *output* -- after a short
--- grace, whatever arrived is returned flagged truncated. This is the whole
--- fix for issue #15: a mutation that demonstrably ran can no longer be
--- reported as having timed out just because a descendant it spawned still
--- holds the pipe open.
---
--- Both graces are awaited under one 'timeout', and with 'readMVar' rather
--- than 'takeMVar', so a stream that did finish is still recognised as
--- complete when the other one is what ran out the clock.
-awaitCommandOutcome :: CommandBounds -> ProcessHandle -> StreamCapture -> StreamCapture -> IO CommandOutcome
-awaitCommandOutcome bounds processHandle outputCapture errorCapture = do
-  exited <- timeout bounds.commandDeadlineMicros (waitForProcess processHandle)
-  case exited of
-    Nothing -> pure CommandUnfinished
-    Just exitCode -> do
-      void . timeout bounds.commandCaptureGraceMicros $ do
-        void (readMVar outputCapture.streamCaptureDone)
-        void (readMVar errorCapture.streamCaptureDone)
-      CommandExited exitCode <$> streamCaptureResult outputCapture <*> streamCaptureResult errorCapture
-
--- | One subprocess stream's capture worker, plus everything needed to give
--- up on it. The bytes accumulate into an 'IORef' that stays readable while
--- the worker is still blocked, and completion is signalled separately --
--- 'ByteString.hGetContents' publishes only at EOF, which never arrives
--- while a descendant that inherited the pipe holds its write end, so a
--- grace period that had to @takeMVar@ the worker's result would hang
--- exactly where it is supposed to give up.
-data StreamCapture = StreamCapture
-  { streamCaptureChunks :: IORef [ByteString.ByteString],
-    streamCaptureDone :: MVar (Either IOException ()),
-    streamCaptureThread :: ThreadId,
-    streamCaptureHandle :: Handle
-  }
-
-startCapture :: Handle -> IO StreamCapture
-startCapture handle = do
-  chunks <- newIORef []
-  done <- newEmptyMVar
-  threadId <- forkIO $ do
-    outcome <- try (readChunks chunks)
-    putMVar done outcome
-  pure
-    StreamCapture
-      { streamCaptureChunks = chunks,
-        streamCaptureDone = done,
-        streamCaptureThread = threadId,
-        streamCaptureHandle = handle
-      }
-  where
-    readChunks chunks = do
-      chunk <- ByteString.hGetSome handle captureChunkBytes
-      if ByteString.null chunk
-        then pure ()
-        else atomicModifyIORef' chunks (\previous -> (chunk : previous, ())) >> readChunks chunks
-
-streamCaptureResult :: StreamCapture -> IO StreamCaptureResult
-streamCaptureResult capture = do
-  finished <- tryReadMVar capture.streamCaptureDone
-  captured <- ByteString.concat . reverse <$> readIORef capture.streamCaptureChunks
-  pure $ case finished of
-    Nothing -> StreamTruncated captured
-    Just (Left exception) -> StreamUnreadable exception
-    Just (Right ()) -> StreamComplete captured
-
--- | Retires a capture worker: a finished one only needs its pipe closed,
--- and a still-blocked one is killed first, since nothing else will ever
--- unblock a read on a pipe another process is holding open. Killing before
--- closing matters -- a blocked reader holds the handle's lock, so a close
--- attempted first would block right behind it.
-releaseCapture :: StreamCapture -> IO ()
-releaseCapture capture = do
-  finished <- tryReadMVar capture.streamCaptureDone
-  case finished of
-    Just _ -> pure ()
-    Nothing -> killThread capture.streamCaptureThread
-  void (try (hClose capture.streamCaptureHandle) :: IO (Either IOException ()))
-
--- | Renders a bound for a diagnostic. Sub-second bounds only ever come from
--- tests, but they are rendered honestly rather than rounded to \"0 seconds\".
-renderWindow :: Int -> Text
-renderWindow micros
-  | micros >= 1000000 && micros `mod` 1000000 == 0 = Text.pack (show (micros `div` 1000000)) <> unit (micros `div` 1000000) " second"
-  | otherwise = Text.pack (show (micros `div` 1000)) <> " ms"
-  where
-    unit 1 singular = singular
-    unit _ singular = singular <> "s"
-
 -- | Spawns the authenticated Claude CLI and attaches it to the
 -- invocation-wide reservation `key` (see 'withReservedToolSlot'). As in
 -- 'runGitHubCommand', every exit path -- natural completion, a broken input
@@ -1627,27 +1529,19 @@ runAuthenticatedClaude client key prompt = do
           if not attached
             then killManagedProcess managed >> pure (Left "Review client is shutting down")
             else do
-              outputResult <- newEmptyMVar
-              errorResult <- newEmptyMVar
-              void . forkIO $ captureHandle outputHandle outputResult
-              void . forkIO $ captureHandle errorHandle errorResult
+              outputCapture <- startCapture outputHandle
+              errorCapture <- startCapture errorHandle
               written <- try (ByteString.hPutStr inputHandle (TextEncoding.encodeUtf8 prompt) >> hClose inputHandle) :: IO (Either IOException ())
               result <- case written of
                 Left exception -> pure (Left ("Could not send the reviewer prompt to Claude: " <> exceptionText exception))
-                Right () -> do
-                  completed <-
-                    timeout claudeReviewerTimeoutMicros $ do
-                      exitCode <- waitForProcess processHandle
-                      output <- takeMVar outputResult
-                      errors <- takeMVar errorResult
-                      pure (exitCode, output, errors)
-                  pure $ case completed of
-                    Nothing -> Left "Claude Sonnet 5 revision agent timed out after ten minutes"
-                    Just captured -> renderClaudeResult captured
+                Right () -> renderClaudeResult bounds <$> awaitCommandOutcome bounds processHandle outputCapture errorCapture
+              releaseCapture outputCapture
+              releaseCapture errorCapture
               killManagedProcess managed
               pure result
         Right _ -> pure (Left "Claude CLI did not provide all three standard streams")
   where
+    bounds = client.reviewClaudeBounds
     claudeProcess claudePath =
       ( proc
           claudePath
@@ -1669,26 +1563,72 @@ runAuthenticatedClaude client key prompt = do
           create_group = True
         }
 
-captureHandle :: Handle -> MVar (Either IOException ByteString.ByteString) -> IO ()
-captureHandle handle result = do
-  captured <- try (ByteString.hGetContents handle)
-  putMVar result captured
+-- | The Claude reviewer's rendering, in the same precedence the pre-#154
+-- capture used: an unreadable stream keeps its own error, an *observed*
+-- nonzero exit stays a nonzero-exit failure whatever the capture managed,
+-- and a clean exit with complete stdout round-trips unchanged even when
+-- only stderr is still held open.
+--
+-- The one new case is a clean exit whose stdout never reached EOF. That is
+-- deliberately still a 'Right': unlike 'runGitHubCommand' and
+-- 'runCanonicalCommand', whose truncated output is read as a comment URL or
+-- a JSON verdict that a prefix would silently corrupt, this output is prose
+-- handed back to the reviewing model, which can use a partial answer and is
+-- told plainly that it is partial.
+--
+-- It deliberately does *not* carry 'outcomeUnknownMarker'. That marker says
+-- the outcome is unknown and may already have completed, which is exactly
+-- what 'CommandExited' rules out here -- the exit was observed. Nor is
+-- there a side effect to re-check: @kanban_run_claude@ runs Claude under
+-- @--permission-mode plan --safe-mode@, so both existing remedies
+-- ('githubVerificationRemedy', 'canonicalVerificationRemedy') would be
+-- telling the model to verify something that cannot have changed.
+renderClaudeResult :: CommandBounds -> CommandOutcome -> Either Text Text
+renderClaudeResult bounds outcome = case outcome of
+  CommandUnfinished -> Left claudeReviewerTimeoutMessage
+  CommandExited exitCode output errors -> case (exitCode, output, errors) of
+    (_, StreamUnreadable exception, _) -> Left ("Could not read Claude reviewer output: " <> exceptionText exception)
+    (_, _, StreamUnreadable exception) -> Left ("Could not read Claude reviewer diagnostics: " <> exceptionText exception)
+    (ExitFailure code, _, _) ->
+      Left
+        ( "Claude Sonnet 5 exited with status "
+            <> Text.pack (show code)
+            <> renderClaudeFailureDetails (capturedBytes output) (capturedBytes errors)
+        )
+    (ExitSuccess, StreamTruncated outputBytes, _) ->
+      Right (renderIncompleteClaudeOutput bounds (decodeClaudeBytes outputBytes))
+    (ExitSuccess, StreamComplete outputBytes, _)
+      | Text.null renderedOutput -> Left "Claude returned no reviewer output"
+      | otherwise -> Right renderedOutput
+      where
+        renderedOutput = decodeClaudeBytes outputBytes
 
-renderClaudeResult :: (ExitCode, Either IOException ByteString.ByteString, Either IOException ByteString.ByteString) -> Either Text Text
-renderClaudeResult (exitCode, outputResult, errorResult) = case (exitCode, outputResult, errorResult) of
-  (_, Left exception, _) -> Left ("Could not read Claude reviewer output: " <> exceptionText exception)
-  (_, _, Left exception) -> Left ("Could not read Claude reviewer diagnostics: " <> exceptionText exception)
-  (ExitSuccess, Right output, Right _)
-    | Text.null renderedOutput -> Left "Claude returned no reviewer output"
-    | otherwise -> Right renderedOutput
-    where
-      renderedOutput = decodeClaudeBytes output
-  (ExitFailure code, Right output, Right errors) ->
-    Left
-      ( "Claude Sonnet 5 exited with status "
-          <> Text.pack (show code)
-          <> renderClaudeFailureDetails output errors
-      )
+-- | What the reviewing model is handed when Claude exited cleanly but a
+-- surviving pipe holder kept its stdout from reaching EOF. Whatever arrived
+-- before the grace expired is kept -- it is the answer, just an unfinished
+-- one -- and an empty prefix says so rather than claiming Claude produced
+-- no output, which is what a discarded capture would look like.
+renderIncompleteClaudeOutput :: CommandBounds -> Text -> Text
+renderIncompleteClaudeOutput bounds captured
+  | Text.null captured =
+      "[Incomplete output: Claude Sonnet 5 exited successfully, but nothing had been captured from its output "
+        <> grace
+        <> "]"
+  | otherwise =
+      captured
+        <> "\n\n[Incomplete output: Claude Sonnet 5 exited successfully, but its output was still incomplete "
+        <> grace
+        <> " The text above is the part that was captured.]"
+  where
+    grace = "after " <> renderWindow bounds.commandCaptureGraceMicros <> "."
+
+-- | The diagnostic a Claude reviewer run that outlived its own process
+-- deadline has always returned. Held as a constant, and phrased for the
+-- production deadline, because 'claudeCommandBounds' is what production
+-- runs under; the injected bounds behind it exist only so a test can reach
+-- this path without waiting ten minutes for it.
+claudeReviewerTimeoutMessage :: Text
+claudeReviewerTimeoutMessage = "Claude Sonnet 5 revision agent timed out after ten minutes"
 
 renderClaudeFailureDetails :: ByteString.ByteString -> ByteString.ByteString -> Text
 renderClaudeFailureDetails output errors =
@@ -1975,8 +1915,15 @@ finalOutputSchema =
 initializationTimeoutMicros :: Int
 initializationTimeoutMicros = 10 * 1000 * 1000
 
-claudeReviewerTimeoutMicros :: Int
-claudeReviewerTimeoutMicros = 10 * 60 * 1000 * 1000
+-- | Production bounds for the authenticated Claude reviewer: the same
+-- ten-minute process deadline as before, with capture bounded separately
+-- behind it (issue #154).
+claudeCommandBounds :: CommandBounds
+claudeCommandBounds =
+  CommandBounds
+    { commandDeadlineMicros = 10 * 60 * 1000 * 1000,
+      commandCaptureGraceMicros = captureGraceMicros
+    }
 
 -- | Production bounds for the canonical gate: the same one-hour process
 -- deadline as before, now with capture bounded separately behind it.
@@ -1986,15 +1933,6 @@ canonicalCommandBounds =
     { commandDeadlineMicros = 60 * 60 * 1000 * 1000,
       commandCaptureGraceMicros = captureGraceMicros
     }
-
--- | How much longer than the process itself its output capture may take.
--- Long enough that an ordinary pipe drain always finishes inside it, short
--- enough that a descendant holding the pipe open cannot stall the caller.
-captureGraceMicros :: Int
-captureGraceMicros = 2 * 1000 * 1000
-
-captureChunkBytes :: Int
-captureChunkBytes = 65536
 
 claudePromptLimit :: Int
 claudePromptLimit = 100000

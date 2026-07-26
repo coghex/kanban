@@ -163,6 +163,7 @@ import Kanban.Review
     resolveCanonicalIssueReviewer,
     githubCommandBounds,
     reviewStageForLabels,
+    runAuthenticatedClaude,
     runCanonicalCommand,
     runGitHubIssueTool,
     sendReviewMessage,
@@ -2993,6 +2994,75 @@ main = hspec $ do
       canonicalReviewNotice unknown `shouldMention` "could not be observed"
       canonicalReviewActivity "python3 was not found on PATH" `shouldBe` "failed"
       canonicalReviewNotice "python3 was not found on PATH" `shouldBe` "Canonical issue review failed: python3 was not found on PATH"
+
+    -- The Claude reviewer was the third short-lived runner in this module and
+    -- the one #15 never enumerated, so it kept the very hGetContents-plus-
+    -- takeMVar shape that fix existed to remove (issue #154). Its answer is
+    -- prose read by a model rather than a URL or a JSON verdict, so unlike the
+    -- two runners above a truncated capture stays a *success* carrying what
+    -- arrived -- but it is never a timeout, and never outcome-unknown.
+    it "round-trips an ordinary fast claude reviewer call unchanged" $
+      withFakeClaudeCli ["printf '%s' 'reviewer answer'"] injectedBounds $ \_ client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        result `shouldBe` Right "reviewer answer"
+
+    it "returns the prefix captured before the grace expired when a forked child holds claude's stdout open, never a timeout" $
+      withFakeClaudeCli
+        [ "sleep 30 &",
+          "echo $! > \"$CLAUDE_CHILD_MARKER\"",
+          "printf '%s' 'partial verdict'",
+          "exit 0"
+        ]
+        injectedBounds
+        $ \markerPath client -> do
+          result <- runBoundedClaudeCall boundedCallMicros client "review this"
+          output <- requireRight "expected a clean exit with truncated stdout to keep what was captured" result
+          output `shouldMention` "partial verdict"
+          output `shouldMention` "Incomplete output"
+          output `shouldMention` "still incomplete after"
+          output `shouldNotMention` "timed out"
+          -- The marker this path must not carry: 'CommandExited' already
+          -- established the exit, and the run is read-only, so there is
+          -- neither an unknown outcome nor anything to re-verify.
+          output `shouldNotMention` "outcome is unknown"
+          output `shouldNotMention` "may already have completed"
+          markerPath `shouldRecordASweptProcess` "the child holding claude's stdout open"
+
+    it "describes an incomplete capture that yielded nothing as incomplete rather than as no output" $
+      withFakeClaudeCli
+        [ "sleep 30 &",
+          "echo $! > \"$CLAUDE_CHILD_MARKER\"",
+          "exit 0"
+        ]
+        injectedBounds
+        $ \_ client -> do
+          result <- runBoundedClaudeCall boundedCallMicros client "review this"
+          output <- requireRight "expected an empty truncated capture to still be reported as incomplete" result
+          output `shouldMention` "Incomplete output"
+          output `shouldMention` "nothing had been captured"
+          output `shouldNotMention` "Claude returned no reviewer output"
+          output `shouldNotMention` "timed out"
+
+    it "still reports a claude reviewer that outlives its own deadline as a timeout, sweeping its process group" $
+      withFakeClaudeCli ["echo $$ > \"$CLAUDE_CHILD_MARKER\"", "sleep 30"] injectedBounds $ \markerPath client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        message <- requireLeft "expected a claude reviewer past its deadline to time out" result
+        message `shouldBe` "Claude Sonnet 5 revision agent timed out after ten minutes"
+        markerPath `shouldRecordASweptProcess` "the claude reviewer that outlived its deadline"
+
+    it "still succeeds unchanged when only claude's stderr is held open past the grace" $
+      withFakeClaudeCli ["sleep 30 >/dev/null &", "printf '%s' 'complete verdict'", "exit 0"] injectedBounds $ \_ client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        result `shouldBe` Right "complete verdict"
+
+    it "keeps an observed nonzero claude exit a status failure carrying whatever prefixes were captured" $
+      withFakeClaudeCli ["sleep 30 &", "printf 'boom\\n' >&2", "exit 3"] injectedBounds $ \_ client -> do
+        result <- runBoundedClaudeCall boundedCallMicros client "review this"
+        message <- requireLeft "expected a nonzero claude exit to stay a nonzero-exit failure" result
+        message `shouldMention` "Claude Sonnet 5 exited with status 3"
+        message `shouldMention` "boom"
+        message `shouldNotMention` "Incomplete output"
+        message `shouldNotMention` "timed out"
 
   describe "persistent worker deadline UI projections" $ do
     it "renders the deadline reason distinctly from a generic provider failure" $ do
@@ -9166,6 +9236,57 @@ runBoundedGitHubTool :: Int -> ReviewClient -> GitHubIssueToolRequest -> IO (Eit
 runBoundedGitHubTool boundMicros client request = do
   outcome <- timeout boundMicros (withReservedToolSlot client "thread-1" (\key -> runGitHubIssueTool client key request))
   requireJust "the GitHub tool call did not return within its bounded window" outcome
+
+-- | A fake @claude@ on a temporary PATH plus a review client whose Claude
+-- bounds are the given ones, so 'runAuthenticatedClaude''s deadline and
+-- capture-grace paths are reachable in well under a second instead of the
+-- production ten minutes. The action is handed @$CLAUDE_CHILD_MARKER@ -- the
+-- path the script is expected to record a PID at when the test needs to see
+-- that the spawned process group was swept.
+withFakeClaudeCli :: [ByteString.ByteString] -> CommandBounds -> (FilePath -> ReviewClient -> IO result) -> IO result
+withFakeClaudeCli scriptLines bounds action =
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+        binaryRoot = temporaryRoot </> "bin"
+        fakeClaude = binaryRoot </> "claude"
+        markerPath = temporaryRoot </> "claude-child.pid"
+    createDirectory repositoryRoot
+    createDirectory binaryRoot
+    -- Drain stdin first, as the real `claude --print` does.
+    -- 'runAuthenticatedClaude' always writes the prompt and closes its end,
+    -- so a fake that exited without reading would leave that write to fail
+    -- with EPIPE at the flush -- a fixture artifact that says nothing about
+    -- the capture bounds under test, and one whose timing differs by
+    -- platform. Same reason as 'withFakeGitHubCli' above.
+    ByteString.writeFile fakeClaude (ByteString.unlines ("#!/bin/sh" : "cat >/dev/null" : scriptLines))
+    setFileMode fakeClaude 0o700
+    originalPath <- maybe "" id <$> lookupEnv "PATH"
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
+      withEnvironmentValue "CLAUDE_CHILD_MARKER" markerPath $
+        bracket
+          (newReviewClientForTesting bounds repositoryRoot "coghex/kanban" (const (pure ())))
+          stopReviewClient
+          (action markerPath)
+
+runBoundedClaudeCall :: Int -> ReviewClient -> Text -> IO (Either Text Text)
+runBoundedClaudeCall boundMicros client prompt = do
+  outcome <- timeout boundMicros (withReservedToolSlot client "thread-1" (\key -> runAuthenticatedClaude client key prompt))
+  requireJust "the Claude reviewer call did not return within its bounded window" outcome
+
+-- | Asserts the process a fixture recorded is gone by the time the runner
+-- returned, which is how a test sees the spawned process group swept. A
+-- killed process is already absent from this snapshot even before its parent
+-- reaps it, so no wait is needed here.
+shouldRecordASweptProcess :: FilePath -> String -> Expectation
+shouldRecordASweptProcess markerPath description = do
+  pid <- readRecordedPid markerPath
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities ->
+      case identityForPid pid identities of
+        Nothing -> pure ()
+        Just _ -> expectationFailure ("expected " <> description <> " (pid " <> show pid <> ") to have been terminated")
 
 -- | A fake canonical reviewer executable, with @XDG_CACHE_HOME@ pointed at
 -- the temporary root so the run's session log lands somewhere inspectable.
