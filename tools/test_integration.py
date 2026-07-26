@@ -1470,6 +1470,27 @@ class PostMergeCleanupTests(ProcessPrFixture):
             for path in sorted(self.incident_dir.glob("incident-*.json"))
         ]
 
+    def _stuck_cleanup_record(self):
+        """A merged PR #7 that still owes one issue close, and nothing else, so
+        an escalation is attributable to that single obligation."""
+        record = drain_prs.plan_cleanup(
+            {
+                "number": 7,
+                "headRefName": "issue-7-departed",
+                "headRefOid": "b" * 40,
+                "closingIssuesReferences": [
+                    {
+                        "number": 7,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                ],
+            }
+        )
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        return record
+
     def _script_merge_with_failing_issue_close(self):
         self.fake.script("gh", ["pr", "merge", "42"], stdout="")
         self.fake.script(
@@ -1537,24 +1558,7 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertEqual(len(self._pr_merge_calls()), 1)
 
     def test_repeated_cleanup_failure_escalates_without_blocking_another_pr(self):
-        stuck = drain_prs.plan_cleanup(
-            {
-                "number": 7,
-                "headRefName": "issue-7-departed",
-                "headRefOid": "b" * 40,
-                "closingIssuesReferences": [
-                    {
-                        "number": 7,
-                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
-                    }
-                ],
-            }
-        )
-        # Only the failing obligation, so the escalation below is attributable
-        # to it alone.
-        stuck["pending"] = [
-            item for item in stuck["pending"] if item["kind"] == "issue"
-        ]
+        stuck = self._stuck_cleanup_record()
         self._write_state(
             {
                 "version": drain_prs.STATE_VERSION,
@@ -1639,22 +1643,7 @@ class PostMergeCleanupTests(ProcessPrFixture):
         )
 
     def test_an_escalated_cleanup_resolves_its_incident_once_it_finishes(self):
-        stuck = drain_prs.plan_cleanup(
-            {
-                "number": 7,
-                "headRefName": "issue-7-departed",
-                "headRefOid": "b" * 40,
-                "closingIssuesReferences": [
-                    {
-                        "number": 7,
-                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
-                    }
-                ],
-            }
-        )
-        stuck["pending"] = [
-            item for item in stuck["pending"] if item["kind"] == "issue"
-        ]
+        stuck = self._stuck_cleanup_record()
         stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
         self._write_state(
             {
@@ -1683,6 +1672,100 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["status"], "resolved")
         self.assertNotIn("7", self._read_state()["prs"])
+
+    def test_an_intentional_stop_does_not_hide_a_still_failing_cleanup(self):
+        # Stopping the drainer resolves every open incident for the repository.
+        # A debt that is still outstanding must be reported again on the next
+        # poll rather than stay hidden behind the id of an incident that no
+        # longer exists.
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        first = self._incidents()
+        self.assertEqual([entry["status"] for entry in first], ["open"])
+
+        with self._drainer():
+            drain_prs_service.resolve_open_incidents(
+                self.ctx.path, "Drainer stopped intentionally."
+            )
+        self.assertEqual(
+            [entry["status"] for entry in self._incidents()], ["resolved"]
+        )
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 2)
+        opened = [entry for entry in incidents if entry["status"] == "open"]
+        self.assertEqual(len(opened), 1)
+        self.assertNotEqual(opened[0]["incident_id"], first[0]["incident_id"])
+        self.assertEqual(
+            self._read_state()["prs"]["7"]["cleanup"]["incident"],
+            opened[0]["incident_id"],
+        )
+
+    def test_an_unreadable_remote_leaves_the_branch_obligation_outstanding(self):
+        # `git ls-remote --exit-code` reports a missing branch as exactly 2; a
+        # remote it cannot reach at all is 128. Reading the latter as absence
+        # would discharge a deletion that never happened.
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "remote-branch"
+        ]
+        run_git(
+            ["remote", "set-url", "origin", str(self.root / "missing.git")],
+            cwd=self.main,
+        )
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("deleting remote branch issue-99-demo", errors[0])
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "remote-branch", "branch": "issue-99-demo"}],
+        )
+        self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+
+    def test_an_unreadable_repository_leaves_the_local_branch_outstanding(self):
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "local-branch"
+        ]
+        broken = drain_prs.RepoContext(
+            self.root / "not-a-repository",
+            self.ctx.repo_slug,
+            self.ctx.repo_name,
+            self.ctx.default_branch,
+        )
+        (self.root / "not-a-repository").mkdir()
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(broken, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("deleting local branch issue-99-demo", errors[0])
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "local-branch", "branch": "issue-99-demo"}],
+        )
+        self.assertTrue(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
 
     def test_a_closed_unmerged_pr_is_forgotten_without_running_cleanup(self):
         closed = self._base_pr_json()

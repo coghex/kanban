@@ -1360,8 +1360,16 @@ def delete_local_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> None
         cwd=ctx.path,
         check=False,
     )
-    if proc.returncode != 0:
+    # Exactly 1 means the ref is absent, which is this step already done.
+    # Anything else (128: no repository, unreadable refs) is a failed lookup,
+    # and reading it as absence would discharge an obligation never performed.
+    if proc.returncode == 1:
         return
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(
+            f"Could not determine whether local branch {branch} exists:\n{detail}"
+        )
     log(f"Deleting local branch {branch}")
     if dry_run:
         return
@@ -1374,8 +1382,17 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
         cwd=ctx.path,
         check=False,
     )
-    if proc.returncode != 0:
+    # `--exit-code` reports "no matching refs" as exactly 2; a transient
+    # network, auth or remote failure is 128. Only the former means the branch
+    # is already gone -- the latter must keep the obligation outstanding rather
+    # than let a merged PR be forgotten with its remote branch still there.
+    if proc.returncode == 2:
         return
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(
+            f"Could not determine whether remote branch {branch} exists:\n{detail}"
+        )
     log(f"Deleting remote branch {branch}")
     if dry_run:
         return
@@ -1801,13 +1818,18 @@ def advance_pending_cleanup(
             f"outstanding after {passes} pass(es); will retry"
         )
         return False
-    if record.get("incident") is None:
-        incident = drain_prs_service.record_cleanup_incident(
-            repo_path=ctx.path,
-            pull_request=number,
-            steps=steps,
-            error=record["last_error"],
-        )
+    # Recorded unconditionally rather than only when this record names no
+    # incident: recording is idempotent while one is open, and an id it still
+    # names may belong to an incident that has since been resolved -- an
+    # intentional stop clears every open incident for the repository. Trusting
+    # the stored id would hide an outstanding debt for good.
+    incident = drain_prs_service.record_cleanup_incident(
+        repo_path=ctx.path,
+        pull_request=number,
+        steps=steps,
+        error=record["last_error"],
+    )
+    if incident["incident_id"] != record.get("incident"):
         record["incident"] = incident["incident_id"]
         log(
             f"PR #{number}: post-merge cleanup still outstanding after {passes} "
