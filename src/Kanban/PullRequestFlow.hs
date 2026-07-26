@@ -30,7 +30,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), agentOutcome, parseSolveOutputLine, resumeProvenanceHeader)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, flushUnknownAggregates, newUnknownAggregator, parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
@@ -119,6 +119,10 @@ runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteS
 runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
+  -- One aggregator per invocation, flushed by 'closeWithOutcome' on every
+  -- terminal path, exactly as in "Kanban.Solve": unknown-payload notices are
+  -- bounded and collapsed identically whichever flow drives the provider.
+  aggregator <- newUnknownAggregator
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (PullRequestFlowDiagnostic pullRequestNumber message) >> pure Nothing
@@ -128,7 +132,7 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
       pure (Just value)
   executable <- findExecutable executableName
   case executable of
-    Nothing -> closeWithOutcome sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
+    Nothing -> closeWithOutcome aggregator sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
       -- Masked from before the process is even spawned through its
       -- registration, so a deadline's cancellation can never land in the
@@ -156,13 +160,13 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
           _ -> eventSink (PullRequestProcessSpawning pullRequestNumber False)
         pure result
       case started of
-        Left exception -> closeWithOutcome sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
+        Left exception -> closeWithOutcome aggregator sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           managedResult <- readIORef managedRef
           case managedResult of
-            Nothing -> closeWithOutcome sessionLog (SolveFailed "internal error: PR agent process was not registered as managed")
+            Nothing -> closeWithOutcome aggregator sessionLog (SolveFailed "internal error: PR agent process was not registered as managed")
             Just managed -> do
               sessionRef <- newIORef existingSession
               lastMessageRef <- newIORef ""
@@ -172,17 +176,21 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
               void . forkIO $
                 void (runStreamReaderWith (readLineFor "stderr" errorHandle) "stderr" (stderrOnLine sessionLog eventSink pullRequestNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink pullRequestNumber) abandon
+              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink pullRequestNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef
               abandonReason <- readIORef abandonReasonRef
               let outcome = maybe (flowOutcome exitCode lastMessage) SolveFailed abandonReason
-              closeWithOutcome sessionLog outcome
-        Right _ -> closeWithOutcome sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
+              closeWithOutcome aggregator sessionLog outcome
+        Right _ -> closeWithOutcome aggregator sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot
-    closeWithOutcome sessionLog outcome = do
+    -- Before the terminal event, never after: replay stops at the terminal
+    -- journal envelope, so a summary emitted later would be written but never
+    -- replayed.
+    closeWithOutcome aggregator sessionLog outcome = do
+      flushUnknownAggregates aggregator >>= mapM_ (eventSink . PullRequestFlowOutput pullRequestNumber)
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
@@ -291,8 +299,8 @@ actionName PullRequestRereview = "rereview"
 -- | Per-line handler for the stdout reader: raw-line session logging,
 -- session-id capture, and agent-message forwarding, unchanged from before
 -- this module's reader loop was unified in "Kanban.StreamReader".
-stdoutOnLine :: Maybe SessionLog -> IORef (Maybe Text) -> IORef Text -> (PullRequestFlowEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
-stdoutOnLine sessionLog sessionRef lastMessageRef eventSink number line = do
+stdoutOnLine :: Maybe SessionLog -> UnknownAggregator -> IORef (Maybe Text) -> IORef Text -> (PullRequestFlowEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink number line = do
   mapM_ (\value -> logRawLine value "stdout" line) sessionLog
   case parseSolveOutputLine line of
     Left _ -> emitDiagnostic line
@@ -300,7 +308,7 @@ stdoutOnLine sessionLog sessionRef lastMessageRef eventSink number line = do
       case sessionId of
         Nothing -> pure ()
         Just value -> writeIORef sessionRef (Just value) >> eventSink (PullRequestSessionIdentified number value)
-      mapM_ emitMessage messages
+      mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ emitMessage) messages
   where
     emitMessage agentEvent
       | Text.null (Text.strip agentEvent.agentEventSummary) = pure ()

@@ -9,9 +9,10 @@ import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
-import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sortOn)
+import Data.Char (isControl)
+import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
+import Data.Maybe (catMaybes, isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
@@ -161,10 +162,15 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    StreamEvent (..),
+    admitStreamEvent,
     claudeReviewerModel,
     claudeSolverModel,
     codexReviewerModel,
     codexSolverModel,
+    flushUnknownAggregates,
+    maxUnknownNoticeLength,
+    newUnknownAggregator,
     parseSolveOutputLine,
     renderAgentEvent,
     resumeProvenanceHeader,
@@ -172,6 +178,7 @@ import Kanban.Solve
     runSolveWith,
     solveArguments,
     solveOutcome,
+    unknownNoticeSamples,
   )
 import Kanban.Settings (ChatVerbosity (..), Settings (..), defaultSettings, loadSettings, saveSettings)
 import Kanban.StreamReader
@@ -3312,23 +3319,172 @@ main = hspec $ do
       parseSolveOutputLine "{\"type\":\"thread.started\",\"thread_id\":\"019f-session\"}"
         `shouldBe` Right (Just "019f-session", [])
       parseSolveOutputLine "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #42\"}}"
-        `shouldBe` Right (Nothing, [AgentEvent "message" "Created PR #42" "" (Just "Created PR #42")])
+        `shouldBe` Right (Nothing, [StreamEvent Nothing (AgentEvent "message" "Created PR #42" "" (Just "Created PR #42"))])
 
     it "extracts Claude session ids and assistant text" $ do
       parseSolveOutputLine "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}"
         `shouldBe` Right (Just "claude-session", [])
       parseSolveOutputLine "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Working in issue-42\"}]}}"
-        `shouldBe` Right (Nothing, [AgentEvent "message" "Working in issue-42" "" (Just "Working in issue-42")])
+        `shouldBe` Right (Nothing, [StreamEvent Nothing (AgentEvent "message" "Working in issue-42" "" (Just "Working in issue-42"))])
 
     it "promotes Claude Bash tools to visible running commands while retaining full input" $ do
       let toolLine = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"git status --short\"}}]}}"
       case parseSolveOutputLine toolLine of
-        Right (_, [agentEvent]) -> do
+        Right (_, [streamEvent]) -> do
+          let agentEvent = streamEvent.streamEventAgent
           agentEvent.agentEventKind `shouldBe` "command"
           renderAgentEvent CompactChat agentEvent `shouldBe` Just "[command] git status --short"
           renderAgentEvent StandardChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "git status --short")
           renderAgentEvent FullChat agentEvent `shouldSatisfy` maybe False (Data.Text.isInfixOf "command")
         result -> expectationFailure ("unexpected parsed tool event: " <> show result)
+
+    it "bounds every unrecognized payload to a single-line notice instead of embedding its whole JSON" $ do
+      -- One chatty unrecognized type per parser fallback, each carrying a
+      -- payload far larger than the notice budget.
+      let blob = Data.Text.replicate 400 "0123456789"
+          topLevel = "{\"type\":\"telemetry\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}"
+          item = "{\"type\":\"item.completed\",\"item\":{\"type\":\"heartbeat\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}}"
+          content = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"telemetry_delta\",\"blob\":\"" <> Data.Text.unpack blob <> "\"}]}}"
+      notices <- traverse (\(line, tag) -> (,) tag <$> singleNotice (ByteString.pack line)) [(topLevel, "[event] telemetry"), (item, "[item] heartbeat"), (content, "[content] telemetry_delta")]
+      mapM_
+        ( \(tag, agentEvent) -> do
+            let summary = agentEvent.agentEventSummary
+            summary `shouldSatisfy` Data.Text.isPrefixOf tag
+            Data.Text.length summary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            Data.Text.lines summary `shouldSatisfy` ((== 1) . length)
+            -- A prefix of the payload is kept for diagnosis; the payload
+            -- itself never is.
+            summary `shouldSatisfy` Data.Text.isInfixOf "0123456789"
+            summary `shouldNotSatisfy` Data.Text.isInfixOf blob
+            -- The detail lives inside the one-line summary, so even the Full
+            -- rendering (which would otherwise indent a detail onto its own
+            -- lines) stays one bounded line.
+            agentEvent.agentEventDetail `shouldBe` ""
+            case renderAgentEvent FullChat agentEvent of
+              Nothing -> expectationFailure "expected the Full rendering to keep the unknown notice"
+              Just rendered -> do
+                rendered `shouldBe` summary
+                Data.Text.length rendered `shouldSatisfy` (<= maxUnknownNoticeLength)
+        )
+        notices
+
+    it "gives a missing, non-string, blank, multi-line, or overlong type a bounded one-line label" $ do
+      -- Every shape of unusable or hostile 'type' across all three
+      -- fallbacks. None may escape the whole-notice bound or the one-line
+      -- rule, and none may be dropped.
+      let payloads =
+            [ "{\"detail\":\"no type at all\"}",
+              "{\"type\":42,\"detail\":\"numeric type\"}",
+              "{\"type\":{\"nested\":\"object\"},\"detail\":\"object type\"}",
+              "{\"type\":[\"array\"],\"detail\":\"array type\"}",
+              "{\"type\":\"   \",\"detail\":\"blank type\"}",
+              "{\"type\":\"first\\nsecond\\rthird\\ttab\",\"detail\":\"multi-line type\"}",
+              "{\"type\":\"bell\\u0007bidi\\u202e\",\"detail\":\"control type\"}",
+              "{\"type\":\"" <> replicate 500 'z' <> "\",\"detail\":\"overlong type\"}"
+            ]
+          wrapped payload =
+            [ ByteString.pack payload,
+              ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload <> "}"),
+              ByteString.pack ("{\"type\":\"assistant\",\"message\":{\"content\":[" <> payload <> "]}}")
+            ]
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            let summary = agentEvent.agentEventSummary
+            summary `shouldSatisfy` (not . Data.Text.null)
+            Data.Text.length summary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            Data.Text.lines summary `shouldSatisfy` ((== 1) . length)
+            summary `shouldSatisfy` Data.Text.all (not . isControl)
+        )
+        (concatMap wrapped payloads)
+
+    it "reports the first three occurrences of an unknown key and collapses the rest into one counted summary" $ do
+      -- The exact boundary: three occurrences are all reported and leave no
+      -- summary behind; a fourth suppresses itself and redeems the key as a
+      -- single total-count summary.
+      let telemetry = "{\"type\":\"telemetry\",\"n\":1}"
+      atBoundary <- aggregatedNotices (replicate unknownNoticeSamples telemetry)
+      length atBoundary `shouldBe` unknownNoticeSamples
+      atBoundary `shouldSatisfy` all (Data.Text.isPrefixOf "[event] telemetry ")
+      atBoundary `shouldSatisfy` all (not . Data.Text.isInfixOf "×")
+
+      pastBoundary <- aggregatedNotices (replicate (unknownNoticeSamples + 1) telemetry)
+      length pastBoundary `shouldBe` unknownNoticeSamples + 1
+      last pastBoundary `shouldBe` "[event] telemetry ×4"
+
+      -- A chatty type stays O(1) per invocation however long it runs.
+      chatty <- aggregatedNotices (replicate 418 telemetry)
+      length chatty `shouldBe` unknownNoticeSamples + 1
+      last chatty `shouldBe` "[event] telemetry ×418"
+
+    it "counts each category, type, and prefix-sharing type apart, and lets recognized events pass between repeats" $ do
+      -- 'foo' arriving as a top-level event, a Codex item, and a Claude
+      -- content block is three independent keys, not one; two distinct long
+      -- types that share a bounded display prefix are two keys, not one; and
+      -- recognized output interleaved with the repeats neither resets a
+      -- count nor is itself suppressed.
+      let longPrefix = replicate 60 'p'
+          typeA = longPrefix <> "-alpha"
+          typeB = longPrefix <> "-beta"
+          eventFoo = "{\"type\":\"foo\"}"
+          itemFoo = "{\"type\":\"item.completed\",\"item\":{\"type\":\"foo\"}}"
+          contentFoo = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"foo\"}]}}"
+          recognizedLine = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"still working\"}}"
+          longA = "{\"type\":\"" <> typeA <> "\"}"
+          longB = "{\"type\":\"" <> typeB <> "\"}"
+      notices <-
+        aggregatedNotices
+          ( concat (replicate 5 [eventFoo, itemFoo, contentFoo])
+              <> [recognizedLine]
+              <> concat (replicate 5 [eventFoo, itemFoo, contentFoo])
+              <> replicate 5 longA
+              <> replicate 7 longB
+          )
+      let summaries = filter (Data.Text.isInfixOf "×") notices
+      -- Each of the five keys is counted on its own; the interleaved
+      -- recognized event did not restart 'foo' at one.
+      sort summaries
+        `shouldBe` sort
+          [ "[content] foo ×10",
+            "[event] " <> Data.Text.pack (take 47 typeA) <> "… ×5",
+            "[event] " <> Data.Text.pack (take 47 typeB) <> "… ×7",
+            "[event] foo ×10",
+            "[item] foo ×10"
+          ]
+      notices `shouldSatisfy` elem "still working"
+
+    it "keeps a textual error message in full while bounding an error payload that has no usable message" $ do
+      -- The one exemption stays: a literal string 'message' is never
+      -- truncated. Anything else about an 'error' payload — missing,
+      -- non-string, or blank message — is bounded like any other
+      -- unrecognized payload rather than embedding the raw JSON.
+      let longMessage = Data.Text.replicate 120 "failure detail "
+          textualError = ByteString.pack ("{\"type\":\"error\",\"message\":\"" <> Data.Text.unpack longMessage <> "\"}")
+          textualItemError = ByteString.pack ("{\"type\":\"item.completed\",\"item\":{\"type\":\"error\",\"message\":\"" <> Data.Text.unpack longMessage <> "\"}}")
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            agentEvent.agentEventKind `shouldBe` "error"
+            agentEvent.agentEventSummary `shouldBe` "[error] " <> longMessage
+            agentEvent.agentEventOutcomeText `shouldBe` Just longMessage
+        )
+        [textualError, textualItemError]
+
+      let blob = Data.Text.replicate 400 "0123456789"
+          unusable suffix = "{\"type\":\"error\"," <> suffix <> ",\"blob\":\"" <> Data.Text.unpack blob <> "\"}"
+          messageShapes = map unusable ["\"detail\":\"no message\"", "\"message\":123", "\"message\":{\"text\":\"coerced\"}", "\"message\":\"  \""]
+      mapM_
+        ( \payload ->
+            mapM_
+              ( \line -> do
+                  agentEvent <- singleNotice line
+                  agentEvent.agentEventKind `shouldBe` "event"
+                  Data.Text.length agentEvent.agentEventSummary `shouldSatisfy` (<= maxUnknownNoticeLength)
+                  agentEvent.agentEventSummary `shouldNotSatisfy` Data.Text.isInfixOf blob
+              )
+              [ByteString.pack payload, ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload <> "}")]
+        )
+        messageShapes
 
     it "identifies the session before forwarding agent output, and reports normal completion" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3473,6 +3629,74 @@ main = hspec $ do
                 case snapshotAfter of
                   Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
                   Right identities -> matchingIdentities identities [recorded] `shouldBe` []
+
+    it "records every raw line of a chatty unknown event type while forwarding only bounded, collapsed notices" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile fakeCodex (chattyProvider "unknown-stream-session" "Created PR #999" [])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            -- Only a constant number of records reach the sink the worker
+            -- journals: the samples plus one counted summary, however many
+            -- occurrences the provider streamed.
+            let notices = [agentEvent | SolveOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+            length notices `shouldBe` unknownNoticeSamples + 1
+            notices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length . (.agentEventSummary))
+            -- The summary lands before the terminal event, which is where
+            -- replay stops reading the journal.
+            case reverse collected of
+              (SolveProcessFinished _ SolveCompleted : SolveOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
+            -- Full fidelity still lives in the session log, untouched.
+            rawTelemetryLines [path | SolveLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
+
+    it "still emits exactly one aggregate summary when the provider is interrupted mid-stream" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        -- The provider stays alive after its chatty burst, so the kill below
+        -- lands as a real interruption rather than racing a normal exit. The
+        -- sentinel is only reached once every telemetry line before it has
+        -- already been read and aggregated, which is what makes the expected
+        -- count deterministic.
+        ByteString.writeFile fakeCodex (chattyProvider "interrupted-stream-session" "READY" ["sleep 30"])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            managedRef <- newIORef Nothing
+            let sink event = do
+                  modifyIORef events (event :)
+                  case event of
+                    SolveProcessStarted _ _ managed -> writeIORef managedRef (Just managed)
+                    SolveOutput _ agentEvent
+                      | agentEvent.agentEventSummary == "READY" -> readIORef managedRef >>= mapM_ killManagedProcess
+                    _ -> pure ()
+            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            collected <- reverse <$> readIORef events
+            [agentEvent.agentEventSummary | SolveOutput _ agentEvent <- collected, Data.Text.isInfixOf "×" agentEvent.agentEventSummary]
+              `shouldBe` ["[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)]
+            case reverse collected of
+              (SolveProcessFinished _ (SolveFailed _) : SolveOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the interrupted terminal event"
+            rawTelemetryLines [path | SolveLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
 
   describe "settings" $ do
     it "defaults chat output to standard and persists a selected verbosity" $
@@ -3753,6 +3977,34 @@ main = hspec $ do
                 case snapshotAfter of
                   Left message -> expectationFailure ("could not verify process death: " <> Data.Text.unpack message)
                   Right identities -> matchingIdentities identities [recorded] `shouldBe` []
+
+    it "records every raw line of a chatty unknown event type while forwarding only bounded, collapsed notices" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The PR flow owns its own stdout loop, so it needs its own proof
+        -- that the shared parser's bounding and this flow's own aggregation
+        -- are wired together the same way the solve flow's are.
+        let repositoryRoot = temporaryRoot </> "repo"
+            binaryRoot = temporaryRoot </> "bin"
+            fakeCodex = binaryRoot </> "codex"
+            repository = Repository repositoryRoot "coghex" "kanban"
+        createDirectory repositoryRoot
+        createDirectory binaryRoot
+        ByteString.writeFile fakeCodex (chattyProvider "pr-unknown-stream-session" "Reviewed" [])
+        setFileMode fakeCodex 0o700
+        originalPath <- maybe "" id <$> lookupEnv "PATH"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+            events <- newIORef []
+            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            collected <- reverse <$> readIORef events
+            let notices = [agentEvent | PullRequestFlowOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+            length notices `shouldBe` unknownNoticeSamples + 1
+            notices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length . (.agentEventSummary))
+            case reverse collected of
+              (PullRequestProcessFinished _ SolveCompleted : PullRequestFlowOutput _ summary : _) ->
+                summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+              _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
+            rawTelemetryLines [path | PullRequestLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
 
   describe "review overlay digit dispatch" $ do
     let requestId = ReviewRequestId (String "req-1")
@@ -7814,6 +8066,67 @@ isDiagnosticEvent _ = False
 isWorkerFailedEvent :: WorkerEvent -> Bool
 isWorkerFailedEvent (WorkerFinished (SolveFailed _)) = True
 isWorkerFailedEvent _ = False
+
+-- | How many occurrences of the unrecognized @telemetry@ type
+-- 'chattyProvider' streams. Comfortably past 'unknownNoticeSamples', so a
+-- run proves collapsing rather than merely staying under the sample budget.
+chattyProviderLines :: Int
+chattyProviderLines = 40
+
+-- | A fake provider that streams 'chattyProviderLines' occurrences of one
+-- unrecognized event type, each with a payload far larger than a bounded
+-- notice, then a recognized agent message. @tailCommands@ can keep it alive
+-- afterwards so a test can interrupt it deterministically once that
+-- recognized sentinel proves every telemetry line has been read.
+chattyProvider :: ByteString.ByteString -> ByteString.ByteString -> [ByteString.ByteString] -> ByteString.ByteString
+chattyProvider sessionId sentinel tailCommands =
+  ByteString.unlines
+    ( [ "#!/bin/sh",
+        "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"" <> sessionId <> "\"}'",
+        "i=0",
+        "while [ $i -lt " <> ByteString.pack (show chattyProviderLines) <> " ]; do",
+        "  printf '{\"type\":\"telemetry\",\"tick\":%s,\"blob\":\"" <> ByteString.pack (replicate 400 'x') <> "\"}\\n' \"$i\"",
+        "  i=$((i + 1))",
+        "done",
+        "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"" <> sentinel <> "\"}}'"
+      ]
+        <> tailCommands
+    )
+
+-- | How many raw stdout records a 'chattyProvider' run left in its session
+-- log, given the log paths the invocation reported opening. The §16 contract
+-- is that this stays at full fidelity no matter how aggressively the parsed
+-- notices are bounded and collapsed.
+rawTelemetryLines :: [FilePath] -> IO Int
+rawTelemetryLines [path] = do
+  contents <- ByteString.readFile path
+  pure (length (filter (ByteString.isInfixOf "\\\"telemetry\\\"") (ByteString.lines contents)))
+rawTelemetryLines paths = throwIO (userError ("expected exactly one opened session log, got " <> show paths))
+
+-- | The single agent event one provider line parses into. Anything else is
+-- a broken fixture rather than an assertion worth reporting, so it aborts
+-- the example with the shape actually produced.
+singleNotice :: ByteString.ByteString -> IO AgentEvent
+singleNotice line = case parseSolveOutputLine line of
+  Right (_, [streamEvent]) -> pure streamEvent.streamEventAgent
+  result -> throwIO (userError ("expected exactly one parsed event from " <> show line <> ", got " <> show result))
+
+-- | Runs provider lines through one invocation's unknown-payload aggregator
+-- and returns the notice summaries that invocation would journal: the events
+-- it admitted, in order, followed by the aggregate summaries it flushes
+-- before its terminal event. This is the pure-side stand-in for a full
+-- provider run, so aggregation boundaries can be asserted without spawning
+-- hundreds of lines through a real process.
+aggregatedNotices :: [String] -> IO [Text]
+aggregatedNotices providerLines = do
+  aggregator <- newUnknownAggregator
+  admitted <- concat <$> traverse (admitLine aggregator) providerLines
+  summaries <- flushUnknownAggregates aggregator
+  pure (map (.agentEventSummary) (admitted <> summaries))
+  where
+    admitLine aggregator line = case parseSolveOutputLine (ByteString.pack line) of
+      Left message -> throwIO (userError ("unparsable fixture line " <> line <> ": " <> Data.Text.unpack message))
+      Right (_, events) -> catMaybes <$> traverse (admitStreamEvent aggregator) events
 
 isSolveSessionIdentifiedEvent :: SolveEvent -> Bool
 isSolveSessionIdentifiedEvent (SolveSessionIdentified _ _) = True

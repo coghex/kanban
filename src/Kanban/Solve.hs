@@ -8,11 +8,20 @@ module Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    StreamEvent (..),
+    UnknownAggregator,
+    UnknownStreamCategory (..),
+    UnknownStreamKey (..),
+    admitStreamEvent,
     agentOutcome,
     codexSolverModel,
     claudeSolverModel,
     codexReviewerModel,
     claudeReviewerModel,
+    flushUnknownAggregates,
+    maxUnknownNoticeLength,
+    maxUnknownTypeLength,
+    newUnknownAggregator,
     parseSolveOutputLine,
     renderAgentEvent,
     resumeProvenanceHeader,
@@ -21,6 +30,7 @@ module Kanban.Solve
     solveArguments,
     solveOutcome,
     solverLabel,
+    unknownNoticeSamples,
   )
 where
 
@@ -35,6 +45,8 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
 import GHC.Generics (Generic)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,6 +56,7 @@ import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Settings (ChatVerbosity (..))
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
+import Kanban.Text (excerpt)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -95,7 +108,7 @@ data SolveEvent
 
 data ParsedSolveOutput = ParsedSolveOutput
   { parsedSessionId :: Maybe Text,
-    parsedMessages :: [AgentEvent]
+    parsedMessages :: [StreamEvent]
   }
   deriving stock (Eq, Show)
 
@@ -107,6 +120,94 @@ data AgentEvent = AgentEvent
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | A parsed agent event paired with the identity of the unknown-payload
+-- fallback that produced it, if any. The identity rides alongside
+-- 'AgentEvent' rather than inside it deliberately: aggregation is decided in
+-- the stream loops and never reaches a worker-journal envelope, so journals
+-- written before this bounding existed keep decoding exactly as they did.
+data StreamEvent = StreamEvent
+  { streamEventUnknown :: Maybe UnknownStreamKey,
+    streamEventAgent :: AgentEvent
+  }
+  deriving stock (Eq, Show)
+
+-- | Which of the parser's three unrecognized-payload fallbacks produced a
+-- notice. It is part of the aggregation key so a top-level event, a Codex
+-- item, and a Claude content block that happen to share a type string are
+-- still counted apart.
+data UnknownStreamCategory = UnknownTopLevel | UnknownCodexItem | UnknownClaudeContent
+  deriving stock (Eq, Ord, Show)
+
+-- | The identity repeated unknown payloads collapse under: the fallback's
+-- category plus the payload's usable literal-string @type@, or 'Nothing'
+-- when that type is missing, not a JSON string, or blank once normalized.
+-- The /full/ type text is kept rather than the truncated display label, so
+-- two long distinct types that share a bounded prefix never merge into one
+-- another's count.
+data UnknownStreamKey = UnknownStreamKey UnknownStreamCategory (Maybe Text)
+  deriving stock (Eq, Ord, Show)
+
+-- | The deterministic ceiling on an entire unknown-payload notice — category
+-- tag, type label, separator, and bounded detail together, not just the
+-- detail. A provider that starts emitting a chatty unrecognized event type
+-- therefore costs a fixed number of characters per occurrence in the worker
+-- journal and replayed transcript instead of its whole payload.
+maxUnknownNoticeLength :: Int
+maxUnknownNoticeLength = 200
+
+-- | The short fixed width an unknown payload's type label is normalized and
+-- truncated to before the detail is appended, so a pathological type string
+-- cannot by itself consume the whole notice budget.
+maxUnknownTypeLength :: Int
+maxUnknownTypeLength = 48
+
+-- | How many occurrences of one unknown key are reported individually before
+-- the remainder only accumulate a count, redeemed as a single aggregate
+-- summary when the invocation ends. Keeping a few samples preserves the
+-- payload variation worth seeing; suppressing the rest is what makes a
+-- chatty type cost O(1) per invocation instead of O(n).
+unknownNoticeSamples :: Int
+unknownNoticeSamples = 3
+
+-- | The stable label a payload with no usable @type@ is reported and
+-- aggregated under, so such payloads still produce a deterministic bounded
+-- notice rather than being dropped or falling back to their raw JSON.
+unknownTypePlaceholder :: Text
+unknownTypePlaceholder = "unknown"
+
+-- | Invocation-local aggregation state. Its lifetime is exactly one provider
+-- invocation and its worker journal: nothing is carried across a resume, and
+-- no entry is ever rewritten, which is what keeps this compatible with the
+-- append-only journal.
+newtype UnknownAggregator = UnknownAggregator (IORef (Map UnknownStreamKey Int))
+
+newUnknownAggregator :: IO UnknownAggregator
+newUnknownAggregator = UnknownAggregator <$> newIORef Map.empty
+
+-- | Admits one parsed event into an invocation's output. Recognized events
+-- always pass through. An unknown notice passes through for its key's first
+-- 'unknownNoticeSamples' occurrences and is suppressed afterwards, its count
+-- accumulating for 'flushUnknownAggregates'.
+admitStreamEvent :: UnknownAggregator -> StreamEvent -> IO (Maybe AgentEvent)
+admitStreamEvent _ (StreamEvent Nothing agentEvent) = pure (Just agentEvent)
+admitStreamEvent (UnknownAggregator counts) (StreamEvent (Just key) agentEvent) = do
+  seen <- atomicModifyIORef' counts (\tally -> let total = Map.findWithDefault 0 key tally + 1 in (Map.insert key total tally, total))
+  pure (if seen <= unknownNoticeSamples then Just agentEvent else Nothing)
+
+-- | The one aggregate summary each key with suppressed occurrences
+-- contributes, reporting that key's total occurrence count. Callers emit
+-- these before the invocation's terminal event, because replay stops at the
+-- terminal journal envelope and would never reach a later summary. The state
+-- is cleared as it is read so a repeated flush cannot double-report.
+flushUnknownAggregates :: UnknownAggregator -> IO [AgentEvent]
+flushUnknownAggregates (UnknownAggregator counts) = do
+  tally <- atomicModifyIORef' counts (\existing -> (Map.empty, existing))
+  pure
+    [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
+      | (key, total) <- Map.toAscList tally,
+        total > unknownNoticeSamples
+    ]
 
 codexSolverModel :: Text
 codexSolverModel = "gpt-5.4 high"
@@ -139,6 +240,11 @@ runSolve = runSolveWith (const handleReadLine)
 -- the other's.
 runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
 runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage eventSink = do
+  -- One aggregator per invocation, flushed by 'closeWithOutcome' on every
+  -- terminal path (normal EOF, needs-input handoff, failure, abandonment,
+  -- cancellation), so a chatty unknown type's tail is always redeemed as a
+  -- single counted summary and never carried into another invocation.
+  aggregator <- newUnknownAggregator
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -148,7 +254,7 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
       pure (Just value)
   executable <- findExecutable executableName
   case executable of
-    Nothing -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
+    Nothing -> finishWithoutProcess aggregator sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
       -- Masked from before the process is even spawned through its
       -- registration, so a deadline's cancellation can never land in the
@@ -179,13 +285,13 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
           _ -> eventSink (SolveProcessSpawning issueNumber False)
         pure result
       case started of
-        Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
+        Left exception -> finishWithoutProcess aggregator sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           managedResult <- readIORef managedRef
           case managedResult of
-            Nothing -> finishWithoutProcess sessionLog (SolveFailed "internal error: provider process was not registered as managed")
+            Nothing -> finishWithoutProcess aggregator sessionLog (SolveFailed "internal error: provider process was not registered as managed")
             Just managed -> do
               sessionRef <- newIORef existingSession
               lastMessageRef <- newIORef ""
@@ -195,23 +301,28 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
               void . forkIO $
                 void (runStreamReaderWith (readLineFor "stderr" errorHandle) "stderr" (stderrOnLine sessionLog eventSink issueNumber) abandon)
                   `finally` putMVar diagnosticsDone ()
-              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber) abandon
+              _ <- runStreamReaderWith (readLineFor "stdout" outputHandle) "stdout" (stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink issueNumber) abandon
               exitCode <- waitForProcess processHandle
               takeMVar diagnosticsDone
               lastMessage <- readIORef lastMessageRef
               abandonReason <- readIORef abandonReasonRef
               let outcome = maybe (solveOutcome exitCode lastMessage) SolveFailed abandonReason
-              closeWithOutcome sessionLog outcome
-        Right _ -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " did not provide stdout and stderr pipes"))
+              closeWithOutcome aggregator sessionLog outcome
+        Right _ -> finishWithoutProcess aggregator sessionLog (SolveFailed (Text.pack executableName <> " did not provide stdout and stderr pipes"))
   where
+    -- Before the terminal event, never after: replay stops at the terminal
+    -- journal envelope, so a summary emitted later would be written but
+    -- never replayed.
+    flushAggregates aggregator = flushUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
     repositoryRoot = repository.repositoryRoot
     executableName = case brand of
       CodexSolver -> "codex"
       ClaudeSolver -> "claude"
     solverName CodexSolver = "codex"
     solverName ClaudeSolver = "claude"
-    finishWithoutProcess sessionLog outcome = closeWithOutcome sessionLog outcome
-    closeWithOutcome sessionLog outcome = do
+    finishWithoutProcess aggregator sessionLog outcome = closeWithOutcome aggregator sessionLog outcome
+    closeWithOutcome aggregator sessionLog outcome = do
+      flushAggregates aggregator
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =
@@ -338,7 +449,7 @@ resumeProvenanceHeader config ResumeAutomatedChangesRequested =
     <> config.changesRequestedLabel
     <> ", not because of a user message. The following automated handoff directs you to the canonical review blockers; it is not the blocker text itself:"
 
-parseSolveOutputLine :: ByteString.ByteString -> Either Text (Maybe Text, [AgentEvent])
+parseSolveOutputLine :: ByteString.ByteString -> Either Text (Maybe Text, [StreamEvent])
 parseSolveOutputLine bytes = do
   value <- case eitherDecodeStrict' bytes of
     Left message -> Left (Text.pack message)
@@ -356,43 +467,129 @@ parseSolveValue value = case fieldText "type" value of
   Just "result" ->
     let resultText = fieldText "result" value
         usage = maybe "" (("usage: " <>) . compactValue) (fieldValue "usage" value)
-     in ParsedSolveOutput (fieldText "session_id" value) (maybe [] (\message -> [agentMessage message usage]) resultText)
-  Just "turn.completed" -> ParsedSolveOutput Nothing (maybe [] (\usage -> [AgentEvent "usage" "[usage] turn complete" (compactValue usage) Nothing]) (fieldValue "usage" value))
-  Just "error" -> ParsedSolveOutput Nothing [errorEvent (fromMaybe (compactValue value) (fieldText "message" value))]
-  messageType -> ParsedSolveOutput Nothing [AgentEvent "event" ("[event] " <> fromMaybe "unknown" messageType) (compactValue value) Nothing]
+     in ParsedSolveOutput (fieldText "session_id" value) (maybe [] (\message -> [recognized (agentMessage message usage)]) resultText)
+  Just "turn.completed" -> ParsedSolveOutput Nothing (maybe [] (\usage -> [recognized (AgentEvent "usage" "[usage] turn complete" (compactValue usage) Nothing)]) (fieldValue "usage" value))
+  Just "error" -> ParsedSolveOutput Nothing [errorOrUnknown UnknownTopLevel value]
+  _ -> ParsedSolveOutput Nothing [unknownStreamEvent UnknownTopLevel value]
 
-parseCodexItem :: Value -> [AgentEvent]
+parseCodexItem :: Value -> [StreamEvent]
 parseCodexItem item = case fieldText "type" item of
-  Just "agent_message" -> maybe [] (\message -> [agentMessage message ""]) (fieldText "text" item)
+  Just "agent_message" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" item)
   Just "reasoning" ->
     let reasoning = firstText [fieldValue "summary" item, fieldValue "text" item, fieldValue "content" item]
-     in maybe [] (\message -> [AgentEvent "reasoning" "[reasoning]" message Nothing]) reasoning
+     in maybe [] (\message -> [recognized (AgentEvent "reasoning" "[reasoning]" message Nothing)]) reasoning
   Just "command_execution" ->
     let command = fromMaybe "" (fieldText "command" item)
         status = maybe "" (" · " <>) (fieldText "status" item)
         output = fromMaybe "" (firstText [fieldValue "aggregated_output" item, fieldValue "output" item])
-     in [AgentEvent "command" ("[command] " <> command <> status) output Nothing | not (Text.null command)]
-  Just "file_change" -> [AgentEvent "file" "[files] changes applied" (compactValue item) Nothing]
+     in [recognized (AgentEvent "command" ("[command] " <> command <> status) output Nothing) | not (Text.null command)]
+  Just "file_change" -> [recognized (AgentEvent "file" "[files] changes applied" (compactValue item) Nothing)]
   Just "mcp_tool_call" -> toolEvent item
-  Just "web_search" -> [AgentEvent "tool" "[web search] " (compactValue item) Nothing]
-  Just "todo_list" -> [AgentEvent "plan" "[plan] updated" (compactValue item) Nothing]
-  Just "error" -> maybe [] (pure . errorEvent) (fieldText "message" item)
-  itemType -> [AgentEvent "event" ("[item] " <> fromMaybe "unknown" itemType) (compactValue item) Nothing]
+  Just "web_search" -> [recognized (AgentEvent "tool" "[web search] " (compactValue item) Nothing)]
+  Just "todo_list" -> [recognized (AgentEvent "plan" "[plan] updated" (compactValue item) Nothing)]
+  Just "error" -> [errorOrUnknown UnknownCodexItem item]
+  _ -> [unknownStreamEvent UnknownCodexItem item]
 
-parseClaudeMessage :: Value -> [AgentEvent]
+parseClaudeMessage :: Value -> [StreamEvent]
 parseClaudeMessage message = maybe [] (concatMap parseClaudeContent . valueList) (fieldValue "content" message)
 
-parseClaudeContent :: Value -> [AgentEvent]
+parseClaudeContent :: Value -> [StreamEvent]
 parseClaudeContent content = case fieldText "type" content of
-  Just "text" -> maybe [] (\message -> [agentMessage message ""]) (fieldText "text" content)
-  Just "thinking" -> maybe [] (\message -> [AgentEvent "reasoning" "[reasoning]" message Nothing]) (firstText [fieldValue "thinking" content, fieldValue "text" content])
+  Just "text" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" content)
+  Just "thinking" -> maybe [] (\message -> [recognized (AgentEvent "reasoning" "[reasoning]" message Nothing)]) (firstText [fieldValue "thinking" content, fieldValue "text" content])
   Just "tool_use" -> toolEvent content
   Just "tool_result" ->
     let result = fromMaybe (compactValue content) (firstText [fieldValue "content" content, fieldValue "result" content])
-     in [AgentEvent "tool-result" "[tool result]" result Nothing]
-  contentType -> [AgentEvent "event" ("[content] " <> fromMaybe "unknown" contentType) (compactValue content) Nothing]
+     in [recognized (AgentEvent "tool-result" "[tool result]" result Nothing)]
+  _ -> [unknownStreamEvent UnknownClaudeContent content]
 
-toolEvent :: Value -> [AgentEvent]
+-- | A recognized event, carrying no aggregation identity: it is emitted
+-- as-is however often it repeats.
+recognized :: AgentEvent -> StreamEvent
+recognized = StreamEvent Nothing
+
+-- | A recognized @error@ payload. Its full literal-string @message@ survives
+-- verbatim — the one deliberate exemption from the notice bound. A payload
+-- whose @message@ is missing, blank, or any non-string JSON is /not/
+-- exempt: it degrades to the same bounded, aggregatable notice as any other
+-- unrecognized payload instead of embedding its whole raw JSON. The check is
+-- deliberately stricter than 'fieldText', which would also coerce an array,
+-- object, number, or boolean into a "message".
+errorOrUnknown :: UnknownStreamCategory -> Value -> StreamEvent
+errorOrUnknown category value = case fieldString "message" value >>= nonEmptyText of
+  Just message -> recognized (errorEvent message)
+  Nothing -> unknownStreamEvent category value
+
+-- | The bounded one-line notice an unrecognized payload contributes, tagged
+-- with the identity repeated occurrences collapse under.
+unknownStreamEvent :: UnknownStreamCategory -> Value -> StreamEvent
+unknownStreamEvent category value =
+  let key = unknownStreamKey category value
+   in StreamEvent (Just key) (AgentEvent "event" (unknownNotice key value) "" Nothing)
+
+-- | The aggregation identity of an unrecognized payload. Only a literal JSON
+-- string is a usable type; everything else — missing, non-string, or blank
+-- once normalized — shares the one stable placeholder key.
+unknownStreamKey :: UnknownStreamCategory -> Value -> UnknownStreamKey
+unknownStreamKey category value = UnknownStreamKey category usableType
+  where
+    usableType = case fieldString "type" value of
+      Just typeText | not (Text.null (excerpt typeText)) -> Just typeText
+      _ -> Nothing
+
+-- | The whole notice for one occurrence: category tag, bounded type label,
+-- and a bounded compact rendering of the payload, all on one line and
+-- together within 'maxUnknownNoticeLength'. The detail lives in the summary
+-- rather than 'agentEventDetail' so even the Full chat rendering — which
+-- would otherwise put the detail on its own indented lines — stays one line.
+unknownNotice :: UnknownStreamKey -> Value -> Text
+unknownNotice key value =
+  let prefix = unknownNoticePrefix key
+      budget = maxUnknownNoticeLength - Text.length prefix - 1
+      detail = if budget <= 0 then "" else elide budget (excerpt (boundedCompactValue budget value))
+   in elide maxUnknownNoticeLength (if Text.null detail then prefix else prefix <> " " <> detail)
+
+-- | The single summary a key with suppressed occurrences leaves behind,
+-- reporting how many times it occurred in total.
+unknownAggregateNotice :: UnknownStreamKey -> Int -> Text
+unknownAggregateNotice key total = elide maxUnknownNoticeLength (unknownNoticePrefix key <> " ×" <> Text.pack (show total))
+
+-- | The category tag and normalized, bounded type label shared by a key's
+-- per-occurrence notices and its aggregate summary.
+unknownNoticePrefix :: UnknownStreamKey -> Text
+unknownNoticePrefix (UnknownStreamKey category usableType) = categoryTag category <> label
+  where
+    label = maybe unknownTypePlaceholder (elide maxUnknownTypeLength . excerpt) usableType
+
+categoryTag :: UnknownStreamCategory -> Text
+categoryTag UnknownTopLevel = "[event] "
+categoryTag UnknownCodexItem = "[item] "
+categoryTag UnknownClaudeContent = "[content] "
+
+-- | Truncates to at most @limit@ characters, marking any loss with a single
+-- ellipsis so a bounded notice never reads as a complete payload. The length
+-- probe drops at most @limit@ characters rather than measuring the whole
+-- value, so an oversized input is never fully traversed.
+elide :: Int -> Text -> Text
+elide limit value
+  | limit <= 0 = ""
+  | Text.null (Text.drop limit value) = value
+  | otherwise = Text.take (limit - 1) value <> "…"
+
+-- | A compact JSON rendering truncated to at least @limit@ characters
+-- without ever materializing the whole encoded value: 'encode' yields a lazy
+-- 'LazyByteString.ByteString', so taking a bounded byte prefix forces only
+-- the chunks that prefix needs. Four bytes is UTF-8's maximum per character,
+-- so the prefix always carries @limit@ characters when the value has them,
+-- and 'lenientDecode' absorbs the partial character the cut may leave.
+boundedCompactValue :: Int -> Value -> Text
+boundedCompactValue limit =
+  TextEncoding.decodeUtf8With lenientDecode
+    . LazyByteString.toStrict
+    . LazyByteString.take (fromIntegral (4 * max 0 limit + 4))
+    . encode
+
+toolEvent :: Value -> [StreamEvent]
 toolEvent value =
   let name = fromMaybe "tool" (fieldText "name" value <|> fieldText "tool" value)
       inputValue = fieldValue "input" value <|> fieldValue "arguments" value
@@ -402,8 +599,8 @@ toolEvent value =
    in case command of
         Just commandText
           | Text.toCaseFold name `elem` ["bash", "shell"] ->
-              [AgentEvent "command" ("[command] " <> commandText <> status) input Nothing]
-        _ -> [AgentEvent "tool" ("[tool] " <> name <> status) input Nothing]
+              [recognized (AgentEvent "command" ("[command] " <> commandText <> status) input Nothing)]
+        _ -> [recognized (AgentEvent "tool" ("[tool] " <> name <> status) input Nothing)]
 
 agentMessage :: Text -> Text -> AgentEvent
 agentMessage message detail = AgentEvent "message" message detail (Just message)
@@ -430,6 +627,15 @@ fieldValue _ _ = Nothing
 
 fieldText :: Text -> Value -> Maybe Text
 fieldText key value = fieldValue key value >>= valueText
+
+-- | The literal JSON string at @key@, with none of 'fieldText' \'s coercion
+-- of arrays, objects, numbers, and booleans — the strict reading the
+-- unknown-payload contract needs, where "the payload had no textual type" and
+-- "the payload had a type-shaped object" must not be confused.
+fieldString :: Text -> Value -> Maybe Text
+fieldString key value = case fieldValue key value of
+  Just (String text) -> Just text
+  _ -> Nothing
 
 valueText :: Value -> Maybe Text
 valueText (String value) = Just value
@@ -466,8 +672,8 @@ Nothing <|> fallback = fallback
 -- | Per-line handler for the stdout reader: raw-line session logging,
 -- session-id capture, and agent-message forwarding, unchanged from before
 -- this module's reader loop was unified in "Kanban.StreamReader".
-stdoutOnLine :: Maybe SessionLog -> IORef (Maybe Text) -> IORef Text -> (SolveEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
-stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber line = do
+stdoutOnLine :: Maybe SessionLog -> UnknownAggregator -> IORef (Maybe Text) -> IORef Text -> (SolveEvent -> IO ()) -> Int -> ByteString.ByteString -> IO ()
+stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink issueNumber line = do
   mapM_ (\value -> logRawLine value "stdout" line) sessionLog
   case parseSolveOutputLine line of
     Left _ ->
@@ -479,7 +685,7 @@ stdoutOnLine sessionLog sessionRef lastMessageRef eventSink issueNumber line = d
         Just value -> do
           writeIORef sessionRef (Just value)
           eventSink (SolveSessionIdentified issueNumber value)
-      mapM_ (emitMessage lastMessageRef eventSink issueNumber) messages
+      mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emitMessage lastMessageRef eventSink issueNumber)) messages
 
 emitMessage :: IORef Text -> (SolveEvent -> IO ()) -> Int -> AgentEvent -> IO ()
 emitMessage lastMessageRef eventSink issueNumber agentEvent
