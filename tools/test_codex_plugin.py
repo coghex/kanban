@@ -22,6 +22,13 @@ counterpart here by design. See docs/drafting-workflow-contract.md. The new
 skills are still subject to every structural policy this module enforces:
 frontmatter name matching, forbidden configuration keys, and no personal
 paths.
+
+Issue #125 added a third category, PACKAGED_ONLY_SKILL_NAMES: packaged and
+policy-checked, excluded from Haskell name parity like the drafting skills,
+but not part of the declared drafting surface either. EXPECTED_SKILL_NAMES is
+the union of all three, and discovery-minus-parity is now the union of the two
+non-parity sets. See tools/test_repair_workflow_contract.py for $repair's own
+behavioral contract.
 """
 
 from __future__ import annotations
@@ -64,8 +71,21 @@ HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"}
 # (docs/drafting-workflow-contract.md §3.2).
 DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review"}
 
+# Packaged, policy-checked, and excluded from Haskell name parity for the same
+# reason as the drafting skills — Kanban's CLI does not spawn them — but *not*
+# drafting workflows. DRAFTING_SKILL_NAMES names exactly the seven assets
+# docs/drafting-workflow-contract.md declares and
+# tools/test_drafting_workflow_contract.py pins, so a packaged-only workflow
+# that is not part of that declared surface needs its own set rather than a
+# seat in that one. $repair (issue #125) is packaged ahead of the Done-column
+# repair action that will spawn it; moving it into parity belongs to the issue
+# that adds the key binding (#122).
+PACKAGED_ONLY_SKILL_NAMES = {"repair"}
+
 # What a Codex installation must actually discover under skills/.
-EXPECTED_SKILL_NAMES = HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES
+EXPECTED_SKILL_NAMES = (
+    HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES | PACKAGED_ONLY_SKILL_NAMES
+)
 
 # Keys that would let a packaged manifest silently override the model,
 # reasoning effort, sandbox/approval policy, or working directory Kanban's
@@ -253,7 +273,20 @@ class SkillDiscoveryTests(unittest.TestCase):
         # Haskell code spawns. Collapsing them back into one constant would
         # either break parity or silently stop discovering the drafting skills.
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
-        self.assertEqual(EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES, DRAFTING_SKILL_NAMES)
+        self.assertEqual(
+            EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
+            DRAFTING_SKILL_NAMES | PACKAGED_ONLY_SKILL_NAMES,
+        )
+
+    def test_the_two_non_parity_sets_are_disjoint(self):
+        # $repair is packaged-but-not-spawned for the same reason as the
+        # drafting skills, but it is not part of the declared drafting surface
+        # docs/drafting-workflow-contract.md and
+        # tools/test_drafting_workflow_contract.py pin at exactly seven assets.
+        self.assertEqual(DRAFTING_SKILL_NAMES & PACKAGED_ONLY_SKILL_NAMES, set())
+        self.assertEqual(HASKELL_PARITY_SKILL_NAMES & PACKAGED_ONLY_SKILL_NAMES, set())
+        self.assertIn("repair", PACKAGED_ONLY_SKILL_NAMES)
+        self.assertNotIn("repair", DRAFTING_SKILL_NAMES)
 
     def test_the_claude_only_breadth_workflow_is_not_packaged_here(self):
         self.assertNotIn("draft-issues", EXPECTED_SKILL_NAMES)
@@ -304,9 +337,10 @@ class WorkflowNameParityTests(unittest.TestCase):
         self.assertEqual(all_tokens, HASKELL_PARITY_SKILL_NAMES)
 
     def test_no_drafting_skill_is_spawned_by_kanbans_haskell_code(self):
-        # The other half of the discovery/parity split: a drafting workflow
-        # appearing in Kanban's own invocation surface would mean this
-        # module's parity set is wrong, not that the drafting set should grow.
+        # The other half of the discovery/parity split: a workflow outside the
+        # parity set appearing in Kanban's own invocation surface would mean
+        # this module's parity set is wrong, not that the non-parity set
+        # should grow.
         haskell_sources = "\n".join(
             path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS, UI_HS)
         )
@@ -315,6 +349,7 @@ class WorkflowNameParityTests(unittest.TestCase):
         # spawn, so an extraction that silently matched nothing fails here.
         self.assertEqual(spawned & EXPECTED_SKILL_NAMES, HASKELL_PARITY_SKILL_NAMES)
         self.assertEqual(spawned & DRAFTING_SKILL_NAMES, set())
+        self.assertEqual(spawned & PACKAGED_ONLY_SKILL_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):
