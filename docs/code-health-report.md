@@ -56,24 +56,56 @@ and unmarked findings stay unchecked, so the unchecked count is the work this
 report still owes.
 
 - [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
-- [ ] 2. `UI.hs` is a god-module — [deferred]: bodies unread
-- [ ] 3. `AppState` has seven parallel session tables — [deferred]: with finding 2
+- [x] 2. `UI.hs` is a god-module — [#50]
+- [x] 3. `AppState` has seven parallel session tables — [#51]
 - [ ] 4. `drain_prs.py` is 3,152 lines — [deferred]: after #147 lands
-- [ ] 5. `Worker.hs` and `Review.hs` exceed 2,000 lines — [deferred]: unread
+- [x] 5. `Worker.hs` threads fifteen mutable cells positionally — [#153]
+- [x] 5a. `Review.hs` exceeds 2,000 lines — [no-issue]
 - [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
 - [x] 6a. Launchd label defined three times — [#146]
 - [ ] 7. `.drain-prs.json` is repo-specific at the root — [deferred]: read `kanban_config` repositories table
+- [x] 7a. Issue-reviewer install path spelled twice, in two languages — [#155]
 - [ ] 8. `review_pr.py` duplicated and diverged — [deferred]: read the two plugin sync tests
 - [x] 9. `launchctl` is undeclared — [#149]
 - [x] 10. Process-group hardening not swept — [no-issue]
 - [x] 11. `Drainer.hs` has no platform guard — [#146]
 - [x] 12. Drainer refuses to start on a dirty tree — [#145]
+- [x] 12a. #15's capture fix reached two of three review runners — [#154]
 - [x] 13. Repository override key matched exactly and silently — [#150]
+- [x] 14. `bug`, `ui`, and `input` compiled into the theme — [#152]
 
-**8 of 14 resolved. 6 deferred, 0 unprocessed.** Every unmarked finding has been
-processed; what remains is blocked, not untouched. Findings 2, 3, and 5 clear
-together once `UI.hs`, `Worker.hs`, and `Review.hs` have been read; 7 and 8 each
-clear on reading one named file; 4 clears when #147 merges.
+**15 of 18 resolved. 3 deferred, 0 unprocessed.** Every unmarked finding has been
+processed; what remains is blocked, not untouched. 7 and 8 each clear on reading
+one named file; 4 clears when #147 merges.
+
+Findings 2 and 3 were cleared by reading `src/Kanban/UI.hs` end to end. Both were
+already owned by open issues (#50, #51), so neither was refiled; the read produced
+two new issues instead — **#151**, a live defect that is a fifth instance of the
+drift #51 describes, and **#152**, recorded here as finding 14.
+
+Finding 5 was cleared by reading `src/Kanban/Worker.hs` end to end, and **its
+original premise turned out to be wrong** — see the finding for the correction.
+It produced **#153**, and split off 5a for the module it had bundled in on that
+same wrong premise.
+
+Finding 5a was closed by reading `src/Kanban/Review.hs` end to end. The size claim
+did not warrant an issue, but the read produced **#154** and **#155**, recorded as
+findings 12a and 7a in the parts whose patterns they belong to.
+
+Worth recording as a pattern: three large modules have now been read closely and
+produced three *different* diagnoses — `UI.hs` tangled, `Worker.hs` cohesive but
+hazardously parameterized, `Review.hs` multi-subject with clean seams and two
+unrelated defects. The report's structural prediction was right once and wrong
+twice. Line count reliably identifies a module worth reading; it predicts nothing
+about what will be found there. `GitHub.hs` (1,393 lines, in the coverage log)
+should be treated as a reading prompt, not as a claim.
+
+A second pattern, now with three instances (10, 12, 12a): this codebase reliably
+fixes a defect at the sites named in the issue, and reliably leaves the same
+defect standing wherever it was not enumerated. 12a is the sharpest case — #15
+named two runners and fixed exactly two, and the third still carries the bug a
+year of intervening work never surfaced. Issues here are better specified by
+removing the alternative than by listing the call sites.
 
 ---
 
@@ -151,19 +183,45 @@ lowercasing derivation would collapse them.
 | Filed | Title | From | Depends on |
 | --- | --- | --- | --- |
 | **#149** | Declare `launchctl` and bring `tools/` into the agent-workflow contract's scanned surface | 9 | — (independent) |
+| **#151** | Report a waiting issue revision as live so the processes overlay can kill it | 3 | — (must land *ahead* of #51) |
+| **#152** | Stop hardcoding `bug`, `ui`, and `input` in label chip coloring | 14 | — (independent) |
+| **#153** | Name the worker supervisor's mutable cells instead of threading them positionally | 5 | — (independent) |
+| **#154** | Apply #15's separate exit and capture bounds to the Claude reviewer subprocess | 12a | — (independent) |
+| **#155** | Resolve the canonical issue reviewer through an installer-written record instead of a duplicated default path | 7a | should share #146's record mechanism |
 
-Promoted out of Wave 2 because it was already fully evidenced, small, and — unlike
-everything else remaining — independent of the #145 → #146 → #147 chain. With that
-chain strictly serial, the board otherwise had only #148 as parallel work.
+#149 was promoted out of Wave 2 because it was already fully evidenced, small,
+and — unlike everything else remaining — independent of the #145 → #146 → #147
+chain. With that chain strictly serial, the board otherwise had only #148 as
+parallel work.
+
+#151 and #152 came out of the line-by-line read of `UI.hs`. #151 is a correctness
+bug rather than code health, and is deliberately *not* folded into #51: that issue
+is sequenced after #50, so filing the fix inside it would park a live defect behind
+two large refactors.
+
+### Already owned by pre-existing issues
+
+Findings 2 and 3 were not refiled. Both had open issues predating this audit:
+
+| Existing | Title | From |
+| --- | --- | --- |
+| **#50** | Split the 4,340-line UI.hs along its natural seams (`reviewed:approve`) | 2 |
+| **#51** | Unify the three near-identical agent-session record types — drift has already cost features | 3 |
+
+Worth knowing before either is picked up: `UI.hs` has grown from the 4,340 lines
+#50 cites to 5,706, so every approximate line range in that issue is stale.
 
 ### Wave 2 — deferred
 
-Findings **2, 3, 4, 5, 7, and 8**, each marked `[deferred]` with a note stating
+Findings **4, 5a, 7, and 8**, each marked `[deferred]` with a note stating
 precisely what has to happen before it can be filed. Three distinct reasons, worth
 separating:
 
-- **Not read yet** (2, 3, 5) — structure and export lists only. An issue written
-  from those would hand a solve agent a guess dressed as a plan.
+- **Not read yet** (5a) — line count and import surface only. An issue written
+  from that would hand a solve agent a guess dressed as a plan. Finding 5 is the
+  proof: written from the same evidence, its stated premise was wrong, and filing
+  it unread would have asked for a module split that reading showed to be the
+  wrong treatment entirely.
 - **Blocked on sequencing** (4) — evidence is adequate, but it would be a fourth
   conflicting change to `tools/drain_prs.py` and `tools/drain_prs_service.py`.
   File after #147 lands.
@@ -171,6 +229,10 @@ separating:
   could materially shrink or invalidate it. Finding 8's claim that nothing
   enforces the shared `review_pr.py` portion is the one most worth verifying
   early, since it is otherwise the strongest remaining finding.
+
+Findings **2 and 3** have left this wave: reading `UI.hs` end to end cleared both,
+and both turned out to be owned by pre-existing issues. See "Already owned by
+pre-existing issues" above.
 
 Finding **10** is closed as `[no-issue]`; see its Disposition note.
 
@@ -213,14 +275,33 @@ them to `other-modules` in the test target. This is a mechanical, behavior-free
 change and should be sequenced *before* the source-side splits below, so that
 those splits land against a suite that can be selectively built.
 
-### [deferred] 2. `src/Kanban/UI.hs` is a 5,705-line god-module
+### [#50] 2. `src/Kanban/UI.hs` is a 5,706-line god-module
 
-> **Deferred:** Structure only — exports, type declarations, and `AppState` have
-> been read; no function bodies have. The seams named below are inferred from the
-> export list, which is enough to argue the problem but not enough to specify a
-> safe cut. Clears once the module's bodies have been read.
+> **Disposition:** Already owned by #50, "Split the 4,340-line UI.hs along its
+> natural seams", which is open and carries `reviewed:approve`. The full
+> line-by-line read that cleared this finding's deferral confirmed the concern and
+> supplied new evidence, posted to that issue rather than filed separately.
 
 **Severity: High** — it is the widest blast radius in the codebase.
+
+The whole module has now been read, lines 1–5,706. Two corrections to what #50
+records, both material to whoever solves it:
+
+- **The file has grown 31% since #50 was filed** — 4,340 lines then, 5,706 now.
+  Every approximate line range in that issue's seam list is stale.
+- **The strongest argument for the split is not size.** The module already
+  contains roughly fifteen pure decision types and predicates, each carrying a
+  comment saying it was extracted so it could be tested without an `EventM` or
+  Brick harness — `OverlayMouseAction` (`:2358`), `ReviewDigitAction` (`:2845`),
+  `ReviewCancelAction` (`:3004`), `TranscriptGeometry` (`:2658`),
+  `ReviewTickArmOutcome` (`:4703`), `ReviewTickFireOutcome` (`:4723`), and the
+  rest — plus two pure render seams, `CardEnv` (`:897`) and `DetailsEnv`
+  (`:1894`), whose own comments say they exist to keep rendering exercisable on
+  its own. The pattern is understood; it is applied inconsistently. `solveBadge`
+  (`:1212`) and `reviewBadge` (`:1251`) sit beside the card code and reach into
+  `AppState` directly, bypassing the `CardEnv` that was built for them and already
+  carries `cardSolveSessions`. The one place the pattern was *not* applied to
+  review liveness is where #151's bug lives.
 
 Measured: 380 top-level definitions, 25 `data`/`newtype` declarations, a
 ~100-entry explicit export list, and a 35-field `AppState` record. It currently
@@ -257,14 +338,16 @@ order, smallest-risk first, each as its own PR:
 Leave `Kanban.UI` as the app wiring plus a re-export shim so downstream imports
 and the test suite do not churn.
 
-### [deferred] 3. `AppState` tracks seven parallel `Map Int` session tables
+### [#51] 3. `AppState` tracks seven parallel `Map Int` session tables
 
-> **Deferred:** Same reason as finding 2 — the record and the five reusability
-> predicates were read, but not the insertion and cleanup sites that would have to
-> collapse into one `AgentSlot`. Should be filed together with finding 2, since a
-> single PR would touch the same declarations.
+> **Disposition:** Already owned by #51, "Unify the three near-identical
+> agent-session record types — drift has already cost features". The full read of
+> `UI.hs` confirmed the concern, and the live defect it turned up was filed
+> separately as **#151** because #51 is explicitly sequenced after #50 and a
+> correctness fix must not wait on two large refactors.
 
 **Severity: Medium** — a live correctness hazard rather than a style complaint.
+The hazard is no longer hypothetical; see "Confirmed consequence" below.
 
 Within `AppState`:
 
@@ -288,6 +371,44 @@ process bugs, and the export list shows the codebase already fighting it:
 `pullRequestSessionAlreadyResolved`, `solveSessionAlreadyResolved`,
 `reviewSessionReusable`, `pullRequestSessionReusable`, `reusableSolveSession` —
 five near-identical predicates, one per table.
+
+**Confirmed consequence (filed as #151).** "Is this review session's turn live?"
+is written four times, and one copy disagrees. `reviewPhaseActive` (`:4048`) is
+the canonical top-level answer; `markDisconnected` (`:4675`) and
+`requestDashboardQuit` (`:2345`) agree with it; `agentSessionEntries` (`:1592`)
+hand-rolls its own and omits `ReviewWaiting`. Two of those definitions share the
+name `reviewSessionHasLiveTurn` while meaning different things, and both sit in
+`where` clauses, so nothing warns. The result is user-visible: while a revision
+agent waits on a command-approval prompt, `q` refuses to quit and tells you to
+kill the session, and `x` in the processes overlay then refuses with "no live
+process to kill" — even though `killReviewAgent`, directly beneath that gate, is
+prepared to interrupt the turn. This is a fifth drift consequence beyond the four
+#51 already lists.
+
+**Further evidence from the full read.** The parallel structure is wider than the
+maps alone:
+
+- The same session split is enumerated **five times at the type level** —
+  `AgentSessionRef` (`:414`), `TranscriptSession` (`:2629`), three `Overlay`
+  constructors, three viewport `Name`s, three panel `Name`s — with hand-written
+  mappings between them (`transcriptViewport`, `displayedTranscript`,
+  `transcriptFollowing`, `setTranscriptFollowing`).
+- **Eight function pairs are near-verbatim duplicates**, including
+  `solveSessionActive` (`:3294`) and `pullRequestReviewActive` (`:4230`), whose
+  bodies are byte-identical, and `pullRequestSessionAlreadyResolved` (`:3695`),
+  whose doc comment reads "The pull-request analogue of
+  `solveSessionAlreadyResolved`; see its documentation."
+- The clincher for the fix shape: `applyUsageRefresh` (`:5276`) is *already* the
+  unified, provider-parameterized version, and `appUsageFreshness` is already a
+  `Map UsageProvider Freshness` — yet `startCodexRefresh` (`:4921`) and
+  `startClaudeRefresh` (`:4942`) were left as two hand-written copies. The lesson
+  was applied to one half of a pair and not swept, which is the same pattern
+  findings 10 and 12 record elsewhere.
+
+`agentSessionEntries` (`:1524`) is the one place that already treats all four
+session kinds uniformly — and it does so by joining six maps by hand, then
+applying a *different* liveness rule to each. That is the unified view existing as
+a computation instead of as the storage model.
 
 **Fix shape:** one `Map Int AgentSlot`, where `AgentSlot` carries the session
 variant and its optional `ManagedProcess` together. Insertion and cleanup then
@@ -324,20 +445,95 @@ most-tested module of the set. The Python suite is already large enough
 (`test_integration.py` at 2,038 lines, plus eight other `test_*.py`) to support
 this refactor safely.
 
-### [deferred] 5. `src/Kanban/Worker.hs` and `src/Kanban/Review.hs` exceed 2,000 lines
+### [#153] 5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
 
-> **Deferred:** Line counts and import surfaces only; neither module has been
-> read. Filing now would produce a issue whose entire content is "this file is
-> big." Revisit after findings 2 and 3, which establish whether the god-module
-> pattern here is the same one `UI.hs` has.
+> **Disposition:** Filed as #153, after reading all 2,253 lines. **This finding's
+> original premise was wrong** and is corrected below; the issue that came out of
+> it is not the one this finding predicted.
 
-**Severity: Medium.**
+**Severity: Medium** — a silent-miscompile hazard in the one module whose whole
+job is defending an invariant.
 
-`Worker.hs` (2,255) and `Review.hs` (2,015) are the next tier down, followed by
-`GitHub.hs` (1,393). Same accretion pattern as `UI.hs` and worth the same
-treatment, but lower priority: their responsibilities are at least
-single-subject, so they are large rather than tangled. Deferred pending a closer
-read — see the coverage log.
+**What this finding originally claimed, and why it was wrong.** It grouped
+`Worker.hs` with `Review.hs` and asserted "same accretion pattern as `UI.hs` and
+worth the same treatment." Reading `Worker.hs` disproved that. It is genuinely
+single-subject — persistent worker supervision — with 87 top-level definitions and
+comments that are the best in the repository: each race is documented alongside
+the alternative designs that were rejected and why. Splitting it by responsibility
+is *not* the right treatment, and an issue asking for that would have been actively
+harmful. This is the case the `[deferred]` marker existed to prevent.
+
+**What is actually wrong.** `runWorkerWithTask` (`:631-1034`) is one 404-line
+function that creates fifteen mutable cells inline (`:644-671`) and threads them
+positionally through its helpers. Five are `IORef Bool`, three are `MVar ()`, and
+two are `IO Bool` closures. `watchdogLoop` (`:2117`) takes **fourteen positional
+parameters**; `waitForOrphanResolution` (`:2002`) takes nine.
+
+At the call site (`:943`), exchanging `claimCompletion` with `claimLeaseRelease`
+compiles silently — as does exchanging `watchdogDoneVar` with
+`watchdogAdjudicatedVar`, or substituting any of the five `IORef Bool` cells for
+another. These are one-shot claims arbitrating who commits the terminal outcome
+and who releases the lease; the module's own documentation (`:1944-1958`,
+`:2108-2116`) explains at length that they must be raced *separately*, because
+winning one says nothing about the other. Confusing them breaks the
+one-live-worker invariant silently, on a path that only runs when a deadline
+fires.
+
+The module's most safety-critical arbitration is therefore carried on the one axis
+the type checker cannot see — and that same positional list is what makes the
+404-line function impractical to break up, since any extraction inherits it.
+
+**Also filed with it: three stale comments.** In a module where comments are
+effectively the specification, these are defects:
+
+- `finalizeMissingState` (`:1244-1247`) claims a second entry path "lacking that,
+  has outlived the elapsed-time grace window." It has one call site (`:1169`),
+  reached only on `Just IdentityAbsent`. The comment eighty lines above
+  (`:1160-1166`) correctly states the opposite.
+- `supervisorLaunchIdentityPresenceWith` (`:1368-1372`) says `Nothing` makes the
+  caller "fall back to its own existing time-based heuristic." Neither caller does
+  — `leaseIsActive` (`:493`) treats it as active, `recoverIfWorkerStoppedWith`
+  (`:1168`) returns `False`.
+- Two `see 'runWorkerWith'` references (`:390`, `:1303`) point at a two-line alias;
+  the behavior described lives in `runWorkerWithTask` (`:681`).
+
+The first two both imply a lease with no recorded supervisor identity eventually
+ages out. It never does — that case is deliberately and permanently unacquirable.
+Defensible, but the opposite of what the comments promise.
+
+### [no-issue] 5a. `src/Kanban/Review.hs` exceeds 2,000 lines
+
+> **Disposition:** No issue — the size claim itself does not warrant one. All
+> 2,015 lines were read. `Review.hs` is multi-subject, but each subject is small
+> and coherent, and the one part that genuinely does not belong is already being
+> extracted by #154. The two real defects the read found were filed as **#154**
+> and **#155**, recorded as findings 12a and 7a. Leaving the remaining ~1,875
+> lines unsplit costs nothing observable.
+
+**Severity: Low**, once read.
+
+The read produced a third distinct diagnosis, which is the point worth keeping.
+`UI.hs` was tangled — one concept implemented several times in `where` clauses the
+compiler cannot cross-check. `Worker.hs` was cohesive but hazardously
+parameterized. `Review.hs` is neither: it holds roughly seven subjects (wire
+protocol types and decoding, app-server client lifecycle, the tool registry, the
+GitHub tool, the Claude tool, the canonical subprocess, and prompts/schemas) with
+clean boundaries between them, and after #154 removes the generic
+subprocess-running machinery the remainder is fairly described as one subject —
+the Codex app-server review client.
+
+**Noted, not filed.** The wire model identifiers are bare literals with no named
+constant: `"gpt-5.4"` at `Review.hs:794`, `Solve.hs:387`, `Solve.hs:400`, and
+`PullRequestFlow.hs:216`; `"claude-sonnet-5"` at `Review.hs:1656`, `Solve.hs:415`,
+and `PullRequestFlow.hs:224`. `Solve.hs` does define named model constants, but for
+*display* strings (`codexSolverModel = "gpt-5.4 high"`, `codexReviewerModel =
+"GPT-5.6-Terra xhigh"`) — already diverged in form from the wire values, which is
+how the duplication stays invisible. Changing a model means finding all seven
+sites. Recorded in #154's Out of scope; it spans three modules and belongs to
+whichever of them is touched next.
+
+`GitHub.hs` (1,393) is the next tier down and remains unexamined. On the evidence
+of three reads, its line count says only that it is worth opening.
 
 ---
 
@@ -451,6 +647,53 @@ config, it belongs alongside the target repository (or in Kanban's per-repositor
 config directory), and the tracked copy at the root should be renamed to
 `.drain-prs.json.example`. If they really are intended as defaults, say so in
 `docs/pr-drainer.md` and give them non-repo-specific values.
+
+### [#155] 7a. The canonical issue reviewer's install path is spelled twice, in two languages
+
+> **Disposition:** Filed as #155. Found by reading `src/Kanban/Review.hs` in full.
+
+**Severity: Medium** — it breaks a supported install option silently, on exactly
+the path this audit exists to check.
+
+The install location is written independently in two tracked places:
+
+- `src/Kanban/Review.hs:541` —
+  `home <> "/Library/Application Support/kanban/issue-review/approve_issues.py"`
+- `tools/install_issue_review.py:26-27` —
+  `Path.home() / "Library" / "Application Support" / "kanban" / "issue-review"`
+
+They agree only because both files spell the same path. The sole coupling is that
+each independently honours `KANBAN_ISSUE_REVIEW_INSTALL_DIR`. No discovery record
+exists: `write_config_reference` writes `install_dir/config.json`, inside the
+directory a reader would need to have found already, and `install()` returns
+`install_dir` only in stdout JSON that nothing retains.
+
+`install_issue_review.py` accepts `--install-dir`. Using it produces a Kanban that
+cannot find the reviewer and reports:
+
+> Canonical issue reviewer was not found at
+> `…/Library/Application Support/kanban/issue-review/approve_issues.py`.
+> Run `python3 tools/install_issue_review.py` from the Kanban checkout to install
+> it.
+
+The remediation offered is the command that just succeeded. Recovery requires
+knowing to export `KANBAN_ISSUE_REVIEW_INSTALL_DIR` into the dashboard's own
+environment — which the installer never says, and which a desktop-launched TUI may
+not inherit.
+
+**This corrects finding 6a's own issue.** #146's Background cites
+`src/Kanban/Review.hs:541` as the good example and calls `Drainer.hs` "the
+outlier." Half true — it is a well-known path rather than a composed launchd label
+— but the conclusion does not hold: this site duplicates its default across the
+language boundary exactly as the drainer's label does. A solver following #146
+today would copy it and inherit the defect. #146 needs a correcting comment.
+
+Two smaller inconsistencies in the same function: `Kanban.Review` imports neither
+`System.FilePath` nor `Kanban.Paths`, so the path is built with `<>` and literal
+separators; and `:541` is the only hardcoded `Application Support` path in `src/`
+or `app/`, where `Kanban.Worker` uses `getXdgDirectory XdgCache` and
+`Kanban.Paths`. `Drainer.hs`'s `~/Library/LaunchAgents` is not comparable —
+launchd requires a user agent plist to live there.
 
 ---
 
@@ -717,6 +960,52 @@ mid-conflict. That is strictly better than today's behavior (refuse to run), but
 it should be called out in `docs/pr-drainer.md` so the recovery path is
 documented rather than discovered.
 
+### [#154] 12a. The #15 capture fix reached two of three review subprocess runners
+
+> **Disposition:** Filed as #154. Found by reading `src/Kanban/Review.hs` in full.
+> This is the clearest instance of this Part's pattern found so far, because the
+> unswept site is a live defect rather than latent risk.
+
+**Severity: Medium** — a false diagnostic and a discarded answer, bounded by the
+affected tool being read-only.
+
+`Kanban.Review` spawns three subprocesses. #15 replaced the
+single-`timeout`-around-exit-and-capture pattern with separately bounded
+`startCapture`/`awaitCommandOutcome` in two of them:
+
+| Runner | Capture strategy |
+| --- | --- |
+| `runGitHubCommand` (`:1356`) | `startCapture` → `awaitCommandOutcome` → `releaseCapture` |
+| `runCanonicalCommand` (`:1390`) | `startCapture` → `awaitCommandOutcome` → `releaseCapture` |
+| `runAuthenticatedClaude` (`:1614`) | `captureHandle` + `takeMVar`, both inside one `timeout` |
+
+`captureHandle` (`:1672`) is `ByteString.hGetContents`, publishing only at EOF.
+The `StreamCapture` documentation the fix itself added (`:1541-1547`) describes
+the hazard in fully general terms — nothing about it is GitHub-specific — and the
+Claude spawn sets `create_group = True`, so descendants are expected there too.
+
+When Claude exits but a descendant holds the stdout pipe: `waitForProcess`
+returns, `takeMVar` blocks, the ten-minute timeout expires, and the result is
+`Left "Claude Sonnet 5 revision agent timed out after ten minutes"` — false, since
+the process exited, and lossy, since `captureHandle` publishes atomically at EOF
+so every byte already read is discarded. The fixed path would have returned
+`StreamTruncated` with whatever arrived.
+
+`CommandBounds`'s own documentation (`:240-247`) calls itself "the two independent
+bounds **every review subprocess** runs under." This one uses neither.
+
+**Why it was missed, which is the reusable lesson.** #15's Background enumerated
+its two runners by name and fixed exactly those. Its Out of scope excludes
+worker-side handling but never mentions `runAuthenticatedClaude` — so this was an
+omission, not a decision. A fix specified by naming call sites fixes those call
+sites; one specified by removing the alternative fixes the class. #154 therefore
+extracts the generic machinery so the shared path becomes the only path.
+
+**Mitigating, and worth stating rather than glossing:** `kanban_run_claude` runs
+`--permission-mode plan --safe-mode`, so it is read-only. No completed mutation is
+misreported, and none of #15's duplicate-side-effect risk applies. The cost is a
+wrong message, a lost answer, and up to ten wasted minutes.
+
 ---
 
 ## Part 6 — Configuration and per-repository setup
@@ -796,6 +1085,50 @@ no configured remote still needs to be able to ask why an AI action would not
 start" — and `doctorLines` reports only dependencies and action readiness. Moving
 config reporting into doctor would mean giving up that property.
 
+### [#152] 14. Three of this repository's own label names are compiled into the theme
+
+> **Disposition:** Filed as #152. Found during the full line-by-line read of
+> `UI.hs`, in its last seventy lines.
+
+**Severity: Low** — cosmetic, with no functional consequence. It earns an issue
+only because project-agnosticism is a stated requirement of this project.
+
+`labelAttribute` (`src/Kanban/UI.hs:5631-5641`) picks a label chip's color from a
+guard chain that mixes configured labels with three literal names:
+
+```haskell
+| folded == Text.toCaseFold config.approvalLabel = labelApprovalAttr
+| folded == "reviewed:revised" = pendingAttr
+| folded == Text.toCaseFold config.changesRequestedLabel
+    || folded `Set.member` foldedBlockedLabels = labelProblemAttr
+| folded == "bug" = labelProblemAttr
+| folded `elem` ["ui", "input"] = labelUiAttr
+| otherwise = labelDefaultAttr
+```
+
+`reviewed:revised` belongs there — it is a reserved protocol label, named by
+`Kanban.Workflow.rereviewLabel` (`Workflow.hs:256`) and defended by
+`Kanban.Config` (`:357-360`), which rejects any config that resolves
+`approval_label` or `changes_requested_label` to it. This was checked before
+filing, precisely because it looks like the same mistake and is not.
+
+`bug`, `ui`, and `input` have no such standing. They appear nowhere in
+`Kanban.Config` or `Kanban.Workflow` and have no configuration path — they are
+simply this repository's own label names in the theme. On a repository that labels
+defects `defect`, nothing tints; on one where `ui` means something unrelated, it
+tints for a reason the user can neither discover nor change.
+
+The boundary here was checked too: #48 deliberately left chip rendering alone when
+it made blocking-label *severity* configurable, and the comment at `:5627-5630`
+records that decision. #152 respects it and touches only the three unconfigurable
+names.
+
+**Related, not filed:** `Kanban.Workflow.rereviewLabel` exists as a named
+constant, and at least seven sites use the bare literal `"reviewed:revised"`
+instead (`UI.hs:5259`, `:5634`; `PullRequestFlow.hs:78`; `Review.hs:521`, `:1218`,
+`:1271`, `:1751`). Harmless today, and the same extract-once-don't-sweep shape as
+findings 10 and 12. Noted in #152's Out of scope as a separate sweep.
+
 ---
 
 ## Coverage log
@@ -810,7 +1143,9 @@ What has actually been read, so the audit can resume without repeating work.
 | `src/Kanban/Repository.hs` (158 lines) | **Read fully** |
 | `tools/test_agent_workflow_contract.py` | Read lines 1–160 (surface lists, manifest parser, regexes). Assertion bodies not read. |
 | `docs/agent-workflow-contract.md` | Read §2.6, §4 manifest, §5 portable-install policy. §1–§2.5 and §3 not read. |
-| `src/Kanban/UI.hs` | Structure only — exports, type declarations, `AppState`. Bodies not read. |
+| `src/Kanban/UI.hs` (5,706 lines) | **Read fully, line by line** — all 380 top-level definitions. Cleared findings 2 and 3; produced #151 and #152. |
+| `src/Kanban/Worker.hs` (2,253 lines) | **Read fully, line by line** — all 87 top-level definitions. Cleared finding 5, disproved its premise, produced #153, and split off 5a. |
+| `src/Kanban/Review.hs` (2,015 lines) | **Read fully, line by line** — all 122 top-level definitions. Closed 5a as no-issue; produced #154 and #155, recorded as findings 12a and 7a. |
 | `src/Kanban/Process.hs` | Export list only. |
 | `tools/drain_prs.py` | Read the clean-tree gate, the autostash, `fast_forward_default_branch`, and every main-checkout command site. The other ~2,900 lines not read. |
 | `tools/drain_prs_service.py` | Read the module constants, `launch_target`, `status_snapshot`, `incident_files`, `install_job`, `start_service`, and the child-spawn loop. Remainder not read. |
