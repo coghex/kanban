@@ -8,7 +8,7 @@ import Control.Monad (void, when)
 import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
 import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -119,6 +119,7 @@ import Kanban.Review
     ReviewClient,
     ReviewApproval (..),
     ReviewChoice (..),
+    ReviewEvent (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewRequestId (..),
@@ -139,7 +140,9 @@ import Kanban.Review
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    handleWireMessage,
     killThreadToolProcesses,
+    newRecordingReviewClientForTesting,
     newReviewClientForTesting,
     newToolRegistry,
     releaseToolSlot,
@@ -149,6 +152,7 @@ import Kanban.Review
     reviewStageForLabels,
     runCanonicalCommand,
     runGitHubIssueTool,
+    sendReviewMessage,
     stopReviewClient,
     renderCanonicalIssueReviewResult,
     renderReviewResult,
@@ -208,6 +212,7 @@ import Kanban.UI
     SolvePhase (..),
     SolveSession (..),
     agentFailureNotice,
+    applyUndeliveredSteer,
     canonicalReviewActivity,
     TranscriptGeometry (..),
     TranscriptSession (..),
@@ -234,6 +239,7 @@ import Kanban.UI
     codexRefreshTimeoutMicros,
     drawCardFrame,
     drawDetails,
+    drawUndeliveredSteers,
     githubRefreshTimeoutMicros,
     itemHasAmberWarning,
     mergeExplanation,
@@ -304,7 +310,7 @@ import System.Directory (createDirectory, createDirectoryIfMissing, createFileLi
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
-import System.IO (hClose, openTempFile)
+import System.IO (Handle, hClose, openTempFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signalProcessGroup)
@@ -3053,6 +3059,160 @@ main = hspec $ do
       githubLabelCreateArguments repo `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
       githubIssueEditArguments repo request `shouldContain` ["--repo", "upstream-owner/upstream-repo"]
 
+  -- issue #17: a rejected turn/steer used to land in 'handleResponse''s
+  -- catch-all arm as a generic protocol warning, so the feedback the user
+  -- typed was neither retried, restored, nor flagged -- it vanished while the
+  -- transcript still showed it as sent. These drive real responses through
+  -- 'handleWireMessage' against a client whose app-server stdin is a readable
+  -- pipe, so both halves of the contract are observed directly: what goes
+  -- back out on the wire, and what the session is told.
+  describe "rejected turn/steer recovery" $ do
+    let steerThread = "thread-1" :: Text
+        targetTurn = "turn-1" :: Text
+        newerTurn = "turn-2" :: Text
+        steerMessage = "actually, check the drainer path too" :: Text
+        turnStarted turnId =
+          WireNotification
+            "turn/started"
+            (object ["threadId" .= steerThread, "turn" .= object ["id" .= turnId]])
+        turnCompleted =
+          WireNotification
+            "turn/completed"
+            (object ["threadId" .= steerThread, "turn" .= object ["status" .= ("completed" :: Text)]])
+        -- The app-server's own rejection when 'expectedTurnId' no longer
+        -- names the running turn. The steer is the first request this client
+        -- sends, so it carries id 2 (the testing client's counter starts at
+        -- 2, matching the real one after 'initialize').
+        steerRejected =
+          WireResponse (Number 2) (Left (object ["message" .= ("expected turn is not active" :: Text)]))
+        steerAccepted = WireResponse (Number 2) (Right (object []))
+        sendSteer client = do
+          sent <- sendReviewMessage client steerThread (Just targetTurn) steerMessage
+          sent `shouldBe` Right ()
+
+    it "resends the message as a new turn/start when the turn it aimed at has already completed" $
+      withRecordingReviewClient $ \client wire events -> do
+        handleWireMessage client (turnStarted targetTurn)
+        sendSteer client
+        (steerMethod, steerParams) <- nextClientRequest wire
+        steerMethod `shouldBe` "turn/steer"
+        encodedValue steerParams `shouldMention` ("\"expectedTurnId\":\"" <> targetTurn <> "\"")
+        -- The race the issue describes: the targeted turn finishes in the
+        -- instant between Enter and the request arriving.
+        handleWireMessage client turnCompleted
+        handleWireMessage client steerRejected
+        (retryMethod, retryParams) <- nextClientRequest wire
+        retryMethod `shouldBe` "turn/start"
+        encodedValue retryParams `shouldMention` ("\"text\":\"" <> steerMessage <> "\"")
+        -- Exactly one follow-up, and nothing reported to the session: the
+        -- optimistic "You:" entry it already holds stayed accurate, so a
+        -- second entry would duplicate it.
+        expectNoFurtherClientRequests wire
+        recorded <- readIORef events
+        undeliveredSteers recorded `shouldBe` []
+        protocolWarnings recorded `shouldBe` []
+
+    it "hands the message back undelivered, sending nothing, when a newer turn is already running" $
+      withRecordingReviewClient $ \client wire events -> do
+        handleWireMessage client (turnStarted targetTurn)
+        sendSteer client
+        void (nextClientRequest wire)
+        handleWireMessage client turnCompleted
+        handleWireMessage client (turnStarted newerTurn)
+        handleWireMessage client steerRejected
+        -- Silently applying the guidance to a turn the user never aimed at
+        -- is exactly the misdirection the rejection is warning about.
+        expectNoFurtherClientRequests wire
+        recorded <- readIORef events
+        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered steerThread targetTurn steerMessage]
+        protocolWarnings recorded `shouldBe` []
+
+    it "hands the message back undelivered when the targeted turn is still the running one" $
+      withRecordingReviewClient $ \client wire events -> do
+        handleWireMessage client (turnStarted targetTurn)
+        sendSteer client
+        void (nextClientRequest wire)
+        handleWireMessage client steerRejected
+        expectNoFurtherClientRequests wire
+        recorded <- readIORef events
+        undeliveredSteers recorded `shouldBe` [ReviewSteerUndelivered steerThread targetTurn steerMessage]
+
+    it "leaves an accepted steer alone: no retry and no undelivered state" $
+      withRecordingReviewClient $ \client wire events -> do
+        handleWireMessage client (turnStarted targetTurn)
+        sendSteer client
+        void (nextClientRequest wire)
+        handleWireMessage client steerAccepted
+        expectNoFurtherClientRequests wire
+        recorded <- readIORef events
+        undeliveredSteers recorded `shouldBe` []
+        protocolWarnings recorded `shouldBe` []
+
+  -- The session half of issue #17. 'applyReviewEvent' runs in brick's
+  -- 'EventM', which no unit test here can drive, so the transition a
+  -- 'ReviewSteerUndelivered' causes lives in 'applyUndeliveredSteer' and is
+  -- covered directly.
+  describe "undelivered review message recovery" $ do
+    let steerMessage = "actually, check the drainer path too" :: Text
+        laterMessage = "and the label cleanup" :: Text
+        undeliveredSession input undelivered =
+          ReviewSession
+            { reviewSessionIssue = baseIssue 17 [],
+              reviewSessionStage = InitialReview,
+              reviewSessionThreadId = Just "thread-1",
+              reviewSessionTurnId = Just "turn-2",
+              reviewSessionPhase = ReviewRunning,
+              reviewSessionActivity = "thinking",
+              reviewSessionTranscript = plainChatTranscript ("\nYou: " <> steerMessage <> "\n"),
+              reviewSessionPending = Nothing,
+              reviewSessionInput = input,
+              reviewSessionUndelivered = undelivered,
+              reviewSessionSpinnerFrame = 0,
+              reviewSessionTickGeneration = 1,
+              reviewSessionTickArmed = False,
+              reviewSessionFollowing = True
+            }
+
+    it "restores the rejected message to an input line the user left alone" $ do
+      let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
+      recovered.reviewSessionInput `shouldBe` steerMessage
+      recovered.reviewSessionUndelivered `shouldBe` []
+
+    it "qualifies the optimistic transcript entry rather than leaving it claiming delivery" $ do
+      let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
+      recovered.reviewSessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> steerMessage)
+
+    it "keeps a draft typed after the send, queueing the rejected message behind it" $ do
+      let draft = "wait, ignore that"
+          recovered = applyUndeliveredSteer steerMessage (undeliveredSession draft [])
+      recovered.reviewSessionInput `shouldBe` draft
+      recovered.reviewSessionUndelivered `shouldBe` [steerMessage]
+
+    it "preserves every independently rejected steer instead of overwriting the first" $ do
+      let draft = "wait, ignore that"
+          recovered =
+            applyUndeliveredSteer laterMessage (applyUndeliveredSteer steerMessage (undeliveredSession draft []))
+      recovered.reviewSessionInput `shouldBe` draft
+      recovered.reviewSessionUndelivered `shouldBe` [steerMessage, laterMessage]
+
+    it "returns queued messages oldest first once the input line is free again" $ do
+      let recovered = applyUndeliveredSteer laterMessage (undeliveredSession "" [steerMessage])
+      recovered.reviewSessionInput `shouldBe` steerMessage
+      recovered.reviewSessionUndelivered `shouldBe` [laterMessage]
+
+    it "shows what is still waiting inside the session overlay, not only in a transient notice" $ do
+      let rendered =
+            renderWidgetLines
+              (themeFor testOptions)
+              60
+              (drawUndeliveredSteers (undeliveredSession "wait, ignore that" [steerMessage]))
+      Data.Text.unlines rendered `shouldMention` "NOT DELIVERED"
+      Data.Text.unlines rendered `shouldMention` steerMessage
+
+    it "renders nothing at all when no message is waiting" $
+      renderWidgetLines (themeFor testOptions) 60 (drawUndeliveredSteers (undeliveredSession "" []))
+        `shouldBe` []
+
   describe "Kanban.StreamReader" $ do
     it "reads every line through to EOF, forwarding each in order and never abandoning" $ do
       cursor <- newIORef (["one", "two", "three"] :: [ByteString.ByteString])
@@ -3972,6 +4132,7 @@ main = hspec $ do
               reviewSessionTranscript = ChatTranscript "" "" "",
               reviewSessionPending = Nothing,
               reviewSessionInput = "",
+              reviewSessionUndelivered = [],
               reviewSessionSpinnerFrame = 0,
               reviewSessionTickGeneration = 1,
               reviewSessionTickArmed = armed,
@@ -4042,6 +4203,7 @@ main = hspec $ do
               reviewSessionTranscript = ChatTranscript "" "" "",
               reviewSessionPending = Nothing,
               reviewSessionInput = "",
+              reviewSessionUndelivered = [],
               reviewSessionSpinnerFrame = 0,
               reviewSessionTickGeneration = 0,
               reviewSessionTickArmed = False,
@@ -7867,6 +8029,55 @@ waitForWorkerState path predicate attempts = do
     _
       | attempts <= 0 -> fail ("worker state did not reach the expected condition: " <> show decoded)
       | otherwise -> threadDelay 100000 >> waitForWorkerState path predicate (attempts - 1)
+
+-- | A review client whose app-server stdin is a pipe this test reads, plus
+-- the events its sink recorded in order, so a response driven in through
+-- 'handleWireMessage' can be judged by both what it writes back and what it
+-- tells the session (issue #17).
+withRecordingReviewClient :: (ReviewClient -> Handle -> IORef [ReviewEvent] -> IO result) -> IO result
+withRecordingReviewClient action = do
+  events <- newIORef []
+  bracket
+    (newRecordingReviewClientForTesting (\event -> modifyIORef events (<> [event])))
+    (\(client, wire) -> stopReviewClient client >> hClose wire)
+    (\(client, wire) -> action client wire events)
+
+-- | The next request the client wrote to its app-server, as method and
+-- params. Bounded so a missing write fails the test instead of hanging it.
+nextClientRequest :: Handle -> IO (Text, Value)
+nextClientRequest wire = do
+  line <- requireJust "the client wrote no request to its app-server" =<< timeout 2000000 (ByteString.hGetLine wire)
+  case decodeReviewWireMessage (LazyByteString.fromStrict line) of
+    Right (WireRequest _ method params) -> pure (method, params)
+    other -> fail ("expected a client request on the wire, got " <> show other)
+
+-- | Every write happens synchronously inside the handler under test, so by
+-- the time it returns the pipe holds everything it is ever going to hold;
+-- this waits a further moment only to keep the assertion honest under load.
+expectNoFurtherClientRequests :: Handle -> IO ()
+expectNoFurtherClientRequests wire = do
+  extra <- timeout 200000 (ByteString.hGetLine wire)
+  case extra of
+    Nothing -> pure ()
+    Just line -> expectationFailure ("expected no further app-server traffic, got " <> show line)
+
+encodedValue :: Value -> Text
+encodedValue = Data.Text.pack . LazyByteString.unpack . encode
+
+undeliveredSteers :: [ReviewEvent] -> [ReviewEvent]
+undeliveredSteers = filter isUndelivered
+  where
+    isUndelivered ReviewSteerUndelivered {} = True
+    isUndelivered _ = False
+
+protocolWarnings :: [ReviewEvent] -> [ReviewEvent]
+protocolWarnings = filter isWarning
+  where
+    isWarning ReviewProtocolWarning {} = True
+    isWarning _ = False
+
+plainChatTranscript :: Text -> ChatTranscript
+plainChatTranscript value = ChatTranscript value value value
 
 requireJust :: String -> Maybe value -> IO value
 requireJust message = maybe (fail message) pure

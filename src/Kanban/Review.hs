@@ -38,9 +38,11 @@ module Kanban.Review
     githubIssueEditArguments,
     githubIssueViewArguments,
     githubLabelCreateArguments,
+    handleWireMessage,
     interruptReview,
     killReviewTools,
     killThreadToolProcesses,
+    newRecordingReviewClientForTesting,
     newReviewClientForTesting,
     newToolRegistry,
     outcomeUnknownDiagnostic,
@@ -102,6 +104,7 @@ import System.Process
   ( CreateProcess (..),
     ProcessHandle,
     StdStream (..),
+    createPipe,
     createProcess,
     proc,
     waitForProcess,
@@ -189,6 +192,13 @@ data ReviewEvent
   | ReviewTurnCompleted Text ReviewTurnOutcome (Maybe Text) (Maybe (Text, ReviewResult))
   | ReviewStartFailed Int Text
   | ReviewClientStopped Text
+  -- | A @turn/steer@ the app-server rejected whose text could not be resent
+  -- automatically, carrying the thread, the turn the steer targeted, and the
+  -- user's original message so the session can offer it back for a deliberate
+  -- resend (issue #17). Emitted only when a turn is still active on the
+  -- thread: with no active turn the message is resent as a new @turn/start@
+  -- instead, and nothing is reported.
+  | ReviewSteerUndelivered Text Text Text
   | ReviewProtocolWarning Text
   deriving stock (Eq, Show)
 
@@ -201,6 +211,12 @@ data ReviewWireMessage
 data PendingRequest
   = PendingThreadStart Int
   | PendingTurnStart Text
+  -- | An in-flight @turn/steer@, retaining its thread, the @expectedTurnId@
+  -- it targeted, and the user's message. Without that context a rejection
+  -- could only be reported as a generic protocol warning, silently dropping
+  -- the typed feedback (issue #17). Interrupts and approval responses stay
+  -- 'PendingOther'.
+  | PendingSteer Text Text Text
   | PendingOther
   deriving stock (Eq, Show)
 
@@ -245,6 +261,15 @@ data ReviewClient = ReviewClient
     reviewWriteLock :: MVar (),
     reviewNextRequestId :: IORef Int,
     reviewPendingRequests :: MVar (Map Int PendingRequest),
+    -- | The turn currently running on each thread, maintained from the
+    -- @turn/started@ and @turn/completed@ notifications. The UI keeps its own
+    -- copy for display, but a rejected steer has to be classified against
+    -- what the wire has actually delivered *at that point in the stream*, and
+    -- notifications and responses are handled in order by the single
+    -- 'readServerOutput' thread — so this map, not the UI's asynchronously
+    -- updated session state, decides whether a rejected steer can be resent
+    -- (issue #17).
+    reviewActiveTurns :: MVar (Map Text Text),
     reviewThreadIssues :: MVar (Map Text Int),
     reviewToolRegistry :: ToolRegistry,
     reviewEventSink :: ReviewEvent -> IO (),
@@ -607,6 +632,7 @@ startReviewClient workflowConfig repository eventSink = do
       writeLock <- newMVar ()
       requestCounter <- newIORef 2
       pendingRequests <- newMVar Map.empty
+      activeTurns <- newMVar Map.empty
       threadIssues <- newMVar Map.empty
       toolRegistry <- newToolRegistry
       outputDone <- newEmptyMVar
@@ -619,6 +645,7 @@ startReviewClient workflowConfig repository eventSink = do
                 reviewWriteLock = writeLock,
                 reviewNextRequestId = requestCounter,
                 reviewPendingRequests = pendingRequests,
+                reviewActiveTurns = activeTurns,
                 reviewThreadIssues = threadIssues,
                 reviewToolRegistry = toolRegistry,
                 reviewEventSink = eventSink,
@@ -678,6 +705,7 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
   writeLock <- newMVar ()
   requestCounter <- newIORef 2
   pendingRequests <- newMVar Map.empty
+  activeTurns <- newMVar Map.empty
   threadIssues <- newMVar Map.empty
   toolRegistry <- newToolRegistry
   outputDone <- newEmptyMVar
@@ -690,6 +718,7 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
         reviewWriteLock = writeLock,
         reviewNextRequestId = requestCounter,
         reviewPendingRequests = pendingRequests,
+        reviewActiveTurns = activeTurns,
         reviewThreadIssues = threadIssues,
         reviewToolRegistry = toolRegistry,
         reviewEventSink = eventSink,
@@ -701,6 +730,21 @@ newReviewClientForTesting bounds repositoryRoot repositorySlug eventSink = do
         reviewErrorDone = errorDone,
         reviewCommandBounds = bounds
       }
+
+-- | A 'newReviewClientForTesting' whose "app-server" stdin is a pipe the
+-- caller reads, so a test can drive responses in through 'handleWireMessage'
+-- and assert on the exact wire traffic they provoke — the seam the steer
+-- recovery path needs, since the suite previously only decoded app-server
+-- messages rather than letting a handler answer one (issue #17).
+newRecordingReviewClientForTesting :: (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
+newRecordingReviewClientForTesting eventSink = do
+  client <- newReviewClientForTesting githubCommandBounds "." "coghex/kanban" eventSink
+  (readEnd, writeEnd) <- createPipe
+  hSetBuffering writeEnd LineBuffering
+  -- The placeholder process's own stdin is of no further use, and leaving it
+  -- open would outlive 'stopReviewClient', which closes 'reviewInput' only.
+  ignoreIOException (hClose client.reviewInput)
+  pure (client {reviewInput = writeEnd}, readEnd)
 
 initializeClient :: ReviewClient -> Handle -> IO (Either Text ())
 initializeClient client outputHandle = do
@@ -757,7 +801,7 @@ beginIssueReview client issueNumber =
 
 sendReviewMessage :: ReviewClient -> Text -> Maybe Text -> Text -> IO (Either Text ())
 sendReviewMessage client threadId activeTurnId message = case activeTurnId of
-  Just turnId -> sendRequest client PendingOther "turn/steer" (steerParams turnId)
+  Just turnId -> sendRequest client (PendingSteer threadId turnId message) "turn/steer" (steerParams turnId)
   Nothing -> sendTurnStart client threadId message
   where
     steerParams turnId =
@@ -946,20 +990,40 @@ handleResponse client requestId result = case requestIdInt requestId of
         client.reviewEventSink (ReviewStartFailed issueNumber ("Codex could not create the review thread: " <> compactValue err))
       (Just (PendingTurnStart threadId), Left err) ->
         client.reviewEventSink (ReviewTurnCompleted threadId TurnFailed (Just (compactValue err)) Nothing)
+      -- A rejected steer still holds the user's typed guidance, so it is
+      -- recovered rather than reported and dropped (issue #17). The natural
+      -- rejection is the targeted turn ending in the instant before the
+      -- request landed: with the thread now idle the message becomes the
+      -- 'turn/start' the user would have sent a moment later. While any turn
+      -- is running -- a newer one, or the targeted one the server rejected
+      -- the steer against anyway -- applying the message would silently
+      -- redirect it, so the session takes it back for a deliberate resend.
+      (Just (PendingSteer threadId targetTurnId message), Left _) -> do
+        activeTurn <- Map.lookup threadId <$> readMVar client.reviewActiveTurns
+        case activeTurn of
+          Nothing -> do
+            resent <- sendTurnStart client threadId message
+            case resent of
+              Right () -> pure ()
+              Left _ -> client.reviewEventSink (ReviewSteerUndelivered threadId targetTurnId message)
+          Just _ -> client.reviewEventSink (ReviewSteerUndelivered threadId targetTurnId message)
       (_, Left err) -> client.reviewEventSink (ReviewProtocolWarning ("Codex request failed: " <> compactValue err))
       _ -> pure ()
 
 handleNotification :: ReviewClient -> Text -> Value -> IO ()
 handleNotification client method params = case method of
   "turn/started" -> case (fieldText "threadId" params, nestedText ["turn", "id"] params) of
-    (Just threadId, Just turnId) -> client.reviewEventSink (ReviewTurnStarted threadId turnId)
+    (Just threadId, Just turnId) -> do
+      modifyMVar_ client.reviewActiveTurns (pure . Map.insert threadId turnId)
+      client.reviewEventSink (ReviewTurnStarted threadId turnId)
     _ -> client.reviewEventSink (ReviewProtocolWarning "turn/started omitted its thread or turn id")
   "item/agentMessage/delta" -> emitDelta AgentOutput
   "item/commandExecution/outputDelta" -> emitDelta CommandOutput
   "item/reasoning/summaryTextDelta" -> emitDelta ReasoningOutput
   "turn/completed" -> case fieldText "threadId" params of
     Nothing -> client.reviewEventSink (ReviewProtocolWarning "turn/completed omitted its thread id")
-    Just threadId ->
+    Just threadId -> do
+      modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
       client.reviewEventSink
         (ReviewTurnCompleted threadId (turnOutcome params) (nestedText ["turn", "error", "message"] params) (turnResult params))
   _ -> pure ()
