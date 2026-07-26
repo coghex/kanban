@@ -95,6 +95,7 @@ Installation does not start the drainer. Press `d` in Kanban when you are ready 
 - [Development](docs/development.md)
 - [Documentation index](docs/README.md)
 - [Design and implementation notes](docs/design.md)
+- [Claude Code session instructions](CLAUDE.md)
 
 ## Tests
 
