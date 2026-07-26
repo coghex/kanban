@@ -81,7 +81,7 @@ import Kanban.Process
     readProcessSnapshot,
   )
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, runSolve)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, newUnknownAggregator, runSolve, sealUnknownAggregates)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectory,
@@ -569,13 +569,21 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 -- (e.g. one that stalls before ever registering a provider) while exercising
 -- the real supervisor lifecycle, the same way 'takeSnapshot' is already
 -- substituted for process verification.
-defaultRunTask :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-defaultRunTask spec rememberProvider emit = case spec.workerTask of
+--
+-- The unknown-notice aggregator is the supervisor's, not the flow's: a
+-- deadline cancels this task outright and emits the terminal envelope from
+-- the watchdog thread, so only the supervisor can guarantee the flow's
+-- suppressed-occurrence counts are journaled before that envelope rather
+-- than lost with the cancelled thread or appended after replay has stopped.
+defaultRunTask :: WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
     runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow task.solveWorkerBrand spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+      aggregator
       (translateSolveEvent rememberProvider emit)
   PullRequestWorkerTaskKind task ->
     runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction spec.workerConfigPath spec.workerWorkflowConfig spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
+      aggregator
       (translatePullRequestEvent rememberProvider emit)
 
 -- | The single source of truth the deadline watchdog and a task's own
@@ -621,7 +629,7 @@ data WorkerDeadlineSpawnRejected = WorkerDeadlineSpawnRejected
   deriving stock (Show)
   deriving anyclass (Exception)
 
-runWorkerWithTask :: IO (Either Text [ProcessIdentity]) -> (WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()) -> FilePath -> IO (Either Text ())
+runWorkerWithTask :: IO (Either Text [ProcessIdentity]) -> (WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()) -> FilePath -> IO (Either Text ())
 runWorkerWithTask takeSnapshot buildRunTask specPath = do
   decoded <- decodeFile specPath
   case decoded of
@@ -662,6 +670,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
       watchdogDoneVar <- newEmptyMVar
       watchdogAdjudicatedVar <- newEmptyMVar
       leaseReleaseClaimRef <- newIORef False
+      noticeAggregator <- newUnknownAggregator
       let claimLeaseRelease = atomicModifyIORef' leaseReleaseClaimRef (\claimed -> (True, not claimed))
           registeredProvider slot = case slot of
             ProviderSlotRegistered process -> Just process
@@ -724,6 +733,21 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           -- 'claimCompletion' spent but nothing recorded), which is exactly
           -- the case 'finalizeSupervisorFailure' has to finish off.
           completeBody verified outcome = uninterruptibleMask_ $ do
+            -- First, before any terminal or orphan envelope: replay stops
+            -- at the terminal envelope, and a deadline reaches here having
+            -- already killed the provider and about to cancel the task
+            -- thread, so this is the last and only point at which the
+            -- flow's suppressed unknown-event counts can still be
+            -- journaled where replay will see them. Sealing here is what
+            -- makes that final: the stream loop is still live and may be
+            -- draining buffered output, and a sealed aggregator refuses
+            -- every unknown notice it produces from now on rather than
+            -- letting them restart after the summary. The flow seals the
+            -- same aggregator on its own unforced paths; the seal is
+            -- one-shot and writes under its own lock, so exactly one side
+            -- ever reports, and if the flow won it, this blocks until its
+            -- summaries are written rather than terminalizing over them.
+            sealUnknownAggregates noticeAggregator (emitRaw . WorkerAgentOutput)
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of
@@ -860,7 +884,7 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
                 let message = "provider started without an observable process-group id; terminating it for safety"
                 emit (WorkerDiagnostic message)
                 killManagedProcess process
-          runTask = buildRunTask spec rememberProvider emit
+          runTask = buildRunTask spec noticeAggregator rememberProvider emit
       -- `runTask` runs under `restore` so a deadline's `killThread` can
       -- still cancel it — that's the whole point. But once it has returned
       -- or been caught by `try`, the handoff to `taskResultVar` runs fully
