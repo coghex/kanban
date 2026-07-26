@@ -30,7 +30,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
@@ -305,7 +305,7 @@ stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink number li
       case sessionId of
         Nothing -> pure ()
         Just value -> writeIORef sessionRef (Just value) >> eventSink (PullRequestSessionIdentified number value)
-      mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ emitMessage) messages
+      mapM_ (emitStreamEvent aggregator emitMessage) messages
   where
     emitMessage agentEvent
       | Text.null (Text.strip agentEvent.agentEventSummary) = pure ()

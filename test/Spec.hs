@@ -12,7 +12,7 @@ import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIO
 import Data.Char (isControl)
 import Data.List (dropWhileEnd, find, findIndex, findIndices, intercalate, isInfixOf, isPrefixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
@@ -164,11 +164,11 @@ import Kanban.Solve
     SolverBrand (..),
     StreamEvent (..),
     UnknownAggregator,
-    admitStreamEvent,
     claudeReviewerModel,
     claudeSolverModel,
     codexReviewerModel,
     codexSolverModel,
+    emitStreamEvent,
     sealUnknownAggregates,
     maxUnknownNoticeLength,
     newUnknownAggregator,
@@ -716,6 +716,63 @@ main = hspec $ do
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerProviderStarted"
             eventBytes `shouldSatisfy` ByteString.isInfixOf "fixture-session"
             eventBytes `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+    it "waits out a sample already being written before the seal returns, and refuses every one after" $ do
+      -- The interleaving a bare compare-and-swap cannot cover: the stream
+      -- thread has already been told to emit a sample and is part-way
+      -- through writing it. If the seal could return here, a supervisor
+      -- would write the aggregate and the terminal envelope while that
+      -- sample was still in flight, landing it after the envelope where
+      -- replay stops — or losing it to the cancellation that follows.
+      aggregator <- newUnknownAggregator
+      written <- newIORef []
+      writing <- newEmptyMVar
+      release <- newEmptyMVar
+      let blockingEmit agentEvent = do
+            putMVar writing ()
+            takeMVar release
+            modifyIORef written (agentEvent.agentEventSummary :)
+      telemetry <- case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
+        Right (_, streamEvents) -> pure streamEvents
+        Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
+      void . forkIO $ mapM_ (emitStreamEvent aggregator blockingEmit) telemetry
+      takeMVar writing
+      sealed <- newEmptyMVar
+      void . forkIO $ sealUnknownAggregates aggregator >>= putMVar sealed
+      -- The seal is blocked on the in-flight write, not racing past it.
+      timeout 200000 (readMVar sealed) `shouldReturn` Nothing
+      readIORef written `shouldReturn` []
+      putMVar release ()
+      void (timeout 5000000 (takeMVar sealed) >>= requireJust "seal never completed")
+      -- The sample admitted before the seal was fully written before the
+      -- seal returned, so it can never trail the terminal envelope.
+      readIORef written `shouldReturn` ["[event] telemetry {\"tick\":1,\"type\":\"telemetry\"}"]
+      -- ...and nothing gets through afterwards.
+      mapM_ (emitStreamEvent aggregator blockingEmit) telemetry
+      readIORef written `shouldReturn` ["[event] telemetry {\"tick\":1,\"type\":\"telemetry\"}"]
+
+    it "bounds a chatty unknown type in a real solve worker's journal, replay, and session log" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = (workerFixtureSpec repository (WorkerId "solve-930-chatty") 930) {workerCreatedAt = now}
+        surfaces <- runChattyWorker temporaryRoot spec "solve-930-chatty"
+        assertBoundedWorkerSurfaces surfaces
+
+    it "bounds a chatty unknown type in a real PR worker's journal, replay, and session log" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The PR flow owns a separate stdout loop and a separate terminal
+        -- path, so it needs its own end-to-end proof rather than inheriting
+        -- the solve worker's.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec =
+              (workerFixtureSpec repository (WorkerId "pr-931-chatty") 931)
+                { workerCreatedAt = now,
+                  workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 931 PullRequestClaude PullRequestReview)
+                }
+        surfaces <- runChattyWorker temporaryRoot spec "pr-931-chatty"
+        assertBoundedWorkerSurfaces surfaces
 
     it "marks a completed provider orphaned until its surviving child exits" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -8223,6 +8280,63 @@ chattyProvider sessionId sentinel tailCommands =
         <> tailCommands
     )
 
+-- | Drives a real worker — the real supervisor, the real solve or PR flow,
+-- and a real provider process — over a 'chattyProvider' run, then reports
+-- the three surfaces the bound has to hold on: the durable worker journal,
+-- what a replay of that journal delivers, and how many raw provider lines
+-- the session log kept. Collecting sinks would prove none of these; only
+-- 'appendWorkerEvent' and 'monitorWorker' running for real do.
+runChattyWorker :: FilePath -> WorkerSpec -> String -> IO ([ByteString.ByteString], [AgentEvent], Int)
+runChattyWorker temporaryRoot spec identifier = do
+  let repository = spec.workerRepository
+      binaryRoot = temporaryRoot </> "bin"
+      fakeCodex = binaryRoot </> "codex"
+      workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+      specPath = workerRoot </> identifier <> ".spec.json"
+      statePath = workerRoot </> identifier <> ".state.json"
+      eventPath = workerRoot </> identifier <> ".events.jsonl"
+  createDirectory repository.repositoryRoot
+  createDirectory binaryRoot
+  createDirectoryIfMissing True workerRoot
+  ByteString.writeFile fakeCodex (chattyProvider "chatty-worker-session" "Created PR #999" [])
+  setFileMode fakeCodex 0o700
+  LazyByteString.writeFile specPath (encode spec)
+  originalPath <- maybe "" id <$> lookupEnv "PATH"
+  withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+    withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+      runWorker specPath `shouldReturn` Right ()
+      journal <- ByteString.lines <$> ByteString.readFile eventPath
+      replayed <- newIORef []
+      descriptors <- discoverWorkerHistory repository
+      case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+        Nothing -> throwIO (userError "worker was not discoverable for replay")
+        Just descriptor -> void (timeout 15000000 (monitorWorker descriptor (\_ _ event -> modifyIORef replayed (event :))))
+      replayedEvents <- reverse <$> readIORef replayed
+      stateBytes <- LazyByteString.readFile statePath
+      logPath <- case eitherDecode stateBytes :: Either String WorkerState of
+        Right state -> requireJust "worker state recorded no session log path" state.workerStateLogPath
+        Left message -> throwIO (userError ("undecodable worker state: " <> message))
+      rawCount <- rawTelemetryLines [logPath]
+      pure (journal, [agentEvent | WorkerAgentOutput agentEvent <- replayedEvents], rawCount)
+
+-- | The bound, asserted on all three of a real worker's surfaces at once:
+-- the journal holds only the samples and one summary, ordered before the
+-- terminal envelope; replay delivers exactly those same bounded notices; and
+-- the session log still holds every raw provider line.
+assertBoundedWorkerSurfaces :: ([ByteString.ByteString], [AgentEvent], Int) -> IO ()
+assertBoundedWorkerSurfaces (journal, replayedOutputs, rawCount) = do
+  let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+      terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+  length noticeIndices `shouldBe` unknownNoticeSamples + 1
+  case (reverse noticeIndices, terminalIndex) of
+    (lastNotice : _, Just terminal) -> lastNotice `shouldSatisfy` (< terminal)
+    _ -> expectationFailure "expected bounded notices and a terminal envelope in the worker journal"
+  let replayedNotices = [agentEvent.agentEventSummary | agentEvent <- replayedOutputs, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
+  length replayedNotices `shouldBe` unknownNoticeSamples + 1
+  replayedNotices `shouldSatisfy` all ((<= maxUnknownNoticeLength) . Data.Text.length)
+  last replayedNotices `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
+  rawCount `shouldBe` chattyProviderLines
+
 -- | Pushes @count@ occurrences of one unrecognized event type through a
 -- supervisor's shared aggregator, emitting whatever it admits — the stream
 -- loop's half of the deadline tests, without needing a real provider whose
@@ -8232,7 +8346,7 @@ admitTelemetry aggregator emit count = mapM_ (const admitOne) [1 .. count]
   where
     admitOne = case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
       Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
-      Right (_, streamEvents) -> mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emit . WorkerAgentOutput)) streamEvents
+      Right (_, streamEvents) -> mapM_ (emitStreamEvent aggregator (emit . WorkerAgentOutput)) streamEvents
 
 -- | How many raw stdout records a 'chattyProvider' run left in its session
 -- log, given the log paths the invocation reported opening. The §16 contract
@@ -8267,7 +8381,10 @@ aggregatedNotices providerLines = do
   where
     admitLine aggregator line = case parseSolveOutputLine (ByteString.pack line) of
       Left message -> throwIO (userError ("unparsable fixture line " <> line <> ": " <> Data.Text.unpack message))
-      Right (_, events) -> catMaybes <$> traverse (admitStreamEvent aggregator) events
+      Right (_, events) -> do
+        admitted <- newIORef []
+        mapM_ (emitStreamEvent aggregator (\agentEvent -> modifyIORef admitted (agentEvent :))) events
+        reverse <$> readIORef admitted
 
 isSolveSessionIdentifiedEvent :: SolveEvent -> Bool
 isSolveSessionIdentifiedEvent (SolveSessionIdentified _ _) = True

@@ -12,12 +12,12 @@ module Kanban.Solve
     UnknownAggregator,
     UnknownStreamCategory (..),
     UnknownStreamKey (..),
-    admitStreamEvent,
     agentOutcome,
     codexSolverModel,
     claudeSolverModel,
     codexReviewerModel,
     claudeReviewerModel,
+    emitStreamEvent,
     maxUnknownNoticeLength,
     maxUnknownTypeLength,
     newUnknownAggregator,
@@ -35,8 +35,9 @@ module Kanban.Solve
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try, uninterruptibleMask_)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict', encode)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -180,36 +181,41 @@ unknownTypePlaceholder = "unknown"
 -- invocation and its worker journal: nothing is carried across a resume, and
 -- no entry is ever rewritten, which is what keeps this compatible with the
 -- append-only journal.
-newtype UnknownAggregator = UnknownAggregator (IORef UnknownTally)
+data UnknownAggregator = UnknownAggregator (MVar ()) (IORef UnknownTally)
 
--- | An aggregator's counts plus whether it has been sealed. Both live under
--- one 'IORef' so that admitting an occurrence and sealing are serialized
--- against each other: an occurrence is either counted before the seal and
--- reported by it, or refused after it. There is no interleaving that counts
--- an occurrence no summary will ever report.
+-- | An aggregator's counts plus whether it has been sealed.
 data UnknownTally = UnknownTally
   { unknownTallyCounts :: Map UnknownStreamKey Int,
     unknownTallySealed :: Bool
   }
 
 newUnknownAggregator :: IO UnknownAggregator
-newUnknownAggregator = UnknownAggregator <$> newIORef (UnknownTally Map.empty False)
+newUnknownAggregator = UnknownAggregator <$> newMVar () <*> newIORef (UnknownTally Map.empty False)
 
--- | Admits one parsed event into an invocation's output. Recognized events
--- always pass through, sealed or not. An unknown notice passes through for
--- its key's first 'unknownNoticeSamples' occurrences and is suppressed
--- afterwards, its count accumulating for 'sealUnknownAggregates' — until the
--- seal, after which every unknown notice is refused outright.
-admitStreamEvent :: UnknownAggregator -> StreamEvent -> IO (Maybe AgentEvent)
-admitStreamEvent _ (StreamEvent Nothing agentEvent) = pure (Just agentEvent)
-admitStreamEvent (UnknownAggregator tally) (StreamEvent (Just key) agentEvent) =
-  atomicModifyIORef' tally $ \current ->
+-- | Passes one parsed event to @emitEvent@, or withholds it. Recognized
+-- events always go straight through, sealed or not. An unknown notice is
+-- emitted for its key's first 'unknownNoticeSamples' occurrences and
+-- withheld afterwards, its count accumulating for 'sealUnknownAggregates'.
+--
+-- Deciding /and emitting/ happen under the aggregator's lock, which
+-- 'sealUnknownAggregates' also takes, because the two halves cannot be
+-- allowed to straddle a seal. Were emission left to the caller, a stream
+-- thread could be descheduled between "admitted" and "written" while a
+-- supervisor sealed, wrote the aggregate, and wrote the terminal envelope —
+-- landing that sample after the envelope, where replay stops, or losing it
+-- to the cancellation that follows. Under one lock a sample is either
+-- wholly written before the seal or never admitted at all.
+emitStreamEvent :: UnknownAggregator -> (AgentEvent -> IO ()) -> StreamEvent -> IO ()
+emitStreamEvent _ emitEvent (StreamEvent Nothing agentEvent) = emitEvent agentEvent
+emitStreamEvent (UnknownAggregator lock tally) emitEvent (StreamEvent (Just key) agentEvent) =
+  withMVar lock $ \() -> do
+    current <- readIORef tally
     if current.unknownTallySealed
-      then (current, Nothing)
-      else
+      then pure ()
+      else do
         let total = Map.findWithDefault 0 key current.unknownTallyCounts + 1
-            admitted = if total <= unknownNoticeSamples then Just agentEvent else Nothing
-         in (current {unknownTallyCounts = Map.insert key total current.unknownTallyCounts}, admitted)
+        writeIORef tally current {unknownTallyCounts = Map.insert key total current.unknownTallyCounts}
+        when (total <= unknownNoticeSamples) (emitEvent agentEvent)
 
 -- | Seals the aggregator and returns the one aggregate summary each key with
 -- suppressed occurrences contributes, reporting that key's total.
@@ -223,12 +229,22 @@ admitStreamEvent (UnknownAggregator tally) (StreamEvent (Just key) agentEvent) =
 -- reported. Sealed, every later unknown notice is refused, so the summary is
 -- final for the invocation. Recognized output is untouched.
 --
+-- Taking the same lock 'emitStreamEvent' holds is what makes the seal a real
+-- boundary rather than an instant: it waits out an emission already in
+-- flight, so once this returns, every sample this invocation will ever emit
+-- has already been written. Summaries are returned rather than emitted here,
+-- so the caller writes them outside the lock — nothing else can emit an
+-- unknown notice by then anyway.
+--
 -- Callers emit these before the invocation's terminal event. The seal also
 -- makes a repeated call return nothing, so the flow and its supervisor can
 -- both call it and only the first reports.
 sealUnknownAggregates :: UnknownAggregator -> IO [AgentEvent]
-sealUnknownAggregates (UnknownAggregator tally) = do
-  counts <- atomicModifyIORef' tally (\current -> (UnknownTally Map.empty True, current.unknownTallyCounts))
+sealUnknownAggregates (UnknownAggregator lock tally) = do
+  counts <- withMVar lock $ \() -> do
+    current <- readIORef tally
+    writeIORef tally (UnknownTally Map.empty True)
+    pure current.unknownTallyCounts
   pure
     [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
       | (key, total) <- Map.toAscList counts,
@@ -716,7 +732,7 @@ stdoutOnLine sessionLog aggregator sessionRef lastMessageRef eventSink issueNumb
         Just value -> do
           writeIORef sessionRef (Just value)
           eventSink (SolveSessionIdentified issueNumber value)
-      mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emitMessage lastMessageRef eventSink issueNumber)) messages
+      mapM_ (emitStreamEvent aggregator (emitMessage lastMessageRef eventSink issueNumber)) messages
 
 emitMessage :: IORef Text -> (SolveEvent -> IO ()) -> Int -> AgentEvent -> IO ()
 emitMessage lastMessageRef eventSink issueNumber agentEvent
