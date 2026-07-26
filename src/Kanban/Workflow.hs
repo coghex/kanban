@@ -91,9 +91,17 @@ deriveBoard config snapshot =
     entries = trackerHeaderEntries <> issueEntries <> pullRequestEntries
     sortedEntries column = sortColumnEntries config [entry | (entryColumn, entry) <- entries, entryColumn == column]
 
+-- | Only an issue GitHub positively reported as having no assignees belongs in
+-- the backlog column. A truncated connection means there are assignees this
+-- board did not receive, and an 'AssigneesUnavailable' gap means it received
+-- nothing at all -- neither is evidence of nobody working on it, so both stay
+-- out of the column that presents an issue as unclaimed.
 issueColumn :: Issue -> BoardColumn
 issueColumn issue
-  | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = Issues
+  | null issue.issueAssignees
+      && issue.issueAssigneeOverflow == 0
+      && AssigneesUnavailable `notElem` issue.issueDataGaps =
+      Issues
   | otherwise = Active
 
 -- | A tracker's checklist can reference a child issue that no longer
