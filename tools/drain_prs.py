@@ -415,8 +415,12 @@ def drain_state_path(ctx: RepoContext) -> Path:
     return ctx.path / ".git" / "drain_prs_state.json"
 
 
-def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]:
-    if not isinstance(state.get("prs"), dict):
+def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
+    # Every shape check below guards a field this module later indexes without
+    # one. Valid JSON is not a valid drain state, and a file that decodes but
+    # is structurally wrong must be reported as one rather than escaping as an
+    # AttributeError or KeyError from wherever it is first touched.
+    if not isinstance(state, dict) or not isinstance(state.get("prs"), dict):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     version = state.get("version")
     if version == 1:
@@ -432,7 +436,20 @@ def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     state["version"] = STATE_VERSION
     state.setdefault("attempt_counter", 0)
-    for entry in state["prs"].values():
+    if not isinstance(state["attempt_counter"], int) or isinstance(
+        state["attempt_counter"], bool
+    ):
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    for key, entry in state["prs"].items():
+        # `approved_head` has no default: it is the commit a review cleared,
+        # and inventing one would let an unreviewed head through.
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("approved_head"), str
+        ):
+            raise DrainError(
+                f"Unsupported drain state for PR {key} in {source}; "
+                "inspect or remove it."
+            )
         entry.setdefault("consecutive_failures", 0)
         entry.setdefault("retry_after_attempt", 0)
         entry.setdefault("last_attempt", 0)
@@ -894,7 +911,12 @@ def audit_merged_pr(
 
 
 def merge_pr(
-    ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool, gates: GateConfig
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    dry_run: bool,
+    gates: GateConfig,
+    report: dict[str, Any] | None = None,
 ) -> bool:
     number = pr["number"]
     head_sha = pr["headRefOid"]
@@ -918,6 +940,15 @@ def merge_pr(
         check=False,
     )
     if proc.returncode == 0:
+        # GitHub has accepted the merge and it is durable from this line on.
+        # Recorded before the audit, not after it: an audit that fails -- or
+        # an interrupt that lands during it -- must still report the merge.
+        set_outcome(
+            report,
+            "merged",
+            f"PR #{number} merged {head_sha[:12]} into {ctx.default_branch}.",
+            merged=True,
+        )
         audit_merged_pr(ctx, number, head_sha, gates)
         return True
 
@@ -2321,7 +2352,7 @@ def process_pr(
         )
         return True
 
-    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates)
+    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
     if not merged:
         set_outcome(
             report,
@@ -2343,15 +2374,8 @@ def process_pr(
         run_cleanup_pass(ctx, plan_cleanup(pr), dry_run=True)
         return True
 
-    # Recorded the instant the merge returns, before any further step: the
-    # merge is durable on GitHub from here on, so everything that can still
-    # go wrong -- an interrupt included -- must report merged=true.
-    set_outcome(
-        report,
-        "merged",
-        f"PR #{number} merged {pr['headRefOid'][:12]} into {ctx.default_branch}.",
-        merged=True,
-    )
+    # merge_pr() recorded the merged outcome the instant GitHub accepted it,
+    # so everything that can still go wrong below reports merged=true.
     record = plan_cleanup(pr)
 
     # The merge is durable on GitHub the moment it returns, so record what it
@@ -2989,6 +3013,22 @@ def main() -> None:
                     )
                 )
             log("Interrupted; exiting")
+        except Exception as exc:
+            # Last resort. A `--pr` caller is promised one JSON document on
+            # stdout, so even an unanticipated failure is reported there
+            # rather than as a traceback over an empty stdout. The polling
+            # service keeps raising: its supervisor records the crash, and
+            # the traceback is the diagnosis.
+            if not single:
+                raise
+            emit_single_pr_result(
+                single_pr_result(
+                    number,
+                    "operational_error",
+                    f"drain_prs.py failed unexpectedly: {exc!r}",
+                    dry_run=args.dry_run,
+                )
+            )
     finally:
         if lock_handle is not None:
             lock_handle.close()

@@ -814,6 +814,59 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         self.assertTrue(result["merged"])
         self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
 
+    def test_an_interrupt_during_the_post_merge_audit_still_reports_the_merge(self):
+        # GitHub accepted the merge before the audit began, so the caller must
+        # learn that even though the run never got to say so itself.
+        self.script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        with mock.patch.object(
+            drain_prs, "audit_merged_pr", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertTrue(result["merged"])
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+
+    def test_valid_json_that_is_not_a_valid_queue_state_is_reported(self):
+        # These decode cleanly and used to blow up as AttributeError or
+        # KeyError wherever the shape was first touched.
+        shapes = {
+            "top level is not an object": "[]",
+            "entries are not objects": '{"version": 3, "prs": {"42": []}}',
+            "entry has no approved head": '{"version": 3, "prs": {"42": {}}}',
+            "attempt counter is not a number": (
+                '{"version": 3, "attempt_counter": "x", "prs": {}}'
+            ),
+        }
+        for label, text in shapes.items():
+            with self.subTest(shape=label):
+                self.setUp()
+                self.state_path.write_text(text, encoding="utf-8")
+                before = self.state_path.read_bytes()
+                self.script_pr_view()
+
+                result, proc = self.run_single()
+
+                self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertEqual(result["outcome"], "error")
+                self.assertEqual(result["reason"], "operational_error")
+                self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_an_unexpected_failure_still_produces_one_result_document(self):
+        with mock.patch.object(
+            drain_prs, "load_gate_config", side_effect=ValueError("boom")
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertIn("boom", result["message"])
+
     def test_an_unwritable_log_directory_is_reported_rather_than_raised(self):
         blocked = self.root / "not-a-directory"
         blocked.write_text("", encoding="utf-8")
