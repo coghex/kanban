@@ -8,6 +8,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -189,6 +190,7 @@ class ProcessPrFixture(unittest.TestCase):
                     "retry_after_attempt": 0,
                     "last_attempt": 2,
                     "last_error": None,
+                    "cleanup": None,
                 }
             },
         }
@@ -720,6 +722,14 @@ class WorktreeFixture(unittest.TestCase):
             "closingIssuesReferences": [],
         }
 
+    def _run_cleanup(self):
+        """One post-merge cleanup pass for self.pr, asserting it discharged
+        every obligation the merge recorded."""
+        failures = drain_prs.run_cleanup_pass(
+            self.ctx, drain_prs.plan_cleanup(self.pr), dry_run=False
+        )
+        self.assertEqual(failures, [])
+
 
 class WorktreeMatchingSafetyTests(WorktreeFixture):
     """Regression coverage for issue #24: directory-basename scoring alone
@@ -749,7 +759,7 @@ class WorktreeMatchingSafetyTests(WorktreeFixture):
         # The temporary review worktree is genuinely at the PR head, so it is
         # itself a legitimate exact-detached-HEAD match and gets swept up by
         # cleanup below -- that is correct, not a leak.
-        drain_prs.cleanup_after_merge(self.ctx, self.pr, dry_run=False)
+        self._run_cleanup()
 
         # Unrelated worktree is left untouched...
         self.assertTrue(experiment_wt.exists())
@@ -768,7 +778,7 @@ class WorktreeMatchingSafetyTests(WorktreeFixture):
             drain_prs.find_matching_worktree(self.ctx, self.pr), detached_wt.resolve()
         )
 
-        drain_prs.cleanup_after_merge(self.ctx, self.pr, dry_run=False)
+        self._run_cleanup()
 
         self.assertFalse(detached_wt.exists())
 
@@ -781,7 +791,7 @@ class WorktreeMatchingSafetyTests(WorktreeFixture):
 
         self.assertIsNone(drain_prs.find_matching_worktree(self.ctx, self.pr))
 
-        drain_prs.cleanup_after_merge(self.ctx, self.pr, dry_run=False)
+        self._run_cleanup()
 
         self.assertTrue(detached_wt.exists())
 
@@ -1387,6 +1397,641 @@ class MergeConflictIncidentTests(ProcessPrFixture):
             [entry["incident_id"] for entry in self._incidents(status="open")],
             [incident["incident_id"]],
         )
+
+
+class PostMergeCleanupTests(ProcessPrFixture):
+    """Issue #23: a successful merge is durably recorded before its cleanup is
+    attempted, so a cleanup failure is a debt the queue retries rather than a
+    silent leak of the linked issues, the branches and the worktree.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.incident_dir = self.root / "incidents"
+        self.incident_dir.mkdir()
+        self.drainer_log_dir = self.root / "drainer-logs"
+        self.drainer_log_dir.mkdir()
+        self.state_path = drain_prs.drain_state_path(self.ctx)
+
+    @contextlib.contextmanager
+    def _drainer(self):
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs_service, "INCIDENT_DIR", self.incident_dir),
+            mock.patch.object(drain_prs_service, "LOG_DIR", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+        ):
+            yield
+
+    def _entry(self, head, **extra):
+        entry = {
+            "approved_head": head,
+            "last_rereviewed_head": None,
+            "consecutive_failures": 0,
+            "retry_after_attempt": 0,
+            "last_attempt": 0,
+            "last_error": None,
+            "cleanup": None,
+        }
+        entry.update(extra)
+        return entry
+
+    def _gates(self):
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+    def _write_state(self, state):
+        self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _read_state(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def _run_loop(self, *, dry_run=False):
+        with self._drainer():
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=dry_run,
+                gates=self._gates(),
+            )
+
+    def _issue_close_calls(self, number):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:3] == ["issue", "close", str(number)]
+        ]
+
+    def _incidents(self):
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.incident_dir.glob("incident-*.json"))
+        ]
+
+    def _stuck_cleanup_record(self, *issue_numbers):
+        """A merged PR #7 owing one issue close per number given and nothing
+        else, so an escalation is attributable to those obligations alone."""
+        record = drain_prs.plan_cleanup(
+            {
+                "number": 7,
+                "headRefName": "issue-7-departed",
+                "headRefOid": "b" * 40,
+                "closingIssuesReferences": [
+                    {
+                        "number": number,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                    for number in (issue_numbers or (7,))
+                ],
+            }
+        )
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        return record
+
+    def _script_merge_with_failing_issue_close(self):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "99"], stderr="gh: server error", exit_code=1
+        )
+
+    def test_a_failed_issue_close_does_not_skip_the_rest_of_the_pass(self):
+        self._script_pr_view()
+        self._script_merge_with_failing_issue_close()
+
+        with self._drainer():
+            result, state = self._run_process_pr()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._issue_close_calls(99)), 1)
+
+        # Every obligation after the failing one still ran in the same pass.
+        self.assertFalse(self.feature_wt.exists())
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertFalse(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+
+        # The merge is not forgotten while it still owes the issue close, and
+        # the debt is on disk rather than only in this process's memory.
+        record = self._read_state()["prs"]["42"]["cleanup"]
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 99}],
+        )
+        self.assertEqual(record["failed_passes"], 1)
+        self.assertIn("acme/widgets#99", record["last_error"])
+        self.assertIsNone(record["incident"])
+        self.assertEqual(record["pr"]["headRefName"], "issue-99-demo")
+        self.assertIsNotNone(state["prs"]["42"]["cleanup"])
+
+    def test_cleanup_resumes_from_the_state_file_without_a_second_merge(self):
+        # The fourth `gh pr view` is the recovery read of a PR that is now
+        # merged; the second `gh issue close` is the retry that succeeds.
+        self._script_pr_view({}, {}, {}, {"state": "MERGED"})
+        self._script_merge_with_failing_issue_close()
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        with self._drainer():
+            self._run_process_pr()
+        self.assertIn("42", self._read_state()["prs"])
+
+        # A fresh state object loaded from disk, as a restarted drainer has:
+        # nothing about the interrupted cleanup survives in memory.
+        resumed = drain_prs.load_drain_state(self.ctx)
+        self.assertIsNotNone(resumed["prs"]["42"]["cleanup"])
+        with self._drainer():
+            recovered = drain_prs.recover_stale_approval(
+                self.ctx, resumed, dry_run=False
+            )
+
+        self.assertFalse(recovered)
+        self.assertEqual(len(self._issue_close_calls(99)), 2)
+        self.assertNotIn("42", resumed["prs"])
+        # Recovery completed the outstanding obligation; it did not re-merge.
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+
+    def test_repeated_cleanup_failure_escalates_without_blocking_another_pr(self):
+        stuck = self._stuck_cleanup_record()
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {
+                    "7": self._entry("b" * 40, cleanup=stuck),
+                    "42": self._entry(self.head_sha),
+                },
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self._script_pr_view()
+        # PR 42 is queued for the first cycle only; the later cycles exist to
+        # drive the stuck cleanup past its escalation bound.
+        self.fake.script(
+            "gh",
+            ["pr", "list"],
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                        "isDraft": False,
+                        "headRefOid": self.head_sha,
+                    }
+                ]
+            ),
+        )
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        # Three cycles with once=True: a cleanup failure that reached the
+        # loop's global stale-recovery handler would raise out of the first.
+        for expected_passes in (1, 2, 3):
+            self._run_loop()
+            record = self._read_state()["prs"]["7"]["cleanup"]
+            self.assertEqual(record["failed_passes"], expected_passes)
+            self.assertEqual(
+                record["pending"],
+                [{"kind": "issue", "repo": "acme/widgets", "number": 7}],
+            )
+            if expected_passes < drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT:
+                self.assertEqual(self._incidents(), [])
+                self.assertIsNone(record["incident"])
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(
+            incidents[0]["kind"], drain_prs_service.CLEANUP_INCIDENT_KIND
+        )
+        self.assertEqual(incidents[0]["status"], "open")
+        self.assertEqual(incidents[0]["pull_request"], 7)
+        self.assertIn("acme/widgets#7", incidents[0]["steps"][0])
+        self.assertEqual(
+            self._read_state()["prs"]["7"]["cleanup"]["incident"],
+            incidents[0]["incident_id"],
+        )
+
+        # The stuck cleanup never wedged the queue: PR 42 merged and finished
+        # its own cleanup in the very first cycle.
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertNotIn("42", self._read_state()["prs"])
+        self.assertFalse(self.feature_wt.exists())
+        # A recorded cleanup is worked from the record alone, so PR 7 is never
+        # refetched -- a failing read cannot strand what the merge already owes.
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if call["args"][:3] == ["pr", "view", "7"]
+            ],
+            [],
+        )
+
+    def test_an_escalated_cleanup_resolves_its_incident_once_it_finishes(self):
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        opened = self._incidents()
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0]["status"], "open")
+
+        self._run_loop()
+
+        resolved = self._incidents()
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0]["status"], "resolved")
+        self.assertNotIn("7", self._read_state()["prs"])
+
+    def test_an_open_incident_stops_naming_a_step_that_has_since_succeeded(self):
+        # The incident carries what is outstanding now. A pass that discharges
+        # part of the debt must update the open incident rather than leave
+        # Kanban showing work that is already done -- and must not open a
+        # second incident for the same pull request.
+        stuck = self._stuck_cleanup_record(7, 5)
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        for number in (7, 5):
+            self.fake.script(
+                "gh",
+                ["issue", "view", str(number)],
+                stdout=json.dumps({"state": "OPEN"}),
+            )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "5"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["issue", "close", "5"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        opened = self._incidents()
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(
+            opened[0]["steps"],
+            ["closing acme/widgets#7", "closing acme/widgets#5"],
+        )
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_id"], opened[0]["incident_id"])
+        self.assertEqual(incidents[0]["status"], "open")
+        self.assertEqual(incidents[0]["steps"], ["closing acme/widgets#7"])
+        self.assertIn("acme/widgets#7", incidents[0]["summary"])
+        self.assertNotIn("acme/widgets#5", incidents[0]["summary"])
+        self.assertEqual(
+            [
+                item["number"]
+                for item in self._read_state()["prs"]["7"]["cleanup"]["pending"]
+            ],
+            [7],
+        )
+
+    def test_an_intentional_stop_does_not_hide_a_still_failing_cleanup(self):
+        # Stopping the drainer resolves every open incident for the repository.
+        # A debt that is still outstanding must be reported again on the next
+        # poll rather than stay hidden behind the id of an incident that no
+        # longer exists.
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        first = self._incidents()
+        self.assertEqual([entry["status"] for entry in first], ["open"])
+
+        with self._drainer():
+            drain_prs_service.resolve_open_incidents(
+                self.ctx.path, "Drainer stopped intentionally."
+            )
+        self.assertEqual(
+            [entry["status"] for entry in self._incidents()], ["resolved"]
+        )
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 2)
+        opened = [entry for entry in incidents if entry["status"] == "open"]
+        self.assertEqual(len(opened), 1)
+        self.assertNotEqual(opened[0]["incident_id"], first[0]["incident_id"])
+        self.assertEqual(
+            self._read_state()["prs"]["7"]["cleanup"]["incident"],
+            opened[0]["incident_id"],
+        )
+
+    def test_an_incident_the_record_never_learned_of_is_still_resolved(self):
+        # An incident is written atomically before the state that remembers its
+        # id, so a crash in between leaves one open against a record naming no
+        # incident at all. Finishing the cleanup must still close it, or Kanban
+        # shows an open incident for work that is done.
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        opened = self._incidents()
+        self.assertEqual([entry["status"] for entry in opened], ["open"])
+
+        # The crash: the incident file survives, the state save that would have
+        # recorded its id does not.
+        crashed = self._read_state()
+        crashed["prs"]["7"]["cleanup"]["incident"] = None
+        self._write_state(crashed)
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["status"], "resolved")
+        self.assertEqual(incidents[0]["incident_id"], opened[0]["incident_id"])
+        self.assertNotIn("7", self._read_state()["prs"])
+
+    def test_a_manually_deleted_worktree_counts_as_already_removed(self):
+        # `git worktree list` keeps a registration for a directory somebody
+        # deleted by hand. That worktree is gone, which is what the obligation
+        # wanted, so the pass must discharge it and carry on.
+        shutil.rmtree(self.feature_wt)
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] != "issue"
+        ]
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(record["pending"], [])
+        self.assertNotIn(
+            str(self.feature_wt.resolve()),
+            [
+                entry.get("worktree")
+                for entry in drain_prs.parse_worktrees(self.ctx)
+            ],
+        )
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+
+    def test_an_undeletable_missing_worktree_stays_outstanding(self):
+        # A locked registration whose directory is gone survives both removal
+        # and pruning. Inspecting it for uncommitted work would run git with a
+        # missing cwd and raise past the pass; it must stay an ordinary
+        # outstanding obligation instead.
+        run_git(["worktree", "lock", str(self.feature_wt)], cwd=self.main)
+        shutil.rmtree(self.feature_wt)
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] != "issue"
+        ]
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        # The surviving registration still holds the branch, so the local
+        # delete is blocked with it -- both stay owed, independently.
+        self.assertEqual(len(errors), 2)
+        self.assertIn("removing the matching worktree", errors[0])
+        self.assertIn("deleting local branch issue-99-demo", errors[1])
+        self.assertEqual(
+            [item["kind"] for item in record["pending"]],
+            ["worktree", "local-branch"],
+        )
+        # The steps after the failing ones still ran.
+        self.assertFalse(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+
+    def test_an_unreadable_remote_leaves_the_branch_obligation_outstanding(self):
+        # `git ls-remote --exit-code` reports a missing branch as exactly 2; a
+        # remote it cannot reach at all is 128. Reading the latter as absence
+        # would discharge a deletion that never happened.
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "remote-branch"
+        ]
+        run_git(
+            ["remote", "set-url", "origin", str(self.root / "missing.git")],
+            cwd=self.main,
+        )
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("deleting remote branch issue-99-demo", errors[0])
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "remote-branch", "branch": "issue-99-demo"}],
+        )
+        self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+
+    def test_an_unreadable_repository_leaves_the_local_branch_outstanding(self):
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "local-branch"
+        ]
+        broken = drain_prs.RepoContext(
+            self.root / "not-a-repository",
+            self.ctx.repo_slug,
+            self.ctx.repo_name,
+            self.ctx.default_branch,
+        )
+        (self.root / "not-a-repository").mkdir()
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(broken, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("deleting local branch issue-99-demo", errors[0])
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "local-branch", "branch": "issue-99-demo"}],
+        )
+        self.assertTrue(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+
+    def test_a_closed_unmerged_pr_is_forgotten_without_running_cleanup(self):
+        closed = self._base_pr_json()
+        closed.update({"number": 8, "state": "CLOSED"})
+        self.fake.script("gh", ["pr", "view", "8"], stdout=json.dumps(closed))
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "prs": {"8": self._entry(self.head_sha)},
+        }
+
+        with self._drainer():
+            recovered = drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False
+            )
+
+        self.assertFalse(recovered)
+        self.assertNotIn("8", state["prs"])
+        # A PR closed without merging owes nothing: nothing was closed or
+        # deleted on its behalf.
+        self.assertEqual(self._issue_close_calls(99), [])
+        self.assertTrue(self.feature_wt.exists())
+        self.assertTrue(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+
+    def test_a_version_2_state_file_recovers_an_unfinished_merge(self):
+        # Exactly the pre-change shape: version 2, no cleanup slot, and an
+        # entry for a PR whose merge landed before the upgrade.
+        self._write_state(
+            {
+                "version": 2,
+                "attempt_counter": 4,
+                "prs": {
+                    "42": {
+                        "approved_head": self.head_sha,
+                        "last_rereviewed_head": None,
+                        "consecutive_failures": 0,
+                        "retry_after_attempt": 0,
+                        "last_attempt": 4,
+                        "last_error": None,
+                    }
+                },
+            }
+        )
+        merged = self._base_pr_json()
+        merged["state"] = "MERGED"
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(merged))
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+
+        final = self._read_state()
+        self.assertEqual(final["version"], drain_prs.STATE_VERSION)
+        self.assertEqual(final["attempt_counter"], 4)
+        self.assertNotIn("42", final["prs"])
+        # The in-flight merge was completed rather than forgotten...
+        self.assertEqual(len(self._issue_close_calls(99)), 1)
+        self.assertFalse(self.feature_wt.exists())
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertFalse(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+        # ...without merging anything a second time.
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+
+    def _assert_nothing_was_cleaned_up(self):
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(self._issue_close_calls(99), [])
+        self.assertTrue(self.feature_wt.exists())
+        self.assertTrue(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertNotEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+        self.assertEqual(self._incidents(), [])
+
+    def test_dry_run_writes_no_state_file_and_cleans_up_nothing(self):
+        self._script_pr_view()
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.assertFalse(self.state_path.exists())
+
+        with self._drainer():
+            _, state = self._run_process_pr(dry_run=True)
+
+        self.assertFalse(self.state_path.exists())
+        self.assertIn("42", state["prs"])
+        self.assertIsNone(state["prs"]["42"]["cleanup"])
+        self._assert_nothing_was_cleaned_up()
+
+    def test_dry_run_leaves_an_existing_state_file_byte_for_byte(self):
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"42": self._entry(self.head_sha)},
+            }
+        )
+        before = self.state_path.read_bytes()
+        self._script_pr_view()
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop(dry_run=True)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self._assert_nothing_was_cleaned_up()
 
 
 if __name__ == "__main__":

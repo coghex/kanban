@@ -250,6 +250,20 @@ class MigrateDrainStateTests(unittest.TestCase):
         self.assertEqual(migrated["version"], drain_prs.STATE_VERSION)
         self.assertEqual(migrated["attempt_counter"], 0)
 
+    def test_v2_migrates_to_current_version_and_keeps_its_counter(self):
+        # Version 2 differs from 3 only by the cleanup slot, so its attempt
+        # bookkeeping stays valid across the upgrade.
+        state = {
+            "version": 2,
+            "attempt_counter": 12,
+            "prs": {"42": {"approved_head": "deadbeef", "last_attempt": 11}},
+        }
+        migrated = drain_prs.migrate_drain_state(state, source="test")
+        self.assertEqual(migrated["version"], drain_prs.STATE_VERSION)
+        self.assertEqual(migrated["attempt_counter"], 12)
+        self.assertEqual(migrated["prs"]["42"]["last_attempt"], 11)
+        self.assertIsNone(migrated["prs"]["42"]["cleanup"])
+
     def test_unsupported_version_raises(self):
         state = {"version": 999, "prs": {}}
         with self.assertRaises(drain_prs.DrainError):
@@ -271,6 +285,7 @@ class MigrateDrainStateTests(unittest.TestCase):
         self.assertEqual(entry["retry_after_attempt"], 0)
         self.assertEqual(entry["last_attempt"], 0)
         self.assertIsNone(entry["last_error"])
+        self.assertIsNone(entry["cleanup"])
 
     def test_preserves_existing_pr_entry_fields(self):
         state = {
@@ -289,6 +304,67 @@ class MigrateDrainStateTests(unittest.TestCase):
         migrated = drain_prs.migrate_drain_state(state, source="test")
         self.assertEqual(migrated["prs"]["42"]["consecutive_failures"], 2)
         self.assertEqual(migrated["attempt_counter"], 3)
+
+
+class PlanCleanupTests(unittest.TestCase):
+    """The record a merge leaves behind is built from the PR payload alone and
+    carries everything a later cycle needs to retry each obligation on its own.
+    """
+
+    def _pr(self, **overrides):
+        pr = {
+            "number": 42,
+            "headRefName": "issue-99-demo",
+            "headRefOid": "a" * 40,
+            "closingIssuesReferences": [
+                {
+                    "number": 99,
+                    "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                },
+                {
+                    "number": 4,
+                    "repository": {"owner": {"login": "other"}, "name": "tracker"},
+                },
+            ],
+        }
+        pr.update(overrides)
+        return pr
+
+    def test_each_linked_issue_keeps_its_own_repository(self):
+        # Issue numbers are only meaningful per repository, so a cross-repo
+        # reference must survive as owner/name#number, not as a bare number.
+        record = drain_prs.plan_cleanup(self._pr())
+        issues = [item for item in record["pending"] if item["kind"] == "issue"]
+        self.assertEqual(
+            issues,
+            [
+                {"kind": "issue", "repo": "acme/widgets", "number": 99},
+                {"kind": "issue", "repo": "other/tracker", "number": 4},
+            ],
+        )
+
+    def test_the_worktree_is_removed_before_the_branch_it_holds(self):
+        record = drain_prs.plan_cleanup(self._pr())
+        kinds = [item["kind"] for item in record["pending"]]
+        self.assertEqual(
+            kinds[-4:],
+            ["worktree", "local-branch", "remote-branch", "fast-forward"],
+        )
+
+    def test_a_pr_closing_no_issue_still_owes_the_rest(self):
+        record = drain_prs.plan_cleanup(self._pr(closingIssuesReferences=[]))
+        self.assertEqual(
+            [item["kind"] for item in record["pending"]],
+            ["worktree", "local-branch", "remote-branch", "fast-forward"],
+        )
+        self.assertEqual(record["failed_passes"], 0)
+        self.assertIsNone(record["incident"])
+
+    def test_the_record_round_trips_through_json(self):
+        # It is written to the state file, so it must hold nothing but data.
+        record = drain_prs.plan_cleanup(self._pr())
+        self.assertEqual(json.loads(json.dumps(record)), record)
+        self.assertEqual(record["pr"]["headRefOid"], "a" * 40)
 
 
 class ParseWorktreePorcelainTests(unittest.TestCase):
