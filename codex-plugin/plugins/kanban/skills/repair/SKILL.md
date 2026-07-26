@@ -28,14 +28,16 @@ Forward the resolved repository and configuration to the canonical coordinator t
 Read the pull request's merge state, its complete status-check rollup, its labels, its linked issues, and its comments before deciding anything:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
+gh pr view <pr> -R <owner/name> --json number,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
 ```
+
+Resolve two things from the caller's configuration before judging any of that. A blocking label is whatever the effective configuration says it is, never a fixed string: take the configured `changes_requested_label` (default `reviewed:changes`) and `blocked_labels` (default `blocked`) from the same configuration the caller supplied — the global `[workflow]` table, overridden per repository by `[repositories."<owner>/<name>".workflow]` — and match them case-insensitively, exactly as `hasProblemLabel` does in `src/Kanban/Workflow.hs`. A repository configured with non-default labels would otherwise look like it has nothing to repair. Record `baseRefName` too: merge-conflict repair must incorporate that exact branch, and calling a failure pre-existing means reproducing it there rather than on a guessed default branch.
 
 Address the highest-priority blocking cause you find, in the same order and with the same breadth as `pullRequestStatus` in `src/Kanban/Workflow.hs`, so every state that can make a Done card red has a defined branch:
 
-1. **Merge conflict** — resolve it, preserving the pull request's intent while incorporating the current base branch.
-2. **Failed check** — any failed check in the pull request's status-check rollup, required or not, not only required checks. Fix the cause. A failure you judge to be pre-existing on the base branch or flaky rather than caused by this pull request must be reported to the user and stop the run, never papered over: no retry loops, no deleted or skipped tests, no weakened assertions.
-3. **Blocking label** — with no conflict and no failed check, whatever the check state, passing, pending, or unknown. Never remove a blocking label: a blocking label is a human's decision. Report what is blocking, ask the user, and act only on their answer.
+1. **Merge conflict** — resolve it against the recorded `baseRefName`, preserving the pull request's intent while incorporating that base branch's current tip.
+2. **Failed check** — any failed check in the pull request's status-check rollup, required or not, not only required checks. Fix the cause. A failure you judge to be pre-existing on the recorded base branch or flaky rather than caused by this pull request must be reported to the user and stop the run, never papered over: no retry loops, no deleted or skipped tests, no weakened assertions.
+3. **Blocking label** — one of the configured blocking labels resolved above, with no conflict and no failed check, whatever the check state, passing, pending, or unknown. Never remove a blocking label: a blocking label is a human's decision. Report what is blocking, ask the user, and act only on their answer.
 
 If none of the three is present, report what you found and stop without pushing.
 
@@ -57,7 +59,11 @@ A dirty or interrupted reused worktree is recoverable work, not a collision: ins
 
 Only when no worktree is on that branch, create one keyed on the pull request number under the repository-scoped worktrees root `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`, outside the source checkout. Never switch the repository's primary checkout.
 
-Make the smallest change that clears the diagnosed cause, then run the checks the changed paths and that cause actually select. Before pushing, re-fetch the pull request branch from the recorded head repository and verify its remote head still equals the recorded SHA. Push to that exact branch, in that head repository, without force. If the remote head moved, stop and report the competing update rather than overwriting it.
+Make the smallest change that clears the diagnosed cause, then run the checks the changed paths and that cause actually select. Commit that repair as a focused commit before pushing — an uncommitted working tree pushes nothing — and leave any recovered work from a reused worktree intact rather than reverting it or folding it into the repair.
+
+Before pushing, re-fetch the pull request branch from the recorded head repository and verify its remote head still equals the recorded SHA. Push to that exact branch, in that head repository, without force. If the remote head moved, stop and report the competing update rather than overwriting it.
+
+After pushing, verify the head repository's `headRefName` now resolves to a SHA different from the one recorded at the start. That verified new SHA is what "pushed a new head" means in step 4; a push that left the head unchanged transferred no repair, so treat it as having pushed nothing, invoke no rereview, and report it.
 
 ## 4. Hand off exactly one canonical rereview
 

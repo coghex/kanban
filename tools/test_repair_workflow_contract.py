@@ -73,24 +73,40 @@ REQUIRED_PHRASES = {
         "in the same order and with the same breadth as `pullRequestStatus` in "
         "`src/Kanban/Workflow.hs`"
     ),
+    "resolves-the-configured-blocking-labels": (
+        "A blocking label is whatever the effective configuration says it is, never a "
+        "fixed string: take the configured `changes_requested_label` (default "
+        "`reviewed:changes`) and `blocked_labels` (default `blocked`) from the same "
+        "configuration the caller supplied — the global `[workflow]` table, "
+        "overridden per repository by `[repositories.\"<owner>/<name>\".workflow]` — "
+        "and match them case-insensitively, exactly as `hasProblemLabel` does in "
+        "`src/Kanban/Workflow.hs`."
+    ),
+    "records-the-base-ref": (
+        "Record `baseRefName` too: merge-conflict repair must incorporate that exact "
+        "branch, and calling a failure pre-existing means reproducing it there rather "
+        "than on a guessed default branch."
+    ),
     "cause-1-merge-conflict": (
-        "1. **Merge conflict** — resolve it, preserving the pull request's intent "
-        "while incorporating the current base branch."
+        "1. **Merge conflict** — resolve it against the recorded `baseRefName`, "
+        "preserving the pull request's intent while incorporating that base branch's "
+        "current tip."
     ),
     "cause-2-any-failed-check-not-only-required": (
         "2. **Failed check** — any failed check in the pull request's status-check "
         "rollup, required or not, not only required checks."
     ),
     "cause-3-blocking-label-whatever-the-check-state": (
-        "3. **Blocking label** — with no conflict and no failed check, whatever the "
-        "check state, passing, pending, or unknown."
+        "3. **Blocking label** — one of the configured blocking labels resolved "
+        "above, with no conflict and no failed check, whatever the check state, "
+        "passing, pending, or unknown."
     ),
     # A pre-existing or flaky failure stops the run rather than being worked around.
     "flaky-or-pre-existing-failure-stops-the-run": (
-        "A failure you judge to be pre-existing on the base branch or flaky rather "
-        "than caused by this pull request must be reported to the user and stop the "
-        "run, never papered over: no retry loops, no deleted or skipped tests, no "
-        "weakened assertions."
+        "A failure you judge to be pre-existing on the recorded base branch or flaky "
+        "rather than caused by this pull request must be reported to the user and "
+        "stop the run, never papered over: no retry loops, no deleted or skipped "
+        "tests, no weakened assertions."
     ),
     # A blocking label is never removed without asking.
     "blocking-label-is-never-removed-without-asking": (
@@ -140,6 +156,18 @@ REQUIRED_PHRASES = {
     ),
     "never-switches-the-primary-checkout": (
         "Never switch the repository's primary checkout."
+    ),
+    "commits-the-repair-before-pushing": (
+        "Commit that repair as a focused commit before pushing — an uncommitted "
+        "working tree pushes nothing — and leave any recovered work from a reused "
+        "worktree intact rather than reverting it or folding it into the repair."
+    ),
+    "verifies-the-push-actually-advanced-the-head": (
+        "After pushing, verify the head repository's `headRefName` now resolves to a "
+        "SHA different from the one recorded at the start. That verified new SHA is "
+        "what \"pushed a new head\" means in step 4; a push that left the head "
+        "unchanged transferred no repair, so treat it as having pushed nothing, "
+        "invoke no rereview, and report it."
     ),
     "reverifies-the-head-before-a-non-force-push": (
         "Before pushing, re-fetch the pull request branch from the recorded head "
@@ -348,7 +376,24 @@ class RepairWorkflowContractTests(unittest.TestCase):
                     f"{path} invokes gh without an explicit repository: {line!r}",
                 )
 
-    def test_the_diagnosis_query_requests_the_head_repository_fields(self):
+    def test_the_configured_blocking_labels_match_has_problem_label(self):
+        # Non-vacuous anchor for the configured-label requirement: the two
+        # configuration keys the workflow is told to resolve are exactly the two
+        # hasProblemLabel actually consults, so a change to the Haskell
+        # definition fails here instead of leaving the packaged text stale.
+        source = read(REPO_ROOT / "src/Kanban/Workflow.hs")
+        body = re.search(
+            r"hasProblemLabel config labels =\n(.*?)\n\n", source, re.DOTALL
+        )
+        self.assertIsNotNone(body, "hasProblemLabel definition not found")
+        self.assertIn("config.changesRequestedLabel", body.group(1))
+        self.assertIn("config.blockedLabels", body.group(1))
+        for path in REPAIR_ASSETS:
+            text = read(path)
+            self.assertIn("changes_requested_label", text)
+            self.assertIn("blocked_labels", text)
+
+    def test_the_diagnosis_query_requests_the_base_and_head_ref_fields(self):
         # Round-2 review finding: -R scopes the query to the base repository but
         # says nothing about where the head lives. Without these fields the
         # workflow cannot tell a same-repository PR from a fork PR, so it would
@@ -367,6 +412,7 @@ class RepairWorkflowContractTests(unittest.TestCase):
                 "test for the account running this workflow",
             )
             for field in (
+                "baseRefName",
                 "headRefName",
                 "headRefOid",
                 "headRepository",

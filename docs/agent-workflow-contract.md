@@ -309,15 +309,21 @@ everything else.
   scopes pull-request *metadata* only: the head branch's fetches and pushes go
   to the head repository instead, which is not the same repository for a
   cross-repository pull request.
-- **Outputs:** at most one pushed commit on the pull request's own head
-  branch, followed by exactly one canonical rereview when — and only when — a
-  new head was pushed. The rereview publishes the `pr-review:v2` comment and
-  switches the configured verdict labels; the workflow itself never sets one.
+- **Outputs:** at most one focused commit pushed to the pull request's own head
+  branch, followed by exactly one canonical rereview when — and only when — the
+  push is verified to have advanced the head past the SHA recorded before
+  editing. The rereview publishes the `pr-review:v2` comment and switches the
+  configured verdict labels; the workflow itself never sets one.
 - **Failure semantics:** it addresses the highest-priority blocking cause in
   the same order and with the same breadth as `pullRequestStatus`
-  (`src/Kanban/Workflow.hs`): merge conflict, then any failed check in the
-  status-check rollup (required or not), then a blocking label whatever the
-  check state. A failure judged pre-existing on the base branch or flaky is
+  (`src/Kanban/Workflow.hs`): merge conflict against the pull request's
+  recorded `baseRefName`, then any failed check in the status-check rollup
+  (required or not), then a blocking label whatever the check state. "Blocking
+  label" means the configured `changes_requested_label` and `blocked_labels`
+  resolved from the caller's configuration including its per-repository
+  override — the same pair `hasProblemLabel` consults — not a fixed string, so
+  a repository with non-default labels is not mistaken for having nothing to
+  repair. A failure judged pre-existing on the base branch or flaky is
   reported and stops the run rather than being worked around; a blocking label
   is reported and referred to the user, never removed; a competing update to
   the remote head stops the run instead of overwriting it; and a push whose
