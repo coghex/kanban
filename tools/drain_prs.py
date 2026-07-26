@@ -255,9 +255,19 @@ def repo_root(path: Path) -> Path:
     return Path(root)
 
 
-def require_clean_worktree(root: Path) -> None:
+def require_clean_worktree(root: Path, *, dry_run: bool = False) -> None:
+    # `git status` refreshes the index's stat cache, which rewrites
+    # .git/index. A dry run must leave the repository byte for byte as it
+    # found it, and --no-optional-locks is git's own way to ask for a status
+    # that reads without writing.
     proc = run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        [
+            "git",
+            *(["--no-optional-locks"] if dry_run else []),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
         cwd=root,
     )
     status = (proc.stdout or "").strip()
@@ -276,9 +286,11 @@ def parse_repo_slug(remote_url: str) -> str:
         raise DrainError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
+def get_repo_context(
+    path: Path, remote_name: str = "origin", *, dry_run: bool = False
+) -> RepoContext:
     root = repo_root(path)
-    require_clean_worktree(root)
+    require_clean_worktree(root, dry_run=dry_run)
     remote_url = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
     repo_slug = parse_repo_slug(remote_url)
     repo_name = repo_slug.split("/", 1)[1]
@@ -2979,7 +2991,7 @@ def main() -> None:
                 pull_request=number,
                 dry_run=args.dry_run,
             )
-            ctx = get_repo_context(root, raw_config.remote_name)
+            ctx = get_repo_context(root, raw_config.remote_name, dry_run=args.dry_run)
             resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
             APPROVE_LABEL = resolved_config.workflow.approval_label
             CHANGES_LABEL = resolved_config.workflow.changes_requested_label

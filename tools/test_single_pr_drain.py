@@ -1044,11 +1044,13 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
         self.embedded_script = tools / "drain_prs.py"
 
     def settled_snapshot(self):
-        # `git status` can refresh the index's stat cache on its first run;
-        # settle it here so the drainer's own status call cannot be mistaken
-        # for a mutation.
-        for _ in range(2):
-            run_git(["status", "--porcelain=v1", "--untracked-files=all"], cwd=self.main)
+        # Deliberately leaves the index's stat cache stale: a plain `git
+        # status` would refresh it and rewrite .git/index, so this is the
+        # state in which a dry run's cleanliness check has to prove it reads
+        # without writing. Settling it first would hide exactly that.
+        readme = self.main / "README"
+        stamp = readme.stat().st_mtime - 120
+        os.utime(readme, (stamp, stamp))
         return snapshot_tree(self.main)
 
     def run_pure(self, *extra):
