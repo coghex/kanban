@@ -143,6 +143,11 @@ by a concurrent run and still excludes one. The lock file is locked too
 because it is the only object a drainer already running from an older version
 of the script takes.
 
+Every run that mutates anything publishes its PID and its mode before doing
+so, which is how the second run names the first. A dry run publishes neither,
+because writing is the one thing it must not do — so it is named by that
+absence, as a dry-run inspection.
+
 ## Approval and checks
 
 A pull request must have the `reviewed:approve` label and must not have `reviewed:changes`.

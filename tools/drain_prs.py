@@ -2450,11 +2450,20 @@ def describe_lock_holder(root: Path) -> str:
     read it that way. Which *kind* of run that PID is lives in a sidecar
     written under the same lock, and is trusted only when it names that same
     PID -- a sidecar left behind by an earlier run describes nobody.
+
+    A holder that published neither is a dry run, and is identified by that
+    absence rather than by anything it wrote: a dry run must leave the
+    repository byte for byte as it found it, so publishing its identity is
+    the one thing it cannot do. Every run that mutates anything publishes
+    first, which is what makes the elimination sound.
     """
-    try:
-        pid = int(lock_path_for(root).read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return "another drain_prs.py run"
+    pid = drain_prs_service.lock_pid(root)
+    if pid is None or not drain_prs_service.pid_alive(pid):
+        # No live PID published, yet something holds the lock.
+        return (
+            "a dry-run inspection, which publishes no identity because it "
+            "writes nothing (or a run in the instant before it published)"
+        )
     owner: Any = None
     try:
         owner = json.loads(lock_owner_path_for(root).read_text(encoding="utf-8"))

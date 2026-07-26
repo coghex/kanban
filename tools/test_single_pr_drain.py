@@ -759,8 +759,30 @@ class SinglePrRunLockTests(SinglePrCliFixture):
 
         self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
         self.assertEqual(result["reason"], "run_locked")
+        # A dry run publishes no identity precisely because it writes nothing,
+        # so it is named by that absence rather than left anonymous.
+        self.assertIn("dry-run inspection", result["message"])
         self.assertEqual(self.fake.calls("gh"), [])
         self.assertFalse(self.state_path.exists())
+
+    def test_a_dry_run_holding_the_lock_is_named_over_a_dead_run_s_leftovers(self):
+        # A stale PID file from a crashed run must not be mistaken for the
+        # live holder, which is the dry run.
+        self.lock_path.write_text("999999", encoding="utf-8")
+        drain_prs.lock_owner_path_for(self.main).write_text(
+            json.dumps({"pid": 999999, "mode": "polling", "pull_request": None}),
+            encoding="utf-8",
+        )
+        self.hold(dry_run=True)
+        self.script_pr_view()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "run_locked")
+        self.assertIn("dry-run inspection", result["message"])
+        self.assertNotIn("polling drainer", result["message"])
+        self.assertEqual(self.fake.calls("gh"), [])
 
     def test_a_dry_run_is_excluded_by_a_real_run_that_left_no_lock_file_yet(self):
         self.assertFalse(self.lock_path.exists())
