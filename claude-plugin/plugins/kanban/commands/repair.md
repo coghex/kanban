@@ -15,7 +15,9 @@ Whenever two reasonable resolutions would differ in behaviour, scope, or user-vi
 
 ## 1. Inputs
 
-Require one positive pull request number. Accept the repository and configuration context the caller supplies alongside it, and resolve the repository identity from that context rather than from the local checkout directory name.
+Require one positive pull request number. Accept the repository and configuration context the caller supplies alongside it, and resolve the repository identity from that context rather than from the local checkout directory name. When the caller supplies none, resolve it from the checkout's own configured remote.
+
+Use that resolved repository for every GitHub read and write in this workflow: pass it to `gh` as `-R <owner/name>` rather than letting `gh` infer the repository from the local checkout, and fetch and push the pull request's head branch against that same repository. A fork checkout whose remote points at the fork would otherwise diagnose, or fail on, a same-numbered pull request in the wrong repository.
 
 Forward the resolved repository and configuration to the canonical coordinator through the coordinator's own `--repo` and `--config` options, so a fork checkout or a non-default config path repairs and rereviews the same repository the board displays. Omit an option the caller did not supply.
 
@@ -24,7 +26,7 @@ Forward the resolved repository and configuration to the canonical coordinator t
 Read the pull request's merge state, its complete status-check rollup, its labels, its linked issues, and its comments before deciding anything:
 
 ```bash
-gh pr view <pr> --json number,headRefName,headRefOid,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
+gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
 ```
 
 Address the highest-priority blocking cause you find, in the same order and with the same breadth as `pullRequestStatus` in `src/Kanban/Workflow.hs`, so every state that can make a Done card red has a defined branch:

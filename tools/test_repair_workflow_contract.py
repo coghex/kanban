@@ -143,6 +143,12 @@ REQUIRED_PHRASES = {
     ),
     # Inputs.
     "requires-one-positive-pr-number": "Require one positive pull request number.",
+    "scopes-every-github-operation-to-the-resolved-repository": (
+        "Use that resolved repository for every GitHub read and write in this "
+        "workflow: pass it to `gh` as `-R <owner/name>` rather than letting `gh` "
+        "infer the repository from the local checkout, and fetch and push the pull "
+        "request's head branch against that same repository."
+    ),
     "forwards-repo-and-config-to-the-coordinator": (
         "Forward the resolved repository and configuration to the canonical "
         "coordinator through the coordinator's own `--repo` and `--config` options"
@@ -294,6 +300,27 @@ class RepairWorkflowContractTests(unittest.TestCase):
                 fences,
                 f"{path} must not publish a verdict itself",
             )
+
+    def test_every_gh_invocation_is_scoped_to_the_resolved_repository(self):
+        # Round-1 review finding: an unscoped `gh pr view` lets gh infer the
+        # repository from the local checkout, so a fork checkout given explicit
+        # repository context would diagnose (or fail on) a same-numbered pull
+        # request in the wrong repository — before the coordinator ever
+        # receives --repo. Every gh call in a fenced block must carry -R.
+        for path in REPAIR_ASSETS:
+            gh_lines = [
+                line.strip()
+                for fence in bash_fence_bodies(read(path))
+                for line in fence.splitlines()
+                if line.strip().startswith("gh ")
+            ]
+            self.assertTrue(gh_lines, f"{path} has no gh invocation to check")
+            for line in gh_lines:
+                self.assertIn(
+                    "-R <owner/name>",
+                    line,
+                    f"{path} invokes gh without an explicit repository: {line!r}",
+                )
 
     def test_neither_asset_invokes_a_merge_or_a_verdict_label_mutation(self):
         for path in REPAIR_ASSETS:
