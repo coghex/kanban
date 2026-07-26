@@ -15,6 +15,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -764,6 +765,42 @@ class SinglePrRunLockTests(SinglePrCliFixture):
         self.assertIn("dry-run inspection", result["message"])
         self.assertEqual(self.fake.calls("gh"), [])
         self.assertFalse(self.state_path.exists())
+
+    def test_a_real_run_that_has_not_published_yet_is_not_called_a_dry_run(self):
+        # The pre-publication window: a real run holds the lock file but has
+        # written no PID. Because a real run takes the file before the
+        # directory, and a dry run never takes the file at all, holding the
+        # file is already enough to tell them apart.
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(self.lock_path.read_bytes(), b"")
+
+        holder = drain_prs.describe_lock_holder(self.main)
+
+        self.assertNotIn("dry-run", holder)
+        self.assertIn("starting up", holder)
+
+        # And the same through the CLI, which loses on that very file lock.
+        self.script_pr_view()
+        result, proc = self.run_single()
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "run_locked")
+        self.assertNotIn("dry-run", result["message"])
+        self.assertEqual(self.fake.calls("gh"), [])
+
+    def test_a_real_run_holds_the_lock_file_before_the_directory(self):
+        # The ordering is what makes the identification atomic, so it is
+        # asserted rather than left to the comment that explains it.
+        self.hold(mode="polling")
+        self.assertTrue(drain_prs.lock_file_is_held(self.main))
+
+    def test_a_dry_run_holds_the_directory_alone(self):
+        self.hold(dry_run=True)
+        self.assertFalse(drain_prs.lock_file_is_held(self.main))
+        self.assertIn(
+            "dry-run inspection", drain_prs.describe_lock_holder(self.main)
+        )
 
     def test_a_dry_run_holding_the_lock_is_named_over_a_dead_run_s_leftovers(self):
         # A stale PID file from a crashed run must not be mistaken for the

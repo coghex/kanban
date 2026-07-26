@@ -136,17 +136,25 @@ repository, so they can never act on the same repository at once. Whichever
 starts second fails immediately without acting, naming the holder — the
 polling drainer, or the single-PR run and its pull request number.
 
-The lock is taken on the repository's `.git` directory and, whenever one
-exists, on `.git/drain_prs.lock` as well. The directory is what always exists
-to be locked, so a dry run — which creates no file at all — is still excluded
-by a concurrent run and still excludes one. The lock file is locked too
-because it is the only object a drainer already running from an older version
-of the script takes.
+A real run locks `.git/drain_prs.lock` and then the repository's `.git`
+directory. A dry run locks the directory alone, because creating or writing
+the lock file is exactly what it must not do. The directory is what always
+exists to be locked, so a dry run is still excluded by a concurrent run and
+still excludes one, even in a repository where no lock file has ever been
+written.
 
-Every run that mutates anything publishes its PID and its mode before doing
-so, which is how the second run names the first. A dry run publishes neither,
-because writing is the one thing it must not do — so it is named by that
-absence, as a dry-run inspection.
+That order is also how the second run names the first, so it is part of the
+contract rather than an implementation detail. A real run holds the lock file
+from before it holds the directory until after it releases it, so holding the
+directory *without* the file means a dry run, at every instant — including
+while a real run is still starting up and has not yet recorded its PID and
+mode. Those are read from the lock file and its `.owner.json` sidecar only to
+add detail: which mode, and which pull request.
+
+One consequence is deliberate: a dry run no longer collides with a drainer
+still running from an older version of this script, which locks only the file.
+That exclusion protected nothing, because a dry run mutates nothing — the
+worst a concurrent old run can do is make its report a moment stale.
 
 ## Approval and checks
 

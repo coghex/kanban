@@ -2442,28 +2442,54 @@ def lock_owner_path_for(root: Path) -> Path:
     return root / ".git" / "drain_prs.lock.owner.json"
 
 
-def describe_lock_holder(root: Path) -> str:
+def lock_file_is_held(root: Path) -> bool:
+    """Whether some process holds the lock file, probed without writing.
+
+    Taking a lock we immediately drop leaves nothing behind, and an absent or
+    unreadable file cannot be held by anyone.
+    """
+    try:
+        fd = os.open(lock_path_for(root), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        # Closing releases whatever this probe just took.
+        os.close(fd)
+    return False
+
+
+def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> str:
     """Name the run that holds the repository lock, as precisely as it can.
 
-    The lock file itself still holds nothing but the bare PID, because
-    drain_prs_service.lock_pid() and install_drainer.repository_drainer_running()
-    read it that way. Which *kind* of run that PID is lives in a sidecar
-    written under the same lock, and is trusted only when it names that same
-    PID -- a sidecar left behind by an earlier run describes nobody.
+    Which *kind* of run it is comes from which locks it holds, never from
+    anything it has written, so the answer is settled atomically by the lock
+    acquisition itself. A real run takes the lock file and then the `.git`
+    directory; a dry run takes the directory alone, because writing is the
+    one thing it must not do. Holding the directory without the file is
+    therefore a dry run, with no window in which a starting real run could be
+    mistaken for one.
 
-    A holder that published neither is a dry run, and is identified by that
-    absence rather than by anything it wrote: a dry run must leave the
-    repository byte for byte as it found it, so publishing its identity is
-    the one thing it cannot do. Every run that mutates anything publishes
-    first, which is what makes the elimination sound.
+    Only the finer detail -- the PID, the mode, the pull request -- is read
+    from what the holder published, and a run reports itself as starting
+    rather than guessing when it has not published yet. The lock file holds
+    the bare PID because drain_prs_service.lock_pid() and
+    install_drainer.repository_drainer_running() read it that way; the mode
+    lives in a sidecar, trusted only when it names that same live PID.
     """
+    # `self_holds_lock_file` says this process already holds the lock file and
+    # lost the directory, so the holder it is describing is by definition one
+    # that does not hold the file -- probing would only rediscover ourselves.
+    if self_holds_lock_file or not lock_file_is_held(root):
+        return "a dry-run inspection, which takes the repository without writing to it"
     pid = drain_prs_service.lock_pid(root)
     if pid is None or not drain_prs_service.pid_alive(pid):
-        # No live PID published, yet something holds the lock.
-        return (
-            "a dry-run inspection, which publishes no identity because it "
-            "writes nothing (or a run in the instant before it published)"
-        )
+        return "another drain_prs.py run that is still starting up"
     owner: Any = None
     try:
         owner = json.loads(lock_owner_path_for(root).read_text(encoding="utf-8"))
@@ -2493,14 +2519,17 @@ class RunLock:
         self._fds = []
 
 
-def _take_flock(fd: int, root: Path) -> int:
+def _take_flock(fd: int, root: Path, *, self_holds_lock_file: bool = False) -> int:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(fd)
+        holder = describe_lock_holder(
+            root, self_holds_lock_file=self_holds_lock_file
+        )
         raise RunLockedError(
             f"Another drain_prs.py instance is already running for {root}: "
-            f"{describe_lock_holder(root)} holds the lock."
+            f"{holder} holds the lock."
         ) from exc
     except OSError as exc:
         os.close(fd)
@@ -2550,29 +2579,44 @@ def acquire_lock(
     never act on the same repository at once: whichever starts second fails
     here rather than proceeding.
 
-    Two descriptors, always taken in this order so no pair of runs can
-    deadlock. The `.git` directory is the rendezvous that always exists, which
-    is what lets a dry run -- which must create nothing at all -- still
-    exclude a concurrent run, and be excluded by one, even in a repository
-    where no lock file has ever been written. The lock file is then locked too
-    whenever there is one, because it is the only object a drainer already
-    running from an older version of this script takes.
+    The `.git` directory is the rendezvous that always exists, which is what
+    lets a dry run -- which must create nothing at all -- still exclude a
+    concurrent run and be excluded by one, even in a repository where no lock
+    file has ever been written.
+
+    Which locks each mode takes is also how a contender tells them apart, so
+    the order is part of the contract, not an implementation detail. A real
+    run takes the lock file first and the directory second, so from the moment
+    it holds the directory it has always held the file too. A dry run takes
+    the directory alone. Holding the directory without the file therefore
+    means a dry run, at every instant, with nothing written and no startup
+    window in which the two could be confused.
+
+    The cost is that a dry run no longer collides with a drainer still running
+    from an older version of this script, which locks only the file. That
+    exclusion protected nothing: a dry run mutates nothing, so the worst a
+    concurrent old run can do to it is make its report a moment stale.
     """
     held: list[int] = []
-    lock_path = lock_path_for(root)
     try:
-        held.append(_take_flock(os.open(root / ".git", os.O_RDONLY), root))
         if dry_run:
-            if lock_path.exists():
-                held.append(_take_flock(os.open(lock_path, os.O_RDONLY), root))
+            held.append(_take_flock(os.open(root / ".git", os.O_RDONLY), root))
             return RunLock(held)
         # Opened without O_TRUNC and rewritten only after the lock is won: a
         # losing contender must never erase the PID of the holder it is about
         # to report.
-        held.append(
-            _take_flock(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644), root)
+        lock_fd = _take_flock(
+            os.open(lock_path_for(root), os.O_RDWR | os.O_CREAT, 0o644), root
         )
-        _publish_lock_owner(held[-1], root, mode, pull_request)
+        held.append(lock_fd)
+        held.append(
+            _take_flock(
+                os.open(root / ".git", os.O_RDONLY), root, self_holds_lock_file=True
+            )
+        )
+        # Published only once both locks are held, so a run that loses the
+        # second one never leaves its identity behind as the holder's.
+        _publish_lock_owner(lock_fd, root, mode, pull_request)
         return RunLock(held)
     except BaseException:
         RunLock(held).close()

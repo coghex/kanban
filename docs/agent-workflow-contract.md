@@ -221,12 +221,14 @@ everything else.
   JSON file, which records both the approved head each queued pull request
   was cleared at and the post-merge obligations a merged pull request still
   owes, and which migrates forward from the shapes earlier versions wrote; and
-  a per-repository run lock held on the `.git` directory and on
-  `.git/drain_prs.lock` — which holds the holder's bare PID — beside a
+  a per-repository run lock held on `.git/drain_prs.lock` — which holds the
+  holder's bare PID — and then on the `.git` directory, beside a
   `.git/drain_prs.lock.owner.json` sidecar recording whether that PID is the
   polling service or a single-PR run. One lock covers both modes, so whichever
-  starts second fails immediately naming the holder rather than acting; the
-  directory is what a dry run, which creates nothing, locks.
+  starts second fails immediately naming the holder rather than acting. A dry
+  run locks the directory alone, since it writes nothing; holding the
+  directory without the file is therefore what identifies it, atomically and
+  at every instant.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.
