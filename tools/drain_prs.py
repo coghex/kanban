@@ -32,8 +32,9 @@ DEFAULT_INTERVAL_SECONDS = 300
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
 MODEL_TIMEOUT_SECONDS = 60 * 60
-STATE_VERSION = 2
+STATE_VERSION = 3
 FAILURES_BEFORE_BACKOFF = 2
+CLEANUP_PASSES_BEFORE_INCIDENT = 3
 MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
 FINALIZE_MODEL = "gpt-5.6-terra"
@@ -366,17 +367,26 @@ def drain_state_path(ctx: RepoContext) -> Path:
 def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]:
     if not isinstance(state.get("prs"), dict):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
-    if state.get("version") == 1:
-        state["version"] = STATE_VERSION
+    version = state.get("version")
+    if version == 1:
         state["attempt_counter"] = 0
-    elif state.get("version") != STATE_VERSION:
+        version = 2
+    if version == 2:
+        # Version 2 recorded no post-merge cleanup obligations, so an entry it
+        # left behind can be a PR that merged before the upgrade and never
+        # finished cleaning up. Nothing is invented for it here: recovery reads
+        # the merged pull request itself and plans the obligations from it.
+        version = 3
+    if version != STATE_VERSION:
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    state["version"] = STATE_VERSION
     state.setdefault("attempt_counter", 0)
     for entry in state["prs"].values():
         entry.setdefault("consecutive_failures", 0)
         entry.setdefault("retry_after_attempt", 0)
         entry.setdefault("last_attempt", 0)
         entry.setdefault("last_error", None)
+        entry.setdefault("cleanup", None)
     return state
 
 
@@ -420,6 +430,10 @@ def remember_approved_head(
         "retry_after_attempt": 0,
         "last_attempt": previous.get("last_attempt", 0),
         "last_error": None,
+        # Approval bookkeeping is reset here; a recorded cleanup obligation is
+        # not. It belongs to a merge that already landed, and only completing
+        # it -- never a new approval -- may discharge it.
+        "cleanup": previous.get("cleanup"),
     }
 
 
@@ -868,44 +882,47 @@ def merge_pr(
     raise DrainError(f"Failed to merge PR #{number}: {detail}")
 
 
-def close_linked_issues(
+def close_linked_issue(
     ctx: RepoContext,
-    pr: dict[str, Any],
+    repo_slug: str,
+    number: int,
     *,
     dry_run: bool,
 ) -> None:
-    for issue in pr.get("closingIssuesReferences", []):
-        number = issue["number"]
-        repo_slug = f'{issue["repository"]["owner"]["login"]}/{issue["repository"]["name"]}'
-        state = run_json(
-            [
-                "gh",
-                "issue",
-                "view",
-                str(number),
-                "--repo",
-                repo_slug,
-                "--json",
-                "state",
-            ],
-            cwd=ctx.path,
-        )["state"]
-        if state == "CLOSED":
-            continue
-        log(f"Closing linked issue {repo_slug}#{number}")
-        if dry_run:
-            continue
-        run(
-            [
-                "gh",
-                "issue",
-                "close",
-                str(number),
-                "--repo",
-                repo_slug,
-            ],
-            cwd=ctx.path,
-        )
+    """Close one issue a merged PR closes, idempotently.
+
+    An issue that is already closed -- by an earlier pass, by GitHub's own
+    closing keyword, or by hand -- is a satisfied obligation, not a failure.
+    """
+    state = run_json(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            repo_slug,
+            "--json",
+            "state",
+        ],
+        cwd=ctx.path,
+    )["state"]
+    if state == "CLOSED":
+        return
+    log(f"Closing linked issue {repo_slug}#{number}")
+    if dry_run:
+        return
+    run(
+        [
+            "gh",
+            "issue",
+            "close",
+            str(number),
+            "--repo",
+            repo_slug,
+        ],
+        cwd=ctx.path,
+    )
 
 
 def parse_worktree_porcelain(output: str) -> list[dict[str, str]]:
@@ -1220,10 +1237,28 @@ def recover_stale_approval(
     for key in sorted(state["prs"], key=int):
         number = int(key)
         entry = state["prs"][key]
+        if entry.get("cleanup") is not None:
+            # A recorded cleanup names everything the merge still owes, so it
+            # is worked without reading the pull request again: that read can
+            # fail, and a merge's outstanding debts must not depend on it.
+            if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
+                forget_pr(state, number)
+            continue
+
         pr = get_pr(ctx, number)
 
         if pr["state"] != "OPEN":
-            forget_pr(state, number)
+            if pr["state"] != "MERGED":
+                # Closed without merging: nothing is owed, and forgetting it
+                # must never close an issue or delete a branch.
+                forget_pr(state, number)
+                continue
+            # Merged with nothing recorded -- the drainer stopped between the
+            # merge and its record, or the merge predates the record entirely.
+            log(f"PR #{number}: merged with no cleanup recorded; planning it now")
+            entry["cleanup"] = plan_cleanup(pr)
+            if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
+                forget_pr(state, number)
             continue
 
         approved_head = entry["approved_head"]
@@ -1591,21 +1626,225 @@ def fast_forward_default_branch(
             _restore_snapshot(ctx, tracked_sha, untracked, anchor_ref)
 
 
-def cleanup_after_merge(
+def cleanup_pr_snapshot(pr: dict[str, Any]) -> dict[str, Any]:
+    """The pull-request facts post-merge cleanup depends on.
+
+    Persisted with the cleanup record so every obligation survives a restart:
+    once the PR is merged the queue no longer refetches it, and the worktree
+    match is recomputed from exactly these fields.
+    """
+    return {
+        "number": pr["number"],
+        "headRefName": pr["headRefName"],
+        "headRefOid": pr["headRefOid"],
+        "closingIssuesReferences": [
+            {
+                "number": issue["number"],
+                "repository": {
+                    "owner": {"login": issue["repository"]["owner"]["login"]},
+                    "name": issue["repository"]["name"],
+                },
+            }
+            for issue in pr.get("closingIssuesReferences", [])
+        ],
+    }
+
+
+def plan_cleanup(pr: dict[str, Any]) -> dict[str, Any]:
+    """Build the post-merge cleanup record for a PR that is about to merge.
+
+    Derived from the pull-request payload alone, so nothing here can fail:
+    the record is what makes a successful merge durable, and it must never be
+    lost to an error in planning it. Every obligation carries the data needed
+    to retry it on its own -- a linked issue keeps its owner and repository
+    name, because issue numbers are only meaningful per repository.
+    """
+    snapshot = cleanup_pr_snapshot(pr)
+    branch = snapshot["headRefName"]
+    pending: list[dict[str, Any]] = [
+        {
+            "kind": "issue",
+            "repo": f'{issue["repository"]["owner"]["login"]}/'
+            f'{issue["repository"]["name"]}',
+            "number": issue["number"],
+        }
+        for issue in snapshot["closingIssuesReferences"]
+    ]
+    # The worktree comes before the branch it has checked out: git refuses to
+    # delete a branch a live worktree holds.
+    pending.append({"kind": "worktree"})
+    pending.append({"kind": "local-branch", "branch": branch})
+    pending.append({"kind": "remote-branch", "branch": branch})
+    pending.append({"kind": "fast-forward"})
+    return {
+        "pr": snapshot,
+        "pending": pending,
+        "failed_passes": 0,
+        "last_error": None,
+        "incident": None,
+    }
+
+
+def describe_cleanup_obligation(obligation: dict[str, Any]) -> str:
+    kind = obligation.get("kind")
+    if kind == "issue":
+        return f'closing {obligation["repo"]}#{obligation["number"]}'
+    if kind == "worktree":
+        return "removing the matching worktree"
+    if kind == "local-branch":
+        return f'deleting local branch {obligation["branch"]}'
+    if kind == "remote-branch":
+        return f'deleting remote branch {obligation["branch"]}'
+    if kind == "fast-forward":
+        return "fast-forwarding the default branch"
+    return f"unknown cleanup step {kind!r}"
+
+
+def run_cleanup_obligation(
     ctx: RepoContext,
-    pr: dict[str, Any],
+    record: dict[str, Any],
+    obligation: dict[str, Any],
     *,
     dry_run: bool,
 ) -> None:
-    close_linked_issues(ctx, pr, dry_run=dry_run)
-    worktree = find_matching_worktree(ctx, pr)
-    if worktree is not None:
+    kind = obligation.get("kind")
+    if kind == "issue":
+        close_linked_issue(
+            ctx, obligation["repo"], obligation["number"], dry_run=dry_run
+        )
+    elif kind == "worktree":
+        # Matched here rather than when the record was written: matching reads
+        # the live worktree list and can fail, and a merge must never depend on
+        # a step that can fail before it is durably recorded.
+        worktree = find_matching_worktree(ctx, record["pr"])
+        if worktree is None:
+            log(f"PR #{record['pr']['number']}: no matching local worktree found")
+            return
         remove_worktree(ctx, worktree, dry_run=dry_run)
+    elif kind == "local-branch":
+        delete_local_branch(ctx, obligation["branch"], dry_run=dry_run)
+    elif kind == "remote-branch":
+        delete_remote_branch(ctx, obligation["branch"], dry_run=dry_run)
+    elif kind == "fast-forward":
+        fast_forward_default_branch(ctx, dry_run=dry_run)
     else:
-        log(f"PR #{pr['number']}: no matching local worktree found")
-    delete_local_branch(ctx, pr["headRefName"], dry_run=dry_run)
-    delete_remote_branch(ctx, pr["headRefName"], dry_run=dry_run)
-    fast_forward_default_branch(ctx, dry_run=dry_run)
+        raise DrainError(f"Unknown cleanup step {kind!r}")
+
+
+def run_cleanup_pass(
+    ctx: RepoContext,
+    record: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> list[str]:
+    """Attempt every outstanding obligation once, independently.
+
+    One failing step never skips the ones after it: each is attempted, and the
+    record is narrowed to exactly those that are still outstanding. Returns one
+    message per step that failed, empty when the record is fully discharged.
+    """
+    number = record["pr"]["number"]
+    remaining: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for obligation in record["pending"]:
+        try:
+            run_cleanup_obligation(ctx, record, obligation, dry_run=dry_run)
+        except DrainError as exc:
+            described = describe_cleanup_obligation(obligation)
+            remaining.append(obligation)
+            errors.append(f"{described}: {exc}")
+            log(f"PR #{number}: post-merge cleanup failed {described}; {exc}")
+    record["pending"] = remaining
+    return errors
+
+
+def advance_pending_cleanup(
+    ctx: RepoContext,
+    record: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> bool:
+    """Work a merged PR's recorded cleanup and report whether it is finished.
+
+    Never raises. The merge already landed, so an outstanding obligation is a
+    debt to retry, not a reason to fail this PR's attempt or to stop the queue
+    -- every other approved PR keeps draining either way. A debt that survives
+    CLEANUP_PASSES_BEFORE_INCIDENT passes stops being silent and is surfaced as
+    an incident, which clears itself once the last step succeeds.
+    """
+    number = record["pr"]["number"]
+    errors = run_cleanup_pass(ctx, record, dry_run=dry_run)
+    if not errors:
+        record["failed_passes"] = 0
+        record["last_error"] = None
+        if record.get("incident") is not None and not dry_run:
+            resolved = drain_prs_service.resolve_cleanup_incident(
+                ctx.path,
+                number,
+                f"PR #{number} finished its post-merge cleanup.",
+            )
+            if resolved is not None:
+                log(
+                    f"PR #{number}: resolved cleanup incident "
+                    f"{resolved['incident_id']}"
+                )
+            record["incident"] = None
+        return True
+
+    record["failed_passes"] = int(record.get("failed_passes", 0)) + 1
+    record["last_error"] = "; ".join(errors)
+    passes = record["failed_passes"]
+    steps = [describe_cleanup_obligation(item) for item in record["pending"]]
+    if passes < CLEANUP_PASSES_BEFORE_INCIDENT or dry_run:
+        log(
+            f"PR #{number}: {len(record['pending'])} post-merge cleanup step(s) "
+            f"outstanding after {passes} pass(es); will retry"
+        )
+        return False
+    if record.get("incident") is None:
+        incident = drain_prs_service.record_cleanup_incident(
+            repo_path=ctx.path,
+            pull_request=number,
+            steps=steps,
+            error=record["last_error"],
+        )
+        record["incident"] = incident["incident_id"]
+        log(
+            f"PR #{number}: post-merge cleanup still outstanding after {passes} "
+            f"pass(es); recorded incident {incident['incident_id']} and kept retrying"
+        )
+    else:
+        log(
+            f"PR #{number}: post-merge cleanup still outstanding after {passes} "
+            f"pass(es) under incident {record['incident']}; kept retrying"
+        )
+    return False
+
+
+def complete_pending_cleanup(
+    ctx: RepoContext,
+    state: dict[str, Any],
+    number: int,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Advance the recorded cleanup for one PR, discharging it when finished.
+
+    The state entry outlives the merge on purpose: it is the only record that
+    these obligations are owed, so it is dropped only once every one of them
+    is done.
+    """
+    entry = state["prs"].get(str(number))
+    if entry is None:
+        return True
+    record = entry.get("cleanup")
+    if record is None:
+        return True
+    if advance_pending_cleanup(ctx, record, dry_run=dry_run):
+        entry["cleanup"] = None
+        log(f"PR #{number}: post-merge cleanup complete")
+        return True
+    return False
 
 
 def fetch_pr_head(ctx: RepoContext, pr: dict[str, Any]) -> bool:
@@ -1869,9 +2108,33 @@ def process_pr(
     merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates)
     if not merged:
         return True
-    cleanup_after_merge(ctx, pr, dry_run=dry_run)
-    if not dry_run:
+
+    record = plan_cleanup(pr)
+    if dry_run:
+        # Records nothing and mutates nothing, exactly as before: the pass only
+        # reports what a real run would clean up.
+        run_cleanup_pass(ctx, record, dry_run=True)
+        return True
+
+    # The merge is durable on GitHub the moment it returns, so record what it
+    # still owes *before* attempting any of it. A cleanup step that fails after
+    # this point is retried from the record; one that failed before it existed
+    # left the merge looking like a PR that simply departed the queue, and its
+    # issues, branches and worktree leaked silently.
+    entry = state["prs"].get(str(number))
+    if entry is None:
+        # The queue always has an entry for a PR it selected; this only keeps a
+        # merge from being lost to a caller that does not.
+        remember_approved_head(state, number, pr["headRefOid"])
+        entry = state["prs"][str(number)]
+    entry["cleanup"] = record
+    save_drain_state(ctx, state, dry_run=dry_run)
+
+    if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
         forget_pr(state, number)
+    # Persist what the pass achieved rather than leaving it to the caller: the
+    # obligations that remain are the ones the next cycle must retry.
+    save_drain_state(ctx, state, dry_run=dry_run)
     return True
 
 

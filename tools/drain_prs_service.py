@@ -75,12 +75,17 @@ NTFY_URL = configured_ntfy_url()
 CONFIGURED_CONFIG_PATH = configured_config_path()
 CONFIGURED_REMOTE_NAME = configured_remote_name()
 # Incident kinds. A crash incident says the drainer process died; a conflict
-# incident says a healthy drainer stopped working one pull request. They have
-# different payloads and different lifecycles, so every selector filters on
-# this field. Incidents written before the field existed are crashes.
+# incident says a healthy drainer stopped working one pull request; a cleanup
+# incident says a merge landed but its post-merge obligations keep failing.
+# They have different payloads and different lifecycles, so every selector
+# filters on this field. Incidents written before the field existed are
+# crashes. Only the crash kind means the drainer is not running: the other two
+# are raised by a healthy drainer that keeps draining every other pull request.
 CRASH_INCIDENT_KIND = "drainer-exit"
 CONFLICT_INCIDENT_KIND = "merge-conflict"
+CLEANUP_INCIDENT_KIND = "cleanup-pending"
 CONFLICT_SUMMARY_FILES = 3
+CLEANUP_SUMMARY_STEPS = 3
 INTERVAL_SECONDS = 60
 START_TIMEOUT_SECONDS = 12
 START_STABILITY_SECONDS = 1.0
@@ -603,17 +608,37 @@ def conflict_summary(pull_request: int, files: list[str]) -> str:
     )
 
 
-def find_open_conflict_incident(
-    repo_path: Path, pull_request: int
+def cleanup_summary(pull_request: int, steps: list[str]) -> str:
+    if not steps:
+        return (
+            f"PR #{pull_request} merged, but the drainer could not finish its "
+            "post-merge cleanup."
+        )
+    shown = ", ".join(steps[:CLEANUP_SUMMARY_STEPS])
+    remaining = len(steps) - CLEANUP_SUMMARY_STEPS
+    if remaining > 0:
+        shown += f" (+{remaining} more)"
+    return (
+        f"PR #{pull_request} merged, but its post-merge cleanup keeps failing: "
+        f"{shown}."
+    )
+
+
+def find_open_pr_incident(
+    repo_path: Path, pull_request: int, kind: str
 ) -> tuple[Path, dict[str, Any]] | None:
     """The one open incident keyed by this repository, kind and PR, if any."""
-    for path in incident_files(
-        repo_path=repo_path, open_only=True, kind=CONFLICT_INCIDENT_KIND
-    ):
+    for path in incident_files(repo_path=repo_path, open_only=True, kind=kind):
         incident = read_json(path)
         if incident is not None and incident.get("pull_request") == pull_request:
             return path, incident
     return None
+
+
+def find_open_conflict_incident(
+    repo_path: Path, pull_request: int
+) -> tuple[Path, dict[str, Any]] | None:
+    return find_open_pr_incident(repo_path, pull_request, CONFLICT_INCIDENT_KIND)
 
 
 def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
@@ -627,19 +652,24 @@ def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
     return incidents
 
 
-def record_conflict_incident(
+def record_pr_incident(
     *,
     repo_path: Path,
     pull_request: int,
-    files: list[str],
+    kind: str,
+    summary: str,
+    payload: dict[str, Any],
+    notes: list[str],
+    title: str,
+    tags: str,
 ) -> dict[str, Any]:
-    """Record that a healthy drainer stopped merging one conflicted PR.
+    """Record that a healthy drainer needs help with one pull request.
 
     Idempotent on (repository, kind, pull request): while an incident for that
-    PR is open, repeated polls return it untouched instead of accumulating
-    duplicates. A recurrence after resolution opens a new one.
+    PR and kind is open, repeated polls return it untouched instead of
+    accumulating duplicates. A recurrence after resolution opens a new one.
     """
-    existing = find_open_conflict_incident(repo_path, pull_request)
+    existing = find_open_pr_incident(repo_path, pull_request, kind)
     if existing is not None:
         return existing[1]
 
@@ -656,15 +686,16 @@ def record_conflict_incident(
         duplicate += 1
         incident_id = f"{base_id}-{duplicate}"
     log_path = latest_log_path()
-    summary = conflict_summary(pull_request, files)
     incident: dict[str, Any] = {
+        # Kind-specific detail first, so it can never displace the fields every
+        # incident reader relies on.
+        **payload,
         "incident_id": incident_id,
-        "kind": CONFLICT_INCIDENT_KIND,
+        "kind": kind,
         "status": "open",
         "occurred_at": utc_stamp(),
         "summary": summary,
         "pull_request": pull_request,
-        "files": files,
         "repo": str(repo_path),
         "drainer": str(DRAINER_PATH),
         "drainer_log": str(log_path) if log_path else None,
@@ -675,19 +706,13 @@ def record_conflict_incident(
     incident["path"] = str(incident_path)
     atomic_write_json(incident_path, incident)
 
-    message_parts = [
-        summary,
-        f"Incident: {incident_id}",
-        "The drainer is still running and keeps draining every other approved PR.",
-        "Resolve the conflict on the PR branch; this incident clears itself "
-        "once GitHub reports the PR mergeable again.",
-    ]
+    message_parts = [summary, f"Incident: {incident_id}", *notes]
     try:
         incident["notification"] = publish_ntfy(
             "\n".join(message_parts),
-            title="PR drainer blocked on a merge conflict",
+            title=title,
             priority="high",
-            tags="warning,twisted_rightwards_arrows",
+            tags=tags,
         )
     except ServiceError as exc:
         incident["notification"] = {
@@ -699,12 +724,65 @@ def record_conflict_incident(
     return incident
 
 
-def resolve_conflict_incident(
-    repo_path: Path, pull_request: int, note: str
+def record_conflict_incident(
+    *,
+    repo_path: Path,
+    pull_request: int,
+    files: list[str],
+) -> dict[str, Any]:
+    """Record that a healthy drainer stopped merging one conflicted PR."""
+    return record_pr_incident(
+        repo_path=repo_path,
+        pull_request=pull_request,
+        kind=CONFLICT_INCIDENT_KIND,
+        summary=conflict_summary(pull_request, files),
+        payload={"files": files},
+        notes=[
+            "The drainer is still running and keeps draining every other approved PR.",
+            "Resolve the conflict on the PR branch; this incident clears itself "
+            "once GitHub reports the PR mergeable again.",
+        ],
+        title="PR drainer blocked on a merge conflict",
+        tags="warning,twisted_rightwards_arrows",
+    )
+
+
+def record_cleanup_incident(
+    *,
+    repo_path: Path,
+    pull_request: int,
+    steps: list[str],
+    error: str | None,
+) -> dict[str, Any]:
+    """Record that a merged PR's post-merge cleanup keeps failing.
+
+    The merge itself already landed, so this never asks the drainer to exit:
+    the obligations stay recorded and retried while every other approved PR
+    keeps draining.
+    """
+    return record_pr_incident(
+        repo_path=repo_path,
+        pull_request=pull_request,
+        kind=CLEANUP_INCIDENT_KIND,
+        summary=cleanup_summary(pull_request, steps),
+        payload={"steps": steps, "last_error": error},
+        notes=[
+            "The merge already landed; only its cleanup is outstanding.",
+            "The drainer is still running, keeps retrying these steps, and "
+            "keeps draining every other approved PR.",
+            "This incident clears itself once every outstanding step succeeds.",
+        ],
+        title="PR drainer cannot finish post-merge cleanup",
+        tags="warning,broom",
+    )
+
+
+def resolve_pr_incident(
+    repo_path: Path, pull_request: int, kind: str, note: str
 ) -> dict[str, Any] | None:
-    """Resolve only this PR's conflict incident, leaving every other open
-    incident -- another PR's conflict, or a supervisor crash -- untouched."""
-    found = find_open_conflict_incident(repo_path, pull_request)
+    """Resolve only this PR's incident of this kind, leaving every other open
+    incident -- another PR's, another kind's, or a supervisor crash -- alone."""
+    found = find_open_pr_incident(repo_path, pull_request, kind)
     if found is None:
         return None
     path, incident = found
@@ -713,6 +791,18 @@ def resolve_conflict_incident(
     incident["resolution"] = note
     atomic_write_json(path, incident)
     return incident
+
+
+def resolve_conflict_incident(
+    repo_path: Path, pull_request: int, note: str
+) -> dict[str, Any] | None:
+    return resolve_pr_incident(repo_path, pull_request, CONFLICT_INCIDENT_KIND, note)
+
+
+def resolve_cleanup_incident(
+    repo_path: Path, pull_request: int, note: str
+) -> dict[str, Any] | None:
+    return resolve_pr_incident(repo_path, pull_request, CLEANUP_INCIDENT_KIND, note)
 
 
 def acknowledge_incident(
