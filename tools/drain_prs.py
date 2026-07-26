@@ -1794,7 +1794,12 @@ def advance_pending_cleanup(
     if not errors:
         record["failed_passes"] = 0
         record["last_error"] = None
-        if record.get("incident") is not None and not dry_run:
+        record["incident"] = None
+        if not dry_run:
+            # Resolved by (repository, PR) rather than by the id this record
+            # happens to name: an incident is written atomically before the
+            # state that remembers it, so a crash in between leaves one open
+            # against a record naming nothing, and nothing else would close it.
             resolved = drain_prs_service.resolve_cleanup_incident(
                 ctx.path,
                 number,
@@ -1805,7 +1810,6 @@ def advance_pending_cleanup(
                     f"PR #{number}: resolved cleanup incident "
                     f"{resolved['incident_id']}"
                 )
-            record["incident"] = None
         return True
 
     record["failed_passes"] = int(record.get("failed_passes", 0)) + 1

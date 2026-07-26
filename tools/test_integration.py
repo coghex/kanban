@@ -1719,6 +1719,47 @@ class PostMergeCleanupTests(ProcessPrFixture):
             opened[0]["incident_id"],
         )
 
+    def test_an_incident_the_record_never_learned_of_is_still_resolved(self):
+        # An incident is written atomically before the state that remembers its
+        # id, so a crash in between leaves one open against a record naming no
+        # incident at all. Finishing the cleanup must still close it, or Kanban
+        # shows an open incident for work that is done.
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        opened = self._incidents()
+        self.assertEqual([entry["status"] for entry in opened], ["open"])
+
+        # The crash: the incident file survives, the state save that would have
+        # recorded its id does not.
+        crashed = self._read_state()
+        crashed["prs"]["7"]["cleanup"]["incident"] = None
+        self._write_state(crashed)
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["status"], "resolved")
+        self.assertEqual(incidents[0]["incident_id"], opened[0]["incident_id"])
+        self.assertNotIn("7", self._read_state()["prs"])
+
     def test_an_unreadable_remote_leaves_the_branch_obligation_outstanding(self):
         # `git ls-remote --exit-code` reports a missing branch as exactly 2; a
         # remote it cannot reach at all is 128. Reading the latter as absence
