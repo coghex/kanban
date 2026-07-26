@@ -255,27 +255,55 @@ def repo_root(path: Path) -> Path:
     return Path(root)
 
 
-def require_clean_worktree(root: Path, *, dry_run: bool = False) -> None:
-    # `git status` refreshes the index's stat cache, which rewrites
-    # .git/index. A dry run must leave the repository byte for byte as it
-    # found it, and --no-optional-locks is git's own way to ask for a status
-    # that reads without writing.
-    proc = run(
-        [
-            "git",
-            *(["--no-optional-locks"] if dry_run else []),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-        ],
-        cwd=root,
-    )
-    status = (proc.stdout or "").strip()
-    if status:
+def git_dir(path: Path) -> Path:
+    # Not path / ".git": for a linked worktree that's a gitdir *file*
+    # (a pointer to .git/worktrees/<name>), not a directory, so mkdtemp()
+    # under it would fail outright. This resolves the real one either way.
+    proc = run(["git", "rev-parse", "--absolute-git-dir"], cwd=path, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(f"Could not resolve the git directory for {path}:\n{detail}")
+    return Path((proc.stdout or "").strip())
+
+
+def in_progress_operation(git_directory: Path) -> str | None:
+    """Names the operation this checkout is stopped part-way through, if any.
+
+    Reads the markers git itself writes into the git directory rather than
+    asking whether `git status` is non-empty. Ordinary uncommitted work is no
+    reason to refuse — `fast_forward_default_branch` sets it aside and
+    restores it — but an unfinished operation blocks that fast-forward until
+    a human resolves it, so every merge in the run would fail the same
+    avoidable way.
+    """
+    if (git_directory / "rebase-merge").exists():
+        return "rebase"
+    if (git_directory / "rebase-apply").exists():
+        # git shares this directory between `rebase --apply` and `am`, which
+        # are finished and aborted by different commands, so the message must
+        # not guess which one the user has to run.
+        applying = git_directory / "rebase-apply" / "applying"
+        return "am" if applying.exists() else "rebase"
+    for marker, operation in (
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+    ):
+        if (git_directory / marker).exists():
+            return operation
+    return None
+
+
+def require_no_operation_in_progress(root: Path) -> None:
+    # Reading marker paths never refreshes the index's stat cache the way
+    # `git status` does, so this leaves .git/index byte for byte as it found
+    # it — in a dry run and a real one alike.
+    operation = in_progress_operation(git_dir(root))
+    if operation is not None:
         raise DrainError(
-            "Refusing to start PR drainer: repository has uncommitted changes. "
-            "Commit, stash, or discard them first.\n"
-            + status
+            f"Refusing to start PR drainer: a {operation} is in progress in {root}. "
+            "Finish or abort it first."
         )
 
 
@@ -286,11 +314,12 @@ def parse_repo_slug(remote_url: str) -> str:
         raise DrainError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(
-    path: Path, remote_name: str = "origin", *, dry_run: bool = False
-) -> RepoContext:
+def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
     root = repo_root(path)
-    require_clean_worktree(root, dry_run=dry_run)
+    # Ahead of the default-branch check below: a rebase or a bisect commonly
+    # leaves a detached HEAD, so checking the branch first would report the
+    # symptom instead of naming the operation the user has to finish.
+    require_no_operation_in_progress(root)
     remote_url = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
     repo_slug = parse_repo_slug(remote_url)
     repo_name = repo_slug.split("/", 1)[1]
@@ -1514,17 +1543,6 @@ def delete_remote_branch(ctx: RepoContext, branch: str, *, dry_run: bool) -> Non
     run(["git", "push", ctx.remote_name, "--delete", branch], cwd=ctx.path)
 
 
-def _git_dir(ctx: RepoContext) -> Path:
-    # Not ctx.path / ".git": for a linked worktree that's a gitdir *file*
-    # (a pointer to .git/worktrees/<name>), not a directory, so mkdtemp()
-    # under it would fail outright. This resolves the real one either way.
-    proc = run(["git", "rev-parse", "--absolute-git-dir"], cwd=ctx.path, check=False)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
-        raise DrainError(f"Could not resolve the git directory for {ctx.path}:\n{detail}")
-    return Path((proc.stdout or "").strip())
-
-
 def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None:
     # Physically moved aside (never staged, stashed, or otherwise recorded in
     # any git ref) so a concurrent `git stash` in another terminal has
@@ -1540,7 +1558,7 @@ def _relocate_untracked_files(ctx: RepoContext) -> tuple[Path, list[str]] | None
     paths = [p for p in (proc.stdout or "").split("\0") if p]
     if not paths:
         return None
-    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(_git_dir(ctx))))
+    holding = Path(tempfile.mkdtemp(prefix="autostash-", dir=str(git_dir(ctx.path))))
     moved: list[str] = []
     try:
         for rel in paths:
@@ -3044,7 +3062,7 @@ def main() -> None:
                 pull_request=number,
                 dry_run=args.dry_run,
             )
-            ctx = get_repo_context(root, raw_config.remote_name, dry_run=args.dry_run)
+            ctx = get_repo_context(root, raw_config.remote_name)
             resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
             APPROVE_LABEL = resolved_config.workflow.approval_label
             CHANGES_LABEL = resolved_config.workflow.changes_requested_label

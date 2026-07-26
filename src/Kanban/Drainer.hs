@@ -99,13 +99,16 @@ instance FromJSON RawIncident where
 
 data RawStatus = RawStatus
   { rawState :: Text,
+    -- | Which git operation a @mid_operation@ checkout is stopped part-way
+    -- through, so the board can name what has to be finished.
+    rawOperation :: Maybe Text,
     rawIncident :: Maybe RawIncident
   }
   deriving stock (Eq, Show)
 
 instance FromJSON RawStatus where
   parseJSON = withObject "PR drainer status" $ \value ->
-    RawStatus <$> value .: "state" <*> value .:? "open_incident"
+    RawStatus <$> value .: "state" <*> value .:? "operation" <*> value .:? "open_incident"
 
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do
@@ -410,10 +413,21 @@ statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
   ("starting", _) -> DrainerStatus DrainerStarting "starting…"
   ("external", _) -> DrainerStatus DrainerWarning "on outside launchd"
   ("foreign", _) -> DrainerStatus DrainerWarning "another repository is running"
-  ("dirty", _) -> DrainerStatus DrainerError "uncommitted changes; drainer will not start"
+  ("mid_operation", _) -> DrainerStatus DrainerError (operationDetail rawStatus.rawOperation)
   ("stopped", Nothing) -> DrainerStatus DrainerOff "off"
   ("stopped", Just incident) -> DrainerStatus DrainerError ("stopped · unresolved incident" <> incidentDetail incident)
   (other, _) -> DrainerStatus DrainerError ("unknown state: " <> other)
 
 incidentDetail :: RawIncident -> Text
 incidentDetail incident = maybe "" (" · " <>) incident.rawIncidentSummary
+
+-- | Uncommitted work is no longer a reason the drainer will not start — its
+-- fast-forward stashes and restores it — so the one repository condition left
+-- to report is a checkout stopped part-way through a git operation, which
+-- blocks that fast-forward until a human finishes it. The controller names
+-- the operation; a controller that reports the state without one still gets a
+-- message worth acting on.
+operationDetail :: Maybe Text -> Text
+operationDetail operation = case operation of
+  Just name | not (Text.null name) -> name <> " in progress; finish or abort it"
+  _ -> "unfinished git operation; finish or abort it"

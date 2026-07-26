@@ -185,15 +185,45 @@ def lock_pid(repo_path: Path) -> int | None:
         return None
 
 
-def working_tree_status(repo_path: Path) -> str:
+def in_progress_operation(repo_path: Path) -> str | None:
+    """Names the operation the checkout is stopped part-way through, if any.
+
+    Mirrors `drain_prs.in_progress_operation` the way `require_default_branch`
+    below mirrors the drainer's own default-branch check: the controller
+    decides whether to start before the drainer process exists, so it has to
+    read the same repository state independently.
+    """
     proc = run_command(
-        ["git", "-C", str(repo_path), "status", "--porcelain=v1", "--untracked-files=all"],
+        ["git", "-C", str(repo_path), "rev-parse", "--absolute-git-dir"],
         check=False,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
-        raise ServiceError(f"Could not inspect repository status: {detail}")
-    return (proc.stdout or "").strip()
+        raise ServiceError(f"Could not resolve the repository git directory: {detail}")
+    git_directory = Path((proc.stdout or "").strip())
+    if (git_directory / "rebase-merge").exists():
+        return "rebase"
+    if (git_directory / "rebase-apply").exists():
+        applying = git_directory / "rebase-apply" / "applying"
+        return "am" if applying.exists() else "rebase"
+    for marker, operation in (
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+    ):
+        if (git_directory / marker).exists():
+            return operation
+    return None
+
+
+def require_no_operation_in_progress(repo_path: Path) -> None:
+    operation = in_progress_operation(repo_path)
+    if operation is not None:
+        raise ServiceError(
+            f"Refusing to start PR drainer: a {operation} is in progress in "
+            f"{repo_path}. Finish or abort it first."
+        )
 
 
 def require_default_branch(repo_path: Path, remote_name: str | None = None) -> None:
@@ -308,6 +338,7 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
     locked_pid = lock_pid(repo_path)
     locked_alive = pid_alive(locked_pid)
 
+    operation: str | None = None
     if runner_alive and active_repo is not None and active_repo != repo_path:
         state = "foreign"
     elif runner_alive and child_alive:
@@ -317,7 +348,11 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
     elif locked_alive:
         state = "external"
     else:
-        state = "dirty" if working_tree_status(repo_path) else "stopped"
+        # Only probed for a drainer that is not running: this is the one state
+        # in which starting is the next question, and an unfinished operation
+        # is the one repository condition that still answers it "no".
+        operation = in_progress_operation(repo_path)
+        state = "mid_operation" if operation else "stopped"
 
     open_incidents = incident_files(repo_path=repo_path, open_only=True)
     latest_incident = read_json(open_incidents[0]) if open_incidents else None
@@ -325,6 +360,7 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
     log_tail = tail_lines(log_path, 1)
     return {
         "state": state,
+        "operation": operation,
         "launchd_loaded": launchd_loaded(),
         "runner_pid": runner_pid if runner_alive else None,
         "drainer_pid": child_pid if child_alive else (locked_pid if locked_alive else None),
@@ -402,13 +438,10 @@ def install_job(repo_path: Path) -> dict[str, Any]:
 
 
 def start_service(repo_path: Path) -> dict[str, Any]:
-    dirty_status = working_tree_status(repo_path)
-    if dirty_status:
-        raise ServiceError(
-            "Refusing to start PR drainer: repository has uncommitted changes. "
-            "Commit, stash, or discard them first.\n"
-            + dirty_status
-        )
+    # Ahead of the default-branch check: a rebase or a bisect commonly leaves
+    # a detached HEAD, so checking the branch first would report the symptom
+    # instead of naming the operation the user has to finish.
+    require_no_operation_in_progress(repo_path)
     require_default_branch(repo_path)
     ensure_dirs()
     snapshot = status_snapshot(repo_path)

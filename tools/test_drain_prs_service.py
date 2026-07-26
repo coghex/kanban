@@ -280,8 +280,7 @@ class ControllerConfigurationTests(unittest.TestCase):
         self.assertEqual(snapshot["open_incident"]["pull_request"], 42)
         self.assertIn("#42", snapshot["open_incident"]["summary"])
 
-    def test_status_marks_a_stopped_dirty_checkout_as_an_error_state(self):
-        repo = Path("/tmp/a")
+    def _stopped_snapshot(self, repo, operation):
         with (
             mock.patch.object(drain_prs_service, "read_json", return_value={}),
             mock.patch.object(drain_prs_service, "pid_alive", return_value=False),
@@ -290,28 +289,95 @@ class ControllerConfigurationTests(unittest.TestCase):
             mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
             mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
             mock.patch.object(
-                drain_prs_service, "working_tree_status", return_value=" M src/Kanban/UI.hs"
+                drain_prs_service, "in_progress_operation", return_value=operation
             ),
         ):
-            result = drain_prs_service.status_snapshot(repo)
-        self.assertEqual(result["state"], "dirty")
+            return drain_prs_service.status_snapshot(repo)
 
-    def test_start_refuses_a_dirty_checkout_before_installing_or_launching(self):
+    def test_status_leaves_a_stopped_dirty_checkout_simply_stopped(self):
+        # Inverted from the removed blanket gate: uncommitted work is carried
+        # across the post-merge fast-forward by the drainer's own autostash,
+        # so a dirty tree reports no repository condition at all.
+        result = self._stopped_snapshot(Path("/tmp/a"), None)
+        self.assertEqual(result["state"], "stopped")
+        self.assertIsNone(result["operation"])
+
+    def test_status_names_each_unfinished_operation_that_blocks_a_start(self):
+        for operation in ("merge", "rebase", "cherry-pick", "bisect"):
+            with self.subTest(operation=operation):
+                result = self._stopped_snapshot(Path("/tmp/a"), operation)
+                self.assertEqual(result["state"], "mid_operation")
+                self.assertEqual(result["operation"], operation)
+
+    def test_start_no_longer_inspects_the_working_tree_for_uncommitted_work(self):
+        # Inverted from the removed blanket gate: with no operation in
+        # progress there is nothing left in the tree that can refuse a start,
+        # so the run reaches installation however dirty the checkout is.
         repo = Path("/tmp/a")
         with (
-            mock.patch.object(drain_prs_service, "working_tree_status", return_value=" M src/Kanban/UI.hs"),
-            mock.patch.object(drain_prs_service, "install_job") as install_job,
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "ensure_dirs"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                return_value={"state": "stopped", "drainer_pid": None, "active_repo": None},
+            ),
+            mock.patch.object(
+                drain_prs_service,
+                "install_job",
+                side_effect=drain_prs_service.ServiceError("reached installation"),
+            ),
         ):
             with self.assertRaisesRegex(
-                drain_prs_service.ServiceError, "repository has uncommitted changes"
+                drain_prs_service.ServiceError, "reached installation"
             ):
                 drain_prs_service.start_service(repo)
-        install_job.assert_not_called()
+
+    def test_start_refuses_an_unfinished_operation_before_installing_or_launching(self):
+        repo = Path("/tmp/a")
+        for operation in ("merge", "rebase", "cherry-pick", "bisect"):
+            with self.subTest(operation=operation):
+                with (
+                    mock.patch.object(
+                        drain_prs_service, "in_progress_operation", return_value=operation
+                    ),
+                    mock.patch.object(drain_prs_service, "install_job") as install_job,
+                ):
+                    with self.assertRaisesRegex(
+                        drain_prs_service.ServiceError, f"a {operation} is in progress"
+                    ):
+                        drain_prs_service.start_service(repo)
+                install_job.assert_not_called()
+
+    def test_start_names_the_operation_ahead_of_a_detached_head(self):
+        # A rebase or a bisect commonly leaves a detached HEAD, so checking
+        # the branch first would report that symptom instead of the operation
+        # the user actually has to finish.
+        repo = Path("/tmp/a")
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value="rebase"
+            ),
+            mock.patch.object(
+                drain_prs_service,
+                "require_default_branch",
+                side_effect=drain_prs_service.ServiceError("repository is on branch ''"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                drain_prs_service.ServiceError, "a rebase is in progress"
+            ):
+                drain_prs_service.start_service(repo)
 
     def test_start_refuses_a_non_default_branch_before_installing_or_launching(self):
         repo = Path("/tmp/a")
         with (
-            mock.patch.object(drain_prs_service, "working_tree_status", return_value=""),
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
             mock.patch.object(
                 drain_prs_service,
                 "require_default_branch",
