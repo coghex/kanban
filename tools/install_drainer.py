@@ -5,6 +5,10 @@
 The installer never starts the drainer. It only installs stable script links and
 loads a stopped LaunchAgent definition for the selected repository. An optional
 --config path is persisted and forwarded to the installed drain_prs.py runs.
+
+Installing runs drain_prs_service.py's own install step, which writes the plist
+and records where it put it. Re-running this installer therefore also repairs a
+missing or stale discovery record in place.
 """
 
 from __future__ import annotations
@@ -16,16 +20,16 @@ import re
 import secrets
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
+import drain_prs_service
 
-LABEL = "com.coghex.drain-prs"
-DEFAULT_INSTALL_DIR = (
-    Path.home() / "Library" / "Application Support" / "kanban" / "pr-drainer"
-)
-PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+# The controller writes the plist, so it owns the label, the plist path, and
+# the launchd target derived from them; this installer reads all three from
+# there rather than restating any of them.
+DEFAULT_INSTALL_DIR = drain_prs_service.DEFAULT_INSTALL_DIR
 
 
 class InstallError(RuntimeError):
@@ -64,12 +68,8 @@ def repository_root(requested: Path) -> Path:
     return root
 
 
-def launch_target() -> str:
-    return f"gui/{os.getuid()}/{LABEL}"
-
-
 def launchd_job_running() -> bool:
-    proc = run(["launchctl", "print", launch_target()], check=False)
+    proc = run(["launchctl", "print", drain_prs_service.launch_target()], check=False)
     if proc.returncode != 0:
         return False
     output = proc.stdout + proc.stderr
@@ -143,49 +143,77 @@ def validate_symlink_destination(destination: Path) -> None:
         )
 
 
-def merge_installed_config_json(install_dir: Path, updates: dict[str, Any]) -> Path:
-    """Merge `updates` into the shared config.json (ntfy_url, config_path)
-    rather than overwriting it, so a later installer run that sets one key
-    does not delete a different key persisted by an earlier run."""
-    path = install_dir / "config.json"
-    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
-        raise InstallError(f"Refusing unsafe notification config path: {path}")
-    install_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    install_dir.chmod(0o700)
-    existing: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict):
-            existing = loaded
-    existing.update(updates)
-    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=install_dir)
-    temporary = Path(temporary_name)
+def shared_config_path() -> Path:
+    """The single document the installer's keys and the controller's discovery
+    record share. It is the controller's fixed path, not an --install-dir
+    -relative copy: Kanban resolves the record without inheriting
+    KANBAN_DRAINER_INSTALL_DIR, so a custom install whose `ntfy_url` and
+    `config_path` lived beside its script links would be a second document
+    rather than the one merged record the contract describes."""
+    return drain_prs_service.DISCOVERY_RECORD_PATH
+
+
+def merge_installed_config_json(updates: dict[str, Any]) -> Path:
+    """Merge `updates` into that document rather than overwriting it, so a
+    later installer run that sets one key does not delete a different key
+    persisted by an earlier run. The merge itself lives with the controller,
+    which records the installed LaunchAgent in the same document and must not
+    clobber these keys either."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(existing, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            temporary.unlink()
-    return path
+        return drain_prs_service.merge_json_document(shared_config_path(), updates)
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(str(exc)) from exc
 
 
-def write_notification_config(install_dir: Path, ntfy_url: str) -> Path:
-    return merge_installed_config_json(install_dir, {"ntfy_url": ntfy_url})
+def read_config_document(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
-def write_installed_config_path(install_dir: Path, config_path: str) -> Path:
+def migrate_legacy_installed_config(install_dir: Path) -> list[str]:
+    """Fold the configuration an earlier --install-dir install persisted beside
+    its script links into the shared document, and report which keys moved.
+
+    Re-running the installer is already how an installation predating the
+    discovery record is repaired; migrating here means that same run also stops
+    a custom install's `ntfy_url` and `config_path` from being stranded outside
+    the record. Keys already in the shared document win — it is the current
+    one — so this can never undo a newer value."""
+    legacy_path = install_dir / "config.json"
+    if legacy_path == shared_config_path() or not legacy_path.is_file():
+        return []
+    current = read_config_document(shared_config_path())
+    moved = {
+        key: value
+        for key, value in read_config_document(legacy_path).items()
+        if key not in current
+    }
+    if moved:
+        merge_installed_config_json(moved)
+    return sorted(moved)
+
+
+def installed_ntfy_url() -> str | None:
+    """The notification endpoint a previous run persisted, if any. Read out of
+    the document rather than inferred from its existence: the controller also
+    records the installed LaunchAgent there, so the file is present after every
+    install whether or not notifications were ever configured."""
+    url = read_config_document(shared_config_path()).get("ntfy_url")
+    return url if isinstance(url, str) and url else None
+
+
+def write_notification_config(ntfy_url: str) -> Path:
+    return merge_installed_config_json({"ntfy_url": ntfy_url})
+
+
+def write_installed_config_path(config_path: str) -> Path:
     """Persist the kanban config.toml path for drain_prs_service.py's runner
-    to forward to drain_prs.py. Merges into the same config.json used for
-    ntfy_url rather than overwriting it."""
-    return merge_installed_config_json(install_dir, {"config_path": config_path})
+    to forward to drain_prs.py. Merges into the same shared document used for
+    ntfy_url and the discovery record rather than overwriting it."""
+    return merge_installed_config_json({"config_path": config_path})
 
 
 def install(
@@ -229,7 +257,8 @@ def install(
                 key: {"source": str(sources[key]), "destination": str(destination)}
                 for key, destination in destinations.items()
             },
-            "plist": str(PLIST_PATH),
+            "plist": str(drain_prs_service.PLIST_PATH),
+            "record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
             "config_path": resolved_config_path,
             "started": False,
         }
@@ -238,11 +267,14 @@ def install(
         key: install_symlink(sources[key], destination)
         for key, destination in destinations.items()
     }
+    # Ahead of this run's own options, so an explicit --ntfy-url or --config
+    # still wins over whatever the migrated copy carried.
+    migrated_keys = migrate_legacy_installed_config(install_dir)
     notification_config = None
     if ntfy_url:
-        notification_config = str(write_notification_config(install_dir, ntfy_url))
+        notification_config = str(write_notification_config(ntfy_url))
     if resolved_config_path:
-        write_installed_config_path(install_dir, resolved_config_path)
+        write_installed_config_path(resolved_config_path)
     environment = os.environ.copy()
     environment["KANBAN_DRAINER_INSTALL_DIR"] = str(install_dir)
     environment.pop("KANBAN_DRAINER_NTFY_URL", None)
@@ -268,8 +300,10 @@ def install(
         "repo": str(repo),
         "install_dir": str(install_dir),
         "links": link_results,
+        "config": str(shared_config_path()),
+        "migrated_config_keys": migrated_keys,
         "notifications_configured": notification_config is not None
-        or (install_dir / "config.json").is_file(),
+        or installed_ntfy_url() is not None,
         "config_path": resolved_config_path,
         "controller": controller_result,
         "started": False,

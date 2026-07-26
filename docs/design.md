@@ -886,7 +886,16 @@ a countdown.
 - Brick owns the blocking terminal event loop.
 - The GitHub and usage providers each run once in short-lived startup workers
   and again only after an explicit unified update.
-- The PR drainer controller discovers the installed LaunchAgent, reads its
+- The PR drainer controller discovers the installed LaunchAgent through the
+  record its installer writes at
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, which names
+  the launchd label, the plist's absolute path, and the installed repository.
+  Kanban restates none of those: it reads the plist path from the record and
+  the controller command from the plist, which stays authoritative for what
+  launchd runs. Each way that lookup can fail — a host that is not macOS, no
+  record, a record that does not name a job, or a plist that cannot be read —
+  is reported as its own status naming the remediation, never as a raw
+  exception. Discovery then reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
   and stop operations run asynchronously and expose transitional UI state.
   Every controller call includes the dashboard's resolved repository root; a
@@ -909,7 +918,9 @@ a countdown.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links under
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
-  those links after repository relocation.
+  those links after repository relocation, and repairs a missing or stale
+  discovery record in place without an uninstall and without changing the
+  LaunchAgent's identity.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
@@ -1160,7 +1171,8 @@ Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
 - Install stable per-user links and the LaunchAgent through an idempotent
   installer that refuses active services and ordinary-file replacement, and
   never starts the drainer implicitly.
-- Discover the controller command from the LaunchAgent plist.
+- Discover the controller command from the LaunchAgent plist, located through
+  the installer-written discovery record rather than a label Kanban restates.
 - Bind controller status and start/stop operations to the current repository.
 - Reinstall the stopped singleton LaunchAgent with that repository path before
   starting it, and reject cross-repository start/stop requests while it runs.

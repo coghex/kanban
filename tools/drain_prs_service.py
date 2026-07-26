@@ -21,17 +21,33 @@ from typing import Any
 import kanban_config
 
 
+# This module writes the plist, so it also owns the label the plist is named
+# and targeted by. Nothing else may restate it: `tools/install_drainer.py`
+# imports it from here, and `src/Kanban/Drainer.hs` never sees it at all —
+# it resolves the installed job through DISCOVERY_RECORD_PATH below.
 LABEL = "com.coghex.drain-prs"
 HOME = Path.home()
+# The record Kanban reads to find that job. Its location is fixed rather than
+# INSTALL_DIR-relative on purpose: a dashboard that never inherits
+# KANBAN_DRAINER_INSTALL_DIR still has to discover an install made with
+# --install-dir, so the record's own path is the one thing that cannot move.
+DISCOVERY_RECORD_PATH = Path(
+    f"{HOME}/Library/Application Support/kanban/pr-drainer/config.json"
+)
+DEFAULT_INSTALL_DIR = DISCOVERY_RECORD_PATH.parent
 INSTALL_DIR = Path(
-    os.environ.get(
-        "KANBAN_DRAINER_INSTALL_DIR",
-        HOME / "Library" / "Application Support" / "kanban" / "pr-drainer",
-    )
+    os.environ.get("KANBAN_DRAINER_INSTALL_DIR", DEFAULT_INSTALL_DIR)
 ).expanduser()
 CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
 DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
-CONFIG_PATH = INSTALL_DIR / "config.json"
+# One document, at that same fixed location, carries both the installer's keys
+# and the discovery record: --install-dir relocates the script links and the
+# runtime state, not the file Kanban and this service both have to resolve
+# without an environment override.
+CONFIG_PATH = DISCOVERY_RECORD_PATH
+# Where a --install-dir install made before that consolidation left them. The
+# installer migrates this copy on its next run; until then it is still read.
+LEGACY_CONFIG_PATH = INSTALL_DIR / "config.json"
 LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "pr-drainer"
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 INCIDENT_DIR = RUNTIME_DIR / "incidents"
@@ -42,12 +58,25 @@ SERVICE_ERR_PATH = LOG_DIR / "service.err"
 PLIST_PATH = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
-def _read_service_config() -> dict[str, Any]:
+def _read_json_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _read_service_config() -> dict[str, Any]:
+    """The shared document, with any pre-consolidation --install-dir copy read
+    underneath it. The installer folds that copy in on its next run, but a
+    custom install upgraded before that run must not silently lose its
+    notification endpoint in the meantime, so it is still honoured here."""
+    configured = _read_json_object(CONFIG_PATH)
+    if LEGACY_CONFIG_PATH == CONFIG_PATH:
+        return configured
+    legacy = _read_json_object(LEGACY_CONFIG_PATH)
+    legacy.update(configured)
+    return legacy
 
 
 def configured_ntfy_url() -> str | None:
@@ -133,6 +162,56 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
+    """Merge `updates` into the private JSON object at `path` rather than
+    overwriting it, so a writer that sets one key does not delete a key
+    persisted by another. `tools/install_drainer.py` writes `ntfy_url` and
+    `config_path` into the same document this module records the installed
+    LaunchAgent in, and either may run without the other."""
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise ServiceError(f"Refusing unsafe config path: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            existing = loaded
+    existing.update(updates)
+    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(existing, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return path
+
+
+def write_discovery_record(repo_path: Path) -> Path:
+    """Record where the LaunchAgent this module just wrote actually lives, so
+    Kanban resolves it by reading rather than by restating the label. Written
+    from the same LABEL and PLIST_PATH `render_plist` and `launch_target` use,
+    which is what keeps a label change from needing a second edit anywhere."""
+    return merge_json_document(
+        DISCOVERY_RECORD_PATH,
+        {
+            "launchd_label": LABEL,
+            "plist_path": str(PLIST_PATH),
+            "repository": str(repo_path),
+        },
+    )
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -431,10 +510,21 @@ def install_job(repo_path: Path) -> dict[str, Any]:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
 
+    # Written from the plist on disk, before launchd is asked to load it: the
+    # record describes where the job is, so it has to be true the moment the
+    # job exists. Every install path reaches here — `install`, and the refresh
+    # `start_service` performs — so no route can leave the record stale.
+    record = write_discovery_record(repo_path)
+
     if launchd_loaded():
         run_command(["launchctl", "bootout", launch_target()])
     run_command(["launchctl", "bootstrap", launch_domain(), str(PLIST_PATH)])
-    return {"installed": True, "plist": str(PLIST_PATH), "target": launch_target()}
+    return {
+        "installed": True,
+        "plist": str(PLIST_PATH),
+        "target": launch_target(),
+        "record": str(record),
+    }
 
 
 def start_service(repo_path: Path) -> dict[str, Any]:

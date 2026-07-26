@@ -1,5 +1,6 @@
 module Kanban.Drainer
   ( DrainerController (..),
+    DrainerRecord (..),
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
@@ -7,18 +8,26 @@ module Kanban.Drainer
     decodeDrainerStatus,
     discoverDrainerController,
     drainerIsRunning,
+    drainerRecordFromBytes,
+    drainerRecordPath,
     drainerToggle,
     queryDrainerStatus,
+    resolveDrainerPlist,
     runDrainerCommand,
     setDrainerRunning,
     statusFromControllerExit,
+    -- | Exported for the discovery-wording tests, which cannot reach this
+    -- branch through 'discoverDrainerController': it needs a plist that
+    -- @plutil@ rejects, and the test host may have neither.
+    unreadablePlist,
   )
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
-import Data.Aeson (FromJSON (..), eitherDecode, withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), eitherDecode, eitherDecodeStrict, withObject, (.:), (.:?))
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -28,10 +37,11 @@ import Kanban.Process
     defaultProcessSnapshot,
     killVerifiedGroup,
   )
-import System.Directory (getHomeDirectory)
+import System.Directory (doesFileExist, getHomeDirectory)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute)
 import System.IO (hClose, hGetContents')
+import System.Info (os)
 import System.Posix.Process (getProcessGroupIDOf, setProcessGroupIDOf)
 import System.Process
   ( CreateProcess (..),
@@ -110,20 +120,145 @@ instance FromJSON RawStatus where
   parseJSON = withObject "PR drainer status" $ \value ->
     RawStatus <$> value .: "state" <*> value .:? "operation" <*> value .:? "open_incident"
 
+-- | What the drainer's installer recorded about the launchd job it wrote.
+-- The record carries the job's location, never its content: discovery still
+-- reads @ProgramArguments@ out of the plist itself, so a hand-edited plist
+-- remains what Kanban reports and controls. Reading the label from here
+-- rather than restating it is what keeps this side from having to reimplement
+-- the installer's naming — a disagreement there would present as "drainer not
+-- found" with both sides looking correct in isolation.
+data DrainerRecord = DrainerRecord
+  { -- | The launchd label the plist was written for. Kanban composes no path
+    -- from it — the record carries the plist path directly — but a record
+    -- naming no label describes no job, so it is required and checked here
+    -- rather than accepted and ignored.
+    drainerRecordLabel :: Text,
+    drainerRecordPlist :: FilePath,
+    -- | Which repository the job was installed for. Metadata only: the
+    -- controller is deliberately rebound to the dashboard's own repository by
+    -- 'controllerFromProgramArguments', and the drainer is a singleton that
+    -- reports a repository mismatch itself as @foreign@.
+    drainerRecordRepository :: FilePath
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON DrainerRecord where
+  parseJSON = withObject "PR drainer install record" $ \value ->
+    DrainerRecord
+      <$> value .: "launchd_label"
+      <*> value .: "plist_path"
+      <*> value .: "repository"
+
+-- | The fixed location the installer writes that record to. Deliberately not
+-- derived from @KANBAN_DRAINER_INSTALL_DIR@: an install made with
+-- @--install-dir@ still has to be discoverable by a dashboard that never saw
+-- that option, so the record's own path is the one thing that cannot move.
+drainerRecordPath :: IO FilePath
+drainerRecordPath = do
+  home <- getHomeDirectory
+  pure (home <> "/Library/Application Support/kanban/pr-drainer/config.json")
+
+-- | Reads the record, rejecting a document that cannot name a launchd job.
+-- An empty label or a relative plist path parses as JSON but identifies
+-- nothing, and treating that as an unreadable record is what sends the user
+-- back to the installer instead of on to a lookup that cannot succeed.
+drainerRecordFromBytes :: ByteString.ByteString -> Either Text DrainerRecord
+drainerRecordFromBytes bytes = case eitherDecodeStrict bytes of
+  Left message -> Left (withoutJsonPath (Text.pack message))
+  Right record
+    | Text.null (Text.strip record.drainerRecordLabel) ->
+        Left "it names no launchd label"
+    | not (isAbsolute record.drainerRecordPlist) ->
+        Left ("its plist path is not absolute: " <> Text.pack record.drainerRecordPlist)
+    | otherwise -> Right record
+
+-- | Resolves the installed plist through that record, naming the remediation
+-- for every way the lookup can fail rather than letting an @IOException@
+-- render itself as the drainer's status. Parameterised by the host operating
+-- system and the record path so each branch is exercisable off a macOS host.
+resolveDrainerPlist :: String -> FilePath -> IO (Either Text FilePath)
+resolveDrainerPlist hostOperatingSystem recordPath
+  | hostOperatingSystem /= "darwin" =
+      pure (Left "the PR drainer is a launchd job and needs macOS to run")
+  | otherwise = do
+      recorded <- doesFileExist recordPath
+      if not recorded
+        then pure (Left notInstalled)
+        else do
+          contents <- try @IOException (ByteString.readFile recordPath)
+          case fmap drainerRecordFromBytes contents of
+            Left _ -> pure (Left (unreadableRecord "it could not be read"))
+            Right (Left message) -> pure (Left (unreadableRecord message))
+            Right (Right record) -> plistOf record
+  where
+    notInstalled =
+      "the PR drainer is not installed, or predates its install record; " <> reinstallHint
+
+    plistOf record = do
+      installed <- doesFileExist record.drainerRecordPlist
+      pure $
+        if installed
+          then Right record.drainerRecordPlist
+          else
+            Left
+              ( "the PR drainer's LaunchAgent is missing at "
+                  <> Text.pack record.drainerRecordPlist
+                  <> "; "
+                  <> reinstallHint
+              )
+
+    unreadableRecord detail =
+      "the PR drainer's install record at "
+        <> Text.pack recordPath
+        <> " is unreadable ("
+        <> detail
+        <> "); "
+        <> reinstallHint
+
+reinstallHint :: Text
+reinstallHint = "run `python3 tools/install_drainer.py` from the Kanban checkout"
+
+-- | Drops the JSONPath Aeson prefixes a parse failure with (@Error in $: @),
+-- which is noise inside a sentence already naming the one document it is
+-- about, and costs sidebar width the remediation needs.
+withoutJsonPath :: Text -> Text
+withoutJsonPath message = case Text.stripPrefix "Error in " message of
+  Just located
+    | (_, remainder) <- Text.breakOn ": " located,
+      not (Text.null remainder) ->
+        Text.drop 2 remainder
+  _ -> message
+
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do
-  home <- getHomeDirectory
-  let plist = home </> "Library" </> "LaunchAgents" </> "com.coghex.drain-prs.plist"
-  result <- runProcess discoveryTimeoutSeconds "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
-  pure $ do
-    output <- case result of
-      Left failure -> Left (invocationFailureMessage discoveryTimeoutSeconds "reading the launchd job" False failure)
-      Right (ExitSuccess, standardOutput, _) -> Right standardOutput
-      Right (ExitFailure _, standardOutput, errors) -> Left (diagnosticMessage standardOutput errors)
-    arguments <- case eitherDecode (LazyByteString.pack output) of
-      Left message -> Left ("could not decode launchd ProgramArguments: " <> Text.pack message)
-      Right values -> Right values
-    controllerFromProgramArguments repository arguments
+  recordPath <- drainerRecordPath
+  resolved <- resolveDrainerPlist os recordPath
+  case resolved of
+    Left message -> pure (Left message)
+    Right plist -> do
+      result <- runProcess discoveryTimeoutSeconds "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
+      pure $ do
+        output <- case result of
+          Left failure -> Left (unreadablePlist plist (invocationFailureMessage discoveryTimeoutSeconds "reading the launchd job" False failure))
+          Right (ExitSuccess, standardOutput, _) -> Right standardOutput
+          Right (ExitFailure _, standardOutput, errors) -> Left (unreadablePlist plist (diagnosticMessage standardOutput errors))
+        arguments <- case eitherDecode (LazyByteString.pack output) of
+          Left message -> Left ("could not decode launchd ProgramArguments: " <> Text.pack message)
+          Right values -> Right values
+        controllerFromProgramArguments repository arguments
+
+-- | A plist that is present but will not parse is the one failure the record
+-- cannot diagnose, so it carries @plutil@'s own complaint — and, like every
+-- other branch, the repair: rewriting the plist is exactly what re-running
+-- the installer does.
+unreadablePlist :: FilePath -> Text -> Text
+unreadablePlist plist detail =
+  "could not read the PR drainer's LaunchAgent at "
+    <> Text.pack plist
+    <> ": "
+    <> detail
+    <> "; "
+    <> reinstallHint
 
 controllerFromProgramArguments :: Repository -> [String] -> Either Text DrainerController
 controllerFromProgramArguments repository arguments = case arguments of

@@ -113,7 +113,7 @@ INDIRECT_VAR_RE = re.compile(r'findExecutable\s+([A-Za-z_][A-Za-z0-9_\']*)\b')
 
 # A `home` value built with <> or </> segments, e.g.
 # `home <> "/work/approve-issues.py"` or
-# `home </> "Library" </> "LaunchAgents" </> "com.coghex.drain-prs.plist"`.
+# `home <> "/Library/Application Support/kanban/pr-drainer/config.json"`.
 HOME_PATH_EXPR_RE = re.compile(r'\bhome(?:\s*(?:<>|</>)\s*"[^"]*")+')
 QUOTED_RE = re.compile(r'"([^"]*)"')
 
@@ -529,13 +529,61 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "Kanban-supported command; remove it instead of re-adding it",
         )
 
-    def test_drainer_launchagent_path_is_not_flagged_as_personal(self):
+    def test_drainer_launchagent_label_is_not_flagged_as_personal(self):
         by_id = {row["id"]: row for row in self.manifest}
-        self.assertIn("drainer-launchagent-plist", by_id)
-        entry = by_id["drainer-launchagent-plist"]
+        self.assertIn("drainer-launchagent-label", by_id)
+        entry = by_id["drainer-launchagent-label"]
         self.assertEqual(entry["kind"], "personal-path")
         self.assertEqual(entry["owner"], "kanban")
         self.assertEqual(entry["status"], "supported")
+
+    def test_drainer_launchagent_label_has_one_owning_component(self):
+        # The component that writes the plist owns the label. Haskell cannot
+        # import a Python constant, so a second definition anywhere could only
+        # drift — and drift here presents as "drainer not found" with every
+        # side looking correct in isolation. The generic grounding test above
+        # only proves the token still appears in its declared file; this one
+        # proves nothing else restates it.
+        entry = {row["id"]: row for row in self.manifest}["drainer-launchagent-label"]
+        self.assertEqual(entry["files"], ["tools/drain_prs_service.py"])
+        label = entry["token"]
+        sources = [
+            *REPO_ROOT.glob("src/**/*.hs"),
+            *REPO_ROOT.glob("app/**/*.hs"),
+            *REPO_ROOT.glob("tools/*.py"),
+        ]
+        restated = sorted(
+            str(path.relative_to(REPO_ROOT))
+            for path in sources
+            if not path.name.startswith("test_")
+            and str(path.relative_to(REPO_ROOT)) not in entry["files"]
+            and label in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            restated,
+            [],
+            f"{label!r} is restated outside {entry['files'][0]}: {restated}; "
+            "read it from the component that writes the plist instead",
+        )
+
+    def test_drainer_discovery_record_grounds_its_writer_and_its_reader(self):
+        # The record is the whole cross-language coupling: the controller
+        # writes it, Kanban reads it, and neither can see the other's
+        # constants. So the manifest has to name both sides, and the path has
+        # to appear literally in each rather than only in whichever one a
+        # single-file row happened to declare.
+        by_id = {row["id"]: row for row in self.manifest}
+        self.assertIn("drainer-discovery-record", by_id)
+        entry = by_id["drainer-discovery-record"]
+        self.assertEqual(entry["kind"], "personal-path")
+        self.assertEqual(entry["owner"], "kanban")
+        self.assertEqual(entry["status"], "supported")
+        self.assertEqual(
+            entry["files"], ["tools/drain_prs_service.py", "src/Kanban/Drainer.hs"]
+        )
+        for relative_path in entry["files"]:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(entry["token"], content, relative_path)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,76 @@ class ControllerConfigurationTests(unittest.TestCase):
             "KANBAN_DRAINER_NTFY_URL", value["EnvironmentVariables"]
         )
 
+    def test_the_plist_path_and_launchd_target_are_derived_from_the_label(self):
+        # The property the record exists to extend: one edit to LABEL moves
+        # the plist's name and the launchctl target, and — through
+        # write_discovery_record — Kanban's discovery, with no other edit
+        # anywhere. Nothing else may derive either from a label of its own.
+        self.assertEqual(
+            drain_prs_service.PLIST_PATH.name, f"{drain_prs_service.LABEL}.plist"
+        )
+        self.assertTrue(
+            drain_prs_service.launch_target().endswith(f"/{drain_prs_service.LABEL}"),
+            drain_prs_service.launch_target(),
+        )
+
+    def test_the_record_stays_at_a_fixed_path_an_install_dir_cannot_move(self):
+        # Kanban never inherits KANBAN_DRAINER_INSTALL_DIR, so an install made
+        # with --install-dir has to remain discoverable: the record is the one
+        # thing whose location the option must not relocate.
+        self.assertEqual(
+            drain_prs_service.DISCOVERY_RECORD_PATH,
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "kanban"
+            / "pr-drainer"
+            / "config.json",
+        )
+        self.assertEqual(
+            drain_prs_service.DEFAULT_INSTALL_DIR,
+            drain_prs_service.DISCOVERY_RECORD_PATH.parent,
+        )
+
+    def test_the_shared_document_is_read_with_a_legacy_install_dir_copy_under_it(self):
+        # A custom install upgraded before its next installer run still has its
+        # endpoint beside the script links; losing notifications silently in
+        # that window would be worse than reading both.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "shared" / "config.json"
+            legacy = root / "installed" / "config.json"
+            shared.parent.mkdir()
+            legacy.parent.mkdir()
+            legacy.write_text(
+                json.dumps(
+                    {
+                        "ntfy_url": "https://notify.example.test/legacy",
+                        "config_path": "/home/user/legacy.toml",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            shared.write_text(
+                json.dumps({"ntfy_url": "https://notify.example.test/current"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(drain_prs_service, "CONFIG_PATH", shared),
+                mock.patch.object(drain_prs_service, "LEGACY_CONFIG_PATH", legacy),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
+                # The environment override outranks both documents, so it must
+                # not be what this test is actually reading.
+                os.environ.pop("KANBAN_DRAINER_NTFY_URL", None)
+                self.assertEqual(
+                    drain_prs_service.configured_ntfy_url(),
+                    "https://notify.example.test/current",
+                )
+                self.assertEqual(
+                    drain_prs_service.configured_config_path(), "/home/user/legacy.toml"
+                )
+
     def test_notifications_are_disabled_by_default(self):
         with mock.patch.object(drain_prs_service, "NTFY_URL", None):
             result = drain_prs_service.publish_ntfy("test")
@@ -455,6 +525,110 @@ class ControllerConfigurationTests(unittest.TestCase):
                     drain_prs_service.ServiceError, "origin/HEAD"
                 ):
                     drain_prs_service.require_default_branch(repo, remote_name="origin")
+
+
+class DiscoveryRecordTests(unittest.TestCase):
+    """The record `src/Kanban/Drainer.hs` resolves the LaunchAgent through."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.plist = self.root / "LaunchAgents" / "job.plist"
+        self.plist.parent.mkdir(parents=True)
+        self.record = self.root / "install" / "config.json"
+
+    def install(self, repo=Path("/tmp/example-project")):
+        """Runs install_job against temporary paths, with launchd faked out.
+
+        Nothing here may touch the real ~/Library/LaunchAgents or
+        ~/Library/Application Support/kanban, so every path the function
+        writes to is redirected and every launchctl call is captured.
+        """
+        with (
+            mock.patch.object(drain_prs_service, "PLIST_PATH", self.plist),
+            mock.patch.object(
+                drain_prs_service, "DISCOVERY_RECORD_PATH", self.record
+            ),
+            mock.patch.object(drain_prs_service, "ensure_dirs"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                return_value={"state": "stopped"},
+            ),
+            mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
+            mock.patch.object(drain_prs_service, "run_command") as run_command,
+        ):
+            result = drain_prs_service.install_job(repo)
+        return result, run_command
+
+    def read_record(self):
+        return json.loads(self.record.read_text(encoding="utf-8"))
+
+    def test_installing_records_the_label_plist_and_repository(self):
+        result, _ = self.install()
+        record = self.read_record()
+        self.assertEqual(record["launchd_label"], drain_prs_service.LABEL)
+        self.assertEqual(record["plist_path"], str(self.plist))
+        self.assertEqual(record["repository"], "/tmp/example-project")
+        self.assertEqual(result["record"], str(self.record))
+
+    def test_the_record_is_written_from_the_same_values_launchd_is_given(self):
+        # The point of the record is that one edit to LABEL moves the plist,
+        # the launchctl target, and Kanban's discovery together; a record
+        # restating the label independently would defeat that.
+        with mock.patch.object(drain_prs_service, "LABEL", "com.example.renamed"):
+            _, run_command = self.install()
+        record = self.read_record()
+        self.assertEqual(record["launchd_label"], "com.example.renamed")
+        bootstrapped = [call.args[0] for call in run_command.call_args_list]
+        self.assertIn(
+            ["launchctl", "bootstrap", drain_prs_service.launch_domain(), str(self.plist)],
+            bootstrapped,
+        )
+
+    def test_reinstalling_repairs_the_record_in_place(self):
+        # An installation predating the record is repaired by re-running the
+        # installer, which reaches install_job the same way a first install
+        # does — without an uninstall, and without changing the label.
+        self.install()
+        first = self.read_record()
+        self.record.unlink()
+        self.install()
+        self.assertEqual(self.read_record(), first)
+
+    def test_recording_preserves_the_installer_persisted_keys(self):
+        self.record.parent.mkdir(parents=True)
+        self.record.write_text(
+            json.dumps(
+                {
+                    "ntfy_url": "https://notify.example.test/topic",
+                    "config_path": "/home/user/.config/kanban/config.toml",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.install()
+        record = self.read_record()
+        self.assertEqual(record["ntfy_url"], "https://notify.example.test/topic")
+        self.assertEqual(
+            record["config_path"], "/home/user/.config/kanban/config.toml"
+        )
+        self.assertEqual(record["plist_path"], str(self.plist))
+
+    def test_the_record_is_private_and_never_a_symlink_target(self):
+        self.install()
+        self.assertFalse(self.record.is_symlink())
+        self.assertEqual(self.record.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.record.parent.stat().st_mode & 0o777, 0o700)
+
+        outside = self.root / "outside.json"
+        outside.write_text("keep\n", encoding="utf-8")
+        self.record.unlink()
+        self.record.symlink_to(outside)
+        with self.assertRaises(drain_prs_service.ServiceError):
+            self.install()
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep\n")
 
 
 if __name__ == "__main__":

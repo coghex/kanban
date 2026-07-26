@@ -184,9 +184,13 @@ everything else.
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
   request, and is covered by `tools/test_single_pr_drain.py`.
-- **Inputs:** repository path; the drainer LaunchAgent plist at
-  `~/Library/LaunchAgents/com.coghex.drain-prs.plist`, which is an
-  installer-owned convention (see §5), not a personal path.
+- **Inputs:** repository path; the drainer LaunchAgent plist under
+  `~/Library/LaunchAgents`, which is a Kanban-owned convention (see §5), not a
+  personal path. Kanban does not name that plist: it resolves the path from
+  the discovery record `tools/drain_prs_service.py` writes at
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, then reads
+  `ProgramArguments` out of the plist itself, which stays authoritative for
+  what launchd will actually run.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
   notifications. A `--pr` run additionally writes exactly one versioned JSON
   result document to stdout — the pull request, its outcome (`merged`,
@@ -215,8 +219,12 @@ everything else.
   not running.
 - **Required authority:** the same GitHub write scope, plus local launchd
   control for the signed-in user.
-- **Durable state:** `~/Library/LaunchAgents/com.coghex.drain-prs.plist`;
-  the installer-managed script directory at
+- **Durable state:** the LaunchAgent plist under `~/Library/LaunchAgents`,
+  named for the label `tools/drain_prs_service.py` owns; the discovery record
+  at `~/Library/Application Support/kanban/pr-drainer/config.json`, which
+  names that label, the plist's absolute path, and the repository the job was
+  installed for, and which every path that writes the plist refreshes from
+  those same values; the installer-managed script directory at
   `~/Library/Application Support/kanban/pr-drainer`; a versioned drain-state
   JSON file, which records both the approved head each queued pull request
   was cleared at and the post-merge obligations a merged pull request still
@@ -470,7 +478,8 @@ python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.h
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
-drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
+drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
+drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 ```
@@ -493,12 +502,30 @@ the Codex plugin being installed.
   the repository at all, it prefers a small, clearly namespaced footprint:
   the drainer installer's default install directory is
   `~/Library/Application Support/kanban/pr-drainer`, and its LaunchAgent
-  label (`com.coghex.drain-prs`) and plist path are a Kanban-owned
-  convention defined once in `tools/install_drainer.py` and read the same
-  way by `src/Kanban/Drainer.hs`. `tools/install_issue_review.py` follows
-  the identical convention for the canonical issue-review backend under
-  `~/Library/Application Support/kanban/issue-review`, read the same way by
-  `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer`.
+  label and plist path are a Kanban-owned convention rather than a personal
+  one. The component that writes the plist owns the label:
+  `tools/drain_prs_service.py` defines it, renders the plist from it, builds
+  every `launchctl` target from it, and — from those same values — records the
+  label, the plist's absolute path, and the repository the job was installed
+  for in `~/Library/Application Support/kanban/pr-drainer/config.json`.
+  `tools/install_drainer.py` imports the label, plist path, and launchd target
+  from that module rather than restating any of them, and
+  `src/Kanban/Drainer.hs` carries no label at all: it resolves the plist by
+  reading that record. Haskell cannot import a Python constant, so a record
+  one side writes and the other reads is the only coupling here that cannot
+  drift. Its location stays fixed even when `--install-dir` moves everything
+  else, since a dashboard that never inherits `KANBAN_DRAINER_INSTALL_DIR`
+  still has to find it: that option relocates the script links and the runtime
+  state, not this document. It is one document rather than two — the
+  installer's `ntfy_url` and `config_path` live in it beside the record, each
+  writer merging rather than overwriting — and an installer run folds in any
+  copy an earlier `--install-dir` install left beside its script links, which
+  the controller keeps reading until then. `tools/install_issue_review.py` follows the same install-directory
+  convention for the canonical issue-review backend under
+  `~/Library/Application Support/kanban/issue-review`, read by
+  `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer` — but through a
+  default each side spells out independently rather than through a record,
+  which is the defect issue #155 is filed to repair.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
   build (`cabal build all`) or normal startup path installs the drainer's
   LaunchAgent or the issue-review backend's stable link; the latter is only
