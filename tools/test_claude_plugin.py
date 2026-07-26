@@ -23,6 +23,13 @@ drafting workflows are user- or daemon-invoked and are deliberately excluded
 from that parity pinning; see docs/drafting-workflow-contract.md. They are
 still subject to every structural policy this module enforces: frontmatter
 description, forbidden configuration keys, and no personal paths.
+
+Issue #125 added a third category, PACKAGED_ONLY_COMMAND_NAMES: packaged and
+policy-checked, excluded from Haskell name parity like the drafting commands,
+but not part of the declared drafting surface either. EXPECTED_COMMAND_NAMES is
+the union of all three, and discovery-minus-parity is now the union of the two
+non-parity sets. See tools/test_repair_workflow_contract.py for /repair's own
+behavioral contract.
 """
 
 from __future__ import annotations
@@ -62,8 +69,21 @@ HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"
 # and policy-checked but excluded from Haskell name parity above.
 DRAFTING_COMMAND_NAMES = {"issue", "draft-issues", "autoissue", "issue-review"}
 
+# Packaged, policy-checked, and excluded from Haskell name parity for the same
+# reason as the drafting commands — Kanban's CLI does not spawn them — but
+# *not* drafting workflows. DRAFTING_COMMAND_NAMES names exactly the assets
+# docs/drafting-workflow-contract.md declares and
+# tools/test_drafting_workflow_contract.py pins at seven, so a packaged-only
+# workflow that is not part of that declared surface needs its own set rather
+# than a seat in that one. /repair (issue #125) is packaged ahead of the
+# Done-column repair action that will spawn it; moving it into parity belongs
+# to the issue that adds the key binding (#122).
+PACKAGED_ONLY_COMMAND_NAMES = {"repair"}
+
 # What a Claude Code installation must actually discover in commands/.
-EXPECTED_COMMAND_NAMES = HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES
+EXPECTED_COMMAND_NAMES = (
+    HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES | PACKAGED_ONLY_COMMAND_NAMES
+)
 
 # Keys that would let a packaged command's frontmatter or manifest silently
 # override the model, reasoning effort, permission mode, or working
@@ -193,8 +213,19 @@ class CommandDiscoveryTests(unittest.TestCase):
         # commands.
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
         self.assertEqual(
-            EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES, DRAFTING_COMMAND_NAMES
+            EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES,
+            DRAFTING_COMMAND_NAMES | PACKAGED_ONLY_COMMAND_NAMES,
         )
+
+    def test_the_two_non_parity_sets_are_disjoint(self):
+        # /repair is packaged-but-not-spawned for the same reason as the
+        # drafting commands, but it is not part of the declared drafting
+        # surface docs/drafting-workflow-contract.md and
+        # tools/test_drafting_workflow_contract.py pin at exactly seven assets.
+        self.assertEqual(DRAFTING_COMMAND_NAMES & PACKAGED_ONLY_COMMAND_NAMES, set())
+        self.assertEqual(HASKELL_PARITY_COMMAND_NAMES & PACKAGED_ONLY_COMMAND_NAMES, set())
+        self.assertIn("repair", PACKAGED_ONLY_COMMAND_NAMES)
+        self.assertNotIn("repair", DRAFTING_COMMAND_NAMES)
 
     def test_each_command_declares_a_description_and_no_forbidden_frontmatter(self):
         for name in EXPECTED_COMMAND_NAMES:
@@ -244,9 +275,10 @@ class WorkflowNameParityTests(unittest.TestCase):
         self.assertEqual(all_tokens, HASKELL_PARITY_COMMAND_NAMES)
 
     def test_no_drafting_command_is_spawned_by_kanbans_haskell_code(self):
-        # The other half of the discovery/parity split: a drafting workflow
-        # appearing in Kanban's own invocation surface would mean this
-        # module's parity set is wrong, not that the drafting set should grow.
+        # The other half of the discovery/parity split: a workflow outside the
+        # parity set appearing in Kanban's own invocation surface would mean
+        # this module's parity set is wrong, not that the non-parity set
+        # should grow.
         haskell_sources = "\n".join(
             path.read_text(encoding="utf-8") for path in (SOLVE_HS, PR_FLOW_HS, UI_HS)
         )
@@ -255,6 +287,7 @@ class WorkflowNameParityTests(unittest.TestCase):
         # spawn, so an extraction that silently matched nothing fails here.
         self.assertEqual(spawned & EXPECTED_COMMAND_NAMES, HASKELL_PARITY_COMMAND_NAMES)
         self.assertEqual(spawned & DRAFTING_COMMAND_NAMES, set())
+        self.assertEqual(spawned & PACKAGED_ONLY_COMMAND_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):

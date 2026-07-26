@@ -284,6 +284,75 @@ everything else.
 | `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
+### 2.7 Pull-request repair (`$repair` / `/repair`)
+
+- **Owning source:** the packaged workflows themselves
+  (`codex-plugin/plugins/kanban/skills/repair/SKILL.md`,
+  `claude-plugin/plugins/kanban/commands/repair.md`). Unlike §2.1-§2.2, no
+  Kanban Haskell code spawns this workflow yet: it is packaged ahead of the
+  Done-column repair action that will bind it to a key, so it is deliberately
+  excluded from the Haskell name-parity pinning in `tools/test_codex_plugin.py`
+  and `tools/test_claude_plugin.py`. It is not a drafting workflow either, and
+  is not part of the declared drafting surface
+  ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
+- **Invocation:** user-invoked as `$repair <pr>` / `/repair <pr>`. Because it
+  works on the pull request's own code, it runs on the pull request's own
+  origin brand — the same rule as `pr-revise` — and therefore hands the verdict
+  off to the opposite brand's canonical reviewer rather than reviewing itself
+  (no `--self-review`).
+- **Inputs:** one positive pull request number, plus the repository and
+  configuration context when the caller supplies it. The resolved repository
+  scopes every `gh` call (`-R <owner/name>`) rather than being inferred from
+  the local checkout, and both are forwarded to the bundled coordinator through
+  its own `--repo` and `--config` options, so a fork checkout or a non-default
+  config path repairs and rereviews the same repository the board displays. It
+  scopes pull-request *metadata* only: the head branch's fetches and pushes go
+  to the head repository instead, which is not the same repository for a
+  cross-repository pull request.
+- **Outputs:** at most one focused commit pushed to the pull request's own head
+  branch, followed by exactly one canonical rereview when — and only when — the
+  push is verified to have advanced the head past the SHA recorded before
+  editing. The rereview publishes the `pr-review:v2` comment and switches the
+  configured verdict labels; the workflow itself never sets one.
+- **Failure semantics:** it addresses the highest-priority blocking cause in
+  the same order and with the same breadth as `pullRequestStatus`
+  (`src/Kanban/Workflow.hs`): merge conflict against the pull request's
+  recorded `baseRefName`, then any failed check in the status-check rollup
+  (required or not), then a blocking label whatever the check state. "Blocking
+  label" means the configured `changes_requested_label` and `blocked_labels`
+  resolved from the caller's configuration including its per-repository
+  override — the same pair `hasProblemLabel` consults — not a fixed string, so
+  a repository with non-default labels is not mistaken for having nothing to
+  repair. A failure judged pre-existing on the base branch or flaky is
+  reported and stops the run rather than being worked around; a blocking label
+  is reported and referred to the user, never removed; a competing update to
+  the remote head stops the run instead of overwriting it; and a push whose
+  rereview the coordinator rejects (no prior canonical review marker, or a
+  blocked issue gate) stops with that exact reason rather than being
+  compensated for with a label. A cross-repository head is fail-closed: when
+  `isCrossRepository` reports a head repository other than the resolved one,
+  `headRefName` names no branch of the resolved repository, so the workflow
+  fetches and pushes only against the recorded head repository. Writability is
+  decided by the ordinary non-force push's own outcome, never by
+  `maintainerCanModify` — that field reports whether the *base* repository's
+  maintainers may modify the branch, which is neither necessary nor sufficient
+  for the account running the workflow, so a fork owner repairing their own
+  pull request is not turned away. A push rejected for lack of write access
+  stops the run with nothing changed on the remote.
+- **Required authority:** GitHub read on the pull request and write to push to
+  its head branch **in the head repository** — which for a fork pull request is
+  not the repository the board is pointed at. It never merges, never closes an
+  issue or pull request, and never adds or removes a verdict label directly.
+- **Durable state:** the worktree it selects by the pull request's exact head
+  branch, confirmed to track the recorded head repository's ref rather than a
+  same-named local branch — a `solve` worktree at that branch is reused, dirty
+  or not, rather than duplicated — or, when no worktree is on that branch, a
+  new one at
+  `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. It never
+  switches the repository's primary checkout.
+- **Mandatory/optional:** optional — packaged and user-invoked; no Kanban key
+  spawns it yet.
+
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -377,24 +446,25 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
 drainer-launchagent-plist | personal-path | com.coghex.drain-prs.plist | src/Kanban/Drainer.hs | kanban | supported | no
-find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
-head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 ```
 
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 the installed Codex plugin's shared review coordinator from `$pr-review`,
-`$pr-rereview`, and `$pr-revise`, themselves optional AI actions, and every
-supported macOS/Linux shell already provides both. The Claude plugin's
-equivalent commands need neither: Claude Code exposes `${CLAUDE_PLUGIN_ROOT}`
-inside a plugin's own commands, so `/pr-review`, `/pr-rereview`, and
-`/pr-revise` resolve their bundled coordinator directly at
+`$pr-rereview`, `$pr-revise`, and `$repair`, themselves optional AI actions,
+and every supported macOS/Linux shell already provides both. The Claude
+plugin's equivalent commands need neither: Claude Code exposes
+`${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so `/pr-review`,
+`/pr-rereview`, `/pr-revise`, and `/repair` resolve their bundled coordinator
+directly at
 `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py` without a filesystem search, and
 that plugin bundles its own copy of the coordinator so it never depends on
 the Codex plugin being installed.

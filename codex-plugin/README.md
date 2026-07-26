@@ -47,10 +47,10 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all seven workflow
+`kanban@kanban` should show as `installed, enabled`, and all eight workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
-`$pr-revise`, `$issue`, `$autoissue`, and `$issue-review` in any Codex session
-run from this checkout.
+`$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, and `$repair` in any
+Codex session run from this checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
 version that provides the `codex plugin` / `codex plugin marketplace`
@@ -59,11 +59,14 @@ without those subcommands cannot install this plugin.
 
 ## What's packaged
 
-Kanban's own CLI spawns the first four by name. The last three are drafting and
-readiness-gate workflows a user or the review daemon invokes directly, which is
-why they are excluded from the Haskell invocation-parity pinning in
-`tools/test_codex_plugin.py`; see
+Kanban's own CLI spawns the first four by name. The next three are drafting and
+readiness-gate workflows a user or the review daemon invokes directly; see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
+`$repair` is packaged ahead of the Done-column repair action that will spawn
+it, and is deliberately *not* part of that declared drafting surface. None of
+the last four is included in the Haskell invocation-parity pinning in
+`tools/test_codex_plugin.py`, which covers only the names Kanban's own code
+spawns.
 
 | Skill | Codex command | Boundary |
 | --- | --- | --- |
@@ -74,6 +77,7 @@ why they are excluded from the Haskell invocation-parity pinning in
 | `skills/issue/` | `$issue` | Finds, verifies, and deduplicates **exactly one** candidate and drafts it to hand-off quality. Stops for explicit signoff; never creates without it. |
 | `skills/autoissue/` | `$autoissue` | Delegates drafting to `$issue`, and on signoff creates the issue and immediately runs `$issue-review` with no second confirmation. Stops without reviewing if drafting stops before creation. |
 | `skills/issue-review/` | `$issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
+| `skills/repair/` | `$repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
 
 Two workflows are deliberately **not** packaged here. `draft-issues`, the
 breadth counterpart to `$issue`, is Claude-only by contract — see
@@ -133,11 +137,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the seven packaged workflows, and the
+- the skills directory contains exactly the eight packaged workflows, and the
   four Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  three drafting skills;
+  three drafting skills or the packaged-only `$repair`;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a
@@ -148,11 +152,17 @@ runs) checks that:
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone.
 
-`tools/test_agent_workflow_contract.py` reconciles all seven skills' own bash
+`tools/test_agent_workflow_contract.py` reconciles all eight skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting and issue-review
 skills name.
+
+`tools/test_repair_workflow_contract.py` pins `$repair`'s own behavioral
+contract — the ordered diagnosis branches, worktree selection and safe push,
+the never-merge/never-label authority limits, and the exactly-one-rereview
+handoff — against both this skill and its Claude counterpart, so the two
+brands' copies cannot diverge.
 
 `tools/test_drafting_workflow_contract.py` reconciles the three drafting skills
 against the responsibility matrix in
