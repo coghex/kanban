@@ -235,6 +235,7 @@ import Kanban.UI
     drawCardFrame,
     drawDetails,
     githubRefreshTimeoutMicros,
+    itemHasAmberWarning,
     mergeExplanation,
     mergeText,
     neutralAttr,
@@ -4412,6 +4413,15 @@ main = hspec $ do
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch False False)
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [1]
 
+    -- An assignee connection that never arrived is not evidence of nobody
+    -- working on the issue, so it must not land in the column that presents
+    -- it as unclaimed work waiting to be picked up.
+    it "keeps an issue whose assignees GitHub never delivered out of the backlog column" $ do
+      let issue = (baseIssue 1 []) {issueDataGaps = [AssigneesUnavailable]}
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch False False)
+      map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [1]
+      Map.findWithDefault [] Issues columns `shouldBe` []
+
     it "keeps draft approved pull requests in Reviewing" $ do
       let pullRequest = basePullRequest 10 [] True [Label "reviewed:approve" "00ff00"]
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
@@ -4822,8 +4832,128 @@ main = hspec $ do
     it "keeps a rollup past the context cap unknown rather than retaining the partial nodes it saw" $ do
       case decodeGitHubItems (LazyByteString.pack githubCappedChecksResponse) of
         Left message -> expectationFailure message
-        Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksUnknown
+        Right ([], [pullRequest]) -> do
+          pullRequest.pullRequestChecks `shouldBe` ChecksUnknown
+          -- The cap is the documented §13 behavior, not an anomaly: it must
+          -- not pick up the incomplete-data marker or warning that a context
+          -- this build could not read would earn.
+          pullRequest.pullRequestDataGaps `shouldBe` []
+          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
+            `shouldSatisfy` not . any (Data.Text.isInfixOf "incomplete data")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- A rollup context type this build has never seen -- GitHub adding a
+    -- kind, or an edge case returning a bare node -- used to fail the whole
+    -- page, so every refresh of a repository containing one such PR broke
+    -- permanently. It degrades that one pull request instead.
+    it "keeps a rollup holding an unknown context type unknown instead of failing the page" $ do
+      let response =
+            githubPageWith
+              []
+              [ pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson, rollupJson 2 [checkRunJson "build-test" "SUCCESS" "2026-01-03T00:00:00Z", futureCheckContextJson]],
+                pullRequestNodeJson 10 [emptyLabelsJson, emptyClosingIssuesJson, rollupJson 1 [checkRunJson "build-test" "SUCCESS" "2026-01-03T00:00:00Z"]]
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [degraded, intact]) -> do
+          degraded.pullRequestNumber `shouldBe` 9
+          degraded.pullRequestChecks `shouldBe` ChecksUnknown
+          degraded.pullRequestDataGaps `shouldBe` [ChecksUndecodable]
+          intact.pullRequestNumber `shouldBe` 10
+          intact.pullRequestChecks `shouldBe` ChecksPassed 1
+          intact.pullRequestDataGaps `shouldBe` []
+          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch False False)
+            `shouldSatisfy` any (Data.Text.isInfixOf "PR #9: incomplete data")
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- The same fail-closed treatment covers a type this build knows that
+    -- arrives without a field its decode needs; "undecodable" is about the
+    -- context node, not only about its typename.
+    it "keeps a rollup holding a recognized context missing a required field unknown" $ do
+      let response =
+            githubPageWith
+              []
+              [pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson, rollupJson 1 [namelessCheckRunJson]]]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [pullRequest]) -> do
+          pullRequest.pullRequestChecks `shouldBe` ChecksUnknown
+          pullRequest.pullRequestDataGaps `shouldBe` [ChecksUndecodable]
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- GitHub's schema makes every nested connection nullable, and a
+    -- partial-error response nulls out exactly the fields that errored. One
+    -- "labels": null used to discard the entire refresh.
+    it "decodes a null nested connection as no nodes and a gap on that item alone" $ do
+      let response =
+            githubPageWith
+              []
+              [ pullRequestNodeJson 9 ["\"labels\":null", emptyClosingIssuesJson],
+                pullRequestNodeJson 10 ["\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"bug\",\"color\":\"d73a4a\"}]}", emptyClosingIssuesJson]
+              ]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([], [degraded, intact]) -> do
+          degraded.pullRequestLabels `shouldBe` []
+          degraded.pullRequestLabelOverflow `shouldBe` 0
+          degraded.pullRequestDataGaps `shouldBe` [LabelsUnavailable]
+          intact.pullRequestLabels `shouldBe` [Label "bug" "d73a4a"]
+          intact.pullRequestDataGaps `shouldBe` []
+          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch False False)
+            `shouldSatisfy` any (Data.Text.isInfixOf "PR #9: incomplete data")
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Absence is the other form the same anomaly takes, and it has to reach
+    -- issues as well as pull requests.
+    it "decodes an absent nested connection on an issue as a gap rather than as no assignees" $ do
+      let response =
+            githubPageWith
+              [ issueNodeJson 41 [emptyLabelsJson],
+                issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]
+              ]
+              [pullRequestNodeJson 9 [emptyLabelsJson, "\"closingIssuesReferences\":null"]]
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([degraded, intact], [pullRequest]) -> do
+          degraded.issueAssignees `shouldBe` []
+          degraded.issueAssigneeOverflow `shouldBe` 0
+          degraded.issueDataGaps `shouldBe` [AssigneesUnavailable]
+          intact.issueDataGaps `shouldBe` []
+          pullRequest.pullRequestLinkedIssues `shouldBe` []
+          pullRequest.pullRequestDataGaps `shouldBe` [LinkedIssuesUnavailable]
+          let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [degraded, intact] [pullRequest] epoch False False)
+          warnings `shouldSatisfy` any (Data.Text.isInfixOf "Issue #41, PR #9: incomplete data")
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- The banner is one line, so many degraded items are named up to a limit
+    -- and the rest counted -- visibly truncated rather than silently dropped.
+    it "names the first few incomplete items and counts the rest" $ do
+      let issues = [(baseIssue number []) {issueDataGaps = [AssigneesUnavailable]} | number <- [1 .. 5]]
+          warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot issues [] epoch False False)
+      warnings `shouldSatisfy` any (Data.Text.isInfixOf "Issue #1, Issue #2, Issue #3 +2 more: incomplete data")
+
+    -- A connection GitHub did deliver stays strict. These are not one item's
+    -- missing field but a response shape the decoder cannot reason about, and
+    -- degrading them would hide real corruption behind an amber card.
+    it "still fails the page when a present nested connection is malformed" $ do
+      let pageWithLabels labels = LazyByteString.pack (githubPageWith [] [pullRequestNodeJson 9 [labels, emptyClosingIssuesJson]])
+      -- totalCount below the node list it came with
+      decodeGitHubItems (pageWithLabels "\"labels\":{\"totalCount\":0,\"nodes\":[{\"name\":\"bug\",\"color\":\"d73a4a\"}]}")
+        `shouldSatisfy` isLeft
+      -- no totalCount at all
+      decodeGitHubItems (pageWithLabels "\"labels\":{\"nodes\":[]}") `shouldSatisfy` isLeft
+      -- a totalCount that is not a number
+      decodeGitHubItems (pageWithLabels "\"labels\":{\"totalCount\":\"many\",\"nodes\":[]}") `shouldSatisfy` isLeft
+      -- a node missing a field the item parser requires
+      decodeGitHubItems (pageWithLabels "\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"bug\"}]}") `shouldSatisfy` isLeft
+      -- a connection that is not an object
+      decodeGitHubItems (pageWithLabels "\"labels\":5") `shouldSatisfy` isLeft
+
+    -- The rollup's own container is not a per-context anomaly either.
+    it "still fails the page when the rollup container itself is malformed" $ do
+      let pageWithRollup rollup = LazyByteString.pack (githubPageWith [] [pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson, rollup]])
+      decodeGitHubItems (pageWithRollup "\"statusCheckRollup\":{\"contexts\":{\"nodes\":[]}}") `shouldSatisfy` isLeft
+      decodeGitHubItems (pageWithRollup "\"statusCheckRollup\":{}") `shouldSatisfy` isLeft
 
     it "rejects GraphQL error responses" $
       decodeGitHubItems "{\"errors\":[{\"message\":\"boom\"}],\"data\":{}}"
@@ -5787,6 +5917,39 @@ main = hspec $ do
           writeRepositoryCache repository snapshot `shouldReturn` Right ()
           loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
 
+    -- A card restored from cache has to keep saying what it does not know.
+    -- Reloading one with its gaps dropped would put back the amber marker's
+    -- absence and the definite "unassigned" the live decode refused.
+    it "round-trips the per-item data gaps" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+              issue = (baseIssue 41 []) {issueDataGaps = [AssigneesUnavailable]}
+              pullRequest =
+                (basePullRequest 823 [] False [])
+                  {pullRequestDataGaps = [LabelsUnavailable, ChecksUndecodable]}
+              snapshot = RepoSnapshot [issue] [pullRequest] epoch False False
+          writeRepositoryCache repository snapshot `shouldReturn` Right ()
+          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
+
+    -- Version 3 knew nothing of those gaps, so reusing one of its entries
+    -- would restore a card as though every field had arrived. §17's contract
+    -- for an unknown version is to treat the snapshot as absent.
+    it "rejects a genuine version 3 file as unsupported rather than as malformed" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+          cachePath <- repositoryCachePath repository
+          ByteString.writeFile cachePath (versionThreeCacheFile 3)
+          loadRepositoryCache repository `shouldReturn` CacheInvalid "cache ignored: unsupported schema version"
+          -- The version gate, not the decoder, is what rejected it: relabelled
+          -- as current, the same file fails on its missing gap fields instead.
+          ByteString.writeFile cachePath (versionThreeCacheFile repositoryCacheSchemaVersion)
+          relabeled <- loadRepositoryCache repository
+          relabeled `shouldSatisfy` isInvalidCache
+          relabeled `shouldNotBe` CacheInvalid "cache ignored: unsupported schema version"
+
     -- A real version 2 file wrote its check summaries as two aggregate counts,
     -- so its snapshot cannot decode under the current schema at all. The
     -- version has to be read before the snapshot, or the user is told the file
@@ -6005,6 +6168,22 @@ main = hspec $ do
       map displayWidth rendered `shouldBe` replicate (length rendered) 46
       cardBorderColumns rendered `shouldBe` (["╭"] <> replicate 8 "│" <> ["╰"], ["╮"] <> replicate 8 "│" <> ["╯"])
 
+    -- An item missing data reaches the same amber incomplete treatment the
+    -- overflow markers use, and its card says what it does not know rather
+    -- than asserting the absence as a fact.
+    it "renders an item with missing data amber, without claiming it is unassigned or unlinked" $ do
+      let issue = (baseIssue 812 []) {issueDataGaps = [AssigneesUnavailable]}
+          pullRequest = (basePullRequest 823 [] False []) {pullRequestDataGaps = [LinkedIssuesUnavailable]}
+      itemHasAmberWarning defaultWorkflowConfig (IssueItem issue) `shouldBe` True
+      itemHasAmberWarning defaultWorkflowConfig (PullRequestItem pullRequest) `shouldBe` True
+      pullRequestCardAttribute defaultWorkflowConfig pullRequest `shouldBe` pendingAttr
+      let issueCard = renderCard testOptions False (Standalone (IssueItem issue)) 46
+      issueCard `shouldSatisfy` any (Data.Text.isInfixOf "assignees unknown")
+      issueCard `shouldSatisfy` not . any (Data.Text.isInfixOf "unassigned")
+      let pullRequestCard = renderCard testOptions False (Standalone (PullRequestItem pullRequest)) 46
+      pullRequestCard `shouldSatisfy` any (Data.Text.isInfixOf "LINKS UNKNOWN")
+      pullRequestCard `shouldSatisfy` not . any (Data.Text.isInfixOf "UNLINKED")
+
     it "reflows the same card, including its truncation markers, at a narrower width" $ do
       let rendered = renderCard testOptions False cardFixtureEntry 34
       map Data.Text.strip (cardInterior rendered)
@@ -6103,6 +6282,14 @@ main = hspec $ do
                    ]
       rendered `shouldSatisfy` any (Data.Text.isInfixOf "Routes Shift-wheel through the modal-aware ownership path.")
       detailsText rendered "URL" `shouldBe` Just "https://example.test/pull/823"
+
+    -- The overlay is where a user goes to find out what the amber card means,
+    -- so it is the last place that may present missing data as a verdict.
+    it "says an item's assignees and links are unknown when GitHub never delivered them" $ do
+      let issue = (baseIssue 36 []) {issueDataGaps = [AssigneesUnavailable]}
+          pullRequest = (basePullRequest 823 [] False []) {pullRequestDataGaps = [LinkedIssuesUnavailable]}
+      detailsText (renderDetails detailsFixtureBoard (IssueItem issue)) "Assignees" `shouldBe` Just "assignees unknown"
+      detailsText (renderDetails detailsFixtureBoard (PullRequestItem pullRequest)) "Linked issues" `shouldBe` Just "LINKS UNKNOWN"
 
     it "shows the issue-side §11 fields, deriving linked pull requests from the retained snapshot" $ do
       let rendered = renderDetails detailsFixtureBoard (IssueItem detailsFixtureIssue)
@@ -6720,7 +6907,7 @@ main = hspec $ do
 
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
-  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0
+  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0 []
 
 -- | A tracker whose child section is recognized but yields nothing usable:
 -- its single row is malformed, so it is diagnosed and dropped. The tracker
@@ -6782,6 +6969,7 @@ basePullRequest number linked draft labels =
     epoch
     0
     0
+    []
 
 itemNumber :: BoardItem -> Int
 itemNumber (IssueItem issue) = issue.issueNumber
@@ -6826,7 +7014,8 @@ cardFixtureIssue =
       issueCreatedAt = epoch,
       issueUpdatedAt = epoch,
       issueLabelOverflow = 2,
-      issueAssigneeOverflow = 0
+      issueAssigneeOverflow = 0,
+      issueDataGaps = []
     }
 
 cardFixtureEntry :: ColumnEntry
@@ -7880,6 +8069,83 @@ githubChecksResponse totalCount nodes =
       "}}}"
     ]
 
+-- | A page holding the given raw issue and pull-request nodes, so a test can
+-- stand one anomalous item beside an intact one and check that only the
+-- anomalous item is degraded.
+githubPageWith :: [String] -> [String] -> String
+githubPageWith issueNodes pullRequestNodes =
+  unlines
+    [ "{\"data\":{\"repository\":{",
+      "\"issues\":{\"nodes\":[" <> intercalate "," issueNodes <> "],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
+      "\"pullRequests\":{\"nodes\":[" <> intercalate "," pullRequestNodes <> "],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
+      "}}}"
+    ]
+
+-- | One issue node whose nested connections are supplied verbatim, so a test
+-- can null one out or leave it off the node entirely.
+issueNodeJson :: Int -> [String] -> String
+issueNodeJson number connections =
+  "{"
+    <> intercalate
+      ","
+      ( [ "\"number\":" <> show number,
+          "\"title\":\"Issue " <> show number <> "\"",
+          "\"body\":\"B\"",
+          "\"url\":\"https://example.test/issues/" <> show number <> "\""
+        ]
+          <> connections
+          <> ["\"createdAt\":\"2026-01-01T00:00:00Z\"", "\"updatedAt\":\"2026-01-02T00:00:00Z\""]
+      )
+    <> "}"
+
+-- | The pull-request counterpart: every scalar the decoder requires, with the
+-- connections and rollup left to the caller.
+pullRequestNodeJson :: Int -> [String] -> String
+pullRequestNodeJson number extras =
+  "{"
+    <> intercalate
+      ","
+      ( [ "\"number\":" <> show number,
+          "\"title\":\"PR " <> show number <> "\"",
+          "\"body\":\"B\"",
+          "\"url\":\"https://example.test/pull/" <> show number <> "\"",
+          "\"author\":{\"login\":\"author\"}",
+          "\"isDraft\":false",
+          "\"baseRefName\":\"master\"",
+          "\"headRefName\":\"fix\"",
+          "\"reviewDecision\":null",
+          "\"mergeable\":\"MERGEABLE\"",
+          "\"mergeStateStatus\":\"CLEAN\""
+        ]
+          <> extras
+          <> ["\"createdAt\":\"2026-01-03T00:00:00Z\"", "\"updatedAt\":\"2026-01-04T00:00:00Z\""]
+      )
+    <> "}"
+
+emptyLabelsJson, emptyAssigneesJson, emptyClosingIssuesJson :: String
+emptyLabelsJson = "\"labels\":{\"totalCount\":0,\"nodes\":[]}"
+emptyAssigneesJson = "\"assignees\":{\"totalCount\":0,\"nodes\":[]}"
+emptyClosingIssuesJson = "\"closingIssuesReferences\":{\"totalCount\":0,\"nodes\":[]}"
+
+rollupJson :: Int -> [String] -> String
+rollupJson totalCount nodes =
+  "\"statusCheckRollup\":{\"contexts\":{\"totalCount\":"
+    <> show totalCount
+    <> ",\"nodes\":["
+    <> intercalate "," nodes
+    <> "]}}"
+
+-- | A rollup context whose @__typename@ this build has never seen, as GitHub
+-- adding a rollup kind would deliver it.
+futureCheckContextJson :: String
+futureCheckContextJson = "{\"__typename\":\"SomeFutureType\",\"name\":\"future\"}"
+
+-- | A context of a type this build /does/ know, missing a field that type's
+-- decode requires.
+namelessCheckRunJson :: String
+namelessCheckRunJson =
+  "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"startedAt\":\"2026-01-03T00:00:00Z\"}"
+
 runningCheckRunJson :: String -> String -> String
 runningCheckRunJson name startedAt =
   "{\"__typename\":\"CheckRun\",\"name\":\""
@@ -7903,6 +8169,29 @@ versionTwoCacheFile version =
         <> "\"snapshotPullRequests\":[{"
         <> "\"pullRequestAuthor\":\"agent\",\"pullRequestBase\":\"master\",\"pullRequestBody\":\"B\","
         <> "\"pullRequestChecks\":{\"contents\":[1,2],\"tag\":\"ChecksFailed\"},"
+        <> "\"pullRequestCreatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestDraft\":false,"
+        <> "\"pullRequestHead\":\"branch\",\"pullRequestLabelOverflow\":0,\"pullRequestLabels\":[],"
+        <> "\"pullRequestLinkedIssueOverflow\":0,\"pullRequestLinkedIssues\":[36],"
+        <> "\"pullRequestMergeState\":\"MergeUnknown\",\"pullRequestNumber\":823,"
+        <> "\"pullRequestReviewDecision\":\"ReviewRequired\",\"pullRequestTitle\":\"T\","
+        <> "\"pullRequestUpdatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestUrl\":\"u\"}]}}"
+    )
+
+-- | A cache file exactly as version 3 wrote one: the current envelope and
+-- check-summary shape, but with no per-item data gaps. Everything else is the
+-- current encoder's own output, so the only thing that cannot decode under the
+-- current schema is the part version 4 actually added.
+versionThreeCacheFile :: Int -> ByteString.ByteString
+versionThreeCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{"
+        <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\",\"snapshotIssues\":[],"
+        <> "\"snapshotIssuesTruncated\":false,\"snapshotPullRequestsTruncated\":false,"
+        <> "\"snapshotPullRequests\":[{"
+        <> "\"pullRequestAuthor\":\"agent\",\"pullRequestBase\":\"master\",\"pullRequestBody\":\"B\","
+        <> "\"pullRequestChecks\":{\"contents\":[9,12,[]],\"tag\":\"ChecksFailed\"},"
         <> "\"pullRequestCreatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestDraft\":false,"
         <> "\"pullRequestHead\":\"branch\",\"pullRequestLabelOverflow\":0,\"pullRequestLabels\":[],"
         <> "\"pullRequestLinkedIssueOverflow\":0,\"pullRequestLinkedIssues\":[36],"

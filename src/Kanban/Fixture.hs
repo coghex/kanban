@@ -71,7 +71,8 @@ issue number title body labels assignees =
       issueCreatedAt = onDay (number `mod` 12 + 1) 9 0,
       issueUpdatedAt = at 10 (number `mod` 60),
       issueLabelOverflow = 0,
-      issueAssigneeOverflow = 0
+      issueAssigneeOverflow = 0,
+      issueDataGaps = []
     }
 
 pullRequest :: Int -> Text -> Text -> [Label] -> Bool -> [Int] -> ReviewDecision -> MergeState -> CheckSummary -> PullRequest
@@ -93,7 +94,8 @@ pullRequest number title body labels draft linkedIssues review mergeState checks
       pullRequestCreatedAt = onDay (number `mod` 12 + 1) 10 0,
       pullRequestUpdatedAt = at 11 (number `mod` 60),
       pullRequestLabelOverflow = 0,
-      pullRequestLinkedIssueOverflow = 0
+      pullRequestLinkedIssueOverflow = 0,
+      pullRequestDataGaps = []
     }
 
 label :: Text -> Text -> Label
