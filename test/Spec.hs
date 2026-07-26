@@ -5359,6 +5359,48 @@ main = hspec $ do
                   identityForPid secondPid identities `shouldBe` Nothing
               (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
+    it "reports a reclaim that refused, even when the refresh timer fired while it was shielded" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+        -- Two recorded groups: the first this repository's and killable, the
+        -- second occupied by a process no saved identity matches. Working
+        -- through the first outlasts the one-second timeout, so the timer is
+        -- already pending when the second is refused.
+        --
+        -- That pending exception is delivered the instant the shield's mask
+        -- lifts, before anything outside it could run -- so a refusal decided
+        -- inside and published outside would simply be lost, and the refresh
+        -- would report an ordinary timeout over a record it had just failed
+        -- to clear.
+        withSurvivingGroupLeader $ \ourPid ->
+          withSurvivingGroupLeader $ \squatterPid ->
+            withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+              snapshot <- readProcessSnapshot
+              case snapshot of
+                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
+                Right identities -> do
+                  let ours = filter ((== ourPid) . processIdentityGroupPid) identities
+                      departed =
+                        ProcessIdentity
+                          { processIdentityPid = squatterPid,
+                            processIdentityParentPid = 1,
+                            processIdentityGroupPid = squatterPid,
+                            processIdentityStartedAt = "Thu Jan 1 00:00:00 1970",
+                            processIdentityCommand = "gh api graphql"
+                          }
+                  ours `shouldNotBe` []
+                  writeGhGroupRecord
+                    repository
+                    [ OwnedProcessGroup ourPid ours True,
+                      OwnedProcessGroup squatterPid [departed] True
+                    ]
+                    `shouldReturn` Right ()
+              withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
+                (outcome, _) <- captureBoardRefresh temporaryRoot 1
+                heldOffMessage outcome >>= (`shouldMention` "cannot be identified as this repository's")
+              -- The record stands, naming the group that was refused.
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+
     it "does not mistake a gh that is still exiting for a group it leaked" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"

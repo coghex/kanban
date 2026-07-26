@@ -162,6 +162,9 @@ ghFetchCleanupFailure (GhFetchGuard cleanupFailure) = readIORef cleanupFailure
 setCleanupFailure :: GhFetchGuard -> GhCleanupFailure -> IO ()
 setCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure . Just
 
+clearCleanupFailure :: GhFetchGuard -> IO ()
+clearCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure Nothing
+
 fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
 fetchGitHubSnapshot guard limits workflowConfig repository = do
   -- Reclaim signals process groups and then confirms what it did, so it is
@@ -169,14 +172,14 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
   -- those halves. Without that, a timeout arriving mid-freeze would leave the
   -- record on disk, the guard unset, and the board publishing an ordinary
   -- timeout over a group nothing had established anything about.
-  reclaimed <- uninterruptiblyBounded reclaimInterrupted (reclaimRecordedGhGroups repository)
+  -- Reclaim publishes its own outcome from inside the shield rather than
+  -- having it read off afterwards. A refresh timeout pending while this waits
+  -- is delivered the instant the mask lifts -- before any code out here could
+  -- run -- so anything decided in between would be lost and the refresh would
+  -- report an ordinary timeout over a record it had just failed to clear.
+  reclaimed <- uninterruptiblyBounded reclaimInterrupted (reclaimRecordedGhGroups guard repository)
   case reclaimed of
-    -- A record was on disk -- that is what reclaim was working on -- so the
-    -- guard reports it as durably held, and the board holds off rather than
-    -- ageing into an ordinary failed refresh.
-    Left message -> do
-      setCleanupFailure guard (GhCleanupFailure message GuardRecorded)
-      pure (Left (ProviderError RequestFailed message))
+    Left message -> pure (Left (ProviderError RequestFailed message))
     Right () -> fetchPages initialState
   where
     reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
@@ -598,17 +601,29 @@ forceKillGhGroup processHandle spawnedPid = do
 -- Reclaim is where this belongs and TERM is not: this group was already asked
 -- to stop gracefully by the fetch that abandoned it. Skipping the courtesy
 -- second time is also what stops a TERM handler from forking anything new.
-freezeThenKillOwnedGroup :: Int -> IO (Either Text [ProcessIdentity])
-freezeThenKillOwnedGroup groupPid = do
+freezeThenKillOwnedGroup :: Int -> [ProcessIdentity] -> IO (Either Text [ProcessIdentity])
+freezeThenKillOwnedGroup groupPid known = do
   ignoreIOException (signalProcessGroup sigSTOP (fromIntegral groupPid))
   frozen <- defaultProcessSnapshot
   case frozen of
-    Left message -> do
-      -- Nothing was killed, so nothing may be left frozen either.
+    Left message -> release ("could not census the frozen gh process group: " <> message)
+    Right processes
+      -- Ownership was proven from a snapshot taken before the freeze, and the
+      -- group could have emptied and its pgid been reissued in between. The
+      -- frozen census is the one that decides: nothing can join or leave the
+      -- group now, so a recorded identity still sitting in this exact group
+      -- is a fact rather than a recollection. Without one, the group belongs
+      -- to somebody else and is released untouched.
+      | null (membersStillInGroup groupPid processes known) ->
+          release "the gh process group was no longer this repository's once frozen, so it was left alone"
+      | otherwise -> killFrozen (groupMembers groupPid processes)
+  where
+    -- Nothing was killed, so nothing may be left frozen either.
+    release message = do
       ignoreIOException (signalProcessGroup sigCONT (fromIntegral groupPid))
-      pure (Left ("could not census the frozen gh process group: " <> message))
-    Right processes -> do
-      let members = groupMembers groupPid processes
+      pure (Left message)
+
+    killFrozen members = do
       ignoreIOException (signalProcessGroup sigKILL (fromIntegral groupPid))
       threadDelay terminationGraceMicros
       settled <- defaultProcessSnapshot
@@ -811,21 +826,36 @@ recordedGhGroups repository = do
 -- disk. The record is cleared only once every entry is provably accounted
 -- for; anything else refuses the fetch outright, so a new @gh@ is never
 -- spawned alongside one that may still be running.
-reclaimRecordedGhGroups :: Repository -> IO (Either Text ())
-reclaimRecordedGhGroups repository = do
+reclaimRecordedGhGroups :: GhFetchGuard -> Repository -> IO (Either Text ())
+reclaimRecordedGhGroups guard repository = do
   recordLoad <- loadGhGroupRecord repository
   case recordLoad of
     GhGroupRecordAbsent -> pure (Right ())
-    GhGroupRecordUnusable message -> pure (Left (refusal message))
+    GhGroupRecordUnusable message -> refuse message
     GhGroupRecordLoaded groups -> do
+      -- A record exists from here on, so every exit other than clearing it
+      -- has to leave the guard set. It is set now, pessimistically, because
+      -- the exits that matter most are the ones that never reach a `case`:
+      -- the budget expiring, or this whole reclaim being abandoned.
+      setCleanupFailure guard (GhCleanupFailure (refusalText interrupted) GuardRecorded)
       outcomes <- traverse reclaimGhGroup groups
       case [message | Left message <- outcomes] of
         [] -> do
           cleared <- removeGhGroupRecord repository
-          pure (first refusal cleared)
-        message : _ -> pure (Left (refusal message))
+          case cleared of
+            Left message -> refuse message
+            Right () -> do
+              clearCleanupFailure guard
+              pure (Right ())
+        message : _ -> refuse message
   where
-    refusal message = "a gh process from an earlier GitHub refresh could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
+    refuse message = do
+      setCleanupFailure guard (GhCleanupFailure (refusalText message) GuardRecorded)
+      pure (Left (refusalText message))
+
+    interrupted = "reclaiming it did not run to completion"
+
+    refusalText message = "a gh process from an earlier GitHub refresh could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
 
 -- | One recorded group's second chance.
 --
@@ -873,7 +903,7 @@ reclaimGhGroup group = go group.ownedProcessGroupMembers groupCleanupPasses
               | not (provablyOurs processes known) -> pure (Left (unprovable (length survivors)))
               | passesLeft <= 0 -> pure (Left exhausted)
               | otherwise -> do
-                  result <- freezeThenKillOwnedGroup groupPid
+                  result <- freezeThenKillOwnedGroup groupPid known
                   case result of
                     Left message -> pure (Left message)
                     Right adopted -> go (known <> adopted) (passesLeft - 1)
