@@ -94,9 +94,32 @@ request mergeable again — or the pull request is closed — the next poll
 resolves that incident on its own. Incidents belonging to other pull requests,
 and to a drainer crash, are left open. There is no manual dismissal step.
 
+## Post-merge cleanup
+
+A merge is durable on GitHub the moment it returns, but the work it implies is
+not: closing the linked issues, removing the matching worktree, deleting the
+local and remote head branches, and fast-forwarding the local default branch.
+So the drainer records those obligations in its queue state *before* attempting
+any of them, and drops the record only once every one of them is done.
+
+- Each obligation is retried independently until it succeeds or is verified
+  already done. An issue that is already closed, a branch that is already gone,
+  and an absent worktree all count as done.
+- One obligation failing never skips the ones after it in the same pass.
+- A linked issue is recorded as `owner/name#number`, so a pull request that
+  closes an issue in another repository is retried against that repository.
+- Obligations still outstanding after three passes are recorded as an open
+  incident, which Kanban shows in the sidebar. The drainer keeps retrying them
+  and keeps draining every other approved pull request; the incident resolves
+  itself once the last obligation succeeds.
+- If the drainer is restarted or the pull request merges without its cleanup
+  being recorded, the next poll reads the merged pull request and finishes the
+  outstanding work. A pull request closed *without* merging owes nothing: it is
+  forgotten without closing any issue or deleting any branch.
+
 ## Notifications
 
-Crash and merge-conflict notifications are off by default. To use a private ntfy endpoint:
+Crash, merge-conflict, and cleanup notifications are off by default. To use a private ntfy endpoint:
 
 ```console
 python3 tools/install_drainer.py --ntfy-url https://your-server.example/topic
@@ -111,7 +134,7 @@ The endpoint is stored in a private configuration file and is not written into t
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`
 
-The controller records unexpected exits as incidents, and the drainer records a merge conflict as a per-pull-request incident. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository; a conflict that is still unresolved is recorded again on the next poll after it restarts.
+The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
 
 ## Manual status
 

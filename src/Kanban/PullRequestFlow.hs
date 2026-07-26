@@ -185,9 +185,10 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
     -- Before this invocation's terminal event, never after: replay stops at
     -- the terminal journal envelope. A supervisor cancelling this invocation
     -- shares the aggregator and seals it before its own terminal envelope;
-    -- the seal is one-shot, so exactly one side reports.
+    -- the seal is one-shot and writes under its own lock, so exactly one side
+    -- reports and the other cannot terminalize until it has finished.
     closeWithOutcome sessionLog outcome = do
-      sealUnknownAggregates aggregator >>= mapM_ (eventSink . PullRequestFlowOutput pullRequestNumber)
+      sealUnknownAggregates aggregator (eventSink . PullRequestFlowOutput pullRequestNumber)
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =

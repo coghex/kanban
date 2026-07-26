@@ -348,6 +348,17 @@ follow-up turn, and Ctrl-C interrupts the active turn. Only running turns chain
 short spinner ticks; completed, hidden, and idle sessions schedule no redraws.
 Quitting terminates the owned app-server process.
 
+Feedback sent into a running turn is steered into it against the turn it was
+aimed at, so the app-server rejects it when that turn has moved on. A rejection
+never discards the message. With the thread now idle it becomes the follow-up
+turn the same keypress would have started a moment later — one request, and no
+second transcript entry. While any turn is running it is reported undelivered
+rather than redirected into a turn the user never addressed: the transcript
+entry is marked as not delivered, and the text returns to the input line, or
+waits in the session behind whatever is already there. A draft typed after the
+send and a second rejected message are both preserved; sending frees the line
+and brings the oldest waiting message back.
+
 Review, solve, and PR transcripts follow the live tail only while they are
 already at the bottom. Scrolling up during a turn holds the view where it is,
 however much output arrives; scrolling back down to the bottom resumes tailing,
@@ -1196,7 +1207,9 @@ The first solve/autosolve-compatible slice is implemented.
   unforced paths. Sealing is one-shot and refuses every later unknown notice,
   so exactly one side reports and a stream still draining buffered output
   cannot restart counts after the summary or append past the terminal
-  envelope.
+  envelope. Deciding and writing a notice, and sealing and writing the
+  summaries, all happen under one lock, so neither a sample nor a summary can
+  be in flight while the other side terminalizes over it.
   Aggregation is invocation-local and append-only, never rewriting an entry or
   carrying counts across invocations, so a chatty unrecognized type costs a
   journal and replayed transcript O(1) rather than O(n). Section 16's raw

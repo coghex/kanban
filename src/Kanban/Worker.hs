@@ -744,8 +744,10 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             -- every unknown notice it produces from now on rather than
             -- letting them restart after the summary. The flow seals the
             -- same aggregator on its own unforced paths; the seal is
-            -- one-shot, so exactly one side ever reports.
-            sealUnknownAggregates noticeAggregator >>= mapM_ (emitRaw . WorkerAgentOutput)
+            -- one-shot and writes under its own lock, so exactly one side
+            -- ever reports, and if the flow won it, this blocks until its
+            -- summaries are written rather than terminalizing over them.
+            sealUnknownAggregates noticeAggregator (emitRaw . WorkerAgentOutput)
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of

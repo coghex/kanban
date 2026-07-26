@@ -188,19 +188,29 @@ everything else.
 - **Failure semantics:** an unresolved incident surfaces in Kanban's
   sidebar as `DrainerWarning`/`DrainerError` with the incident summary
   (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
-  incident rules independently of Kanban. Incidents come in two kinds. A
+  incident rules independently of Kanban. Incidents come in three kinds. A
   crash incident says the drainer process died and is cleared per
   repository. A merge-conflict incident says a healthy drainer stopped
   merging one pull request; it carries that pull-request number and its
   conflicting paths, is unique per open (repository, pull request), changes
   no label on the pull request it names, and resolves itself once that pull
   request is mergeable again or closed, leaving every other incident open.
+  A cleanup-pending incident says a merge landed but its post-merge
+  obligations — closing the linked issues, removing the matching worktree,
+  deleting the head branches, fast-forwarding the default branch — are still
+  outstanding after a bounded number of poll cycles; it carries that
+  pull-request number and the outstanding steps, is unique per open
+  (repository, pull request), never asks the drainer to exit, and resolves
+  itself once every step succeeds. Only the crash kind means the drainer is
+  not running.
 - **Required authority:** the same GitHub write scope, plus local launchd
   control for the signed-in user.
 - **Durable state:** `~/Library/LaunchAgents/com.coghex.drain-prs.plist`;
   the installer-managed script directory at
-  `~/Library/Application Support/kanban/pr-drainer`; a drain-state JSON
-  file.
+  `~/Library/Application Support/kanban/pr-drainer`; a versioned drain-state
+  JSON file, which records both the approved head each queued pull request
+  was cleared at and the post-merge obligations a merged pull request still
+  owes, and which migrates forward from the shapes earlier versions wrote.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.

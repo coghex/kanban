@@ -217,8 +217,8 @@ emitStreamEvent (UnknownAggregator lock tally) emitEvent (StreamEvent (Just key)
         writeIORef tally current {unknownTallyCounts = Map.insert key total current.unknownTallyCounts}
         when (total <= unknownNoticeSamples) (emitEvent agentEvent)
 
--- | Seals the aggregator and returns the one aggregate summary each key with
--- suppressed occurrences contributes, reporting that key's total.
+-- | Seals the aggregator and writes, through @emitEvent@, the one aggregate
+-- summary each key with suppressed occurrences contributes.
 --
 -- Sealing is what makes this safe to call from a supervisor that is about to
 -- cancel the stream loop still feeding the aggregator. Without it, that loop
@@ -229,27 +229,30 @@ emitStreamEvent (UnknownAggregator lock tally) emitEvent (StreamEvent (Just key)
 -- reported. Sealed, every later unknown notice is refused, so the summary is
 -- final for the invocation. Recognized output is untouched.
 --
--- Taking the same lock 'emitStreamEvent' holds is what makes the seal a real
--- boundary rather than an instant: it waits out an emission already in
--- flight, so once this returns, every sample this invocation will ever emit
--- has already been written. Summaries are returned rather than emitted here,
--- so the caller writes them outside the lock — nothing else can emit an
--- unknown notice by then anyway.
+-- Sealing and writing happen under the lock 'emitStreamEvent' also holds,
+-- which is what makes the seal a real boundary rather than an instant. It
+-- covers both directions. Inbound, it waits out a sample already being
+-- written, so a sample admitted before the seal can never trail it. Outbound,
+-- the summaries are written before the lock is released, so the /other/
+-- caller of this — the flow and its supervisor both call it, and only the
+-- first finds anything to report — cannot observe an already-sealed
+-- aggregator, conclude there is nothing to write, and terminalize while the
+-- winner's summaries are still in flight. When this returns, every unknown
+-- notice this invocation will ever produce has already been written.
 --
--- Callers emit these before the invocation's terminal event. The seal also
--- makes a repeated call return nothing, so the flow and its supervisor can
--- both call it and only the first reports.
-sealUnknownAggregates :: UnknownAggregator -> IO [AgentEvent]
-sealUnknownAggregates (UnknownAggregator lock tally) = do
-  counts <- withMVar lock $ \() -> do
+-- Callers seal before the invocation's terminal event, which is the whole
+-- point: replay stops at that envelope.
+sealUnknownAggregates :: UnknownAggregator -> (AgentEvent -> IO ()) -> IO ()
+sealUnknownAggregates (UnknownAggregator lock tally) emitEvent =
+  withMVar lock $ \() -> do
     current <- readIORef tally
     writeIORef tally (UnknownTally Map.empty True)
-    pure current.unknownTallyCounts
-  pure
-    [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
-      | (key, total) <- Map.toAscList counts,
-        total > unknownNoticeSamples
-    ]
+    mapM_
+      emitEvent
+      [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
+        | (key, total) <- Map.toAscList current.unknownTallyCounts,
+          total > unknownNoticeSamples
+      ]
 
 codexSolverModel :: Text
 codexSolverModel = "gpt-5.4 high"
@@ -351,9 +354,10 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
     -- the terminal journal envelope, so a summary emitted later would be
     -- written but never replayed. A supervisor that cancels this invocation
     -- outright owns the same aggregator and seals it before its own terminal
-    -- envelope; sealing is one-shot, so whichever side gets there first is
-    -- the only one that reports.
-    flushAggregates = sealUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
+    -- envelope; sealing is one-shot and writes under its own lock, so
+    -- whichever side gets there first is the only one that reports, and the
+    -- other cannot terminalize until that reporting is complete.
+    flushAggregates = sealUnknownAggregates aggregator (eventSink . SolveOutput issueNumber)
     repositoryRoot = repository.repositoryRoot
     executableName = case brand of
       CodexSolver -> "codex"
