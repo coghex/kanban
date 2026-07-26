@@ -246,6 +246,7 @@ import Kanban.UI
     followAfterScroll,
     followAfterTurnStarted,
     killSelectionNotice,
+    liveReviewSessions,
     orphanMessage,
     overlayMouseAction,
     pullRequestSessionAlreadyResolved,
@@ -279,11 +280,14 @@ import Kanban.UI
     resolveProcessSelection,
     resolveReviewDigitAction,
     reusableSolveSession,
+    reviewAgentSessionEntry,
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
     reviewPhaseLabel,
+    reviewSessionLive,
     reviewSessionReusable,
     reviewSessionsNeedingArm,
+    reviewTurnInterruptible,
     revisedAttr,
     runBoardRefreshWith,
     solveSessionAlreadyResolved,
@@ -4579,6 +4583,143 @@ main = hspec $ do
         `shouldBe` ReviewCancelNotRunning
       resolveReviewCancelAction False Nothing Nothing InitialReview ReviewStarting False
         `shouldBe` ReviewCancelStillStarting
+
+  describe "review session liveness, quit protection, and the x gate" $ do
+    -- issue #151: the processes overlay, the `x` gate that dispatches on
+    -- its rows, and the dashboard quit guard each re-implemented "live"
+    -- differently, so a revision waiting on a question or approval blocked
+    -- `q` while the overlay called the same session dead and refused `x`.
+    -- 'reviewSessionLive' is now the one decision all three consume, and it
+    -- means *currently killable*: the session has a target 'killReviewAgent'
+    -- can act on. These are the pure decisions behind those call sites, so
+    -- the whole input matrix is covered without an 'EventM' harness.
+    let reviewedIssue = 151
+        sessionFor (_, _, stage, phase, threadId, turnId) =
+          ReviewSession
+            { reviewSessionIssue = baseIssue reviewedIssue [],
+              reviewSessionStage = stage,
+              reviewSessionThreadId = threadId,
+              reviewSessionTurnId = turnId,
+              reviewSessionPhase = phase,
+              reviewSessionActivity = "",
+              reviewSessionTranscript = ChatTranscript "" "" "",
+              reviewSessionPending = Nothing,
+              reviewSessionInput = "",
+              reviewSessionUndelivered = [],
+              reviewSessionSpinnerFrame = 0,
+              reviewSessionTickGeneration = 1,
+              reviewSessionTickArmed = False,
+              reviewSessionFollowing = True
+            }
+        canonicalProcesses hasProcess = if hasProcess then Set.singleton reviewedIssue else Set.empty
+        allPhases =
+          [ ReviewStarting,
+            ReviewRunning,
+            ReviewWaiting,
+            ReviewFinished,
+            ReviewNeedsChanges,
+            ReviewFailed,
+            ReviewRevised,
+            ReviewInterrupted
+          ]
+        allStages = [InitialReview, IssueRevision, IssueRereview]
+        -- Every input the kill target depends on: phase, stage,
+        -- canonical-process presence, backend readiness, and both IDs.
+        killTargetInputs =
+          [ (backendReady, hasProcess, stage, phase, threadId, turnId)
+            | backendReady <- [False, True],
+              hasProcess <- [False, True],
+              stage <- allStages,
+              phase <- allPhases,
+              threadId <- [Nothing, Just "thread-1"],
+              turnId <- [Nothing, Just "turn-1"]
+          ]
+        -- The issue's rule restated independently of the code under test.
+        expectedLive (backendReady, hasProcess, stage, phase, threadId, turnId) =
+          hasProcess
+            || ( stage == IssueRevision
+                   && phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
+                   && backendReady
+                   && isJust threadId
+                   && isJust turnId
+               )
+        sharedLive inputs@(backendReady, hasProcess, _, _, _, _) =
+          reviewSessionLive backendReady hasProcess (sessionFor inputs)
+        overlayLive inputs@(backendReady, hasProcess, _, _, _, _) =
+          (reviewAgentSessionEntry backendReady hasProcess reviewedIssue (sessionFor inputs)).agentSessionLive
+        quitBlocked inputs@(backendReady, hasProcess, _, _, _, _) =
+          liveReviewSessions backendReady (canonicalProcesses hasProcess) (Map.singleton reviewedIssue (sessionFor inputs))
+            == [reviewedIssue]
+        -- Every combination whose answer disagrees with the rule above,
+        -- tagged with its inputs, so a failure names the exact
+        -- combinations rather than reporting "True /= False" or dumping
+        -- the whole matrix.
+        wrongAnswers decide = [(inputs, decide inputs) | inputs <- killTargetInputs, decide inputs /= expectedLive inputs]
+
+    it "covers every combination of phase, stage, canonical process, backend readiness, and both IDs" $ do
+      length killTargetInputs `shouldBe` 384
+      (any expectedLive killTargetInputs, all expectedLive killTargetInputs) `shouldBe` (True, False)
+
+    it "reports a review session live exactly when it currently has a kill target" $
+      wrongAnswers sharedLive `shouldBe` []
+
+    it "keeps the processes overlay and the quit guard agreeing over the whole matrix" $ do
+      wrongAnswers overlayLive `shouldBe` []
+      wrongAnswers quitBlocked `shouldBe` []
+
+    it "keeps a waiting revision live and routes x to its interruptible turn" $ do
+      let waiting = (True, False, IssueRevision, ReviewWaiting, Just "thread-1", Just "turn-1")
+          session = sessionFor waiting
+      sharedLive waiting `shouldBe` True
+      overlayLive waiting `shouldBe` True
+      liveReviewSessions True Set.empty (Map.singleton reviewedIssue session) `shouldBe` [reviewedIssue]
+      -- The gate hands a live review row to 'killReviewAgent', whose turn
+      -- branch takes the recorded thread and turn under exactly this
+      -- condition, so `x` interrupts the turn instead of reporting no live
+      -- process to kill.
+      reviewTurnInterruptible IssueRevision ReviewWaiting `shouldBe` True
+
+    it "leaves a canonical stage quittable until its process is registered" $ do
+      let starting = (True, False, InitialReview, ReviewStarting, Nothing, Nothing)
+      sharedLive starting `shouldBe` False
+      overlayLive starting `shouldBe` False
+      liveReviewSessions True Set.empty (Map.singleton reviewedIssue (sessionFor starting)) `shouldBe` []
+
+    it "leaves a starting revision quittable until its backend is ready and it has both IDs" $
+      mapM_
+        (\inputs -> (inputs, sharedLive inputs, overlayLive inputs, quitBlocked inputs) `shouldBe` (inputs, False, False, False))
+        [ (False, False, IssueRevision, ReviewStarting, Nothing, Nothing),
+          (False, False, IssueRevision, ReviewStarting, Just "thread-1", Just "turn-1"),
+          (True, False, IssueRevision, ReviewStarting, Nothing, Nothing),
+          (True, False, IssueRevision, ReviewStarting, Just "thread-1", Nothing),
+          (True, False, IssueRevision, ReviewStarting, Nothing, Just "turn-1")
+        ]
+
+    it "keeps a registered canonical process live and killable whatever the session phase" $
+      mapM_
+        ( \phase -> do
+            let withProcess = (False, True, InitialReview, phase, Nothing, Nothing)
+            sharedLive withProcess `shouldBe` True
+            overlayLive withProcess `shouldBe` True
+            quitBlocked withProcess `shouldBe` True
+            -- No interruptible turn, so 'killReviewAgent' reaches the
+            -- unchanged canonical process-kill branch for this row.
+            reviewTurnInterruptible InitialReview phase `shouldBe` False
+            (reviewAgentSessionEntry False True reviewedIssue (sessionFor withProcess)).agentSessionRef
+              `shouldBe` ReviewAgent reviewedIssue
+        )
+        allPhases
+
+    it "stops counting a just-killed revision as live while it still carries its turn ID" $ do
+      -- 'killReviewAgent' leaves the session ReviewFailed without clearing
+      -- the thread and turn IDs, so without the phase condition `q` would
+      -- stay refused after the kill and a second `x` would pass the gate
+      -- only to hit the no-live-process notice.
+      let killed = (True, False, IssueRevision, ReviewFailed, Just "thread-1", Just "turn-1")
+      sharedLive killed `shouldBe` False
+      overlayLive killed `shouldBe` False
+      quitBlocked killed `shouldBe` False
+      reviewTurnInterruptible IssueRevision ReviewFailed `shouldBe` False
 
   describe "canonical review completion vs. cancellation" $ do
     -- issue #31 spec addition: a canonical process's completion event can
