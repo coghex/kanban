@@ -1471,9 +1471,9 @@ class PostMergeCleanupTests(ProcessPrFixture):
             for path in sorted(self.incident_dir.glob("incident-*.json"))
         ]
 
-    def _stuck_cleanup_record(self):
-        """A merged PR #7 that still owes one issue close, and nothing else, so
-        an escalation is attributable to that single obligation."""
+    def _stuck_cleanup_record(self, *issue_numbers):
+        """A merged PR #7 owing one issue close per number given and nothing
+        else, so an escalation is attributable to those obligations alone."""
         record = drain_prs.plan_cleanup(
             {
                 "number": 7,
@@ -1481,9 +1481,10 @@ class PostMergeCleanupTests(ProcessPrFixture):
                 "headRefOid": "b" * 40,
                 "closingIssuesReferences": [
                     {
-                        "number": 7,
+                        "number": number,
                         "repository": {"owner": {"login": "acme"}, "name": "widgets"},
                     }
+                    for number in (issue_numbers or (7,))
                 ],
             }
         )
@@ -1673,6 +1674,60 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["status"], "resolved")
         self.assertNotIn("7", self._read_state()["prs"])
+
+    def test_an_open_incident_stops_naming_a_step_that_has_since_succeeded(self):
+        # The incident carries what is outstanding now. A pass that discharges
+        # part of the debt must update the open incident rather than leave
+        # Kanban showing work that is already done -- and must not open a
+        # second incident for the same pull request.
+        stuck = self._stuck_cleanup_record(7, 5)
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": self._entry("b" * 40, cleanup=stuck)},
+            }
+        )
+        for number in (7, 5):
+            self.fake.script(
+                "gh",
+                ["issue", "view", str(number)],
+                stdout=json.dumps({"state": "OPEN"}),
+            )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "5"], stderr="gh: server error", exit_code=1
+        )
+        self.fake.script("gh", ["issue", "close", "5"], stdout="")
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+
+        self._run_loop()
+        opened = self._incidents()
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(
+            opened[0]["steps"],
+            ["closing acme/widgets#7", "closing acme/widgets#5"],
+        )
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_id"], opened[0]["incident_id"])
+        self.assertEqual(incidents[0]["status"], "open")
+        self.assertEqual(incidents[0]["steps"], ["closing acme/widgets#7"])
+        self.assertIn("acme/widgets#7", incidents[0]["summary"])
+        self.assertNotIn("acme/widgets#5", incidents[0]["summary"])
+        self.assertEqual(
+            [
+                item["number"]
+                for item in self._read_state()["prs"]["7"]["cleanup"]["pending"]
+            ],
+            [7],
+        )
 
     def test_an_intentional_stop_does_not_hide_a_still_failing_cleanup(self):
         # Stopping the drainer resolves every open incident for the repository.

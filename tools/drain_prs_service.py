@@ -662,16 +662,30 @@ def record_pr_incident(
     notes: list[str],
     title: str,
     tags: str,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Record that a healthy drainer needs help with one pull request.
 
     Idempotent on (repository, kind, pull request): while an incident for that
-    PR and kind is open, repeated polls return it untouched instead of
-    accumulating duplicates. A recurrence after resolution opens a new one.
+    PR and kind is open, repeated polls return it rather than accumulating
+    duplicates. A recurrence after resolution opens a new one. With `refresh`,
+    an open incident's summary and payload are brought up to date in place --
+    for a kind whose detail shrinks as the drainer makes progress, leaving the
+    first report standing would show work that is no longer outstanding. The
+    incident keeps its id, its opening time and its one notification.
     """
     existing = find_open_pr_incident(repo_path, pull_request, kind)
     if existing is not None:
-        return existing[1]
+        path, incident = existing
+        if not refresh:
+            return incident
+        updated = {"summary": summary, **payload}
+        if all(incident.get(key) == value for key, value in updated.items()):
+            return incident
+        incident.update(updated)
+        incident["updated_at"] = utc_stamp()
+        atomic_write_json(path, incident)
+        return incident
 
     INCIDENT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Second-granularity stamps repeat, and the same PR number can belong to
@@ -758,7 +772,8 @@ def record_cleanup_incident(
 
     The merge itself already landed, so this never asks the drainer to exit:
     the obligations stay recorded and retried while every other approved PR
-    keeps draining.
+    keeps draining. The incident names what is outstanding *now*, so a pass
+    that discharges some of it updates the open incident in place.
     """
     return record_pr_incident(
         repo_path=repo_path,
@@ -774,6 +789,7 @@ def record_cleanup_incident(
         ],
         title="PR drainer cannot finish post-merge cleanup",
         tags="warning,broom",
+        refresh=True,
     )
 
 
