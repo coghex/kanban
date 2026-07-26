@@ -16,6 +16,10 @@ module Kanban.Drainer
     runDrainerCommand,
     setDrainerRunning,
     statusFromControllerExit,
+    -- | Exported for the discovery-wording tests, which cannot reach this
+    -- branch through 'discoverDrainerController': it needs a plist that
+    -- @plutil@ rejects, and the test host may have neither.
+    unreadablePlist,
   )
 where
 
@@ -243,9 +247,18 @@ discoverDrainerController repository = do
           Right values -> Right values
         controllerFromProgramArguments repository arguments
 
+-- | A plist that is present but will not parse is the one failure the record
+-- cannot diagnose, so it carries @plutil@'s own complaint — and, like every
+-- other branch, the repair: rewriting the plist is exactly what re-running
+-- the installer does.
 unreadablePlist :: FilePath -> Text -> Text
 unreadablePlist plist detail =
-  "could not read the PR drainer's LaunchAgent at " <> Text.pack plist <> ": " <> detail
+  "could not read the PR drainer's LaunchAgent at "
+    <> Text.pack plist
+    <> ": "
+    <> detail
+    <> "; "
+    <> reinstallHint
 
 controllerFromProgramArguments :: Repository -> [String] -> Either Text DrainerController
 controllerFromProgramArguments repository arguments = case arguments of

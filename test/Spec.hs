@@ -56,6 +56,7 @@ import Kanban.Drainer
     resolveDrainerPlist,
     runDrainerCommand,
     statusFromControllerExit,
+    unreadablePlist,
   )
 import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), confirmsOwnGroupLeadership, decodeGitHubItems, ghBehindBarrier, groupConfirmedEmpty, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
@@ -6727,6 +6728,20 @@ main = hspec $ do
         outcome <- resolveDrainerPlist "darwin" recordPath
         failureFor outcome `shouldMention` "LaunchAgent is missing"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "keeps a plist that will not parse distinct, and still names the repair" $ do
+      -- The one failure the record cannot diagnose: it located the plist
+      -- correctly and the file is there. plutil's own complaint is carried
+      -- through, but re-running the installer rewrites the plist, so this
+      -- branch is no less actionable than the others.
+      let message =
+            unreadablePlist
+              "/Users/example/Library/LaunchAgents/com.example.drain.plist"
+              "Property List error: Unexpected character b at line 1"
+      message `shouldMention` "com.example.drain.plist"
+      message `shouldMention` "Unexpected character"
+      message `shouldMention` "tools/install_drainer.py"
+      message `shouldNotMention` "install record"
 
     it "resolves the plist the record names, wherever the installer put it" $
       withTemporaryCacheRoot $ \root -> do

@@ -40,7 +40,14 @@ INSTALL_DIR = Path(
 ).expanduser()
 CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
 DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
-CONFIG_PATH = INSTALL_DIR / "config.json"
+# One document, at that same fixed location, carries both the installer's keys
+# and the discovery record: --install-dir relocates the script links and the
+# runtime state, not the file Kanban and this service both have to resolve
+# without an environment override.
+CONFIG_PATH = DISCOVERY_RECORD_PATH
+# Where a --install-dir install made before that consolidation left them. The
+# installer migrates this copy on its next run; until then it is still read.
+LEGACY_CONFIG_PATH = INSTALL_DIR / "config.json"
 LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "pr-drainer"
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 INCIDENT_DIR = RUNTIME_DIR / "incidents"
@@ -51,12 +58,25 @@ SERVICE_ERR_PATH = LOG_DIR / "service.err"
 PLIST_PATH = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
-def _read_service_config() -> dict[str, Any]:
+def _read_json_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _read_service_config() -> dict[str, Any]:
+    """The shared document, with any pre-consolidation --install-dir copy read
+    underneath it. The installer folds that copy in on its next run, but a
+    custom install upgraded before that run must not silently lose its
+    notification endpoint in the meantime, so it is still honoured here."""
+    configured = _read_json_object(CONFIG_PATH)
+    if LEGACY_CONFIG_PATH == CONFIG_PATH:
+        return configured
+    legacy = _read_json_object(LEGACY_CONFIG_PATH)
+    legacy.update(configured)
+    return legacy
 
 
 def configured_ntfy_url() -> str | None:

@@ -515,9 +515,12 @@ the Codex plugin being installed.
   one side writes and the other reads is the only coupling here that cannot
   drift. Its location stays fixed even when `--install-dir` moves everything
   else, since a dashboard that never inherits `KANBAN_DRAINER_INSTALL_DIR`
-  still has to find it, and it is merged rather than overwritten so the
-  `ntfy_url` and `config_path` the installer persists in the same document
-  survive. `tools/install_issue_review.py` follows the same install-directory
+  still has to find it: that option relocates the script links and the runtime
+  state, not this document. It is one document rather than two — the
+  installer's `ntfy_url` and `config_path` live in it beside the record, each
+  writer merging rather than overwriting — and an installer run folds in any
+  copy an earlier `--install-dir` install left beside its script links, which
+  the controller keeps reading until then. `tools/install_issue_review.py` follows the same install-directory
   convention for the canonical issue-review backend under
   `~/Library/Application Support/kanban/issue-review`, read by
   `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer` — but through a

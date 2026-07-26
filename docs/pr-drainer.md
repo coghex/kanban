@@ -281,7 +281,10 @@ The endpoint is stored in a private configuration file and is not written into t
 ## Files and logs
 
 - Installed links and private configuration: `~/Library/Application Support/kanban/pr-drainer/`
-- Install record Kanban resolves the LaunchAgent through: `~/Library/Application Support/kanban/pr-drainer/config.json`
+- Install record Kanban resolves the LaunchAgent through, and the private
+  configuration (`ntfy_url`, `config_path`) that shares it:
+  `~/Library/Application Support/kanban/pr-drainer/config.json` — this path is
+  fixed, and `--install-dir` does not move it
 - Logs: `~/Library/Logs/kanban/pr-drainer/`
 - LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
 - Repository queue state: `.git/drain_prs_state.json`

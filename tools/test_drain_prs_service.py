@@ -86,6 +86,45 @@ class ControllerConfigurationTests(unittest.TestCase):
             drain_prs_service.DISCOVERY_RECORD_PATH.parent,
         )
 
+    def test_the_shared_document_is_read_with_a_legacy_install_dir_copy_under_it(self):
+        # A custom install upgraded before its next installer run still has its
+        # endpoint beside the script links; losing notifications silently in
+        # that window would be worse than reading both.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "shared" / "config.json"
+            legacy = root / "installed" / "config.json"
+            shared.parent.mkdir()
+            legacy.parent.mkdir()
+            legacy.write_text(
+                json.dumps(
+                    {
+                        "ntfy_url": "https://notify.example.test/legacy",
+                        "config_path": "/home/user/legacy.toml",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            shared.write_text(
+                json.dumps({"ntfy_url": "https://notify.example.test/current"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(drain_prs_service, "CONFIG_PATH", shared),
+                mock.patch.object(drain_prs_service, "LEGACY_CONFIG_PATH", legacy),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
+                # The environment override outranks both documents, so it must
+                # not be what this test is actually reading.
+                os.environ.pop("KANBAN_DRAINER_NTFY_URL", None)
+                self.assertEqual(
+                    drain_prs_service.configured_ntfy_url(),
+                    "https://notify.example.test/current",
+                )
+                self.assertEqual(
+                    drain_prs_service.configured_config_path(), "/home/user/legacy.toml"
+                )
+
     def test_notifications_are_disabled_by_default(self):
         with mock.patch.object(drain_prs_service, "NTFY_URL", None):
             result = drain_prs_service.publish_ntfy("test")
