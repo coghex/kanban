@@ -58,14 +58,14 @@ report still owes.
 - [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
 - [x] 2. `UI.hs` is a god-module — [#50]
 - [x] 3. `AppState` has seven parallel session tables — [#51]
-- [ ] 4. `drain_prs.py` is 3,152 lines — [deferred]: after #147 lands
+- [ ] 4. `drain_prs.py` is 3,170 lines — [deferred]: after #147 lands; premise unverified
 - [x] 5. `Worker.hs` threads fifteen mutable cells positionally — [#153]
 - [x] 5a. `Review.hs` exceeds 2,000 lines — [no-issue]
 - [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
 - [x] 6a. Launchd label defined three times — [#146]
-- [ ] 7. `.drain-prs.json` is repo-specific at the root — [deferred]: read `kanban_config` repositories table
+- [x] 7. `.drain-prs.json` is repo-specific at the root — [no-issue]
 - [x] 7a. Issue-reviewer install path spelled twice, in two languages — [#155]
-- [ ] 8. `review_pr.py` duplicated and diverged — [deferred]: read the two plugin sync tests
+- [x] 8. `review_pr.py` duplicated and diverged — [no-issue]
 - [x] 9. `launchctl` is undeclared — [#149]
 - [x] 10. Process-group hardening not swept — [no-issue]
 - [x] 11. `Drainer.hs` has no platform guard — [#146]
@@ -74,9 +74,9 @@ report still owes.
 - [x] 13. Repository override key matched exactly and silently — [#150]
 - [x] 14. `bug`, `ui`, and `input` compiled into the theme — [#152]
 
-**15 of 18 resolved. 3 deferred, 0 unprocessed.** Every unmarked finding has been
-processed; what remains is blocked, not untouched. 7 and 8 each clear on reading
-one named file; 4 clears when #147 merges.
+**17 of 18 resolved. 1 deferred, 0 unprocessed.** Every finding has been processed.
+The one that remains, 4, is blocked on sequencing rather than evidence: it clears
+when #147 merges.
 
 Findings 2 and 3 were cleared by reading `src/Kanban/UI.hs` end to end. Both were
 already owned by open issues (#50, #51), so neither was refiled; the read produced
@@ -143,9 +143,11 @@ The chosen shape: the installer writes the label and plist path into the
 `~/Library/Application Support/kanban/pr-drainer/`, and `Drainer.hs` reads the
 record to locate the plist — then still reads the plist itself via `plutil` for the
 controller argv, so the plist stays authoritative for what launchd actually runs.
-This is the pattern `Review.hs:541` already uses for the issue-review backend;
-`Drainer.hs` was the outlier. Finding 11 folded in because it rewrites the same
-function.
+Written on the belief that `Review.hs` already used this pattern for the
+issue-review backend and `Drainer.hs` was the outlier. **Finding 7a later
+disproved that** — `Review.hs:546` duplicates its default across the language
+boundary exactly as the drainer's label does, and #146 carries a correcting
+comment. Finding 11 folded in because it rewrites the same function.
 
 Notes on the order:
 
@@ -213,28 +215,33 @@ Worth knowing before either is picked up: `UI.hs` has grown from the 4,340 lines
 
 ### Wave 2 — deferred
 
-Findings **4, 5a, 7, and 8**, each marked `[deferred]` with a note stating
-precisely what has to happen before it can be filed. Three distinct reasons, worth
-separating:
+Findings **4 and 7** remain, each marked `[deferred]` with a note stating precisely
+what has to happen before it can be filed. Two distinct reasons:
 
-- **Not read yet** (5a) — line count and import surface only. An issue written
-  from that would hand a solve agent a guess dressed as a plan. Finding 5 is the
-  proof: written from the same evidence, its stated premise was wrong, and filing
-  it unread would have asked for a module split that reading showed to be the
-  wrong treatment entirely.
 - **Blocked on sequencing** (4) — evidence is adequate, but it would be a fourth
   conflicting change to `tools/drain_prs.py` and `tools/drain_prs_service.py`.
   File after #147 lands.
-- **Premise unverified** (7, 8) — each rests on something not yet checked that
-  could materially shrink or invalidate it. Finding 8's claim that nothing
-  enforces the shared `review_pr.py` portion is the one most worth verifying
-  early, since it is otherwise the strongest remaining finding.
+- **Premise unverified** (7) — rests on something not yet checked that could
+  materially shrink or invalidate it: whether `tools/kanban_config.py`'s
+  repositories table already provides the per-target configuration the finding
+  says is missing.
 
-Findings **2 and 3** have left this wave: reading `UI.hs` end to end cleared both,
-and both turned out to be owned by pre-existing issues. See "Already owned by
-pre-existing issues" above.
+Findings **2, 3, 5, 5a, and 8** have all left this wave, and how they left is worth
+recording, because deferral earned its keep in three different ways:
 
-Finding **10** is closed as `[no-issue]`; see its Disposition note.
+- **2 and 3** were already owned by open issues (#50, #51). Reading `UI.hs` end to
+  end confirmed both and produced #151 and #152. See "Already owned by pre-existing
+  issues" above.
+- **5 and 5a** were written from line counts. Reading disproved 5's stated premise
+  outright and reduced 5a to no-issue — while turning up four defects neither had
+  predicted (#153, #154, #155, and 12a). Filing either unread would have asked for
+  the wrong work.
+- **8** was verified rather than read-and-discarded: its central premise held, and
+  two of its supporting claims did not. It is closed as an accepted risk, not as a
+  refuted finding — see its Disposition note.
+
+Findings **5a, 8, and 10** are closed as `[no-issue]`; each carries a Disposition
+note giving the reason and the consequence of leaving the code unchanged.
 
 ---
 
@@ -415,25 +422,39 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### [deferred] 4. `tools/drain_prs.py` is a 3,152-line script
+### [deferred] 4. `tools/drain_prs.py` is a 3,170-line script
 
-> **Deferred:** Blocked on sequencing rather than evidence. #145, #146, and #147
-> already form a three-deep serial chain through `tools/drain_prs.py` and
-> `tools/drain_prs_service.py`; a split filed now would be a fourth conflicting
-> change to the same files. File after #147 lands. Roughly 250 of 3,152 lines read
-> so far, so the phase boundaries proposed below still need confirming.
+> **Deferred:** Blocked on sequencing rather than evidence. #145 has since merged,
+> but #146 and #147 remain open with no PR in flight, and #147 — giving each
+> repository its own drainer — threads repository identity through config
+> resolution, the service, and the durable state files, so it will touch
+> `tools/drain_prs.py` broadly. A split specified now would be invalidated by it.
+> **Clears when #147 merges** (verified open, 2026-07-26).
+>
+> **Verify the premise before filing, do not inherit it.** Roughly 250 of 3,170
+> lines have been read. This is a size-based finding, and every other size-based
+> finding in this report has failed on contact: 5's stated premise was wrong, 5a
+> and 7 closed as no-issue. The structural evidence here already argues for
+> caution — 107 top-level definitions across 3,170 lines is about 30 lines each,
+> which is many small functions in one flat file rather than the god-module shape
+> the text below implies, and is the same shape `Review.hs` had before its finding
+> closed. Of the phases proposed below, `check` (10 functions), `merge` (4),
+> `conflict` (3), and `incident` (1) exist as recognisable clusters, while
+> "eligibility" and "repair" appear as no named function at all. Read the file
+> after #147 lands, then decide whether a split is warranted and where — rather
+> than filing the fix shape below as written.
 
 **Severity: High** — this is the component that merges pull requests, and it is
 the least structured code in the repository.
 
-`tools/` is flat: `drain_prs.py` (3,152), `approve_issues.py` (2,138), and
+`tools/` is flat: `drain_prs.py` (3,170), `approve_issues.py` (2,138), and
 `drain_prs_service.py` (1,048) are single-module programs sharing only
 `kanban_config.py` (493). The drainer owns the one irreversible action in the
 whole pipeline — merging — and it has already produced at least one recorded
 deadlock (it stripped the very label its own wait loop depended on, causing
 spurious `reviewed:changes` and 3-of-3 failures).
 
-A 3,000-line flat script is a poor host for that logic: there is no module
+A 3,000-line flat script is arguably a poor host for that logic: there is no module
 boundary between "decide whether this PR is eligible", "repair a conflicted
 branch", "wait for a check", and "merge", so a state-machine bug in one shows up
 as a mystery in another.
@@ -618,35 +639,53 @@ either reading it or having its literal pinned by a test that reads the Python
 value. Then update the manifest row's `files` column to list all sites, so the
 existing check enforces it.
 
-### [deferred] 7. `.drain-prs.json` is a tracked, repo-specific config at the root
+### [no-issue] 7. `.drain-prs.json` is a tracked, repo-specific config at the root
 
-> **Deferred:** The finding rests on not knowing where per-target drainer config
-> is *supposed* to live. `tools/kanban_config.py` has a repositories table
-> (`_parse_repositories_table`) that has not been read, and it may already answer
-> this — in which case the finding is about a stale root file rather than a
-> missing mechanism, and the fix is much smaller. Read that first.
+> **Disposition:** No issue — **the finding was wrong on every substantive point.**
+> `.drain-prs.json` is already per-target: `load_gate_config`
+> (`tools/drain_prs.py:359`) reads `ctx.path / ".drain-prs.json"`, and `ctx.path`
+> is the *target* repository's root, resolved by `get_repo_context` (`:318`) →
+> `repo_root` (`:254`) → `git rev-parse --show-toplevel` in the `--path` directory
+> (`:3058`). Draining `synarchy` reads `synarchy/.drain-prs.json`. The tracked
+> copy at Kanban's root is Kanban's own drainer config, which is correct — Kanban
+> is itself a repository that gets drained.
+>
+> **Consequence of leaving it unchanged:** none. There is nothing to change.
 
-**Severity: Medium.**
+**Severity: none**, on inspection.
 
-```json
-{
-  "required_ci_check": "build-test",
-  "required_review_check": "review-approved"
-}
-```
+The finding made three claims. All three are false:
 
-These are the check names of *this* repository's CI. They are committed to the
-root of the tool that is supposed to be repository-agnostic, which conflates two
-distinct things: Kanban's own drainer settings, and the settings the drainer
-should use when draining some *other* repository. A new-machine install pointed
-at `synarchy` needs check names from `synarchy`, and it is not clear from the
-layout where those are meant to live or that this file is not global defaults.
+- *"Conflates Kanban's own drainer settings and the settings for draining some
+  other repository."* It conflates nothing. The mechanism is per-target by
+  construction, as the load path above shows.
+- *"It is not clear from the layout where those are meant to live."*
+  `docs/pr-drainer.md:203-211` lists `build-test` and `review-approved` as the
+  defaults and then states that "a repository can change or disable those check
+  names with `.drain-prs.json`", with a worked example
+  (`"required_ci_check": "project-ci"`, `"required_review_check": null`).
+- *"…or that this file is not global defaults."* The documentation distinguishes
+  the two explicitly: the defaults live in code (`drain_prs.py:35-36`), the
+  per-repository override is the file.
 
-**Fix shape:** decide and document which of the two it is. If it is per-target
-config, it belongs alongside the target repository (or in Kanban's per-repository
-config directory), and the tracked copy at the root should be renamed to
-`.drain-prs.json.example`. If they really are intended as defaults, say so in
-`docs/pr-drainer.md` and give them non-repo-specific values.
+The proposed fix — renaming the tracked file to `.drain-prs.json.example` — would
+have deleted Kanban's own working drainer configuration.
+
+**The deferral's precondition, resolved.** `tools/kanban_config.py`'s repositories
+table does *not* answer this: `RepositoryOverride` (`:98-101`) carries only
+`workflow`, `limits`, and `timeouts`, and nothing in that module mentions
+`required_ci_check` or `required_review_check`. But it does not need to, because
+`.drain-prs.json` already covers it. The deferral asked the right question and got
+an answer that closed the finding rather than shrinking it.
+
+**One residual, deliberately not filed.** `DEFAULT_REQUIRED_CI_CHECK = "build-test"`
+and `DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"` (`tools/drain_prs.py:35-36`)
+are this repository's check names serving as the fallback for a target repository
+with no `.drain-prs.json`, which would then wait on checks that do not exist there.
+Some default is necessary, it is documented as a default, and it is overridable per
+repository. Treating it as a portability bug would repeat the mistake finding 8
+made with the `coghex/kanban` test vector — reading a fixed sample value as
+configuration.
 
 ### [#155] 7a. The canonical issue reviewer's install path is spelled twice, in two languages
 
@@ -657,7 +696,7 @@ the path this audit exists to check.
 
 The install location is written independently in two tracked places:
 
-- `src/Kanban/Review.hs:541` —
+- `src/Kanban/Review.hs:546` —
   `home <> "/Library/Application Support/kanban/issue-review/approve_issues.py"`
 - `tools/install_issue_review.py:26-27` —
   `Path.home() / "Library" / "Application Support" / "kanban" / "issue-review"`
@@ -699,15 +738,47 @@ launchd requires a user agent plist to live there.
 
 ## Part 3 — Duplicated logic across the two plugin bundles
 
-### [deferred] 8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
+### [no-issue] 8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
 
-> **Deferred:** Strongest Wave 2 candidate, but one premise is unverified. The
-> claim that *nothing* enforces the shared portion rests on not having read
-> `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py`, which are known
-> to pin plugin/Haskell name parity and may already pin more. If they cross-check
-> the two copies, this finding is materially wrong. Verify before filing.
+> **Disposition:** No issue — maintainer decision, 2026-07-26. The premise was
+> verified and holds: no test compares the two copies. But the proposed
+> enforcement (a drift test plus a planted-violation meta-test) was judged
+> disproportionate to the risk. Cross-brand mirroring is instead handled by
+> instructing agents to mirror an implementation across both bundles and trusting
+> that. Recorded as accepted risk, not as a refuted finding.
+>
+> **Consequence of leaving it unchanged:** a fix applied to one copy of the ~1,200
+> shared lines and not the other diverges with no signal. The blast radius is
+> bounded by what is already guarded — see the two corrections below — so the
+> realistic failure is an ordinary correctness bug that reproduces under one brand
+> and not the other, which is confusing to debug but not silent state corruption.
 
-**Severity: High.**
+**Severity: Medium**, revised down from High during verification.
+
+**Two of this finding's original claims did not survive checking, and both are
+corrected here rather than left standing.**
+
+- The hardcoded `coghex/kanban` was called "another project-agnostic leak (see
+  finding 6)." It is not. Both occurrences are a sample argument to `gate_key`
+  inside the self-test — a hash test vector, where any fixed string would serve.
+  It has no effect on behavior against another repository.
+- The finding claimed the two brands "silently disagree about review state, and
+  the only signal is a hash mismatch discovered at runtime." Not so. `gate_key` —
+  the one function whose cross-copy agreement decides whether cross-brand review
+  works at all — is pinned in *both* copies by the same vector
+  (`assert gate_key("coghex/kanban", [], []) == "acc8ca6f35ab53bb"`), and both
+  self-tests run in CI via `test_review_pr_self_test_passes_standalone`. Changing
+  that algorithm in one copy fails that copy's own test, at CI time. That is what
+  moved the severity from High to Medium.
+
+The deliberate divergence is also better protected than the finding assumed, from
+both directions: `tools/test_codex_plugin.py:240` forbids nested-reviewer model
+flags (with a planted-violation meta-test at `:256`), and
+`tools/test_claude_plugin.py:664` and `:651` assert the pinned flags and check them
+against the Haskell constants.
+
+What was genuinely unguarded, and remains so by choice, is the surrounding
+coordinator logic.
 
 Two copies of the same ~1,350-line review coordinator:
 
@@ -721,30 +792,37 @@ verified model, while the Codex copy pins nothing and publishes
 `UNVERIFIED_MODEL_TOKEN`. A 19-line comment in the Claude copy explains why, and
 names the other copy explicitly.
 
-The problem is not the divergence. It is that **~1,230 lines are supposed to be
-identical and nothing enforces it.** Both copies contain the same inline
-self-test asserting `gate_key("coghex/kanban", [], []) == "acc8ca6f35ab53bb"` —
-a gate-key hash that must match across bundles for cross-brand review to work at
-all. If an agent fixes a bug in one copy and not the other, the two brands
-silently disagree about review state, and the only signal is a hash mismatch
-discovered at runtime.
+The problem is not the divergence. It is that **~1,200 lines are supposed to be
+identical and nothing enforces it.**
 
-Two further notes:
+Verified: no test opens both files. The two plugin suites total 1,833 lines and
+every test in them is scoped to a single bundle.
+`tools/test_agent_workflow_contract.py` comes closest and still misses it — `:333`
+and `:358` are two *parallel* tests, each reading its own copy and checking it
+against the contract document, never against each other.
+`tools/test_repair_workflow_contract.py:442-447` asserts only that the paths exist.
+`tools/test_claude_plugin.py:647` mentions `codex-plugin` in a prose comment. That
+the 14 diff hunks are scattered through the file rather than confined to one config
+block indicates the two copies are already edited independently in practice.
 
-- The hardcoded `coghex/kanban` in that self-test assertion is another
-  project-agnostic leak (see finding 6): the test vector is keyed to this
-  specific repository.
-- Pinned model IDs inside a plugin bundle are a maintenance clock. `gpt-5.6-terra`
-  and `claude-opus-5` will age out, and when they do the failure is a spawn error
-  inside a nested reviewer — one of the hardest places in this system to debug.
+Still worth knowing, though not acted on: pinned model IDs inside a plugin bundle
+are a maintenance clock. `gpt-5.6-terra` and `claude-opus-5` will age out, and when
+they do the failure is a spawn error inside a nested reviewer — one of the hardest
+places in this system to debug.
 
-**Fix shape:** extract the ~1,230 shared lines into one module vendored into both
-bundles by a build/sync step, with the intended divergence reduced to a small
-per-bundle config block (`PIN_NESTED_MODEL = True/False` plus the IDs). Then add
-a test that fails if the shared portion drifts — the existing
-`tools/test_codex_plugin.py` and `tools/test_claude_plugin.py` are the natural
-homes. If vendoring is rejected, the minimum acceptable substitute is a test that
-diffs the two files and asserts the diff is *exactly* the known-good divergence.
+**Fix shape, for the record — considered and declined.** Either extract the shared
+lines into one module vendored into both bundles, or add a test diffing the two
+files against a declared allowlist, plus a planted-violation meta-test so the check
+cannot pass by being too coarse. Drafted in full and rejected as disproportionate:
+the enforcement machinery would be comparable in size to the risk it removes, in a
+repository with one maintainer where agents perform the edits. The chosen mitigation
+is procedural instead — agents are instructed to mirror an implementation across
+both bundles.
+
+If that mitigation is to carry the weight, it belongs somewhere agents actually
+read: `CLAUDE.md`'s pipeline conventions or `docs/agent-workflow-contract.md`,
+alongside the existing origin-marker and never-merge rules. Not filed; noted so the
+decision is not lost.
 
 ---
 
@@ -962,9 +1040,15 @@ documented rather than discovered.
 
 ### [#154] 12a. The #15 capture fix reached two of three review subprocess runners
 
-> **Disposition:** Filed as #154. Found by reading `src/Kanban/Review.hs` in full.
-> This is the clearest instance of this Part's pattern found so far, because the
-> unswept site is a live defect rather than latent risk.
+> **Disposition:** Filed as #154 and **merged** in 289de6d (PR #157), same day.
+> Found by reading `src/Kanban/Review.hs` in full. This is the clearest instance of
+> this Part's pattern in the report, because the unswept site was a live defect
+> rather than latent risk — and it is now fixed: the bounded command capture was
+> extracted into its own module and all three runners share it.
+>
+> Line references in the body below were correct for `Review.hs` as read (2,015
+> lines, at 6068cc1) and no longer resolve against the current 1,953-line file.
+> They are left as filed, since the issue they document is closed.
 
 **Severity: Medium** — a false diagnostic and a discarded answer, bounded by the
 affected tool being read-only.
@@ -1145,7 +1229,7 @@ What has actually been read, so the audit can resume without repeating work.
 | `docs/agent-workflow-contract.md` | Read §2.6, §4 manifest, §5 portable-install policy. §1–§2.5 and §3 not read. |
 | `src/Kanban/UI.hs` (5,706 lines) | **Read fully, line by line** — all 380 top-level definitions. Cleared findings 2 and 3; produced #151 and #152. |
 | `src/Kanban/Worker.hs` (2,253 lines) | **Read fully, line by line** — all 87 top-level definitions. Cleared finding 5, disproved its premise, produced #153, and split off 5a. |
-| `src/Kanban/Review.hs` (2,015 lines) | **Read fully, line by line** — all 122 top-level definitions. Closed 5a as no-issue; produced #154 and #155, recorded as findings 12a and 7a. |
+| `src/Kanban/Review.hs` (2,015 lines at read time; **1,953 now**) | **Read fully, line by line** — all 122 top-level definitions. Closed 5a as no-issue; produced #154 and #155, recorded as findings 12a and 7a. #154 merged the same day (289de6d), extracting `Kanban.CommandCapture` and shifting every line reference in this report's Review findings. |
 | `src/Kanban/Process.hs` | Export list only. |
 | `tools/drain_prs.py` | Read the clean-tree gate, the autostash, `fast_forward_default_branch`, and every main-checkout command site. The other ~2,900 lines not read. |
 | `tools/drain_prs_service.py` | Read the module constants, `launch_target`, `status_snapshot`, `incident_files`, `install_job`, `start_service`, and the child-spawn loop. Remainder not read. |
