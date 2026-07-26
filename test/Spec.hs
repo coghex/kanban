@@ -3398,6 +3398,30 @@ main = hspec $ do
         )
         (concatMap wrapped payloads)
 
+    it "treats a non-string type naming a recognized type as unrecognized rather than letting it reach an unbounded branch" $ do
+      -- A permissive type discriminator would coerce these into recognized
+      -- branches and hand back exactly what the bound exists to prevent: an
+      -- unbounded 'error' message, and 'tool_result' 's whole-payload
+      -- fallback. Only a literal JSON string names a recognized type.
+      let blob = Data.Text.replicate 400 "0123456789"
+          coerced = ["[\"error\"]", "{\"text\":\"error\"}", "[\"tool_result\"]", "{\"text\":\"agent_message\"}", "[\"assistant\"]"]
+          payload typeValue = "{\"type\":" <> typeValue <> ",\"message\":\"" <> Data.Text.unpack blob <> "\",\"text\":\"" <> Data.Text.unpack blob <> "\",\"content\":\"" <> Data.Text.unpack blob <> "\"}"
+          wrapped typeValue =
+            [ ByteString.pack (payload typeValue),
+              ByteString.pack ("{\"type\":\"item.completed\",\"item\":" <> payload typeValue <> "}"),
+              ByteString.pack ("{\"type\":\"assistant\",\"message\":{\"content\":[" <> payload typeValue <> "]}}")
+            ]
+      mapM_
+        ( \line -> do
+            agentEvent <- singleNotice line
+            agentEvent.agentEventKind `shouldBe` "event"
+            agentEvent.agentEventSummary `shouldSatisfy` Data.Text.isInfixOf "unknown"
+            Data.Text.length agentEvent.agentEventSummary `shouldSatisfy` (<= maxUnknownNoticeLength)
+            agentEvent.agentEventSummary `shouldNotSatisfy` Data.Text.isInfixOf blob
+            agentEvent.agentEventDetail `shouldBe` ""
+        )
+        (concatMap wrapped coerced)
+
     it "reports the first three occurrences of an unknown key and collapses the rest into one counted summary" $ do
       -- The exact boundary: three occurrences are all reported and leave no
       -- summary behind; a fourth suppresses itself and redeems the key as a

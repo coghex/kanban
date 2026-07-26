@@ -458,7 +458,7 @@ parseSolveOutputLine bytes = do
   pure (parsed.parsedSessionId, parsed.parsedMessages)
 
 parseSolveValue :: Value -> ParsedSolveOutput
-parseSolveValue value = case fieldText "type" value of
+parseSolveValue value = case fieldString "type" value of
   Just "thread.started" -> ParsedSolveOutput (fieldText "thread_id" value) []
   Just "system" -> ParsedSolveOutput (fieldText "session_id" value) []
   Just "item.completed" -> ParsedSolveOutput Nothing (maybe [] parseCodexItem (fieldValue "item" value))
@@ -473,7 +473,7 @@ parseSolveValue value = case fieldText "type" value of
   _ -> ParsedSolveOutput Nothing [unknownStreamEvent UnknownTopLevel value]
 
 parseCodexItem :: Value -> [StreamEvent]
-parseCodexItem item = case fieldText "type" item of
+parseCodexItem item = case fieldString "type" item of
   Just "agent_message" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" item)
   Just "reasoning" ->
     let reasoning = firstText [fieldValue "summary" item, fieldValue "text" item, fieldValue "content" item]
@@ -494,7 +494,7 @@ parseClaudeMessage :: Value -> [StreamEvent]
 parseClaudeMessage message = maybe [] (concatMap parseClaudeContent . valueList) (fieldValue "content" message)
 
 parseClaudeContent :: Value -> [StreamEvent]
-parseClaudeContent content = case fieldText "type" content of
+parseClaudeContent content = case fieldString "type" content of
   Just "text" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" content)
   Just "thinking" -> maybe [] (\message -> [recognized (AgentEvent "reasoning" "[reasoning]" message Nothing)]) (firstText [fieldValue "thinking" content, fieldValue "text" content])
   Just "tool_use" -> toolEvent content
@@ -632,6 +632,13 @@ fieldText key value = fieldValue key value >>= valueText
 -- of arrays, objects, numbers, and booleans — the strict reading the
 -- unknown-payload contract needs, where "the payload had no textual type" and
 -- "the payload had a type-shaped object" must not be confused.
+--
+-- Every @type@ discriminator reads through this, not 'fieldText'. Coercion
+-- there would let a non-string type reach a /recognized/ branch and escape
+-- the bound entirely: @{"type":["error"],"message":…}@ would forward an
+-- arbitrarily large message, and @{"type":["tool_result"]}@ would fall back
+-- to the whole raw payload. A non-string type is an unrecognized payload,
+-- and must be bounded as one.
 fieldString :: Text -> Value -> Maybe Text
 fieldString key value = case fieldValue key value of
   Just (String text) -> Just text
