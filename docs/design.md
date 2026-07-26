@@ -1191,9 +1191,12 @@ The first solve/autosolve-compatible slice is implemented.
   only accumulate a count, and one aggregate summary naming the total is
   appended before the terminal event on every path. The supervisor owns that
   aggregator, not the flow: a deadline emits the terminal envelope from its
-  watchdog and then cancels the task, so the supervisor flushes before
-  committing any outcome, and the flow flushes the same state on its own
-  unforced paths. The flush clears as it reads, so exactly one side reports.
+  watchdog and then cancels the task, so the supervisor seals and reports
+  before committing any outcome, and the flow seals the same state on its own
+  unforced paths. Sealing is one-shot and refuses every later unknown notice,
+  so exactly one side reports and a stream still draining buffered output
+  cannot restart counts after the summary or append past the terminal
+  envelope.
   Aggregation is invocation-local and append-only, never rewriting an entry or
   carrying counts across invocations, so a chatty unrecognized type costs a
   journal and replayed transcript O(1) rather than O(n). Section 16's raw

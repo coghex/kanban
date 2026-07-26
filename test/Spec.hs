@@ -163,12 +163,13 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..),
     StreamEvent (..),
+    UnknownAggregator,
     admitStreamEvent,
     claudeReviewerModel,
     claudeSolverModel,
     codexReviewerModel,
     codexSolverModel,
-    flushUnknownAggregates,
+    sealUnknownAggregates,
     maxUnknownNoticeLength,
     newUnknownAggregator,
     parseSolveOutputLine,
@@ -1709,10 +1710,7 @@ main = hspec $ do
           -- occupancy in the shared aggregator, then hangs so the deadline
           -- is what ends it.
           let chattyThenHang _spec aggregator _rememberProvider emit = do
-                let admit line = case parseSolveOutputLine line of
-                      Left message -> expectationFailure ("unparsable fixture line: " <> Data.Text.unpack message)
-                      Right (_, streamEvents) -> mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emit . WorkerAgentOutput)) streamEvents
-                mapM_ (const (admit "{\"type\":\"telemetry\",\"tick\":1}")) [1 .. chattyProviderLines]
+                admitTelemetry aggregator emit chattyProviderLines
                 threadDelay (300 * 1000000)
           finished <- newEmptyMVar
           void . forkIO $ runWorkerWithTask readProcessSnapshot chattyThenHang specPath >>= putMVar finished
@@ -1730,6 +1728,51 @@ main = hspec $ do
               lastNotice `shouldSatisfy` (< terminal)
               -- The samples carry a payload prefix; the aggregate summary
               -- carries only the count.
+              (journal !! lastNotice) `shouldNotSatisfy` ByteString.isInfixOf "tick"
+            _ -> expectationFailure "expected bounded notices and a terminal envelope in the journal"
+
+    it "seals aggregation against a stream still draining unknown events when the deadline cancels the task" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The harder race: the stream loop is still admitting unknown events
+        -- when the watchdog flushes, and keeps admitting until 'killThread'
+        -- finally lands. An unsealed aggregator would restart from zero
+        -- after the flush and emit fresh notices after the final summary —
+        -- and after the terminal envelope, where replay stops — while the
+        -- occurrences those suppressed died counted but never reported.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-815-deadline-drain") 815 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-815-deadline-drain.spec.json"
+            statePath = workerRoot </> "solve-815-deadline-drain.state.json"
+            eventPath = workerRoot </> "solve-815-deadline-drain.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          let drainUntilKilled _spec aggregator _rememberProvider emit =
+                let keepDraining = admitTelemetry aggregator emit 5 >> threadDelay 20000 >> keepDraining
+                 in keepDraining
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot drainUntilKilled specPath >>= putMVar finished
+          timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          journal <- ByteString.lines <$> ByteString.readFile eventPath
+          let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+              terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+          -- Still exactly the samples plus one summary, no matter how long
+          -- the drain kept running past the flush.
+          length noticeIndices `shouldBe` unknownNoticeSamples + 1
+          case (reverse noticeIndices, terminalIndex) of
+            (lastNotice : _, Just terminal) -> do
+              -- Nothing from the drain reaches the journal after the
+              -- terminal envelope, where replay would never see it.
+              lastNotice `shouldSatisfy` (< terminal)
               (journal !! lastNotice) `shouldNotSatisfy` ByteString.isInfixOf "tick"
             _ -> expectationFailure "expected bounded notices and a terminal envelope in the journal"
 
@@ -8180,6 +8223,17 @@ chattyProvider sessionId sentinel tailCommands =
         <> tailCommands
     )
 
+-- | Pushes @count@ occurrences of one unrecognized event type through a
+-- supervisor's shared aggregator, emitting whatever it admits — the stream
+-- loop's half of the deadline tests, without needing a real provider whose
+-- output would race the deadline unpredictably.
+admitTelemetry :: UnknownAggregator -> (WorkerEvent -> IO ()) -> Int -> IO ()
+admitTelemetry aggregator emit count = mapM_ (const admitOne) [1 .. count]
+  where
+    admitOne = case parseSolveOutputLine "{\"type\":\"telemetry\",\"tick\":1}" of
+      Left message -> throwIO (userError ("unparsable fixture line: " <> Data.Text.unpack message))
+      Right (_, streamEvents) -> mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emit . WorkerAgentOutput)) streamEvents
+
 -- | How many raw stdout records a 'chattyProvider' run left in its session
 -- log, given the log paths the invocation reported opening. The §16 contract
 -- is that this stays at full fidelity no matter how aggressively the parsed
@@ -8208,7 +8262,7 @@ aggregatedNotices :: [String] -> IO [Text]
 aggregatedNotices providerLines = do
   aggregator <- newUnknownAggregator
   admitted <- concat <$> traverse (admitLine aggregator) providerLines
-  summaries <- flushUnknownAggregates aggregator
+  summaries <- sealUnknownAggregates aggregator
   pure (map (.agentEventSummary) (admitted <> summaries))
   where
     admitLine aggregator line = case parseSolveOutputLine (ByteString.pack line) of

@@ -81,7 +81,7 @@ import Kanban.Process
     readProcessSnapshot,
   )
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, flushUnknownAggregates, newUnknownAggregator, runSolve)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, newUnknownAggregator, runSolve, sealUnknownAggregates)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectory,
@@ -738,10 +738,14 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
             -- already killed the provider and about to cancel the task
             -- thread, so this is the last and only point at which the
             -- flow's suppressed unknown-event counts can still be
-            -- journaled where replay will see them. The flow flushes the
-            -- same aggregator on its own unforced paths; the flush clears
-            -- as it reads, so exactly one side ever reports.
-            flushUnknownAggregates noticeAggregator >>= mapM_ (emitRaw . WorkerAgentOutput)
+            -- journaled where replay will see them. Sealing here is what
+            -- makes that final: the stream loop is still live and may be
+            -- draining buffered output, and a sealed aggregator refuses
+            -- every unknown notice it produces from now on rather than
+            -- letting them restart after the summary. The flow seals the
+            -- same aggregator on its own unforced paths; the seal is
+            -- one-shot, so exactly one side ever reports.
+            sealUnknownAggregates noticeAggregator >>= mapM_ (emitRaw . WorkerAgentOutput)
             refreshProcessCensus descriptor stateLock
             result <- liveRecordedProcessesWith takeSnapshot stateLock
             case result of

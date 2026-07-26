@@ -18,7 +18,6 @@ module Kanban.Solve
     claudeSolverModel,
     codexReviewerModel,
     claudeReviewerModel,
-    flushUnknownAggregates,
     maxUnknownNoticeLength,
     maxUnknownTypeLength,
     newUnknownAggregator,
@@ -27,6 +26,7 @@ module Kanban.Solve
     resumeProvenanceHeader,
     runSolve,
     runSolveWith,
+    sealUnknownAggregates,
     solveArguments,
     solveOutcome,
     solverLabel,
@@ -180,32 +180,58 @@ unknownTypePlaceholder = "unknown"
 -- invocation and its worker journal: nothing is carried across a resume, and
 -- no entry is ever rewritten, which is what keeps this compatible with the
 -- append-only journal.
-newtype UnknownAggregator = UnknownAggregator (IORef (Map UnknownStreamKey Int))
+newtype UnknownAggregator = UnknownAggregator (IORef UnknownTally)
+
+-- | An aggregator's counts plus whether it has been sealed. Both live under
+-- one 'IORef' so that admitting an occurrence and sealing are serialized
+-- against each other: an occurrence is either counted before the seal and
+-- reported by it, or refused after it. There is no interleaving that counts
+-- an occurrence no summary will ever report.
+data UnknownTally = UnknownTally
+  { unknownTallyCounts :: Map UnknownStreamKey Int,
+    unknownTallySealed :: Bool
+  }
 
 newUnknownAggregator :: IO UnknownAggregator
-newUnknownAggregator = UnknownAggregator <$> newIORef Map.empty
+newUnknownAggregator = UnknownAggregator <$> newIORef (UnknownTally Map.empty False)
 
 -- | Admits one parsed event into an invocation's output. Recognized events
--- always pass through. An unknown notice passes through for its key's first
--- 'unknownNoticeSamples' occurrences and is suppressed afterwards, its count
--- accumulating for 'flushUnknownAggregates'.
+-- always pass through, sealed or not. An unknown notice passes through for
+-- its key's first 'unknownNoticeSamples' occurrences and is suppressed
+-- afterwards, its count accumulating for 'sealUnknownAggregates' — until the
+-- seal, after which every unknown notice is refused outright.
 admitStreamEvent :: UnknownAggregator -> StreamEvent -> IO (Maybe AgentEvent)
 admitStreamEvent _ (StreamEvent Nothing agentEvent) = pure (Just agentEvent)
-admitStreamEvent (UnknownAggregator counts) (StreamEvent (Just key) agentEvent) = do
-  seen <- atomicModifyIORef' counts (\tally -> let total = Map.findWithDefault 0 key tally + 1 in (Map.insert key total tally, total))
-  pure (if seen <= unknownNoticeSamples then Just agentEvent else Nothing)
+admitStreamEvent (UnknownAggregator tally) (StreamEvent (Just key) agentEvent) =
+  atomicModifyIORef' tally $ \current ->
+    if current.unknownTallySealed
+      then (current, Nothing)
+      else
+        let total = Map.findWithDefault 0 key current.unknownTallyCounts + 1
+            admitted = if total <= unknownNoticeSamples then Just agentEvent else Nothing
+         in (current {unknownTallyCounts = Map.insert key total current.unknownTallyCounts}, admitted)
 
--- | The one aggregate summary each key with suppressed occurrences
--- contributes, reporting that key's total occurrence count. Callers emit
--- these before the invocation's terminal event, because replay stops at the
--- terminal journal envelope and would never reach a later summary. The state
--- is cleared as it is read so a repeated flush cannot double-report.
-flushUnknownAggregates :: UnknownAggregator -> IO [AgentEvent]
-flushUnknownAggregates (UnknownAggregator counts) = do
-  tally <- atomicModifyIORef' counts (\existing -> (Map.empty, existing))
+-- | Seals the aggregator and returns the one aggregate summary each key with
+-- suppressed occurrences contributes, reporting that key's total.
+--
+-- Sealing is what makes this safe to call from a supervisor that is about to
+-- cancel the stream loop still feeding the aggregator. Without it, that loop
+-- could drain buffered provider output after the summary was written: fresh
+-- occurrences would restart from zero and be emitted /after/ the final
+-- summary — possibly after the terminal envelope, where replay stops — and
+-- any they suppressed would die with the cancelled thread, counted but never
+-- reported. Sealed, every later unknown notice is refused, so the summary is
+-- final for the invocation. Recognized output is untouched.
+--
+-- Callers emit these before the invocation's terminal event. The seal also
+-- makes a repeated call return nothing, so the flow and its supervisor can
+-- both call it and only the first reports.
+sealUnknownAggregates :: UnknownAggregator -> IO [AgentEvent]
+sealUnknownAggregates (UnknownAggregator tally) = do
+  counts <- atomicModifyIORef' tally (\current -> (UnknownTally Map.empty True, current.unknownTallyCounts))
   pure
     [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
-      | (key, total) <- Map.toAscList tally,
+      | (key, total) <- Map.toAscList counts,
         total > unknownNoticeSamples
     ]
 
@@ -308,10 +334,10 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
     -- Before this invocation's terminal event, never after: replay stops at
     -- the terminal journal envelope, so a summary emitted later would be
     -- written but never replayed. A supervisor that cancels this invocation
-    -- outright owns the same aggregator and flushes it before its own
-    -- terminal envelope; 'flushUnknownAggregates' clears as it reads, so
-    -- whichever side gets there first is the only one that reports.
-    flushAggregates = flushUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
+    -- outright owns the same aggregator and seals it before its own terminal
+    -- envelope; sealing is one-shot, so whichever side gets there first is
+    -- the only one that reports.
+    flushAggregates = sealUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
     repositoryRoot = repository.repositoryRoot
     executableName = case brand of
       CodexSolver -> "codex"

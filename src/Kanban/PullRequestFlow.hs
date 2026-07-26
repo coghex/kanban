@@ -30,7 +30,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, flushUnknownAggregates, parseSolveOutputLine, resumeProvenanceHeader)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
@@ -184,10 +184,10 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
     repositoryRoot = repository.repositoryRoot
     -- Before this invocation's terminal event, never after: replay stops at
     -- the terminal journal envelope. A supervisor cancelling this invocation
-    -- shares the aggregator and flushes it before its own terminal envelope,
-    -- and the flush clears as it reads, so exactly one side reports.
+    -- shares the aggregator and seals it before its own terminal envelope;
+    -- the seal is one-shot, so exactly one side reports.
     closeWithOutcome sessionLog outcome = do
-      flushUnknownAggregates aggregator >>= mapM_ (eventSink . PullRequestFlowOutput pullRequestNumber)
+      sealUnknownAggregates aggregator >>= mapM_ (eventSink . PullRequestFlowOutput pullRequestNumber)
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)
     processSpec executablePath brand =
