@@ -301,10 +301,11 @@ everything else.
   off to the opposite brand's canonical reviewer rather than reviewing itself
   (no `--self-review`).
 - **Inputs:** one positive pull request number, plus the repository and
-  configuration context when the caller supplies it. Both are forwarded to the
-  bundled coordinator through its own `--repo` and `--config` options, so a
-  fork checkout or a non-default config path repairs and rereviews the same
-  repository the board displays.
+  configuration context when the caller supplies it. The resolved repository
+  scopes every `gh` call (`-R <owner/name>`) rather than being inferred from
+  the local checkout, and both are forwarded to the bundled coordinator through
+  its own `--repo` and `--config` options, so a fork checkout or a non-default
+  config path repairs and rereviews the same repository the board displays.
 - **Outputs:** at most one pushed commit on the pull request's own head
   branch, followed by exactly one canonical rereview when — and only when — a
   new head was pushed. The rereview publishes the `pr-review:v2` comment and
@@ -319,13 +320,21 @@ everything else.
   the remote head stops the run instead of overwriting it; and a push whose
   rereview the coordinator rejects (no prior canonical review marker, or a
   blocked issue gate) stops with that exact reason rather than being
-  compensated for with a label.
+  compensated for with a label. A cross-repository head is fail-closed: when
+  `isCrossRepository` reports a head repository other than the resolved one,
+  `headRefName` names no branch of the resolved repository, so the workflow
+  fetches and pushes only against the recorded head repository and stops
+  without pushing when that repository is not writable
+  (`maintainerCanModify` false, or a rejected push).
 - **Required authority:** GitHub read on the pull request and write to push to
-  its head branch. It never merges, never closes an issue or pull request, and
-  never adds or removes a verdict label directly.
+  its head branch **in the head repository** — which for a fork pull request is
+  not the repository the board is pointed at. It never merges, never closes an
+  issue or pull request, and never adds or removes a verdict label directly.
 - **Durable state:** the worktree it selects by the pull request's exact head
-  branch — a `solve` worktree at that branch is reused, dirty or not, rather
-  than duplicated — or, when no worktree is on that branch, a new one at
+  branch, confirmed to track the recorded head repository's ref rather than a
+  same-named local branch — a `solve` worktree at that branch is reused, dirty
+  or not, rather than duplicated — or, when no worktree is on that branch, a
+  new one at
   `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. It never
   switches the repository's primary checkout.
 - **Mandatory/optional:** optional — packaged and user-invoked; no Kanban key

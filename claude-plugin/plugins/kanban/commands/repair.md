@@ -26,7 +26,7 @@ Forward the resolved repository and configuration to the canonical coordinator t
 Read the pull request's merge state, its complete status-check rollup, its labels, its linked issues, and its comments before deciding anything:
 
 ```bash
-gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
+gh pr view <pr> -R <owner/name> --json number,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,mergeStateStatus,mergeable,labels,statusCheckRollup,closingIssuesReferences,url
 ```
 
 Address the highest-priority blocking cause you find, in the same order and with the same breadth as `pullRequestStatus` in `src/Kanban/Workflow.hs`, so every state that can make a Done card red has a defined branch:
@@ -39,9 +39,11 @@ If none of the three is present, report what you found and stop without pushing.
 
 ## 3. Work in the pull request's own worktree
 
-Resolve the pull request's head branch and exact head SHA before editing anything, and record both.
+Resolve the pull request's head repository, head branch, and exact head SHA before editing anything, and record all three. `headRepositoryOwner` and `headRepository` identify the head repository; `isCrossRepository` reports whether it differs from the resolved repository the diagnosis above used.
 
-Select the worktree by that branch, not by an issue number: reuse any worktree registered to this repository that is already on the pull request's exact head branch. A `solve` worktree named `issue-<n>-<slug>` matches naturally, by branch rather than by name, so this is well defined whether the pull request links zero, one, or several issues.
+A cross-repository pull request is fail-closed. When the head repository differs from the resolved repository, `headRefName` is not a branch of the resolved repository, so never fetch or push that name there: doing so would miss the recorded head, or overwrite an unrelated branch that merely shares its name. Fetch the head commit from the head repository itself, or read-only from the resolved repository's `pull/<pr>/head` ref, and push only to the head repository's own `headRefName`. When that head repository is not writable — `maintainerCanModify` is false, or the push is rejected — stop and report that the pull request's head cannot be safely written, without pushing anything.
+
+Select the worktree by that branch, not by an issue number: reuse any worktree registered to this repository that is already on the pull request's exact head branch, and confirm it tracks the recorded head repository's `headRefName` rather than merely a local branch of the same name. A `solve` worktree named `issue-<n>-<slug>` matches naturally, by branch rather than by name, so this is well defined whether the pull request links zero, one, or several issues.
 
 ```bash
 git worktree list
@@ -51,7 +53,7 @@ A dirty or interrupted reused worktree is recoverable work, not a collision: ins
 
 Only when no worktree is on that branch, create one keyed on the pull request number under the repository-scoped worktrees root `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`, outside the source checkout. Never switch the repository's primary checkout.
 
-Make the smallest change that clears the diagnosed cause, then run the checks the changed paths and that cause actually select. Before pushing, re-fetch the pull request branch and verify its remote head still equals the recorded SHA. Push to that exact branch without force. If the remote head moved, stop and report the competing update rather than overwriting it.
+Make the smallest change that clears the diagnosed cause, then run the checks the changed paths and that cause actually select. Before pushing, re-fetch the pull request branch from the recorded head repository and verify its remote head still equals the recorded SHA. Push to that exact branch, in that head repository, without force. If the remote head moved, stop and report the competing update rather than overwriting it.
 
 ## 4. Hand off exactly one canonical rereview
 

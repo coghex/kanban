@@ -98,14 +98,27 @@ REQUIRED_PHRASES = {
         "Report what is blocking, ask the user, and act only on their answer."
     ),
     # Worktree selection, reuse, head recording, and safe push.
-    "records-the-head-before-editing": (
-        "Resolve the pull request's head branch and exact head SHA before editing "
-        "anything, and record both."
+    "records-the-head-repository-branch-and-sha-before-editing": (
+        "Resolve the pull request's head repository, head branch, and exact head SHA "
+        "before editing anything, and record all three."
+    ),
+    "cross-repository-heads-are-fail-closed": (
+        "A cross-repository pull request is fail-closed. When the head repository "
+        "differs from the resolved repository, `headRefName` is not a branch of the "
+        "resolved repository, so never fetch or push that name there"
+    ),
+    "pushes-only-to-the-head-repositorys-own-branch": (
+        "push only to the head repository's own `headRefName`. When that head "
+        "repository is not writable — `maintainerCanModify` is false, or the push is "
+        "rejected — stop and report that the pull request's head cannot be safely "
+        "written, without pushing anything."
     ),
     "selects-the-worktree-by-head-branch": (
         "Select the worktree by that branch, not by an issue number: reuse any "
         "worktree registered to this repository that is already on the pull "
-        "request's exact head branch."
+        "request's exact head branch, and confirm it tracks the recorded head "
+        "repository's `headRefName` rather than merely a local branch of the same "
+        "name."
     ),
     "head-branch-selection-covers-any-issue-link-count": (
         "whether the pull request links zero, one, or several issues"
@@ -121,8 +134,9 @@ REQUIRED_PHRASES = {
         "Never switch the repository's primary checkout."
     ),
     "reverifies-the-head-before-a-non-force-push": (
-        "Before pushing, re-fetch the pull request branch and verify its remote head "
-        "still equals the recorded SHA. Push to that exact branch without force."
+        "Before pushing, re-fetch the pull request branch from the recorded head "
+        "repository and verify its remote head still equals the recorded SHA. Push to "
+        "that exact branch, in that head repository, without force."
     ),
     "stops-on-a-competing-update": (
         "If the remote head moved, stop and report the competing update rather than "
@@ -320,6 +334,29 @@ class RepairWorkflowContractTests(unittest.TestCase):
                     "-R <owner/name>",
                     line,
                     f"{path} invokes gh without an explicit repository: {line!r}",
+                )
+
+    def test_the_diagnosis_query_requests_the_head_repository_fields(self):
+        # Round-2 review finding: -R scopes the query to the base repository but
+        # says nothing about where the head lives. Without these fields the
+        # workflow cannot tell a same-repository PR from a fork PR, so it would
+        # fetch or push headRefName against the base repository — missing the
+        # recorded head, or clobbering an unrelated same-named branch there.
+        for path in REPAIR_ASSETS:
+            fences = " ".join(bash_fence_bodies(read(path)))
+            for field in (
+                "headRefName",
+                "headRefOid",
+                "headRepository",
+                "headRepositoryOwner",
+                "isCrossRepository",
+                "maintainerCanModify",
+            ):
+                self.assertIn(
+                    field,
+                    fences,
+                    f"{path} never reads {field}, so it cannot resolve the head "
+                    "repository before fetching or pushing",
                 )
 
     def test_neither_asset_invokes_a_merge_or_a_verdict_label_mutation(self):
