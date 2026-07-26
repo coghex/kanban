@@ -6647,6 +6647,39 @@ main = hspec $ do
         message `shouldNotMention` "could not"
         message `shouldNotMention` "still running"
 
+    it "terminates a replacement the controller's own TERM handler forked before exiting" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let leaderFile = temporaryRoot </> "handler-leader-pid"
+            forkedFile = temporaryRoot </> "handler-forked-pid"
+        -- The nastiest shape a single pass cannot settle. Escalation stops
+        -- as soon as the members censused before it signalled are gone, so a
+        -- TERM handler that forks a replacement and *then* exits satisfies
+        -- that pass without SIGKILL ever being sent -- and the replacement,
+        -- which no signal has yet reached, is left holding the group. Only a
+        -- second census finds it.
+        controller <-
+          fakeController
+            temporaryRoot
+            [ "spawn_replacement() {",
+              "  sh -c 'trap \"\" TERM; while :; do sleep 1; done' &",
+              ByteString.pack ("  echo $! > " <> forkedFile),
+              "  exit 0",
+              "}",
+              "trap spawn_replacement TERM",
+              ByteString.pack ("echo $$ > " <> leaderFile),
+              "while :; do sleep 1; done"
+            ]
+        outcome <- runDrainerCommand 1 controller "status"
+        snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the forking-handler timeout"
+        leaderPid <- readRecordedPid leaderFile
+        forkedPid <- readRecordedPid forkedFile
+        forkedPid `shouldNotBe` leaderPid
+        identityForPid leaderPid snapshot `shouldBe` Nothing
+        identityForPid forkedPid snapshot `shouldBe` Nothing
+        message <- requireLeft "a forking TERM handler reported success" outcome
+        message `shouldMention` "drainer status timed out after 1 seconds"
+        message `shouldNotMention` "still running"
+
     it "keeps the outcome-unknown wording generic for a timed-out status query" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         -- A killed status query changed nothing, so there is no transition

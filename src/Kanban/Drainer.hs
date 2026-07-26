@@ -325,49 +325,62 @@ confirmOwnedGroup processHandle = do
           | groupId == pid -> Right (fromIntegral pid)
           | otherwise -> Left "the drainer controller did not lead its own process group, so what it starts cannot be terminated with it"
 
--- | Terminates a timed-out controller and everything it left running, then
--- proves the group is empty rather than inferring it from having signalled.
--- An ownership failure carried in from 'confirmOwnedGroup' fails closed
--- here, because the caller's alternative — reporting a settled timeout —
--- would be a claim about a process this never actually accounted for.
+-- | Terminates a timed-out controller and everything it left running,
+-- re-censusing and re-killing until a fresh snapshot shows the group empty
+-- or the pass budget runs out. An ownership failure carried in from
+-- 'confirmOwnedGroup' fails closed here, because the caller's alternative —
+-- reporting a settled timeout — would be a claim about a process this never
+-- actually accounted for.
+--
+-- One pass is not enough, and not merely as a race technicality.
+-- 'killVerifiedGroup' stops as soon as the members it censused before
+-- signalling are gone, which means a TERM handler that forks a fresh
+-- same-group child and then lets the censused members exit satisfies that
+-- pass without SIGKILL ever being sent — leaving the group occupied by a
+-- process no signal has yet reached. Each pass therefore begins with a new
+-- census, and only a snapshot showing the group actually empty ends the
+-- loop: a snapshot that could not be taken is not an empty group, and
+-- neither is one this stopped looking at.
 abandonController :: Either Text Int -> IO (Either Text ())
 abandonController (Left ownership) = pure (Left ownership)
-abandonController (Right groupPid) = do
-  snapshot <- defaultProcessSnapshot
-  case snapshot of
-    Left message -> pure (Left ("could not take a process snapshot to terminate it: " <> message))
-    Right processes -> do
-      -- The census can legitimately be empty — the leader may already be a
-      -- zombie, which every snapshot here excludes — so this neither
-      -- requires the leader to be present nor treats its absence as proof
-      -- the group is clear. 'confirmGroupEmpty' is what settles that.
-      killed <- killVerifiedGroup groupPid (groupMembers groupPid processes)
-      either (pure . Left) (const (confirmGroupEmpty groupPid)) killed
+abandonController (Right groupPid) = terminatePass terminationPasses
+  where
+    terminatePass passesLeft = do
+      snapshot <- defaultProcessSnapshot
+      case snapshot of
+        Left message -> pure (Left ("could not take a process snapshot to terminate it: " <> message))
+        -- An empty census is the confirmation, not a precondition: the
+        -- leader may already be a zombie, which every snapshot here
+        -- excludes, so this never requires it to be present.
+        Right processes -> case groupMembers groupPid processes of
+          [] -> pure (Right ())
+          members
+            | passesLeft <= (0 :: Int) -> pure (Left (survivorMessage members))
+            | otherwise -> do
+                killed <- killVerifiedGroup groupPid members
+                either (pure . Left) (const (terminatePass (passesLeft - 1))) killed
+
+    survivorMessage members =
+      Text.pack (show (length members))
+        <> " process(es) the drainer controller led were still running after "
+        <> Text.pack (show terminationPasses)
+        <> " termination passes"
 
 groupMembers :: Int -> [ProcessIdentity] -> [ProcessIdentity]
 groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
 
--- | 'killVerifiedGroup' proves only that the members censused before it
--- signalled are gone; one forked between that census and the signal was
--- never in its list. The group signals themselves did reach it — a group
--- signal goes to whatever is in the group when it is sent — but only a fresh
--- census showing the group actually empty establishes that, and a snapshot
--- that could not be taken is not an empty group.
-confirmGroupEmpty :: Int -> IO (Either Text ())
-confirmGroupEmpty groupPid = do
-  snapshot <- defaultProcessSnapshot
-  pure $ case snapshot of
-    Left message -> Left ("could not confirm the drainer controller's process group was empty: " <> message)
-    Right processes -> case groupMembers groupPid processes of
-      [] -> Right ()
-      survivors ->
-        Left
-          ( Text.pack (show (length survivors))
-              <> " process(es) the drainer controller led are still running"
-          )
-
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)
+
+-- | How many escalation passes a timed-out invocation gets before it reports
+-- survivors; a final census after the last one decides the verdict. Two is
+-- the minimum that can settle a TERM handler which forks a replacement and
+-- exits — the first pass ends on the censused members' departure without
+-- ever reaching SIGKILL, and the second finds and kills what it left behind
+-- — so three leaves one pass of margin without letting a controller that
+-- forks on every signal hold the cleanup open indefinitely.
+terminationPasses :: Int
+terminationPasses = 3
 
 discoveryTimeoutSeconds :: Int
 discoveryTimeoutSeconds = 3
