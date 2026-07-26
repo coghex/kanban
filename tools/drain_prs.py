@@ -1330,6 +1330,26 @@ def remove_worktree(
     )
     if proc.returncode == 0:
         return
+    if not path.exists():
+        # Registered but already deleted from disk. There is no working tree
+        # left to inspect for uncommitted work, and the `git status` below
+        # would run with a missing cwd and raise an OSError rather than the
+        # DrainError this function's callers handle. Drop the stale
+        # registration instead, and report it still owed if git keeps it --
+        # a locked entry survives both removal and pruning.
+        log(f"Worktree {path} is already gone; pruning its stale registration")
+        run(["git", "worktree", "prune"], cwd=ctx.path)
+        registered = any(
+            Path(entry["worktree"]).resolve() == path
+            for entry in parse_worktrees(ctx)
+            if "worktree" in entry
+        )
+        if not registered:
+            return
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise DrainError(
+            f"Worktree {path} is gone from disk but is still registered:\n{detail}"
+        )
     if not allow_dirty_force:
         status = run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
@@ -1766,7 +1786,10 @@ def run_cleanup_pass(
     for obligation in record["pending"]:
         try:
             run_cleanup_obligation(ctx, record, obligation, dry_run=dry_run)
-        except DrainError as exc:
+        # OSError alongside DrainError so the never-raises contract holds for
+        # the whole step: a path that disappears under a command leaves an
+        # obligation outstanding, it does not abort the pass or the queue.
+        except (DrainError, OSError) as exc:
             described = describe_cleanup_obligation(obligation)
             remaining.append(obligation)
             errors.append(f"{described}: {exc}")

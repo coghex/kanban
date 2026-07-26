@@ -8,6 +8,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -1759,6 +1760,60 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertEqual(incidents[0]["status"], "resolved")
         self.assertEqual(incidents[0]["incident_id"], opened[0]["incident_id"])
         self.assertNotIn("7", self._read_state()["prs"])
+
+    def test_a_manually_deleted_worktree_counts_as_already_removed(self):
+        # `git worktree list` keeps a registration for a directory somebody
+        # deleted by hand. That worktree is gone, which is what the obligation
+        # wanted, so the pass must discharge it and carry on.
+        shutil.rmtree(self.feature_wt)
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] != "issue"
+        ]
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(record["pending"], [])
+        self.assertNotIn(
+            str(self.feature_wt.resolve()),
+            [
+                entry.get("worktree")
+                for entry in drain_prs.parse_worktrees(self.ctx)
+            ],
+        )
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+
+    def test_an_undeletable_missing_worktree_stays_outstanding(self):
+        # A locked registration whose directory is gone survives both removal
+        # and pruning. Inspecting it for uncommitted work would run git with a
+        # missing cwd and raise past the pass; it must stay an ordinary
+        # outstanding obligation instead.
+        run_git(["worktree", "lock", str(self.feature_wt)], cwd=self.main)
+        shutil.rmtree(self.feature_wt)
+        record = drain_prs.plan_cleanup(self._base_pr_json())
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] != "issue"
+        ]
+
+        with self._drainer():
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        # The surviving registration still holds the branch, so the local
+        # delete is blocked with it -- both stay owed, independently.
+        self.assertEqual(len(errors), 2)
+        self.assertIn("removing the matching worktree", errors[0])
+        self.assertIn("deleting local branch issue-99-demo", errors[1])
+        self.assertEqual(
+            [item["kind"] for item in record["pending"]],
+            ["worktree", "local-branch"],
+        )
+        # The steps after the failing ones still ran.
+        self.assertFalse(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
 
     def test_an_unreadable_remote_leaves_the_branch_obligation_outstanding(self):
         # `git ls-remote --exit-code` reports a missing branch as exactly 2; a
