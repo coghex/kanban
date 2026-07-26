@@ -27,6 +27,7 @@ module Kanban.UI
     autoSolveRevisionPrompt,
     cacheEnabled,
     agentFailureNotice,
+    applyUndeliveredSteer,
     canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
@@ -39,6 +40,7 @@ module Kanban.UI
     displayedTranscript,
     drawCardFrame,
     drawDetails,
+    drawUndeliveredSteers,
     failureActivity,
     followAfterScroll,
     followAfterTurnStarted,
@@ -377,6 +379,13 @@ data ReviewSession = ReviewSession
     reviewSessionTranscript :: ChatTranscript,
     reviewSessionPending :: Maybe PendingReviewInteraction,
     reviewSessionInput :: Text,
+    -- | Messages the app-server rejected as steers and that could not be
+    -- resent automatically, oldest first. Nothing here is ever dropped:
+    -- 'applyUndeliveredSteer' only takes the input line when it is free, so a
+    -- draft typed after the original send — and a second independently
+    -- rejected steer — survives, and 'takeNextUndelivered' hands the queue
+    -- back one message at a time as the line frees up (issue #17).
+    reviewSessionUndelivered :: [Text],
     reviewSessionSpinnerFrame :: Int,
     -- | Identifies the current tick chain. A fired tick only advances the
     -- frame and reschedules itself when it still carries this generation;
@@ -1781,6 +1790,7 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
             else txtWrap transcript,
         hBorder,
         drawPendingInteraction session,
+        drawUndeliveredSteers session,
         drawReviewInput session,
         withAttr footerAttr (txt "Esc hide  Tab next session  Enter send  Ctrl-C interrupt  arrows/wheel scroll")
       ]
@@ -1841,6 +1851,20 @@ drawPendingInteraction session = case session.reviewSessionPending of
         <+> if Text.null choice.reviewChoiceDescription
           then emptyWidget
           else withAttr dimAttr (txtWrap (" — " <> choice.reviewChoiceDescription))
+
+-- | The messages a rejected steer could not put back on the input line,
+-- shown above it so an undelivered message is recoverable from the session
+-- itself rather than only from a transient notice (issue #17). The one that
+-- did make it onto the input line needs no entry here: it is already visible
+-- there, and its transcript note says it was not delivered.
+drawUndeliveredSteers :: ReviewSession -> Widget Name
+drawUndeliveredSteers session = case session.reviewSessionUndelivered of
+  [] -> emptyWidget
+  messages ->
+    vBox
+      ( withAttr problemAttr (txt "NOT DELIVERED — sending the current message brings the next one back")
+          : map (txtWrap . ("  " <>)) messages
+      )
 
 drawReviewInput :: ReviewSession -> Widget Name
 drawReviewInput session =
@@ -2904,17 +2928,54 @@ sendReviewFeedback issueNumber session = do
       result <- liftIO (sendReviewMessage client threadId session.reviewSessionTurnId message)
       case result of
         Left errorMessage -> setNotice errorMessage
-        Right () -> do
+        Right () ->
           appendToReviewSession issueNumber
             ( \current ->
-                current
-                  { reviewSessionInput = "",
-                    reviewSessionPhase = ReviewRunning,
-                    reviewSessionActivity = "thinking",
-                    reviewSessionTranscript = appendReviewTranscript current.reviewSessionTranscript ("\nYou: " <> message <> "\n")
-                  }
+                let (restored, stillUndelivered) = takeNextUndelivered current.reviewSessionUndelivered
+                 in current
+                      { reviewSessionInput = restored,
+                        reviewSessionUndelivered = stillUndelivered,
+                        reviewSessionPhase = ReviewRunning,
+                        reviewSessionActivity = "thinking",
+                        reviewSessionTranscript = appendReviewTranscript current.reviewSessionTranscript ("\nYou: " <> message <> "\n")
+                      }
             )
     _ -> setNotice "The review session has not connected yet"
+
+-- | What the input line becomes once the message on it has been sent: empty
+-- as before, unless a previously rejected steer is still waiting, in which
+-- case the oldest one comes back for a deliberate resend. Sending is the only
+-- moment the line is known to be free, so it is where the queue drains
+-- without ever overwriting something the user typed (issue #17).
+takeNextUndelivered :: [Text] -> (Text, [Text])
+takeNextUndelivered [] = ("", [])
+takeNextUndelivered (next : remaining) = (next, remaining)
+
+-- | Folds a rejected steer back into its session. The message goes onto the
+-- input line only when the line is free — otherwise it queues behind whatever
+-- is already waiting, so neither a draft typed after the original send nor an
+-- earlier rejection is overwritten or truncated. The transcript is annotated
+-- either way, since 'sendReviewFeedback' already wrote an optimistic @You:@
+-- entry that would otherwise claim the message was delivered (issue #17).
+applyUndeliveredSteer :: Text -> ReviewSession -> ReviewSession
+applyUndeliveredSteer message session =
+  session
+    { reviewSessionInput = nextInput,
+      reviewSessionUndelivered = stillUndelivered,
+      reviewSessionTranscript =
+        appendReviewTranscript session.reviewSessionTranscript ("\n" <> undeliveredTranscriptNote message <> "\n")
+    }
+  where
+    queued = session.reviewSessionUndelivered <> [message]
+    (nextInput, stillUndelivered)
+      | Text.null (Text.strip session.reviewSessionInput) = takeNextUndelivered queued
+      | otherwise = (session.reviewSessionInput, queued)
+
+undeliveredTranscriptNote :: Text -> Text
+undeliveredTranscriptNote message = "[not delivered] " <> message
+
+undeliveredNotice :: Text
+undeliveredNotice = "Your message was not delivered — it is waiting in the review session to resend"
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
 -- session's connection/process state rather than inline in
@@ -4015,6 +4076,7 @@ newReviewSession issue stage priorGeneration =
       reviewSessionTranscript = plainTranscript (if stage == IssueRevision then "" else "Running canonical issue-review:v2 gate…\n"),
       reviewSessionPending = Nothing,
       reviewSessionInput = "",
+      reviewSessionUndelivered = [],
       reviewSessionSpinnerFrame = 0,
       reviewSessionTickGeneration = priorGeneration + 1,
       reviewSessionTickArmed = False,
@@ -4553,6 +4615,10 @@ applyReviewEvent reviewEvent = case reviewEvent of
             }
       )
     tailDisplayedTranscript
+  ReviewSteerUndelivered threadId _targetTurnId message -> do
+    modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
+    tailReviewThread threadId
+    setNotice undeliveredNotice
   ReviewProtocolWarning message -> setNotice ("Codex protocol warning: " <> message)
   where
     outcomePhase IssueRevision TurnSucceeded (Just result)
