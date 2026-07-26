@@ -180,11 +180,21 @@ everything else.
   outside the manifest in §4, which reconciles the solve/PR-flow/canonical
   -review Haskell surface; they are covered by `tools/test_pure_logic.py`,
   `tools/test_drain_prs_service.py`, and `tools/test_install_drainer.py`.
+  `tools/drain_prs.py --pr <number>` is the same merge path driven for one
+  named pull request instead of the queue: it applies the identical gates,
+  guards, ordering and post-merge audit, reads and mutates only that pull
+  request, and is covered by `tools/test_single_pr_drain.py`.
 - **Inputs:** repository path; the drainer LaunchAgent plist at
   `~/Library/LaunchAgents/com.coghex.drain-prs.plist`, which is an
   installer-owned convention (see §5), not a personal path.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
-  notifications.
+  notifications. A `--pr` run additionally writes exactly one versioned JSON
+  result document to stdout — the pull request, its outcome (`merged`,
+  `no_action`, or `error`), whether it merged, a stable reason drawn from a
+  fixed vocabulary, and a caller-displayable message — and exits `0` for a
+  completed merge, `2` for no merge, and `1` for an error. Its human log lines
+  go to stderr, never stdout. `docs/pr-drainer.md` documents the schema, the
+  reason vocabulary, and the exit statuses.
 - **Failure semantics:** an unresolved incident surfaces in Kanban's
   sidebar as `DrainerWarning`/`DrainerError` with the incident summary
   (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
@@ -210,7 +220,15 @@ everything else.
   `~/Library/Application Support/kanban/pr-drainer`; a versioned drain-state
   JSON file, which records both the approved head each queued pull request
   was cleared at and the post-merge obligations a merged pull request still
-  owes, and which migrates forward from the shapes earlier versions wrote.
+  owes, and which migrates forward from the shapes earlier versions wrote; and
+  a per-repository run lock held on `.git/drain_prs.lock` — which holds the
+  holder's bare PID — and then on the `.git` directory, beside a
+  `.git/drain_prs.lock.owner.json` sidecar recording whether that PID is the
+  polling service or a single-PR run. One lock covers both modes, so whichever
+  starts second fails immediately naming the holder rather than acting. A dry
+  run locks the directory alone, since it writes nothing; holding the
+  directory without the file is therefore what identifies it, atomically and
+  at every instant.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.

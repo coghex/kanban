@@ -18,6 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+if "--dry-run" in sys.argv[1:]:
+    # A dry run must leave the filesystem byte-for-byte as it found it, and
+    # the sibling imports below would otherwise write a __pycache__ directory
+    # beside this script -- which, when the drainer drains its own checkout,
+    # is inside the repository under test. Decided from argv because the
+    # imports happen long before parse_args() could tell us.
+    sys.dont_write_bytecode = True
+
 import drain_prs_service
 import kanban_config
 
@@ -58,6 +66,41 @@ LEGACY_CODEX_REVIEW_RE = re.compile(
     re.IGNORECASE,
 )
 LOG_DIR: Path | None = None
+# Single-PR runs own stdout for their one JSON result, so the human log lines
+# go to stderr instead. Never true for the polling service.
+LOG_TO_STDERR = False
+
+SINGLE_PR_SCHEMA = "drain-prs-single-pr"
+SINGLE_PR_SCHEMA_VERSION = 1
+EXIT_MERGED = 0
+EXIT_ERROR = 1
+EXIT_NO_ACTION = 2
+# Every reason a single-PR run can report. The vocabulary is the caller's
+# contract: a value is added here rather than invented at a call site, and an
+# existing one never changes meaning.
+NO_ACTION_REASONS = frozenset(
+    {
+        "not_approved",
+        "changes_requested",
+        "checks_pending",
+        "checks_failed",
+        "merge_conflict",
+        "behind_base",
+        "mergeability_computing",
+        "approved_head_changed",
+        "not_eligible",
+        "would_merge",
+    }
+)
+ERROR_REASONS = frozenset(
+    {
+        "run_locked",
+        "repository_precondition_failed",
+        "post_merge_audit_failed",
+        "post_merge_cleanup_failed",
+        "operational_error",
+    }
+)
 
 
 class DrainError(RuntimeError):
@@ -69,6 +112,10 @@ class ModelUnavailableError(DrainError):
 
 
 class PostMergeAuditError(DrainError):
+    pass
+
+
+class RunLockedError(DrainError):
     pass
 
 
@@ -107,7 +154,7 @@ def append_log_line(line: str) -> None:
 def log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{stamp}] {message}"
-    print(line, flush=True)
+    print(line, file=sys.stderr if LOG_TO_STDERR else sys.stdout, flush=True)
     append_log_line(line)
 
 
@@ -152,7 +199,12 @@ def notify_model_failure(
 
 def fail(message: str) -> "NoReturn":
     print(message, file=sys.stderr, flush=True)
-    append_log_line(message)
+    try:
+        append_log_line(message)
+    except OSError:
+        # Reporting a failure must never fail: an unwritable log directory is
+        # often the very thing being reported.
+        pass
     raise SystemExit(1)
 
 
@@ -203,9 +255,19 @@ def repo_root(path: Path) -> Path:
     return Path(root)
 
 
-def require_clean_worktree(root: Path) -> None:
+def require_clean_worktree(root: Path, *, dry_run: bool = False) -> None:
+    # `git status` refreshes the index's stat cache, which rewrites
+    # .git/index. A dry run must leave the repository byte for byte as it
+    # found it, and --no-optional-locks is git's own way to ask for a status
+    # that reads without writing.
     proc = run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        [
+            "git",
+            *(["--no-optional-locks"] if dry_run else []),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
         cwd=root,
     )
     status = (proc.stdout or "").strip()
@@ -224,9 +286,11 @@ def parse_repo_slug(remote_url: str) -> str:
         raise DrainError(f"Unsupported remote URL: {remote_url}") from exc
 
 
-def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
+def get_repo_context(
+    path: Path, remote_name: str = "origin", *, dry_run: bool = False
+) -> RepoContext:
     root = repo_root(path)
-    require_clean_worktree(root)
+    require_clean_worktree(root, dry_run=dry_run)
     remote_url = run(["git", "remote", "get-url", remote_name], cwd=root).stdout.strip()
     repo_slug = parse_repo_slug(remote_url)
     repo_name = repo_slug.split("/", 1)[1]
@@ -364,8 +428,12 @@ def drain_state_path(ctx: RepoContext) -> Path:
     return ctx.path / ".git" / "drain_prs_state.json"
 
 
-def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]:
-    if not isinstance(state.get("prs"), dict):
+def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
+    # Every shape check below guards a field this module later indexes without
+    # one. Valid JSON is not a valid drain state, and a file that decodes but
+    # is structurally wrong must be reported as one rather than escaping as an
+    # AttributeError or KeyError from wherever it is first touched.
+    if not isinstance(state, dict) or not isinstance(state.get("prs"), dict):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     version = state.get("version")
     if version == 1:
@@ -381,7 +449,20 @@ def migrate_drain_state(state: dict[str, Any], *, source: str) -> dict[str, Any]
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     state["version"] = STATE_VERSION
     state.setdefault("attempt_counter", 0)
-    for entry in state["prs"].values():
+    if not isinstance(state["attempt_counter"], int) or isinstance(
+        state["attempt_counter"], bool
+    ):
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    for key, entry in state["prs"].items():
+        # `approved_head` has no default: it is the commit a review cleared,
+        # and inventing one would let an unreviewed head through.
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("approved_head"), str
+        ):
+            raise DrainError(
+                f"Unsupported drain state for PR {key} in {source}; "
+                "inspect or remove it."
+            )
         entry.setdefault("consecutive_failures", 0)
         entry.setdefault("retry_after_attempt", 0)
         entry.setdefault("last_attempt", 0)
@@ -843,7 +924,12 @@ def audit_merged_pr(
 
 
 def merge_pr(
-    ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool, gates: GateConfig
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    dry_run: bool,
+    gates: GateConfig,
+    report: dict[str, Any] | None = None,
 ) -> bool:
     number = pr["number"]
     head_sha = pr["headRefOid"]
@@ -867,6 +953,15 @@ def merge_pr(
         check=False,
     )
     if proc.returncode == 0:
+        # GitHub has accepted the merge and it is durable from this line on.
+        # Recorded before the audit, not after it: an audit that fails -- or
+        # an interrupt that lands during it -- must still report the merge.
+        set_outcome(
+            report,
+            "merged",
+            f"PR #{number} merged {head_sha[:12]} into {ctx.default_branch}.",
+            merged=True,
+        )
         audit_merged_pr(ctx, number, head_sha, gates)
         return True
 
@@ -2064,6 +2159,46 @@ def reconcile_conflict_incidents(ctx: RepoContext, *, dry_run: bool) -> None:
             log(f"PR #{number}: resolved conflict incident {resolved['incident_id']}")
 
 
+def set_outcome(
+    report: dict[str, Any] | None,
+    reason: str,
+    message: str,
+    *,
+    merged: bool = False,
+) -> None:
+    """Record why one PR's attempt ended, for a caller that wants it verbatim.
+
+    The queue passes no report and is unaffected. A single-PR run passes one
+    so the external result is read off the very decisions the queue makes,
+    rather than re-deriving them in a second implementation that could drift.
+    Only ever called immediately before the return or raise it describes, so
+    a recorded reason is always the one that actually ended the attempt.
+    """
+    if report is None:
+        return
+    report["reason"] = reason
+    report["message"] = message
+    report["merged"] = merged
+
+
+def describe_check_gates(
+    gates: GateConfig, build_state: str, review_state: str
+) -> str:
+    return (
+        f"{render_check_gate('ci', gates.required_ci_check, build_state)}, "
+        f"{render_check_gate('review', gates.required_review_check, review_state)}"
+    )
+
+
+def check_gate_reason(build_state: str, review_state: str) -> str:
+    # "missing" is a check that has not reported yet, which is a wait rather
+    # than a refusal -- the state itself stays in the message so the caller
+    # can still tell the two apart.
+    if "failure" in (build_state, review_state):
+        return "checks_failed"
+    return "checks_pending"
+
+
 def process_pr(
     ctx: RepoContext,
     number: int,
@@ -2071,21 +2206,44 @@ def process_pr(
     dry_run: bool,
     state: dict[str, Any],
     gates: GateConfig,
+    report: dict[str, Any] | None = None,
 ) -> bool:
     pr = get_pr(ctx, number)
 
     if pr["state"] != "OPEN":
         log(f"PR #{number}: no longer open; skipping")
+        set_outcome(
+            report,
+            "not_eligible",
+            f"PR #{number} is no longer open (state {pr['state']}).",
+        )
         return False
     if pr.get("isDraft"):
         log(f"PR #{number}: draft; skipping")
+        set_outcome(report, "not_eligible", f"PR #{number} is a draft.")
         return False
     if pr["baseRefName"] != ctx.default_branch:
-        raise DrainError(
+        message = (
             f"PR #{number} targets {pr['baseRefName']}, not {ctx.default_branch}."
         )
+        set_outcome(report, "not_eligible", message)
+        raise DrainError(message)
     if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
         log(f"PR #{number}: no longer approved; skipping")
+        # The changes label wins when both are attached: a requested change is
+        # the more specific -- and more actionable -- thing to report.
+        if has_label(pr, CHANGES_LABEL):
+            set_outcome(
+                report,
+                "changes_requested",
+                f"PR #{number} is labelled {CHANGES_LABEL}.",
+            )
+        else:
+            set_outcome(
+                report,
+                "not_approved",
+                f"PR #{number} is not labelled {APPROVE_LABEL}.",
+            )
         return False
 
     mergeable = pr.get("mergeable")
@@ -2095,6 +2253,12 @@ def process_pr(
         # loop records no failure and applies no cooldown, so every other
         # approved PR keeps draining in the same run.
         record_merge_conflict(ctx, pr, dry_run=dry_run)
+        set_outcome(
+            report,
+            "merge_conflict",
+            f"PR #{number} conflicts with {ctx.default_branch}; "
+            "it was reported as an incident and left alone.",
+        )
         return False
 
     if merge_state == "BEHIND":
@@ -2103,32 +2267,60 @@ def process_pr(
             refreshed = get_pr(ctx, number)
             if has_label(refreshed, APPROVE_LABEL):
                 remember_approved_head(state, number, refreshed["headRefOid"])
+        # One cycle does one thing: the branch update is this attempt's whole
+        # action, and merging waits for the next one -- exactly as the queue
+        # behaves.
+        set_outcome(
+            report,
+            "behind_base",
+            f"PR #{number} was behind {ctx.default_branch}; its branch update "
+            + ("would be requested" if dry_run else "was requested")
+            + ". Run again once the update settles.",
+        )
         return True
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
 
+    # Every configured check and its state travels with each message, so a
+    # caller shown one blocking gate is never left guessing about the other.
+    gate_detail = describe_check_gates(gates, build_state, review_state)
     if build_state == "failure":
-        raise DrainError(
-            f"PR #{number}: required CI check {gates.required_ci_check} failed."
+        message = (
+            f"PR #{number}: required CI check {gates.required_ci_check} failed "
+            f"({gate_detail})."
         )
+        set_outcome(report, "checks_failed", message)
+        raise DrainError(message)
     if review_state == "failure":
-        raise DrainError(
+        message = (
             f"PR #{number}: required review gate "
-            f"{gates.required_review_check} failed."
+            f"{gates.required_review_check} failed ({gate_detail})."
         )
+        set_outcome(report, "checks_failed", message)
+        raise DrainError(message)
 
     if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
         log(
             f"PR #{number}: waiting "
-            f"({render_check_gate('ci', gates.required_ci_check, build_state)}, "
-            f"{render_check_gate('review', gates.required_review_check, review_state)}, "
-            f"mergeStateStatus={merge_state})"
+            f"({gate_detail}, mergeStateStatus={merge_state})"
+        )
+        set_outcome(
+            report,
+            check_gate_reason(build_state, review_state),
+            f"PR #{number} is waiting on its required checks "
+            f"({gate_detail}, mergeStateStatus={merge_state}).",
         )
         return True
 
     if mergeable in {"UNKNOWN", None} or merge_state == "UNKNOWN":
         log(f"PR #{number}: mergeability still computing; waiting")
+        set_outcome(
+            report,
+            "mergeability_computing",
+            f"PR #{number}: GitHub is still computing mergeability "
+            f"(mergeable={mergeable}, mergeStateStatus={merge_state}).",
+        )
         return True
 
     # Re-check mutable gate state immediately before the admin merge. The
@@ -2142,28 +2334,66 @@ def process_pr(
     pr = get_pr(ctx, number)
     if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
         log(f"PR #{number}: approval changed before merge; deferring")
+        if has_label(pr, CHANGES_LABEL):
+            set_outcome(
+                report,
+                "changes_requested",
+                f"PR #{number} was labelled {CHANGES_LABEL} before the merge.",
+            )
+        else:
+            set_outcome(
+                report,
+                "not_approved",
+                f"PR #{number} lost {APPROVE_LABEL} before the merge.",
+            )
         return True
-    if not check_gate_satisfied(
-        configured_check_state(pr, gates.required_ci_check)
-    ):
+    final_build_state = configured_check_state(pr, gates.required_ci_check)
+    final_review_state = configured_check_state(pr, gates.required_review_check)
+    final_detail = describe_check_gates(gates, final_build_state, final_review_state)
+    if not check_gate_satisfied(final_build_state):
         log(f"PR #{number}: CI changed before merge; deferring")
+        set_outcome(
+            report,
+            check_gate_reason(final_build_state, final_review_state),
+            f"PR #{number}: its required CI check changed before the merge "
+            f"({final_detail}).",
+        )
         return True
-    if not check_gate_satisfied(
-        configured_check_state(pr, gates.required_review_check)
-    ):
+    if not check_gate_satisfied(final_review_state):
         log(f"PR #{number}: review gate changed before merge; deferring")
+        set_outcome(
+            report,
+            check_gate_reason(final_build_state, final_review_state),
+            f"PR #{number}: its required review gate changed before the merge "
+            f"({final_detail}).",
+        )
         return True
 
-    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates)
+    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
     if not merged:
+        set_outcome(
+            report,
+            "approved_head_changed",
+            f"PR #{number}: its head moved away from the approved commit "
+            f"{pr['headRefOid'][:12]} during the merge; it needs a fresh review.",
+        )
         return True
 
-    record = plan_cleanup(pr)
     if dry_run:
         # Records nothing and mutates nothing, exactly as before: the pass only
         # reports what a real run would clean up.
-        run_cleanup_pass(ctx, record, dry_run=True)
+        set_outcome(
+            report,
+            "would_merge",
+            f"PR #{number} passed every gate; a real run would merge "
+            f"{pr['headRefOid'][:12]}.",
+        )
+        run_cleanup_pass(ctx, plan_cleanup(pr), dry_run=True)
         return True
+
+    # merge_pr() recorded the merged outcome the instant GitHub accepted it,
+    # so everything that can still go wrong below reports merged=true.
+    record = plan_cleanup(pr)
 
     # The merge is durable on GitHub the moment it returns, so record what it
     # still owes *before* attempting any of it. A cleanup step that fails after
@@ -2179,32 +2409,218 @@ def process_pr(
     entry["cleanup"] = record
     save_drain_state(ctx, state, dry_run=dry_run)
 
+    outstanding: list[dict[str, Any]] = []
     if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
         forget_pr(state, number)
+    else:
+        entry = state["prs"].get(str(number)) or {}
+        outstanding = (entry.get("cleanup") or {}).get("pending") or []
     # Persist what the pass achieved rather than leaving it to the caller: the
     # obligations that remain are the ones the next cycle must retry.
     save_drain_state(ctx, state, dry_run=dry_run)
+    if outstanding:
+        # The queue treats this as an ordinary debt to retry next cycle. A
+        # single caller cannot wait for a next cycle, so it is told the merge
+        # landed and what it still owes -- recorded only once the debt is
+        # durably persisted above.
+        steps = ", ".join(describe_cleanup_obligation(item) for item in outstanding)
+        set_outcome(
+            report,
+            "post_merge_cleanup_failed",
+            f"PR #{number} merged, but its post-merge cleanup is still "
+            f"outstanding ({steps}). The drainer keeps retrying it.",
+            merged=True,
+        )
     return True
 
 
-def acquire_lock(ctx: RepoContext):
-    lock_path = ctx.path / ".git" / "drain_prs.lock"
-    # Never truncate before flock: mode "w" erased the running instance's
-    # recorded PID as soon as a second instance tried, destroying the only
-    # record of who holds the lock the failed contender is reporting.
-    handle = open(lock_path, "a+", encoding="utf-8")
+def lock_path_for(root: Path) -> Path:
+    return root / ".git" / "drain_prs.lock"
+
+
+def lock_owner_path_for(root: Path) -> Path:
+    return root / ".git" / "drain_prs.lock.owner.json"
+
+
+def lock_file_is_held(root: Path) -> bool:
+    """Whether some process holds the lock file, probed without writing.
+
+    Taking a lock we immediately drop leaves nothing behind, and an absent or
+    unreadable file cannot be held by anyone.
+    """
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd = os.open(lock_path_for(root), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        # Closing releases whatever this probe just took.
+        os.close(fd)
+    return False
+
+
+def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> str:
+    """Name the run that holds the repository lock, as precisely as it can.
+
+    Which *kind* of run it is comes from which locks it holds, never from
+    anything it has written, so the answer is settled atomically by the lock
+    acquisition itself. A real run takes the lock file and then the `.git`
+    directory; a dry run takes the directory alone, because writing is the
+    one thing it must not do. Holding the directory without the file is
+    therefore a dry run, with no window in which a starting real run could be
+    mistaken for one.
+
+    Only the finer detail -- the PID, the mode, the pull request -- is read
+    from what the holder published, and a run reports itself as starting
+    rather than guessing when it has not published yet. The lock file holds
+    the bare PID because drain_prs_service.lock_pid() and
+    install_drainer.repository_drainer_running() read it that way; the mode
+    lives in a sidecar, trusted only when it names that same live PID.
+    """
+    # `self_holds_lock_file` says this process already holds the lock file and
+    # lost the directory, so the holder it is describing is by definition one
+    # that does not hold the file -- probing would only rediscover ourselves.
+    if self_holds_lock_file or not lock_file_is_held(root):
+        return "a dry-run inspection, which takes the repository without writing to it"
+    pid = drain_prs_service.lock_pid(root)
+    if pid is None or not drain_prs_service.pid_alive(pid):
+        return "another drain_prs.py run that is still starting up"
+    owner: Any = None
+    try:
+        owner = json.loads(lock_owner_path_for(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        owner = None
+    if not isinstance(owner, dict) or owner.get("pid") != pid:
+        return f"another drain_prs.py run (pid {pid})"
+    if owner.get("mode") == "single-pr":
+        return f"a single-PR run for PR #{owner.get('pull_request')} (pid {pid})"
+    return f"the polling drainer (pid {pid})"
+
+
+class RunLock:
+    """The repository's exclusive run lock, held for the process's lifetime."""
+
+    def __init__(self, fds: list[int]):
+        self._fds = fds
+
+    def close(self) -> None:
+        # Released in reverse acquisition order, and never allowed to raise:
+        # this runs while the process is already on its way out.
+        for fd in reversed(self._fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds = []
+
+
+def _take_flock(fd: int, root: Path, *, self_holds_lock_file: bool = False) -> int:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
-        handle.close()
-        raise DrainError(
-            f"Another drain_prs.py instance is already running for {ctx.path}."
+        os.close(fd)
+        holder = describe_lock_holder(
+            root, self_holds_lock_file=self_holds_lock_file
+        )
+        raise RunLockedError(
+            f"Another drain_prs.py instance is already running for {root}: "
+            f"{holder} holds the lock."
         ) from exc
-    handle.seek(0)
-    handle.truncate()
-    handle.write(str(os.getpid()))
-    handle.flush()
-    return handle
+    except OSError as exc:
+        os.close(fd)
+        raise DrainError(f"Could not lock {root} for a drainer run: {exc}") from exc
+    return fd
+
+
+def _publish_lock_owner(
+    fd: int, root: Path, mode: str, pull_request: int | None
+) -> None:
+    """Publish who holds the lock, for a contender and for the controller."""
+    # The lock file holds nothing but the bare PID, because
+    # drain_prs_service.lock_pid() and
+    # install_drainer.repository_drainer_running() both parse it that way.
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, str(os.getpid()).encode("utf-8"))
+    owner_path = lock_owner_path_for(root)
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{owner_path.name}.", dir=owner_path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as owner_handle:
+            json.dump(
+                {"pid": os.getpid(), "mode": mode, "pull_request": pull_request},
+                owner_handle,
+                sort_keys=True,
+            )
+            owner_handle.write("\n")
+        tmp_path.replace(owner_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def acquire_lock(
+    root: Path,
+    *,
+    mode: str = "polling",
+    pull_request: int | None = None,
+    dry_run: bool = False,
+) -> RunLock:
+    """Take the repository's exclusive run lock, or refuse naming the holder.
+
+    One lock covers both modes, so a single-PR run and the polling service can
+    never act on the same repository at once: whichever starts second fails
+    here rather than proceeding.
+
+    The `.git` directory is the rendezvous that always exists, which is what
+    lets a dry run -- which must create nothing at all -- still exclude a
+    concurrent run and be excluded by one, even in a repository where no lock
+    file has ever been written.
+
+    Which locks each mode takes is also how a contender tells them apart, so
+    the order is part of the contract, not an implementation detail. A real
+    run takes the lock file first and the directory second, so from the moment
+    it holds the directory it has always held the file too. A dry run takes
+    the directory alone. Holding the directory without the file therefore
+    means a dry run, at every instant, with nothing written and no startup
+    window in which the two could be confused.
+
+    The cost is that a dry run no longer collides with a drainer still running
+    from an older version of this script, which locks only the file. That
+    exclusion protected nothing: a dry run mutates nothing, so the worst a
+    concurrent old run can do to it is make its report a moment stale.
+    """
+    held: list[int] = []
+    try:
+        if dry_run:
+            held.append(_take_flock(os.open(root / ".git", os.O_RDONLY), root))
+            return RunLock(held)
+        # Opened without O_TRUNC and rewritten only after the lock is won: a
+        # losing contender must never erase the PID of the holder it is about
+        # to report.
+        lock_fd = _take_flock(
+            os.open(lock_path_for(root), os.O_RDWR | os.O_CREAT, 0o644), root
+        )
+        held.append(lock_fd)
+        held.append(
+            _take_flock(
+                os.open(root / ".git", os.O_RDONLY), root, self_holds_lock_file=True
+            )
+        )
+        # Published only once both locks are held, so a run that loses the
+        # second one never leaves its identity behind as the holder's.
+        _publish_lock_owner(lock_fd, root, mode, pull_request)
+        return RunLock(held)
+    except BaseException:
+        RunLock(held).close()
+        raise
 
 
 def loop(
@@ -2215,120 +2631,327 @@ def loop(
     dry_run: bool,
     gates: GateConfig,
 ) -> None:
-    lock_handle = acquire_lock(ctx)
+    # The repository run lock is taken by main() before anything reads or
+    # writes, so both this queue loop and a single-PR run are covered by the
+    # same one acquisition.
     state = load_drain_state(ctx)
     stale_recovery_failures = 0
     queue_refresh_failures = 0
-    try:
-        while True:
-            reconcile_conflict_incidents(ctx, dry_run=dry_run)
+    while True:
+        reconcile_conflict_incidents(ctx, dry_run=dry_run)
+        try:
+            recovered = recover_stale_approval(ctx, state, dry_run=dry_run)
+        except ModelUnavailableError:
+            raise
+        except DrainError as exc:
+            if once:
+                raise
+            stale_recovery_failures += 1
+            if stale_recovery_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
+                raise DrainError(
+                    "Stale-approval recovery failed "
+                    f"{stale_recovery_failures} consecutive times: {exc}"
+                ) from exc
+            log(
+                "Stale-approval recovery failed "
+                f"({stale_recovery_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
+                f"will retry: {exc}"
+            )
+            time.sleep(interval)
+            continue
+        else:
+            stale_recovery_failures = 0
+        save_drain_state(ctx, state, dry_run=dry_run)
+
+        try:
+            approved = get_open_approved_prs(ctx, dry_run=dry_run)
+        except DrainError as exc:
+            if once:
+                raise
+            queue_refresh_failures += 1
+            if queue_refresh_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
+                raise DrainError(
+                    "Failed to refresh the PR queue "
+                    f"{queue_refresh_failures} consecutive times: {exc}"
+                ) from exc
+            log(
+                "Failed to refresh the PR queue "
+                f"({queue_refresh_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
+                f"will retry: {exc}"
+            )
+            time.sleep(interval)
+            continue
+        else:
+            queue_refresh_failures = 0
+        eligible: list[dict[str, Any]] = []
+        for pr in approved:
+            key = str(pr["number"])
+            entry = state["prs"].get(key)
+            if entry is None:
+                remember_approved_head(state, pr["number"], pr["headRefOid"])
+                eligible.append(pr)
+            elif entry["approved_head"] == pr["headRefOid"]:
+                eligible.append(pr)
+            else:
+                log(
+                    f"PR #{pr['number']}: approved label is still attached to "
+                    "an unexpected new head; waiting for invalidation"
+                )
+        save_drain_state(ctx, state, dry_run=dry_run)
+
+        selected, probing_cooldown = choose_next_pr(eligible, state)
+        if selected is not None and not recovered:
+            number = selected["number"]
+            attempt = begin_pr_attempt(state, number)
+            entry = state["prs"][str(number)]
+            failures = entry["consecutive_failures"]
+            if probing_cooldown:
+                log(
+                    f"All approved PRs are cooling down; probing PR #{number} "
+                    f"after {failures} consecutive failure(s)"
+                )
+            else:
+                log(f"Processing PR #{number} (queue attempt {attempt})")
+            save_drain_state(ctx, state, dry_run=dry_run)
             try:
-                recovered = recover_stale_approval(ctx, state, dry_run=dry_run)
-            except ModelUnavailableError:
+                process_pr(
+                    ctx,
+                    number,
+                    dry_run=dry_run,
+                    state=state,
+                    gates=gates,
+                )
+            except (ModelUnavailableError, PostMergeAuditError):
                 raise
             except DrainError as exc:
-                if once:
-                    raise
-                stale_recovery_failures += 1
-                if stale_recovery_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
-                    raise DrainError(
-                        "Stale-approval recovery failed "
-                        f"{stale_recovery_failures} consecutive times: {exc}"
-                    ) from exc
-                log(
-                    "Stale-approval recovery failed "
-                    f"({stale_recovery_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
-                    f"will retry: {exc}"
-                )
-                time.sleep(interval)
-                continue
-            else:
-                stale_recovery_failures = 0
-            save_drain_state(ctx, state, dry_run=dry_run)
-
-            try:
-                approved = get_open_approved_prs(ctx, dry_run=dry_run)
-            except DrainError as exc:
-                if once:
-                    raise
-                queue_refresh_failures += 1
-                if queue_refresh_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
-                    raise DrainError(
-                        "Failed to refresh the PR queue "
-                        f"{queue_refresh_failures} consecutive times: {exc}"
-                    ) from exc
-                log(
-                    "Failed to refresh the PR queue "
-                    f"({queue_refresh_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
-                    f"will retry: {exc}"
-                )
-                time.sleep(interval)
-                continue
-            else:
-                queue_refresh_failures = 0
-            eligible: list[dict[str, Any]] = []
-            for pr in approved:
-                key = str(pr["number"])
-                entry = state["prs"].get(key)
-                if entry is None:
-                    remember_approved_head(state, pr["number"], pr["headRefOid"])
-                    eligible.append(pr)
-                elif entry["approved_head"] == pr["headRefOid"]:
-                    eligible.append(pr)
+                cooldown = record_pr_failure(state, number, str(exc))
+                failure_count = state["prs"][str(number)][
+                    "consecutive_failures"
+                ]
+                if cooldown:
+                    log(
+                        f"PR #{number}: attempt failed ({failure_count} consecutive); "
+                        f"skipping it for {cooldown} other queue attempt(s): {exc}"
+                    )
                 else:
                     log(
-                        f"PR #{pr['number']}: approved label is still attached to "
-                        "an unexpected new head; waiting for invalidation"
+                        f"PR #{number}: attempt failed ({failure_count} consecutive); "
+                        f"it remains in the fair rotation: {exc}"
                     )
+            else:
+                record_pr_success(state, number)
             save_drain_state(ctx, state, dry_run=dry_run)
+        if once:
+            return
+        time.sleep(interval)
 
-            selected, probing_cooldown = choose_next_pr(eligible, state)
-            if selected is not None and not recovered:
-                number = selected["number"]
-                attempt = begin_pr_attempt(state, number)
-                entry = state["prs"][str(number)]
-                failures = entry["consecutive_failures"]
-                if probing_cooldown:
-                    log(
-                        f"All approved PRs are cooling down; probing PR #{number} "
-                        f"after {failures} consecutive failure(s)"
-                    )
-                else:
-                    log(f"Processing PR #{number} (queue attempt {attempt})")
-                save_drain_state(ctx, state, dry_run=dry_run)
-                try:
-                    process_pr(
-                        ctx,
-                        number,
-                        dry_run=dry_run,
-                        state=state,
-                        gates=gates,
-                    )
-                except (ModelUnavailableError, PostMergeAuditError):
-                    raise
-                except DrainError as exc:
-                    cooldown = record_pr_failure(state, number, str(exc))
-                    failure_count = state["prs"][str(number)][
-                        "consecutive_failures"
-                    ]
-                    if cooldown:
-                        log(
-                            f"PR #{number}: attempt failed ({failure_count} consecutive); "
-                            f"skipping it for {cooldown} other queue attempt(s): {exc}"
-                        )
-                    else:
-                        log(
-                            f"PR #{number}: attempt failed ({failure_count} consecutive); "
-                            f"it remains in the fair rotation: {exc}"
-                        )
-                else:
-                    record_pr_success(state, number)
-                save_drain_state(ctx, state, dry_run=dry_run)
-            if once:
-                return
-            time.sleep(interval)
-    finally:
-        lock_handle.close()
+
+def single_pr_result(
+    number: int,
+    reason: str,
+    message: str,
+    *,
+    merged: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """The one JSON document a single-PR run writes to stdout."""
+    if reason in ERROR_REASONS:
+        outcome = "error"
+    elif reason == "merged":
+        outcome = "merged"
+    else:
+        outcome = "no_action"
+    return {
+        "schema": SINGLE_PR_SCHEMA,
+        "version": SINGLE_PR_SCHEMA_VERSION,
+        "pull_request": number,
+        "outcome": outcome,
+        "merged": merged,
+        # True exactly when every gate passed and merging was this run's
+        # action -- performed for a real run, withheld for a dry one.
+        "would_merge": reason in {"merged", "would_merge"},
+        "reason": reason,
+        "message": message,
+        "dry_run": dry_run,
+    }
+
+
+def single_pr_exit_code(result: dict[str, Any]) -> int:
+    if result["outcome"] == "error":
+        return EXIT_ERROR
+    if result["outcome"] == "merged":
+        return EXIT_MERGED
+    return EXIT_NO_ACTION
+
+
+def emit_single_pr_result(result: dict[str, Any]) -> "NoReturn":
+    # stdout carries this document and nothing else; every human diagnostic
+    # went to stderr and the log file.
+    print(json.dumps(result, sort_keys=True), flush=True)
+    raise SystemExit(single_pr_exit_code(result))
+
+
+def prepare_single_pr(
+    ctx: RepoContext,
+    number: int,
+    state: dict[str, Any],
+    *,
+    dry_run: bool,
+    report: dict[str, Any],
+) -> bool:
+    """Apply the queue's per-PR safeguards to one named PR.
+
+    These live in the queue loop rather than in process_pr(), so a caller that
+    went straight to process_pr() would merge things the queue would refuse.
+    Only the named PR is read and only its own state entry is touched: no
+    other PR is enumerated, recovered, or moved through the fair rotation, so
+    polling order and per-PR failure cooldowns are exactly as the service left
+    them.
+    """
+    pr = get_pr(ctx, number)
+    if pr["state"] != "OPEN":
+        set_outcome(
+            report,
+            "not_eligible",
+            f"PR #{number} is no longer open (state {pr['state']}).",
+        )
+        return False
+    if has_label(pr, CHANGES_LABEL):
+        set_outcome(
+            report, "changes_requested", f"PR #{number} is labelled {CHANGES_LABEL}."
+        )
+        return False
+    if not has_label(pr, APPROVE_LABEL):
+        set_outcome(
+            report, "not_approved", f"PR #{number} is not labelled {APPROVE_LABEL}."
+        )
+        return False
+
+    if pr.get("isDraft"):
+        if dry_run:
+            log(
+                f"PR #{number}: approved but still a draft; "
+                "would mark it ready for review"
+            )
+        else:
+            log(
+                f"PR #{number}: approved but still a draft; "
+                "marking it ready for review"
+            )
+            run(
+                ["gh", "pr", "ready", str(number), "--repo", ctx.repo_slug],
+                cwd=ctx.path,
+            )
+
+    entry = state["prs"].get(str(number))
+    if entry is None:
+        remember_approved_head(state, number, pr["headRefOid"])
+    elif entry["approved_head"] != pr["headRefOid"]:
+        log(
+            f"PR #{number}: approved label is still attached to an unexpected "
+            "new head; waiting for invalidation"
+        )
+        set_outcome(
+            report,
+            "approved_head_changed",
+            f"PR #{number} still carries {APPROVE_LABEL} on head "
+            f"{pr['headRefOid'][:12]}, which is not the approved head "
+            f"{entry['approved_head'][:12]}; it needs a fresh review.",
+        )
+        return False
+    return True
+
+
+def new_single_pr_report(number: int | None) -> dict[str, Any]:
+    """The mutable record a single-PR run fills in as it decides.
+
+    Owned by main() rather than by drain_one_pr(), so that whatever ends the
+    run -- an interrupt in the final state write included -- the result still
+    reports what was already known, above all a merge that landed.
+    """
+    return {
+        "reason": "operational_error",
+        "message": f"PR #{number}: the run ended without recording an outcome.",
+        "merged": False,
+    }
+
+
+def drain_one_pr(
+    ctx: RepoContext,
+    number: int,
+    *,
+    dry_run: bool,
+    gates: GateConfig,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Process exactly one pull request and describe what happened.
+
+    Runs the same gates, guards, ordering and post-merge audit as a queue
+    cycle -- it is the queue's own process_pr(), not a second implementation
+    of it -- and merges nothing the queue would refuse.
+    """
+    # Stays None until the queue state is read back successfully, so a state
+    # file this run could not parse is reported rather than overwritten with
+    # an empty one -- it holds other PRs' cooldowns and unfinished cleanups.
+    state: dict[str, Any] | None = None
+    try:
+        state = load_drain_state(ctx)
+        if prepare_single_pr(ctx, number, state, dry_run=dry_run, report=report):
+            process_pr(
+                ctx,
+                number,
+                dry_run=dry_run,
+                state=state,
+                gates=gates,
+                report=report,
+            )
+    except PostMergeAuditError as exc:
+        # The merge landed on GitHub before the audit read it back, so the
+        # caller is told both: it failed, and the PR is merged regardless.
+        report["reason"] = "post_merge_audit_failed"
+        report["message"] = str(exc)
+        report["merged"] = True
+    except DrainError as exc:
+        # A refusal process_pr() classified on its way out keeps that
+        # classification; anything else is an operational failure.
+        if report["reason"] not in NO_ACTION_REASONS:
+            report["reason"] = "operational_error"
+            report["message"] = str(exc)
+    except OSError as exc:
+        report["reason"] = "operational_error"
+        report["message"] = f"PR #{number}: {exc}"
+    except KeyboardInterrupt:
+        # Swallowed rather than propagated so the caller still gets its one
+        # JSON result. Whatever was already recorded stands -- above all a
+        # merge that landed before the interrupt arrived.
+        report["reason"] = "operational_error"
+        report["message"] = f"PR #{number}: interrupted before the run finished."
+
+    # Persisted last and separately so a state-write failure can never mask
+    # what already happened on GitHub -- above all a merge that landed.
+    if state is not None:
+        try:
+            save_drain_state(ctx, state, dry_run=dry_run)
+        except OSError as exc:
+            if report["reason"] not in ERROR_REASONS:
+                report["reason"] = "operational_error"
+                report["message"] = (
+                    f"PR #{number}: could not persist the drainer queue state: {exc}"
+                )
+        except KeyboardInterrupt:
+            if report["reason"] not in ERROR_REASONS:
+                report["reason"] = "operational_error"
+                report["message"] = (
+                    f"PR #{number}: interrupted while persisting the drainer "
+                    "queue state."
+                )
+    return single_pr_result(
+        number,
+        report["reason"],
+        report["message"],
+        merged=report["merged"],
+        dry_run=dry_run,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -2349,10 +2972,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_INTERVAL_SECONDS,
         help=f"Polling interval in seconds (default: {DEFAULT_INTERVAL_SECONDS}).",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--once",
         action="store_true",
         help="Run a single poll cycle and exit.",
+    )
+    mode.add_argument(
+        "--pr",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help=(
+            "Process exactly this pull request and exit, writing one JSON "
+            "result to stdout (exit 0 merged, 2 no action, 1 error)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -2375,49 +3009,143 @@ def parse_args() -> argparse.Namespace:
             "(default: ~/.config/kanban/config.toml)."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.pr is not None and args.pr <= 0:
+        parser.error("--pr requires a positive pull request number")
+    return args
 
 
 def main() -> None:
     args = parse_args()
-    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL
-    LOG_DIR = Path(args.log_dir).expanduser().resolve()
+    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, LOG_TO_STDERR
+    number = args.pr
+    single = number is not None
+    # A single-PR run owns stdout for its one JSON result.
+    LOG_TO_STDERR = single
+    # A dry run leaves the filesystem exactly as it found it, so it opens no
+    # log directory either.
+    LOG_DIR = None if args.dry_run else Path(args.log_dir).expanduser().resolve()
+    lock_handle = None
+    # Built before anything can fail, and handed to drain_one_pr() rather than
+    # created inside it, so every handler below reports what was already known.
+    report = new_single_pr_report(number)
     try:
-        raw_config, config_warnings = kanban_config.load_raw_config(args.config)
-        for warning in config_warnings:
-            print(f"drain_prs.py warning: {warning}", file=sys.stderr, flush=True)
-        ctx = get_repo_context(
-            Path(args.path).expanduser().resolve(), raw_config.remote_name
-        )
-        resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
-        APPROVE_LABEL = resolved_config.workflow.approval_label
-        CHANGES_LABEL = resolved_config.workflow.changes_requested_label
-        gates = load_gate_config(ctx)
-        log(
-            f"Watching {ctx.repo_slug} at {ctx.path} "
-            f"(default branch: {ctx.default_branch})"
-        )
-        log(
-            "Required checks: "
-            f"{gates.required_ci_check or 'ci disabled'}, "
-            f"{gates.required_review_check or 'review disabled'}"
-        )
-        log(f"Logging to {active_log_path()}")
-        if args.dry_run:
-            log("Dry-run mode enabled; no changes will be made")
-        loop(
-            ctx,
-            interval=args.interval,
-            once=args.once,
-            dry_run=args.dry_run,
-            gates=gates,
-        )
-    except DrainError as exc:
-        fail(f"drain_prs.py error: {exc}")
-    except kanban_config.KanbanConfigError as exc:
-        fail(f"drain_prs.py error: {exc}")
-    except KeyboardInterrupt:
-        log("Interrupted; exiting")
+        try:
+            raw_config, config_warnings = kanban_config.load_raw_config(args.config)
+            for warning in config_warnings:
+                print(f"drain_prs.py warning: {warning}", file=sys.stderr, flush=True)
+            # Locked as soon as the git directory is known, before any log
+            # line, state read, or GitHub call: a losing contender must find
+            # out that it cannot run before it does any of that work.
+            root = repo_root(Path(args.path).expanduser().resolve())
+            lock_handle = acquire_lock(
+                root,
+                mode="single-pr" if single else "polling",
+                pull_request=number,
+                dry_run=args.dry_run,
+            )
+            ctx = get_repo_context(root, raw_config.remote_name, dry_run=args.dry_run)
+            resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
+            APPROVE_LABEL = resolved_config.workflow.approval_label
+            CHANGES_LABEL = resolved_config.workflow.changes_requested_label
+            gates = load_gate_config(ctx)
+            log(
+                f"Watching {ctx.repo_slug} at {ctx.path} "
+                f"(default branch: {ctx.default_branch})"
+            )
+            log(
+                "Required checks: "
+                f"{gates.required_ci_check or 'ci disabled'}, "
+                f"{gates.required_review_check or 'review disabled'}"
+            )
+            log(f"Logging to {active_log_path() or 'stderr only (dry run)'}")
+            if args.dry_run:
+                log("Dry-run mode enabled; no changes will be made")
+            if single:
+                emit_single_pr_result(
+                    drain_one_pr(
+                        ctx,
+                        number,
+                        dry_run=args.dry_run,
+                        gates=gates,
+                        report=report,
+                    )
+                )
+            loop(
+                ctx,
+                interval=args.interval,
+                once=args.once,
+                dry_run=args.dry_run,
+                gates=gates,
+            )
+        except RunLockedError as exc:
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number, "run_locked", str(exc), dry_run=args.dry_run
+                    )
+                )
+            fail(f"drain_prs.py error: {exc}")
+        except (DrainError, kanban_config.KanbanConfigError) as exc:
+            # Everything reaching here failed before the pull request was
+            # read: an unusable checkout, remote, or drainer configuration.
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number,
+                        "repository_precondition_failed",
+                        str(exc),
+                        dry_run=args.dry_run,
+                    )
+                )
+            fail(f"drain_prs.py error: {exc}")
+        except OSError as exc:
+            # An unwritable log directory or lock file fails before any pull
+            # request is read. A single-PR caller must still get its result
+            # document rather than a traceback and empty stdout.
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number,
+                        "operational_error",
+                        f"drain_prs.py could not start: {exc}",
+                        merged=report["merged"],
+                        dry_run=args.dry_run,
+                    )
+                )
+            fail(f"drain_prs.py error: {exc}")
+        except KeyboardInterrupt:
+            if single:
+                emit_single_pr_result(
+                    single_pr_result(
+                        number,
+                        "operational_error",
+                        f"PR #{number}: interrupted before the run finished.",
+                        merged=report["merged"],
+                        dry_run=args.dry_run,
+                    )
+                )
+            log("Interrupted; exiting")
+        except Exception as exc:
+            # Last resort. A `--pr` caller is promised one JSON document on
+            # stdout, so even an unanticipated failure is reported there
+            # rather than as a traceback over an empty stdout. The polling
+            # service keeps raising: its supervisor records the crash, and
+            # the traceback is the diagnosis.
+            if not single:
+                raise
+            emit_single_pr_result(
+                single_pr_result(
+                    number,
+                    "operational_error",
+                    f"drain_prs.py failed unexpectedly: {exc!r}",
+                    merged=report["merged"],
+                    dry_run=args.dry_run,
+                )
+            )
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
 
 
 if __name__ == "__main__":
