@@ -131,8 +131,9 @@ import Kanban.Drainer
   ( DrainerController,
     DrainerState (..),
     DrainerStatus (..),
+    DrainerToggle (..),
     discoverDrainerController,
-    drainerIsRunning,
+    drainerToggle,
     queryDrainerStatus,
     setDrainerRunning,
   )
@@ -4811,12 +4812,12 @@ reviewAnimationIntervalMicros = 100 * 1000
 toggleDrainer :: EventM Name AppState ()
 toggleDrainer = do
   state <- get
-  if state.appDrainerBusy
-    then setNotice "PR drainer is already starting or stopping"
-    else case state.appDrainerController of
+  case drainerToggle state.appDrainerBusy state.appDrainerStatus of
+    DrainerToggleBusy notice -> setNotice notice
+    decision -> case state.appDrainerController of
       Left message -> setNotice ("PR drainer control unavailable: " <> sanitizeText message)
       Right controller -> do
-        let shouldRun = not (drainerIsRunning state.appDrainerStatus)
+        let shouldRun = decision == StartDrainer
             transition = if shouldRun then DrainerStatus DrainerStarting "starting…" else DrainerStatus DrainerStopping "stopping…"
         modify
           ( \current ->

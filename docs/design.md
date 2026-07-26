@@ -887,6 +887,17 @@ a countdown.
   Every controller call includes the dashboard's resolved repository root; a
   singleton already serving another repository is reported as foreign and is
   never stopped or replaced implicitly.
+- A controller invocation runs as its own process group. Structured status on
+  standard output is decoded even when the controller exits nonzero, so a
+  state reported through a failing exit keeps its incident detail. An
+  invocation that outlives its timeout is terminated as a group and confirmed
+  gone before anything is reported; a start or stop killed mid-transition is
+  reported as an unknown outcome the next status poll reconciles, and a
+  termination that could not be confirmed is reported as such instead.
+- A start is issued only from a settled stopped state. A transition already in
+  flight — this dashboard's own, or a `starting` state reported by the status
+  poll — makes `d` and the drainer button report the transition rather than
+  command a second one.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links under
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes

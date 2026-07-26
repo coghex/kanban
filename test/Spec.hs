@@ -40,7 +40,18 @@ import Kanban.Claude (decodeClaudeUsageText)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
-import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..), controllerFromProgramArguments, decodeDrainerStatus, drainerIsRunning)
+import Kanban.Drainer
+  ( DrainerController (..),
+    DrainerState (..),
+    DrainerStatus (..),
+    DrainerToggle (..),
+    controllerFromProgramArguments,
+    decodeDrainerStatus,
+    drainerIsRunning,
+    drainerToggle,
+    runDrainerCommand,
+    statusFromControllerExit,
+  )
 import Kanban.GitHub (FetchState (..), GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), confirmsOwnGroupLeadership, decodeGitHubItems, ghBehindBarrier, groupConfirmedEmpty, graphqlArguments, paginationDecision, snapshotWarnings)
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Preflight
@@ -325,6 +336,7 @@ import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcess, signa
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe), createProcess, getPid, getProcessExitCode, proc, readProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
 import Test.Hspec
+import Text.Read (readMaybe)
 
 main :: IO ()
 main = hspec $ do
@@ -6523,9 +6535,120 @@ main = hspec $ do
       decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerWarning "another repository is running")
 
-    it "rejects unsupported controller output" $
+    it "renders a state the controller reports but this version does not know as an error" $
       decodeDrainerStatus "{\"state\":\"paused\"}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused")
+
+    it "keeps a status document the controller printed while exiting nonzero" $ do
+      -- Exiting nonzero while reporting "stopped with an unresolved incident"
+      -- is the natural convention for that state, and the state machine
+      -- already renders it in red with the incident attached. Collapsing it
+      -- to an opaque error blob would discard exactly the detail the nonzero
+      -- exit is flagging.
+      statusFromControllerExit (ExitFailure 3) "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}" ""
+        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+
+    it "prefers a decodable status over diagnostics the same failing run wrote to stderr" $
+      statusFromControllerExit
+        (ExitFailure 1)
+        "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
+        "launchctl: warning\n"
+        `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
+
+    it "falls back to stderr when a failing run's output does not decode" $
+      statusFromControllerExit (ExitFailure 2) "not json at all\n" "  controller exploded\n"
+        `shouldBe` Left "controller exploded"
+
+    it "falls back to stdout when a failing run wrote no diagnostics" $
+      statusFromControllerExit (ExitFailure 2) "  not json at all\n" ""
+        `shouldBe` Left "not json at all"
+
+    it "still reports undecodable output from a successful run as a decode failure" $
+      statusFromControllerExit ExitSuccess "not json at all\n" ""
+        `shouldSatisfy` either (Data.Text.isPrefixOf "could not decode PR drainer status") (const False)
+
+    it "decodes the status a real controller process prints while exiting nonzero" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- The interpreter above is pure, so only an actual process proves the
+        -- exit code and the stream reach it the way they are produced.
+        controller <-
+          fakeController
+            temporaryRoot
+            [ "printf '%s' '{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}'",
+              "echo 'controller reported a failure' >&2",
+              "exit 4"
+            ]
+        runDrainerCommand 5 controller "status"
+          `shouldReturn` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+
+    it "reports a failing controller's diagnostics when it printed nothing decodable" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        controller <- fakeController temporaryRoot ["echo 'launchd job is not loaded' >&2", "exit 1"]
+        runDrainerCommand 5 controller "status" `shouldReturn` Left "launchd job is not loaded"
+
+    it "leaves no survivor from a wedged controller's process group, and says the transition's outcome is unknown" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let leaderFile = temporaryRoot </> "leader-pid"
+            descendantFile = temporaryRoot </> "descendant-pid"
+        -- Both the controller and something it started ignore TERM, and the
+        -- descendant holds the inherited pipes open, so nothing about the
+        -- invocation ending implies either of them stopped. `create_group`
+        -- puts both in the invocation's own group; the escalation has to
+        -- reach the whole group and prove it empty, not just TERM the child.
+        controller <-
+          fakeController
+            temporaryRoot
+            [ "trap '' TERM",
+              "sh -c \"trap '' TERM; while :; do sleep 1; done\" &",
+              ByteString.pack ("echo $! > " <> descendantFile),
+              ByteString.pack ("echo $$ > " <> leaderFile),
+              "while :; do sleep 1; done"
+            ]
+        outcome <- runDrainerCommand 1 controller "start"
+        -- Taken the instant the invocation returns, so this proves the group
+        -- was already empty when the timeout was reported -- not merely that
+        -- it emptied by the time an assertion got around to looking.
+        snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the drainer timeout"
+        leaderPid <- readRecordedPid leaderFile
+        descendantPid <- readRecordedPid descendantFile
+        descendantPid `shouldNotBe` leaderPid
+        identityForPid leaderPid snapshot `shouldBe` Nothing
+        identityForPid descendantPid snapshot `shouldBe` Nothing
+        message <- requireLeft "a wedged controller reported success" outcome
+        message `shouldMention` "drainer start timed out after 1 seconds"
+        message `shouldMention` "the outcome is unknown"
+        message `shouldMention` "the next status poll will reconcile it"
+
+    it "keeps the outcome-unknown wording generic for a timed-out status query" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- A killed status query changed nothing, so there is no transition
+        -- for the poll to reconcile and nothing unknown to promise about.
+        controller <- fakeController temporaryRoot ["while :; do sleep 1; done"]
+        outcome <- runDrainerCommand 1 controller "status"
+        message <- requireLeft "a wedged status query reported success" outcome
+        message `shouldMention` "drainer status timed out after 1 seconds"
+        message `shouldNotMention` "reconcile"
+
+  describe "PR drainer toggle decisions" $ do
+    it "issues no second start while a reported start is still in flight" $
+      -- The status poll can report `starting` for a transition this
+      -- dashboard never began, and `drainerIsRunning` calls that "not
+      -- running" -- which is precisely how the toggle used to answer a start
+      -- already under way with another one.
+      case drainerToggle False (DrainerStatus DrainerStarting "starting…") of
+        DrainerToggleBusy notice -> notice `shouldBe` "PR drainer is already starting"
+        decision -> expectationFailure ("a reported starting drainer produced " <> show decision)
+
+    it "issues nothing while this dashboard's own toggle is still in flight" $
+      case drainerToggle True (DrainerStatus DrainerOff "off") of
+        DrainerToggleBusy notice -> notice `shouldBe` "PR drainer is already starting or stopping"
+        decision -> expectationFailure ("a busy toggle produced " <> show decision)
+
+    it "starts a settled off drainer and stops a settled running one" $ do
+      drainerToggle False (DrainerStatus DrainerOff "off") `shouldBe` StartDrainer
+      drainerToggle False (DrainerStatus DrainerOn "on") `shouldBe` StopDrainer
+      drainerToggle False (DrainerStatus DrainerWarning "on · unresolved incident") `shouldBe` StopDrainer
+      drainerToggle False (DrainerStatus DrainerError "uncommitted changes; drainer will not start") `shouldBe` StartDrainer
 
   describe "repository snapshot cache" $ do
     it "round-trips a versioned snapshot and ignores corrupt JSON" $
@@ -8705,6 +8828,25 @@ shouldNotMention :: Text -> Text -> Expectation
 shouldNotMention haystack needle
   | Data.Text.isInfixOf needle haystack = expectationFailure ("expected " <> show haystack <> " not to mention " <> show needle)
   | otherwise = pure ()
+
+-- | A 'DrainerController' pointing at a shell script, so the invocation path
+-- can be driven with a chosen exit code, streams, and staying power. The
+-- controller's own arguments are dropped on the floor by the script; what is
+-- under test is how the invocation reads what comes back, not the wire.
+fakeController :: FilePath -> [ByteString.ByteString] -> IO DrainerController
+fakeController temporaryRoot scriptLines = do
+  let scriptPath = temporaryRoot </> "drain-prs-controller"
+  ByteString.writeFile scriptPath (ByteString.unlines ("#!/bin/sh" : scriptLines))
+  setFileMode scriptPath 0o700
+  pure (DrainerController scriptPath [])
+
+-- | The PID a fixture recorded for itself. Read only after the invocation
+-- under test has returned, by which point the shell has long since written
+-- it.
+readRecordedPid :: FilePath -> IO Int
+readRecordedPid path = do
+  written <- readFile path
+  requireJust ("fixture never recorded a PID in " <> path) (readMaybe (dropWhileEnd (== '\n') written))
 
 -- | A fake @gh@ on a temporary PATH plus a review client wired to the given
 -- 'CommandBounds', so the deadline and capture-grace paths are reachable in
