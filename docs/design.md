@@ -1189,6 +1189,31 @@ The first solve/autosolve-compatible slice is implemented.
   Terminal journals remain discoverable until a newer worker is durable proof
   that their workflow step was superseded, closing the crash window between a
   terminal event and its GitHub-refresh handoff.
+- A provider event the parser does not recognize — an unknown top-level type,
+  an unknown Codex item, or an unknown Claude content block — contributes at
+  most one bounded single-line notice: a normalized, truncated type label and
+  a truncated compact payload prefix, whole-notice length included. Only a
+  literal JSON string names a recognized type, so a non-string type cannot be
+  coerced into a recognized branch and out of the bound. A payload with no
+  usable string type, and an `error` payload with no usable string `message`,
+  use the same bounded form; only a real textual error message is exempt and
+  kept in full. Repeats collapse per invocation: the first few
+  occurrences of each `(category, type)` are reported individually, later ones
+  only accumulate a count, and one aggregate summary naming the total is
+  appended before the terminal event on every path. The supervisor owns that
+  aggregator, not the flow: a deadline emits the terminal envelope from its
+  watchdog and then cancels the task, so the supervisor seals and reports
+  before committing any outcome, and the flow seals the same state on its own
+  unforced paths. Sealing is one-shot and refuses every later unknown notice,
+  so exactly one side reports and a stream still draining buffered output
+  cannot restart counts after the summary or append past the terminal
+  envelope. Deciding and writing a notice, and sealing and writing the
+  summaries, all happen under one lock, so neither a sample nor a summary can
+  be in flight while the other side terminalizes over it.
+  Aggregation is invocation-local and append-only, never rewriting an entry or
+  carrying counts across invocations, so a chatty unrecognized type costs a
+  journal and replayed transcript O(1) rather than O(n). Section 16's raw
+  session log is unaffected and still records every provider line in full.
 - An atomic repository-scoped lease permits only one live solve worker per
   issue and one live review/revision worker per PR. A live lease refuses the
   duplicate launch; a stale lease is retired so an interrupted worktree can be
