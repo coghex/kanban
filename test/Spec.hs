@@ -6688,9 +6688,31 @@ main = hspec $ do
       decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
 
-    it "makes a dirty checkout an error that prevents starting the drainer" $
+    it "names the git operation a checkout stopped mid-operation has to finish" $ do
+      let render operation =
+            decodeDrainerStatus
+              ( "{\"state\":\"mid_operation\",\"operation\":\""
+                  <> operation
+                  <> "\",\"open_incident\":null}"
+              )
+      render "merge" `shouldBe` Right (DrainerStatus DrainerError "merge in progress; finish or abort it")
+      render "rebase" `shouldBe` Right (DrainerStatus DrainerError "rebase in progress; finish or abort it")
+      render "cherry-pick" `shouldBe` Right (DrainerStatus DrainerError "cherry-pick in progress; finish or abort it")
+      render "bisect" `shouldBe` Right (DrainerStatus DrainerError "bisect in progress; finish or abort it")
+
+    it "still says something actionable when the controller names no operation" $ do
+      decodeDrainerStatus "{\"state\":\"mid_operation\",\"operation\":null,\"open_incident\":null}"
+        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
+      decodeDrainerStatus "{\"state\":\"mid_operation\",\"open_incident\":null}"
+        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
+
+    it "no longer recognises the uncommitted-changes state the removed gate produced" $
+      -- Ordinary uncommitted work is carried across the post-merge
+      -- fast-forward by the drainer's own autostash, so a controller still
+      -- reporting `dirty` is one that has had the blanket gate put back. The
+      -- board must not have a rendering waiting for it.
       decodeDrainerStatus "{\"state\":\"dirty\",\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerError "uncommitted changes; drainer will not start")
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: dirty")
 
     it "warns when the singleton drainer belongs to another repository" $
       decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
@@ -6870,7 +6892,7 @@ main = hspec $ do
       drainerToggle False (DrainerStatus DrainerOff "off") `shouldBe` StartDrainer
       drainerToggle False (DrainerStatus DrainerOn "on") `shouldBe` StopDrainer
       drainerToggle False (DrainerStatus DrainerWarning "on · unresolved incident") `shouldBe` StopDrainer
-      drainerToggle False (DrainerStatus DrainerError "uncommitted changes; drainer will not start") `shouldBe` StartDrainer
+      drainerToggle False (DrainerStatus DrainerError "merge in progress; finish or abort it") `shouldBe` StartDrainer
 
   describe "repository snapshot cache" $ do
     it "round-trips a versioned snapshot and ignores corrupt JSON" $
