@@ -53,7 +53,8 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 - `UI`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive layout, and
   external-text sanitization.
 - `Worker`, `Solve`, `Review`, `PullRequestFlow`, `Codex`, `Claude`, `Process`,
-  `Transcript`, `Preflight`, `Provider`, `StreamReader` — the agent execution layer.
+  `Transcript`, `Preflight`, `Provider`, `StreamReader`, `CommandCapture` — the agent
+  execution layer.
 - `Drainer` with `tools/` — the launchd-managed PR drainer and its Python tests.
 
 Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests, and
