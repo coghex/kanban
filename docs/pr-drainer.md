@@ -38,16 +38,54 @@ Only one managed drainer can run for the user at a time. A Kanban window for ano
 
 Installation never starts the drainer. Starting it can merge eligible pull requests immediately.
 
-The controller refuses to start from a checkout with staged, unstaged, or
-untracked changes. Kanban renders that condition in red and reports that the
-changes must be committed, stashed, or discarded first. This keeps the
-drainer's post-merge fast-forward from interfering with an in-progress hotfix.
+The drainer coexists with uncommitted local work. It starts, runs, and merges
+from a checkout holding staged, unstaged, or untracked changes; nothing has to
+be committed, stashed, or discarded first. Merging itself is GitHub's and never
+reads the checkout, and the post-merge fast-forward sets local changes aside
+and puts them back.
+
+It refuses to start only when the checkout is stopped part-way through a git
+operation — an unfinished merge, rebase, `am`, cherry-pick, revert, or bisect —
+because the fast-forward cannot succeed until a human finishes or aborts it, so
+every merge in the run would fail the same avoidable way. Kanban renders that
+condition in red and names the operation to finish. The check reads the markers
+git writes into the git directory and changes nothing: an unresolved conflict is
+left exactly as it stands.
 
 It also requires the checkout to be on the repository's default branch. This
-keeps its post-merge fast-forward from moving a feature branch.
+keeps its post-merge fast-forward from moving a feature branch. The
+operation-state check runs first, because a rebase or a bisect commonly leaves
+a detached HEAD and the message should name the operation rather than the
+branch.
 
 After each successful merge, the drainer fast-forwards its managed default
 branch to the current remote tip.
+
+### Recovering local changes after a failed fast-forward
+
+If local changes stand in the way of the fast-forward, the drainer sets them
+aside for the retry and restores them in a `finally`, so the ordinary outcome is
+that they reappear on the new tip. Tracked edits are snapshotted with `git stash
+create`, which writes no entry into the shared `git stash list`, and untracked
+files are moved into a holding directory under the git directory rather than
+recorded in git at all. When a restore does fail, the message says exactly where
+what it was holding ended up, and the two kinds recover differently.
+
+- **Tracked changes.** The drainer first tries to expose the snapshot commit
+  through `git stash list`; if that succeeds the message says so, and the entry
+  is resolved from there like any other stash. If it fails, the snapshot stays
+  anchored at `refs/drain-prs/autostash/<sha>` and the message names that ref —
+  restore it with `git stash apply --index <sha>`. Only if both fail is the
+  commit unreferenced, and the message says so in as many words. Expect to
+  resolve a conflict either way: a restore only fails because reapplying the
+  snapshot onto the new tip conflicted.
+- **Untracked files.** These never enter any ref, so they are never in
+  `git stash list`. Files that could not be put back stay in the holding
+  directory (`.git/autostash-*`), which the message names along with each file
+  and why it was left. The usual reason is a genuine collision: the
+  fast-forward now tracks a file at that path, and overwriting it would destroy
+  the incoming content, so the local copy waits in the holding directory for
+  manual reconciliation instead.
 
 ## Merging one pull request
 
@@ -103,7 +141,7 @@ vocabulary:
 | `approved_head_changed` | The approval belongs to an older head. The pull request needs a fresh review. |
 | `not_eligible` | The pull request is closed, still a draft, or targets another branch. |
 | `run_locked` | Another drainer run holds the repository. The message names it. |
-| `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the default-branch and clean-checkout requirements above. |
+| `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the unfinished-operation refusal and the default-branch requirement above. |
 | `post_merge_audit_failed` | The merge landed but the post-merge audit found a gate violation. `merged` is `true`. |
 | `post_merge_cleanup_failed` | The merge landed but its post-merge cleanup is still outstanding. The message names the remaining steps, the drainer keeps retrying them, and `merged` is `true`. |
 | `operational_error` | Anything else went wrong. |

@@ -211,6 +211,14 @@ class SinglePrCliFixture(unittest.TestCase):
         )
         self.fake.script("gh", ["issue", "close", "99"], stdout="")
 
+    def dirty_the_checkout(self):
+        """Staged, unstaged, and untracked changes, none of which the
+        incoming commits touch."""
+        (self.main / "staged.txt").write_text("staged\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+        (self.main / "README").write_text("hello, edited\n", encoding="utf-8")
+        (self.main / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+
     def write_state(self, state):
         self.state_path.write_text(
             json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -672,14 +680,74 @@ class SinglePrErrorTests(SinglePrCliFixture):
         self.assertIn("hotfix", result["message"])
         self.assertEqual(self.fake.calls("gh"), [])
 
-    def test_a_dirty_checkout_is_a_precondition_failure(self):
-        (self.main / "scratch.txt").write_text("uncommitted\n", encoding="utf-8")
+    def test_a_dirty_checkout_merges_and_keeps_every_local_change(self):
+        # Inverted from the removed blanket gate: merging is GitHub's, and the
+        # post-merge fast-forward already stashes and restores whatever is in
+        # the tree, so local work is no reason to refuse.
+        self.dirty_the_checkout()
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_MERGED)
+        self.assertTrue(result["merged"])
+        self.assertEqual(len(self.gh_calls("pr", "merge", "42")), 1)
+        # The fast-forward still landed, with every local change intact on
+        # the new tip.
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+        self.assertEqual(
+            (self.main / "README").read_text(encoding="utf-8"), "hello, edited\n"
+        )
+        self.assertEqual(
+            (self.main / "staged.txt").read_text(encoding="utf-8"), "staged\n"
+        )
+        self.assertIn(
+            "staged.txt",
+            run_git(["diff", "--cached", "--name-only"], cwd=self.main).splitlines(),
+        )
+        self.assertEqual(
+            (self.main / "scratch.txt").read_text(encoding="utf-8"), "untracked\n"
+        )
+        self.assertIn(
+            "?? scratch.txt",
+            run_git(["status", "--porcelain=v1"], cwd=self.main).splitlines(),
+        )
+
+    def test_an_unfinished_git_operation_is_a_precondition_failure(self):
+        # The one repository condition still worth refusing: the fast-forward
+        # cannot succeed until a human resolves it, so every merge in the run
+        # would fail the same avoidable way.
+        run_git(["checkout", "-q", "-b", "side"], cwd=self.main)
+        (self.main / "README").write_text("side\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "side edit"], cwd=self.main)
+        run_git(["checkout", "-q", "master"], cwd=self.main)
+        (self.main / "README").write_text("master\n", encoding="utf-8")
+        run_git(["commit", "-q", "-am", "master edit"], cwd=self.main)
+        subprocess.run(
+            ["git", "merge", "side"], cwd=str(self.main), capture_output=True
+        )
+        conflicted = (self.main / "README").read_bytes()
+        index_before = hashlib.sha256(
+            (self.main / ".git" / "index").read_bytes()
+        ).hexdigest()
 
         result, proc = self.run_single()
 
         self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
         self.assertEqual(result["reason"], "repository_precondition_failed")
+        self.assertIn("merge is in progress", result["message"])
         self.assertEqual(self.fake.calls("gh"), [])
+        # Byte for byte intact: no `git reset --hard` ran, and nothing
+        # refreshed the index behind the unresolved conflict.
+        self.assertTrue((self.main / ".git" / "MERGE_HEAD").exists())
+        self.assertEqual((self.main / "README").read_bytes(), conflicted)
+        self.assertEqual(
+            hashlib.sha256((self.main / ".git" / "index").read_bytes()).hexdigest(),
+            index_before,
+        )
 
     def test_an_unparseable_queue_state_is_reported_without_being_overwritten(self):
         # That file holds every other PR's cooldowns and unfinished post-merge
@@ -1142,6 +1210,25 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
         self.assertTrue(self.feature_wt.exists())
         self.assertFalse(self.lock_path.exists())
         self.assertFalse(self.state_path.exists())
+
+    def test_a_dry_run_against_a_dirty_checkout_makes_no_mutation(self):
+        # The removed gate needed --no-optional-locks to keep its `git status`
+        # probe from rewriting .git/index. Its replacement reads marker paths
+        # and runs no status at all, so purity holds structurally -- and this
+        # is the tree state in which that has to be proved.
+        self.dirty_the_checkout()
+        self.script_pr_view()
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+
+        result, proc = self.run_pure()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "would_merge")
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assertFalse(self.lock_path.exists())
 
     def test_every_blocked_condition_dry_runs_without_mutating(self):
         rollup = self.base_pr_json()["statusCheckRollup"]
