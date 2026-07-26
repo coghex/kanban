@@ -43,6 +43,7 @@ module Kanban.UI
     followAfterScroll,
     followAfterTurnStarted,
     githubRefreshTimeoutMicros,
+    itemHasAmberWarning,
     killSelectionNotice,
     mergeExplanation,
     mergeText,
@@ -1085,6 +1086,7 @@ itemMetadata :: UTCTime -> BoardItem -> Text
 itemMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge now issue.issueUpdatedAt
   where
     ownership
+      | AssigneesUnavailable `elem` issue.issueDataGaps = unknownAssigneesText
       | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = "unassigned"
       | otherwise =
           Text.intercalate ", " ["@" <> assignee.assigneeLogin | assignee <- issue.issueAssignees]
@@ -1092,14 +1094,23 @@ itemMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge 
 itemMetadata now (PullRequestItem pullRequest) =
   linked <> pullRequest.pullRequestAuthor <> " → " <> pullRequest.pullRequestBase <> " · updated " <> relativeAge now pullRequest.pullRequestUpdatedAt
   where
-    linked = case pullRequest.pullRequestLinkedIssues of
-      []
-        | pullRequest.pullRequestLinkedIssueOverflow > 0 -> "+" <> showText pullRequest.pullRequestLinkedIssueOverflow <> " linked · "
-        | otherwise -> "UNLINKED · "
-      numbers ->
-        let visibleNumbers = take 2 numbers
-            hiddenNumbers = max 0 (length numbers - length visibleNumbers) + pullRequest.pullRequestLinkedIssueOverflow
-         in Text.intercalate "," (map (("#" <>) . showText) visibleNumbers) <> overflowText hiddenNumbers <> " · "
+    linked
+      | LinkedIssuesUnavailable `elem` pullRequest.pullRequestDataGaps = unknownLinksText <> " · "
+      | otherwise = case pullRequest.pullRequestLinkedIssues of
+          []
+            | pullRequest.pullRequestLinkedIssueOverflow > 0 -> "+" <> showText pullRequest.pullRequestLinkedIssueOverflow <> " linked · "
+            | otherwise -> "UNLINKED · "
+          numbers ->
+            let visibleNumbers = take 2 numbers
+                hiddenNumbers = max 0 (length numbers - length visibleNumbers) + pullRequest.pullRequestLinkedIssueOverflow
+             in Text.intercalate "," (map (("#" <>) . showText) visibleNumbers) <> overflowText hiddenNumbers <> " · "
+
+-- | What a card says instead of a definite \"unassigned\" or \"UNLINKED\" when
+-- GitHub never delivered the connection those verdicts would be read off. The
+-- board must not turn an absent field into a claim about the item.
+unknownAssigneesText, unknownLinksText :: Text
+unknownAssigneesText = "assignees unknown"
+unknownLinksText = "LINKS UNKNOWN"
 
 overflowText :: Int -> Text
 overflowText count
@@ -1181,9 +1192,12 @@ itemHasAmberWarning :: WorkflowConfig -> BoardItem -> Bool
 itemHasAmberWarning config (IssueItem issue) =
   issue.issueLabelOverflow > 0
     || issue.issueAssigneeOverflow > 0
+    || not (null issue.issueDataGaps)
     || not (null (trackerDiagnosticsForIssue config issue))
 itemHasAmberWarning _ (PullRequestItem pullRequest) =
-  pullRequest.pullRequestLabelOverflow > 0 || pullRequest.pullRequestLinkedIssueOverflow > 0
+  pullRequest.pullRequestLabelOverflow > 0
+    || pullRequest.pullRequestLinkedIssueOverflow > 0
+    || not (null pullRequest.pullRequestDataGaps)
 
 solveBadge :: AppState -> BoardItem -> Widget Name
 solveBadge _ (PullRequestItem _) = emptyWidget
@@ -1960,6 +1974,7 @@ drawPeopleDetails (PullRequestItem pullRequest) =
 
 assigneeDetailText :: Issue -> Text
 assigneeDetailText issue
+  | AssigneesUnavailable `elem` issue.issueDataGaps = unknownAssigneesText
   | null issue.issueAssignees && issue.issueAssigneeOverflow == 0 = "unassigned"
   | otherwise =
       Text.intercalate ", " ["@" <> sanitizeText assignee.assigneeLogin | assignee <- issue.issueAssignees]
@@ -1977,9 +1992,12 @@ drawLinkDetails _ (PullRequestItem pullRequest) =
   detailsSection
     "Linked issues"
     [ txtWrap
-        ( linkedRefsText
-            (map (("#" <>) . showText) pullRequest.pullRequestLinkedIssues)
-            pullRequest.pullRequestLinkedIssueOverflow
+        ( if LinkedIssuesUnavailable `elem` pullRequest.pullRequestDataGaps
+            then unknownLinksText
+            else
+              linkedRefsText
+                (map (("#" <>) . showText) pullRequest.pullRequestLinkedIssues)
+                pullRequest.pullRequestLinkedIssueOverflow
         )
     ]
 drawLinkDetails board (IssueItem issue) =

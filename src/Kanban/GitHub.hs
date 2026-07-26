@@ -35,7 +35,7 @@ import Data.Aeson
     (.!=),
   )
 import Data.Aeson.Key (Key)
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseEither)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -1084,8 +1084,8 @@ parseAssignee = withObject "assignee" $ \object -> Assignee <$> object .: "login
 
 parseIssue :: Value -> Parser Issue
 parseIssue = withObject "issue" $ \object -> do
-  (labels, labelOverflow) <- parseNodes parseLabel object "labels"
-  (assignees, assigneeOverflow) <- parseNodes parseAssignee object "assignees"
+  (labels, labelOverflow, labelGaps) <- parseNodes parseLabel object "labels" LabelsUnavailable
+  (assignees, assigneeOverflow, assigneeGaps) <- parseNodes parseAssignee object "assignees" AssigneesUnavailable
   Issue
     <$> object .: "number"
     <*> object .: "title"
@@ -1097,13 +1097,15 @@ parseIssue = withObject "issue" $ \object -> do
     <*> object .: "updatedAt"
     <*> pure labelOverflow
     <*> pure assigneeOverflow
+    <*> pure (labelGaps <> assigneeGaps)
 
 parsePullRequest :: Value -> Parser PullRequest
 parsePullRequest = withObject "pull request" $ \object -> do
   mergeable <- object .: "mergeable"
   mergeStateStatus <- object .: "mergeStateStatus"
-  (labels, labelOverflow) <- parseNodes parseLabel object "labels"
-  (linkedIssues, linkedIssueOverflow) <- parseNodes parseIssueNumber object "closingIssuesReferences"
+  (labels, labelOverflow, labelGaps) <- parseNodes parseLabel object "labels" LabelsUnavailable
+  (linkedIssues, linkedIssueOverflow, linkedIssueGaps) <- parseNodes parseIssueNumber object "closingIssuesReferences" LinkedIssuesUnavailable
+  (checks, checkGaps) <- parseChecks object
   PullRequest
       <$> object .: "number"
       <*> object .: "title"
@@ -1117,16 +1119,29 @@ parsePullRequest = withObject "pull request" $ \object -> do
       <*> pure linkedIssues
       <*> (parseReviewDecision <$> object .:? "reviewDecision")
       <*> pure (parseMergeState mergeable mergeStateStatus)
-      <*> parseChecks object
+      <*> pure checks
       <*> object .: "createdAt"
       <*> object .: "updatedAt"
       <*> pure labelOverflow
       <*> pure linkedIssueOverflow
+      <*> pure (labelGaps <> linkedIssueGaps <> checkGaps)
 
-parseNodes :: (Value -> Parser item) -> Object -> Key -> Parser ([item], Int)
-parseNodes itemParser object fieldName = do
-  connection <- object .: fieldName
-  withObject "nested connection" parseNested connection
+-- | A nested connection, plus the 'DataGap' to record if GitHub did not supply
+-- it. @labels@, @assignees@, and @closingIssuesReferences@ are all nullable in
+-- GitHub's schema, and a partial-error response nulls out exactly the fields
+-- that errored, so an absent or null connection is one item's missing data
+-- rather than a broken page: it decodes as no nodes and a gap on that item.
+--
+-- A connection that /is/ present stays strict. Malformed nodes, a missing or
+-- non-numeric @totalCount@, and a @totalCount@ below the node list all still
+-- fail the decode -- those describe a response this build cannot reason about
+-- at all, not a field GitHub declined to deliver.
+parseNodes :: (Value -> Parser item) -> Object -> Key -> DataGap -> Parser ([item], Int, [DataGap])
+parseNodes itemParser object fieldName gap = do
+  connection <- object .:? fieldName
+  case connection of
+    Nothing -> pure ([], 0, [gap])
+    Just value -> withObject "nested connection" parseNested value
   where
     parseNested nested = do
       nodeValues <- nested .:? "nodes" .!= []
@@ -1134,7 +1149,7 @@ parseNodes itemParser object fieldName = do
       nodes <- traverse itemParser nodeValues
       if totalCount < length nodes
         then fail "nested connection totalCount was smaller than its node list"
-        else pure (nodes, totalCount - length nodes)
+        else pure (nodes, totalCount - length nodes, [])
 
 parseIssueNumber :: Value -> Parser Int
 parseIssueNumber = withObject "issue reference" (.: "number")
@@ -1162,11 +1177,22 @@ parseMergeState _ "BLOCKED" = MergeBlocked
 parseMergeState _ "UNSTABLE" = MergeUnstable
 parseMergeState _ _ = MergeUnknown
 
-parseChecks :: Object -> Parser CheckSummary
+-- | The rollup summary, plus 'ChecksUndecodable' when a context in it could
+-- not be read. The rollup's own structure stays strict -- a missing
+-- @contexts@ object or @totalCount@ is a malformed response, not a degraded
+-- item -- but an individual context this build does not understand fails
+-- closed the way §13 already fails a rollup past the context cap: the whole
+-- summary becomes 'ChecksUnknown' rather than aborting the page it arrived on.
+--
+-- The cap is checked before any context is decoded, so a capped rollup keeps
+-- its existing meaning exactly and never picks up a gap: its summary is
+-- unknown because GitHub reported more contexts than were requested, which is
+-- the documented cap behavior and not an anomaly to warn about.
+parseChecks :: Object -> Parser (CheckSummary, [DataGap])
 parseChecks object = do
   rollup <- object .:? "statusCheckRollup"
   case rollup of
-    Nothing -> pure ChecksNone
+    Nothing -> pure (ChecksNone, [])
     Just value -> withObject "status check rollup" parseRollup value
   where
     parseRollup rollup = do
@@ -1175,10 +1201,11 @@ parseChecks object = do
     parseContexts contexts = do
       totalCount <- contexts .: "totalCount"
       values <- contexts .:? "nodes" .!= []
-      parsed <- traverse parseCheckContext values
       if totalCount > length values
-        then pure ChecksUnknown
-        else pure (summarizeChecks parsed)
+        then pure (ChecksUnknown, [])
+        else case traverse (parseEither parseCheckContext) values of
+          Left _ -> pure (ChecksUnknown, [ChecksUndecodable])
+          Right parsed -> pure (summarizeChecks parsed, [])
 
 parseCheckContext :: Value -> Parser CheckContext
 parseCheckContext = withObject "status check context" $ \context -> do
@@ -1325,7 +1352,27 @@ snapshotWarnings limits workflowConfig snapshot =
            <> " have malformed or missing child checklists; amber diagnostics show the cause"
        | malformedTrackers > 0
        ]
+    <> [incompleteText incompleteItems | not (null incompleteItems)]
   where
+    -- Named rather than counted: the amber marker on a degraded card says
+    -- something is missing, and this is what says which card. The banner is a
+    -- single line, so past a few names it counts the rest with the same +N
+    -- vocabulary the overflow indicators use -- visibly truncated, never
+    -- silently.
+    incompleteItems =
+      [ "Issue #" <> showText issue.issueNumber
+        | issue <- snapshot.snapshotIssues,
+          not (null issue.issueDataGaps)
+      ]
+        <> [ "PR #" <> showText pullRequest.pullRequestNumber
+             | pullRequest <- snapshot.snapshotPullRequests,
+               not (null pullRequest.pullRequestDataGaps)
+           ]
+    incompleteText names =
+      Text.intercalate ", " (take incompleteNameLimit names)
+        <> (if length names > incompleteNameLimit then " +" <> showText (length names - incompleteNameLimit) <> " more" else "")
+        <> ": incomplete data; GitHub did not deliver every field, and the amber cards show which"
+    incompleteNameLimit = 3 :: Int
     nestedOverflowItems =
       length (filter issueHasOverflow snapshot.snapshotIssues)
         + length (filter pullRequestHasOverflow snapshot.snapshotPullRequests)

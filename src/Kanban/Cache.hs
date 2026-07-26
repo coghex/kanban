@@ -116,8 +116,14 @@ instance ToJSON UsageCacheEnvelope where
 -- | Version 3 added the per-check detail 'CheckSummary' retains for the §11
 -- details overlay. A version 2 file decodes its check summaries without that
 -- detail, so it is rejected as unsupported rather than silently reused.
+--
+-- Version 4 added the per-item 'Kanban.Domain.DataGap' list. Reusing a
+-- version 3 entry would restore a card as though every field had arrived,
+-- dropping the amber marker and the warning that explain what is missing, so
+-- an older file is treated as absent -- the §17 contract for an unknown
+-- schema version -- and the next refresh rebuilds it.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
-repositoryCacheSchemaVersion = 3
+repositoryCacheSchemaVersion = 4
 usageCacheSchemaVersion = 1
 ghGroupRecordSchemaVersion = 1
 
