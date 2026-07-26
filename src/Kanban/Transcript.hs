@@ -20,7 +20,8 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import Kanban.Domain (Repository (..))
-import System.Directory (XdgDirectory (XdgCache), createDirectoryIfMissing, getXdgDirectory)
+import Kanban.Paths (createPrivateDirectory)
+import System.Directory (XdgDirectory (XdgCache), getXdgDirectory)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), Handle, IOMode (AppendMode), hClose, hSetBuffering, openBinaryFile)
 import System.Posix.Files (setFileMode)
@@ -41,8 +42,7 @@ openSessionLog :: Repository -> Text -> Int -> Maybe FilePath -> IO (Either Text
 openSessionLog repository category itemNumber existingPath = do
   result <- try @IOException $ do
     directory <- transcriptRoot repository
-    createDirectoryIfMissing True directory
-    setFileMode directory 0o700
+    createPrivateDirectory XdgCache directory
     path <- case existingPath of
       Just value -> pure value
       Nothing -> do

@@ -13,12 +13,14 @@ module Kanban.Settings
 where
 
 import Control.Exception (IOException, bracketOnError, try)
-import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeFileStrict', encode, object, withObject, (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value, eitherDecodeFileStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson.Types (parse)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import System.Directory (XdgDirectory (XdgConfig), createDirectoryIfMissing, doesFileExist, getXdgDirectory, removeFile, renameFile)
+import Kanban.Paths (createPrivateDirectory)
+import System.Directory (XdgDirectory (XdgConfig), doesFileExist, getXdgDirectory, removeFile, renameFile)
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, hClose, openBinaryTempFile)
 import System.Posix.Files (setFileMode)
@@ -50,7 +52,13 @@ instance FromJSON Settings where
     Settings <$> value .:? "chatVerbosity" .!= StandardChat
 
 instance ToJSON Settings where
-  toJSON settings = object ["schemaVersion" .= (1 :: Int), "chatVerbosity" .= settings.settingsChatVerbosity]
+  toJSON settings = object ["schemaVersion" .= settingsSchemaVersion, "chatVerbosity" .= settings.settingsChatVerbosity]
+
+-- | The version 'ToJSON' stamps on every file written, and the only one
+-- 'loadSettings' reads. Emitting it without ever checking it left a future
+-- format bump no mechanism at all.
+settingsSchemaVersion :: Int
+settingsSchemaVersion = 1
 
 defaultSettings :: Settings
 defaultSettings = Settings {settingsChatVerbosity = StandardChat}
@@ -77,19 +85,32 @@ loadSettings = do
   if not exists
     then pure (defaultSettings, Nothing)
     else do
-      result <- try @IOException (eitherDecodeFileStrict' path)
+      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String Value))
       pure $ case result of
         Left exception -> (defaultSettings, Just ("settings ignored: " <> Text.pack (show exception)))
         Right (Left message) -> (defaultSettings, Just ("settings ignored: " <> Text.pack message))
-        Right (Right settings) -> (settings, Nothing)
+        Right (Right value) -> loadDecodedSettings value
+
+-- | The same version-before-payload rule the caches follow: a file written by
+-- another version of the format is not something the user needs to hear
+-- about, so it silently yields the defaults whatever its payload looks like.
+-- A file that claims the current version and still will not decode, or that
+-- carries no integer version at all, keeps the existing warning.
+loadDecodedSettings :: Value -> (Settings, Maybe Text)
+loadDecodedSettings value = case parse (withObject "Kanban settings" (.: "schemaVersion")) value :: Result Int of
+  Error message -> (defaultSettings, Just ("settings ignored: " <> Text.pack message))
+  Success version
+    | version /= settingsSchemaVersion -> (defaultSettings, Nothing)
+    | otherwise -> case fromJSON value :: Result Settings of
+        Error message -> (defaultSettings, Just ("settings ignored: " <> Text.pack message))
+        Success settings -> (settings, Nothing)
 
 saveSettings :: Settings -> IO (Either Text ())
 saveSettings settings = do
   path <- settingsPath
   let directory = takeDirectory path
   result <- try @IOException $ do
-    createDirectoryIfMissing True directory
-    setFileMode directory 0o700
+    createPrivateDirectory XdgConfig directory
     bracketOnError
       (openBinaryTempFile directory (takeFileName path <> ".tmp"))
       cleanup

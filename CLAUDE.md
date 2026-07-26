@@ -47,8 +47,9 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 
 - `Domain`, `Workflow`, `Card`, `Tracker` — board state, column classification, and
   tracker hierarchy.
-- `Repository`, `GitHub`, `Cache`, `Config`, `Settings`, `CLI` — repository resolution,
-  GitHub data, the last-good snapshot, and configuration.
+- `Repository`, `GitHub`, `Cache`, `Config`, `Settings`, `Paths`, `CLI` — repository
+  resolution, GitHub data, the last-good snapshot, configuration, and the private
+  directories under the XDG roots.
 - `UI`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive layout, and
   external-text sanitization.
 - `Worker`, `Solve`, `Review`, `PullRequestFlow`, `Codex`, `Claude`, `Process`,

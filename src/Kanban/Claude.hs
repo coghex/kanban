@@ -30,11 +30,11 @@ import Data.Time
   )
 import Data.Time.Calendar (fromGregorian, toGregorian)
 import Kanban.Domain (UsageSnapshot (..), UsageWindow (..))
+import Kanban.Paths (createPrivateDirectory)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Text (sanitizeText)
 import System.Directory
   ( XdgDirectory (XdgCache),
-    createDirectoryIfMissing,
     findExecutable,
     getXdgDirectory,
   )
@@ -48,7 +48,6 @@ import System.IO
     hSetBuffering,
     hWaitForInput,
   )
-import System.Posix.Files (setFileMode)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -75,8 +74,7 @@ fetchClaudeUsage timeoutMicros = do
 runClaudeProvider :: Int -> FilePath -> FilePath -> IO (Either ProviderError UsageSnapshot)
 runClaudeProvider timeoutMicros scriptPath claudePath = do
   scratchDirectory <- claudeScratchDirectory
-  createDirectoryIfMissing True scratchDirectory
-  setFileMode scratchDirectory 0o700
+  createPrivateDirectory XdgCache scratchDirectory
   environment <- claudeEnvironment
   fetchedAt <- getCurrentTime
   timeZone <- getCurrentTimeZone
