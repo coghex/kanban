@@ -225,7 +225,7 @@ solverLabel :: SolverBrand -> Text
 solverLabel CodexSolver = "codex · " <> codexSolverModel
 solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
-runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
+runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolve = runSolveWith (const handleReadLine)
 
 -- | As 'runSolve', but reads stdout/stderr via an injected primitive instead
@@ -238,13 +238,8 @@ runSolve = runSolveWith (const handleReadLine)
 -- The primitive is given the stream tag ("stdout"/"stderr") alongside the
 -- handle so a test can target one stream's abandonment path without racing
 -- the other's.
-runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (SolveEvent -> IO ()) -> IO ()
-runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage eventSink = do
-  -- One aggregator per invocation, flushed by 'closeWithOutcome' on every
-  -- terminal path (normal EOF, needs-input handoff, failure, abandonment,
-  -- cancellation), so a chatty unknown type's tail is always redeemed as a
-  -- single counted summary and never carried into another invocation.
-  aggregator <- newUnknownAggregator
+runSolveWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
+runSolveWith readLineFor repository issueNumber workflow brand configPath config existingSession existingLogPath provenance userMessage aggregator eventSink = do
   logResult <- openSessionLog repository (workflowLogName workflow <> "-" <> solverName brand) issueNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (SolveDiagnostic issueNumber message) >> pure Nothing
@@ -254,7 +249,7 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
       pure (Just value)
   executable <- findExecutable executableName
   case executable of
-    Nothing -> finishWithoutProcess aggregator sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
+    Nothing -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
       -- Masked from before the process is even spawned through its
       -- registration, so a deadline's cancellation can never land in the
@@ -285,13 +280,13 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
           _ -> eventSink (SolveProcessSpawning issueNumber False)
         pure result
       case started of
-        Left exception -> finishWithoutProcess aggregator sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
+        Left exception -> finishWithoutProcess sessionLog (SolveFailed ("Could not start " <> Text.pack executableName <> ": " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           managedResult <- readIORef managedRef
           case managedResult of
-            Nothing -> finishWithoutProcess aggregator sessionLog (SolveFailed "internal error: provider process was not registered as managed")
+            Nothing -> finishWithoutProcess sessionLog (SolveFailed "internal error: provider process was not registered as managed")
             Just managed -> do
               sessionRef <- newIORef existingSession
               lastMessageRef <- newIORef ""
@@ -307,22 +302,25 @@ runSolveWith readLineFor repository issueNumber workflow brand configPath config
               lastMessage <- readIORef lastMessageRef
               abandonReason <- readIORef abandonReasonRef
               let outcome = maybe (solveOutcome exitCode lastMessage) SolveFailed abandonReason
-              closeWithOutcome aggregator sessionLog outcome
-        Right _ -> finishWithoutProcess aggregator sessionLog (SolveFailed (Text.pack executableName <> " did not provide stdout and stderr pipes"))
+              closeWithOutcome sessionLog outcome
+        Right _ -> finishWithoutProcess sessionLog (SolveFailed (Text.pack executableName <> " did not provide stdout and stderr pipes"))
   where
-    -- Before the terminal event, never after: replay stops at the terminal
-    -- journal envelope, so a summary emitted later would be written but
-    -- never replayed.
-    flushAggregates aggregator = flushUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
+    -- Before this invocation's terminal event, never after: replay stops at
+    -- the terminal journal envelope, so a summary emitted later would be
+    -- written but never replayed. A supervisor that cancels this invocation
+    -- outright owns the same aggregator and flushes it before its own
+    -- terminal envelope; 'flushUnknownAggregates' clears as it reads, so
+    -- whichever side gets there first is the only one that reports.
+    flushAggregates = flushUnknownAggregates aggregator >>= mapM_ (eventSink . SolveOutput issueNumber)
     repositoryRoot = repository.repositoryRoot
     executableName = case brand of
       CodexSolver -> "codex"
       ClaudeSolver -> "claude"
     solverName CodexSolver = "codex"
     solverName ClaudeSolver = "claude"
-    finishWithoutProcess aggregator sessionLog outcome = closeWithOutcome aggregator sessionLog outcome
-    closeWithOutcome aggregator sessionLog outcome = do
-      flushAggregates aggregator
+    finishWithoutProcess sessionLog outcome = closeWithOutcome sessionLog outcome
+    closeWithOutcome sessionLog outcome = do
+      flushAggregates
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (SolveProcessFinished issueNumber outcome)
     processSpec executablePath =

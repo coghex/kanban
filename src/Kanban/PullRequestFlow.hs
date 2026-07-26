@@ -30,7 +30,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, flushUnknownAggregates, newUnknownAggregator, parseSolveOutputLine, resumeProvenanceHeader)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, admitStreamEvent, agentOutcome, flushUnknownAggregates, parseSolveOutputLine, resumeProvenanceHeader)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
@@ -105,7 +105,7 @@ agentForAction PullRequestClaude PullRequestRevision = ClaudeSolver
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
-runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlow :: Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
 runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 
 -- | As 'runPullRequestFlow', but reads stdout/stderr via an injected
@@ -115,14 +115,10 @@ runPullRequestFlow = runPullRequestFlowWith (const handleReadLine)
 -- provider through the shared reader's abandonment path. The primitive is
 -- given the stream tag ("stdout"/"stderr") alongside the handle so a test
 -- can target one stream's abandonment path without racing the other's.
-runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> (PullRequestFlowEvent -> IO ()) -> IO ()
-runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage eventSink = do
+runPullRequestFlowWith :: (Text -> Handle -> IO (Either IOException (Maybe ByteString.ByteString))) -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (PullRequestFlowEvent -> IO ()) -> IO ()
+runPullRequestFlowWith readLineFor repository pullRequestNumber origin action configPath config existingSession existingLogPath provenance userMessage aggregator eventSink = do
   let brand = agentForAction origin action
       executableName = if brand == CodexSolver then "codex" else "claude"
-  -- One aggregator per invocation, flushed by 'closeWithOutcome' on every
-  -- terminal path, exactly as in "Kanban.Solve": unknown-payload notices are
-  -- bounded and collapsed identically whichever flow drives the provider.
-  aggregator <- newUnknownAggregator
   logResult <- openSessionLog repository ("pr-" <> actionName action <> if brand == CodexSolver then "-codex" else "-claude") pullRequestNumber existingLogPath
   sessionLog <- case logResult of
     Left message -> eventSink (PullRequestFlowDiagnostic pullRequestNumber message) >> pure Nothing
@@ -132,7 +128,7 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
       pure (Just value)
   executable <- findExecutable executableName
   case executable of
-    Nothing -> closeWithOutcome aggregator sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
+    Nothing -> closeWithOutcome sessionLog (SolveFailed (Text.pack executableName <> " was not found on PATH"))
     Just executablePath -> do
       -- Masked from before the process is even spawned through its
       -- registration, so a deadline's cancellation can never land in the
@@ -160,13 +156,13 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
           _ -> eventSink (PullRequestProcessSpawning pullRequestNumber False)
         pure result
       case started of
-        Left exception -> closeWithOutcome aggregator sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
+        Left exception -> closeWithOutcome sessionLog (SolveFailed ("Could not start PR agent: " <> exceptionText exception))
         Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
           hSetBuffering outputHandle LineBuffering
           hSetBuffering errorHandle LineBuffering
           managedResult <- readIORef managedRef
           case managedResult of
-            Nothing -> closeWithOutcome aggregator sessionLog (SolveFailed "internal error: PR agent process was not registered as managed")
+            Nothing -> closeWithOutcome sessionLog (SolveFailed "internal error: PR agent process was not registered as managed")
             Just managed -> do
               sessionRef <- newIORef existingSession
               lastMessageRef <- newIORef ""
@@ -182,14 +178,15 @@ runPullRequestFlowWith readLineFor repository pullRequestNumber origin action co
               lastMessage <- readIORef lastMessageRef
               abandonReason <- readIORef abandonReasonRef
               let outcome = maybe (flowOutcome exitCode lastMessage) SolveFailed abandonReason
-              closeWithOutcome aggregator sessionLog outcome
-        Right _ -> closeWithOutcome aggregator sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
+              closeWithOutcome sessionLog outcome
+        Right _ -> closeWithOutcome sessionLog (SolveFailed "PR agent did not provide stdout and stderr pipes")
   where
     repositoryRoot = repository.repositoryRoot
-    -- Before the terminal event, never after: replay stops at the terminal
-    -- journal envelope, so a summary emitted later would be written but never
-    -- replayed.
-    closeWithOutcome aggregator sessionLog outcome = do
+    -- Before this invocation's terminal event, never after: replay stops at
+    -- the terminal journal envelope. A supervisor cancelling this invocation
+    -- shares the aggregator and flushes it before its own terminal envelope,
+    -- and the flush clears as it reads, so exactly one side reports.
+    closeWithOutcome sessionLog outcome = do
       flushUnknownAggregates aggregator >>= mapM_ (eventSink . PullRequestFlowOutput pullRequestNumber)
       mapM_ (\value -> logMessage value "invocation-finished" (Text.pack (show outcome)) >> closeSessionLog value) sessionLog
       eventSink (PullRequestProcessFinished pullRequestNumber outcome)

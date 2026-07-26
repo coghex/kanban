@@ -10,7 +10,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Char (isControl)
-import Data.List (dropWhileEnd, find, findIndex, intercalate, isInfixOf, isPrefixOf, nub, sort, sortOn)
+import Data.List (dropWhileEnd, find, findIndex, findIndices, intercalate, isInfixOf, isPrefixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust)
 import qualified Data.Set as Set
@@ -1617,7 +1617,7 @@ main = hspec $ do
           case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
             Nothing -> expectationFailure "worker fixture was not discoverable"
             Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
-          let stallForever _spec _rememberProvider _emit = threadDelay (120 * 1000000)
+          let stallForever _spec _aggregator _rememberProvider _emit = threadDelay (120 * 1000000)
           result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot stallForever specPath)
           result `shouldBe` Just (Right ())
           terminalState <- waitForWorkerState statePath isTerminal 10
@@ -1647,7 +1647,7 @@ main = hspec $ do
           -- to wall-clock deadline elapsed-ness, so a task finishing this
           -- fast must not be able to claim a normal outcome ahead of an
           -- already-overdue deadline just because it got scheduled first.
-          let finishInstantly _spec _rememberProvider emit = emit (WorkerFinished SolveCompleted)
+          let finishInstantly _spec _aggregator _rememberProvider emit = emit (WorkerFinished SolveCompleted)
           result <- timeout 5000000 (runWorkerWithTask readProcessSnapshot finishInstantly specPath)
           result `shouldBe` Just (Right ())
           terminalState <- waitForWorkerState statePath isTerminal 10
@@ -1672,7 +1672,7 @@ main = hspec $ do
           case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
             Nothing -> expectationFailure "worker fixture was not discoverable"
             Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
-          let hangForever _spec _rememberProvider _emit = threadDelay (300 * 1000000)
+          let hangForever _spec _aggregator _rememberProvider _emit = threadDelay (300 * 1000000)
           finished <- newEmptyMVar
           void . forkIO $ runWorkerWithTask readProcessSnapshot hangForever specPath >>= putMVar finished
           timeout 5000000 (takeMVar finished) `shouldReturn` Just (Right ())
@@ -1680,6 +1680,58 @@ main = hspec $ do
           terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
           leaseReleased <- doesDirectoryExist leasePath
           leaseReleased `shouldBe` False
+
+    it "journals the unknown-event aggregate summary before the terminal envelope when the deadline cancels the task" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        -- A deadline emits the terminal envelope from the watchdog thread
+        -- and then cancels the task outright, so the task can neither run
+        -- its own flush first nor be trusted to run one at all. The
+        -- aggregator is the supervisor's for exactly this reason: replay
+        -- stops at the terminal envelope, so a summary written after it —
+        -- or lost with the cancelled thread — is a suppressed count nobody
+        -- ever sees.
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = deadlineFixtureSpec repository (WorkerId "solve-813-deadline-aggregate") 813 now 1
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-813-deadline-aggregate.spec.json"
+            statePath = workerRoot </> "solve-813-deadline-aggregate.state.json"
+            eventPath = workerRoot </> "solve-813-deadline-aggregate.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
+            Nothing -> expectationFailure "worker fixture was not discoverable"
+            Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
+          -- Streams enough repeats of one unknown type to leave suppressed
+          -- occupancy in the shared aggregator, then hangs so the deadline
+          -- is what ends it.
+          let chattyThenHang _spec aggregator _rememberProvider emit = do
+                let admit line = case parseSolveOutputLine line of
+                      Left message -> expectationFailure ("unparsable fixture line: " <> Data.Text.unpack message)
+                      Right (_, streamEvents) -> mapM_ (\streamEvent -> admitStreamEvent aggregator streamEvent >>= mapM_ (emit . WorkerAgentOutput)) streamEvents
+                mapM_ (const (admit "{\"type\":\"telemetry\",\"tick\":1}")) [1 .. chattyProviderLines]
+                threadDelay (300 * 1000000)
+          finished <- newEmptyMVar
+          void . forkIO $ runWorkerWithTask readProcessSnapshot chattyThenHang specPath >>= putMVar finished
+          timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
+          terminalState <- waitForWorkerState statePath isTerminal 10
+          terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)
+          journal <- ByteString.lines <$> ByteString.readFile eventPath
+          let noticeIndices = findIndices (ByteString.isInfixOf "[event] telemetry") journal
+              terminalIndex = findIndex (ByteString.isInfixOf "WorkerFinished") journal
+          -- The samples plus exactly one summary, and no more: the
+          -- cancellation neither dropped the count nor re-reported it.
+          length noticeIndices `shouldBe` unknownNoticeSamples + 1
+          case (reverse noticeIndices, terminalIndex) of
+            (lastNotice : _, Just terminal) -> do
+              lastNotice `shouldSatisfy` (< terminal)
+              -- The samples carry a payload prefix; the aggregate summary
+              -- carries only the count.
+              (journal !! lastNotice) `shouldNotSatisfy` ByteString.isInfixOf "tick"
+            _ -> expectationFailure "expected bounded notices and a terminal envelope in the journal"
 
     it "kills the current provider and records the deadline outcome when it is still running at the deadline" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -1699,7 +1751,7 @@ main = hspec $ do
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             managed <- managedProcessFor providerProcess
-            let registerThenHang _spec rememberProvider _emit = do
+            let registerThenHang _spec _aggregator rememberProvider _emit = do
                   rememberProvider managed
                   threadDelay (300 * 1000000)
             finished <- newEmptyMVar
@@ -1731,7 +1783,7 @@ main = hspec $ do
           -- the same 'WorkerProviderStarted' event a genuine late
           -- registration would: this must never revert the already-terminal
           -- status back to 'WorkerRunning'.
-          let lateRegister _spec _rememberProvider emit = uninterruptibleMask_ $ do
+          let lateRegister _spec _aggregator _rememberProvider emit = uninterruptibleMask_ $ do
                 _ <- waitForWorkerState statePath isTerminal 50
                 emit (WorkerProviderStarted 999999)
           finished <- newEmptyMVar
@@ -1764,7 +1816,7 @@ main = hspec $ do
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
             managed <- managedProcessFor providerProcess
-            let registerThenHang _spec rememberProvider _emit = do
+            let registerThenHang _spec _aggregator rememberProvider _emit = do
                   rememberProvider managed
                   threadDelay (300 * 1000000)
             -- The provider and census kills the watchdog attempts are real
@@ -1822,7 +1874,7 @@ main = hspec $ do
             -- deadline. It exits on its own well before the slow snapshot
             -- resolves, so this always lands on the real completion's
             -- 'WorkerFinished' rather than an orphan-pending detour.
-            let completeThenSlow _spec rememberProvider emit = do
+            let completeThenSlow _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
                 slowSnapshot = threadDelay 2000000 >> readProcessSnapshot
@@ -1854,7 +1906,7 @@ main = hspec $ do
           -- completion slot and committed its outcome: the deadline must
           -- keep ownership, not be silently replaced by a later-arriving
           -- ordinary 'WorkerFinished'.
-          let completeAfterDeadline _spec _rememberProvider emit = uninterruptibleMask_ $ do
+          let completeAfterDeadline _spec _aggregator _rememberProvider emit = uninterruptibleMask_ $ do
                 _ <- waitForWorkerState statePath isTerminal 50
                 emit (WorkerFinished SolveCompleted)
           finished <- newEmptyMVar
@@ -1898,7 +1950,7 @@ main = hspec $ do
             -- losing the already-claimed slot — well before the watchdog's
             -- own mandatory grace wait lets it finish verifying and
             -- committing.
-            let registerThenWaitAndFinish _spec rememberProvider emit = do
+            let registerThenWaitAndFinish _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   _ <- waitForProcess providerProcess
                   emit (WorkerFinished SolveCompleted)
@@ -2004,7 +2056,7 @@ main = hspec $ do
             -- deterministically lands while the provider slot is still
             -- 'ProviderSlotSpawning' (not yet registered) and a real, live
             -- process is already running unrecorded.
-            let spawningThenRegister _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let spawningThenRegister _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
                   rememberProvider managed
@@ -2059,7 +2111,7 @@ main = hspec $ do
             -- 'rememberProvider' would hand a real, live process to a
             -- worker that has already released its lease; 'registeredRef'
             -- proves that never happens.
-            let lateSpawnClaim _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let lateSpawnClaim _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   _ <- waitForWorkerState statePath isTerminal 80
                   emit (WorkerProviderSpawning True)
                   rememberProvider managed
@@ -2201,7 +2253,7 @@ main = hspec $ do
             -- (now 'terminateProviderRefWith' rather than a bare
             -- 'killManagedProcess') stays correctly wired end to end and
             -- still confirms the descendant gone before the lease releases.
-            let lateRegistrationWithDescendant _spec rememberProvider emit = uninterruptibleMask_ $ do
+            let lateRegistrationWithDescendant _spec _aggregator rememberProvider emit = uninterruptibleMask_ $ do
                   emit (WorkerProviderSpawning True)
                   threadDelay 2000000
                   rememberProvider managed
@@ -2340,7 +2392,7 @@ main = hspec $ do
             -- confirmation that an orphan-pending completion resolves to
             -- the deadline outcome once genuinely past it, alongside the
             -- more targeted unit coverage below.
-            let completeThenOrphan _spec rememberProvider emit = do
+            let completeThenOrphan _spec _aggregator rememberProvider emit = do
                   rememberProvider managed
                   emit (WorkerFinished SolveCompleted)
             finished <- newEmptyMVar
@@ -2484,7 +2536,7 @@ main = hspec $ do
                   armed <- atomicModifyIORef' armedRef (\wasArmed -> (False, wasArmed))
                   when armed (throwIO (userError "process snapshot exploded"))
                   pure (Right [])
-                registerThenReturn _spec rememberProvider _emit = rememberProvider managed
+                registerThenReturn _spec _aggregator rememberProvider _emit = rememberProvider managed
             result <- timeout 15000000 (runWorkerWithTask explodingSnapshot registerThenReturn specPath)
             -- The supervisor reports the failure instead of dying silently.
             failure <- requireJust "supervisor did not return" result >>= requireLeft "supervisor hid its own failure"
@@ -3531,7 +3583,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runSolve repository 900 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isSolveSessionIdentifiedEvent collected, findIndex isSolveOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -3563,7 +3616,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runSolve repository 901 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (SolveProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which branch?"
@@ -3594,7 +3648,8 @@ main = hspec $ do
                   SolveDiagnostic _ message
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
-            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 10000000 (runSolve repository 902 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3638,7 +3693,8 @@ main = hspec $ do
                 stdoutOnlyFails tag handle
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
-            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runSolveWith stdoutOnlyFails repository 906 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | SolveDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -3668,7 +3724,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runSolve repository 907 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             -- Only a constant number of records reach the sink the worker
             -- journals: the samples plus one counted summary, however many
@@ -3712,7 +3769,8 @@ main = hspec $ do
                     SolveOutput _ agentEvent
                       | agentEvent.agentEventSummary == "READY" -> readIORef managedRef >>= mapM_ killManagedProcess
                     _ -> pure ()
-            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runSolve repository 908 SolveOnly CodexSolver Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             [agentEvent.agentEventSummary | SolveOutput _ agentEvent <- collected, Data.Text.isInfixOf "×" agentEvent.agentEventSummary]
               `shouldBe` ["[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)]
@@ -3879,7 +3937,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 904 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case (findIndex isPullRequestSessionIdentifiedEvent collected, findIndex isPullRequestFlowOutputEvent collected) of
               (Just sessionIndex, Just outputIndex) -> sessionIndex `shouldSatisfy` (< outputIndex)
@@ -3911,7 +3970,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 905 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             case reverse collected of
               (PullRequestProcessFinished _ (SolveNeedsInput question) : _) -> question `shouldBe` "which reviewer wins?"
@@ -3942,7 +4002,8 @@ main = hspec $ do
                   PullRequestFlowDiagnostic _ message
                     | Data.Text.isInfixOf "stderr-poison-line" message -> throwIO (userError "diagnostic delivery exploded")
                   _ -> pure ()
-            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" poisonedSink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 10000000 (runPullRequestFlow repository 903 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator poisonedSink) `shouldReturn` Just ()
 
     it "terminates the still-live provider and forces a failed terminal outcome when the stdout reader's read primitive keeps failing" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3986,7 +4047,8 @@ main = hspec $ do
                 stdoutOnlyFails tag handle
                   | tag == "stdout" = pure (Left (userError "simulated persistent stdout read failure"))
                   | otherwise = handleReadLine handle
-            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" sink) `shouldReturn` Just ()
+            aggregator <- newUnknownAggregator
+            timeout 20000000 (runPullRequestFlowWith stdoutOnlyFails repository 907 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator sink) `shouldReturn` Just ()
             collected <- reverse <$> readIORef events
             let stdoutAbandonments = [message | PullRequestFlowDiagnostic _ message <- collected, Data.Text.isInfixOf "stdout stream reader gave up" message]
             stdoutAbandonments `shouldSatisfy` (not . null)
@@ -4019,7 +4081,8 @@ main = hspec $ do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
           withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
             events <- newIORef []
-            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" (\event -> modifyIORef events (event :))
+            aggregator <- newUnknownAggregator
+            runPullRequestFlow repository 908 PullRequestClaude PullRequestReview Nothing defaultWorkflowConfig Nothing Nothing ResumeAnswer "" aggregator (\event -> modifyIORef events (event :))
             collected <- reverse <$> readIORef events
             let notices = [agentEvent | PullRequestFlowOutput _ agentEvent <- collected, Data.Text.isPrefixOf "[event] telemetry" agentEvent.agentEventSummary]
             length notices `shouldBe` unknownNoticeSamples + 1
