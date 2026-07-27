@@ -10,6 +10,7 @@ module Kanban.GitHub
     ghBehindBarrier,
     confirmsOwnGroupLeadership,
     groupConfirmedEmpty,
+    GhFailurePhase (..),
     GhFetchGuard,
     GitHubResult (..),
     advanceState,
@@ -17,6 +18,7 @@ module Kanban.GitHub
     compactError,
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    ghFailureKind,
     ghFetchCleanupFailure,
     graphqlArguments,
     newGhFetchGuard,
@@ -44,14 +46,15 @@ import Data.Aeson
 import Data.Aeson.Key (Key)
 import Data.Aeson.Types (Parser, Result (..), parse, parseEither)
 import Data.Bifunctor (first)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Lazy as LazyText
-import qualified Data.Text.Lazy.Encoding as LazyTextEncoding
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time (getCurrentTime)
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
 import Kanban.Config (LimitsConfig (..))
@@ -61,8 +64,8 @@ import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 import System.Exit (ExitCode (..))
 import System.Directory (findExecutable)
-import System.IO (Handle, hClose, hFlush, hGetContents', hPutStrLn)
-import System.IO.Error (doesNotExistErrorType, mkIOError)
+import System.IO (Handle, hClose, hFlush, hPutStrLn)
+import System.IO.Error (doesNotExistErrorType, isDoesNotExistError, isPermissionError, mkIOError)
 import System.Posix.Signals (sigCONT, sigKILL, sigSTOP, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
@@ -259,7 +262,7 @@ fetchPage guard limits repository state = do
   -- ran and was then stopped again because nothing durable could account for
   -- it. Reporting it as a missing executable would send the user looking in
   -- entirely the wrong place.
-  guarded <- try @GhFetchAborted (try @IOException (runGh guard repository (graphqlArguments limits repository state)))
+  guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (graphqlArguments limits repository state)))
   pure $ case guarded of
     Left (GhGuardUnwritable message) ->
       Left
@@ -273,20 +276,21 @@ fetchPage guard limits repository state = do
           { providerErrorKind = RequestFailed,
             providerErrorMessage = "GitHub refresh left a gh process group it could not confirm stopped (" <> message <> ")"
           }
-    Right (Left exception) ->
+    Right (Left (GhProcessFailed phase exception)) ->
       Left
         ProviderError
-          { providerErrorKind = ExecutableMissing,
+          { providerErrorKind = ghFailureKind phase exception,
             providerErrorMessage = Text.pack (show exception)
           }
-    Right (Right (ExitFailure _, _, stderrText)) ->
-      Left
-        ProviderError
-          { providerErrorKind = classifyFailure (Text.pack stderrText),
-            providerErrorMessage = compactError stderrText
-          }
-    Right (Right (ExitSuccess, stdoutText, _)) ->
-      case eitherDecode (LazyTextEncoding.encodeUtf8 (LazyText.pack stdoutText)) of
+    Right (Right (ExitFailure _, _, standardError)) ->
+      let stderrText = decodeGhOutput standardError
+       in Left
+            ProviderError
+              { providerErrorKind = classifyFailure stderrText,
+                providerErrorMessage = compactError stderrText
+              }
+    Right (Right (ExitSuccess, standardOutput, _)) ->
+      case eitherDecode (LazyByteString.fromStrict (TextEncoding.encodeUtf8 (decodeGhOutput standardOutput))) of
         Left message ->
           Left
             ProviderError
@@ -302,13 +306,30 @@ fetchPage guard limits repository state = do
 -- and ignoring TERM, or one that has spawned a credential helper, could
 -- outlive the timeout that reported it dead and still be running when the
 -- next refresh starts another one.
-runGh :: GhFetchGuard -> Repository -> [String] -> IO (ExitCode, String, String)
-runGh guard repository arguments = do
-  resolved <- findExecutable "gh"
+--
+-- Every 'IOException' the run can raise leaves here tagged with the half it
+-- came out of, because that — not the exception's own text — is what decides
+-- whether the user is told @gh@ is missing. Resolution and spawning are the
+-- only places where a failure can still mean "there is no @gh@ to run"; once
+-- the child exists, @gh@ demonstrably launched, and an exception is about
+-- this run rather than about the installation.
+runGh :: GhFetchGuard -> Repository -> [String] -> IO (ExitCode, ByteString.ByteString, ByteString.ByteString)
+runGh guard repository arguments = afterLaunch $ do
+  resolved <- duringLaunch (findExecutable "gh")
   case resolved of
-    Nothing -> ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh"))
-    Just ghPath -> bracketOnError (createProcess (ghProcess ghPath)) cleanUp run
+    Nothing -> duringLaunch (ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh")))
+    Just ghPath -> bracketOnError (duringLaunch (createProcess (ghProcess ghPath))) cleanUp run
   where
+    -- 'GhProcessFailed' is not an 'IOException', so a launch failure tagged
+    -- here passes straight back out through 'afterLaunch' rather than being
+    -- caught and retagged as one. That is what keeps the outer tag total —
+    -- covering the cleanup handler too — without it ever overwriting a phase
+    -- already established.
+    duringLaunch = taggedAs GhLaunching
+    afterLaunch = taggedAs GhRunning
+
+    taggedAs phase action = try @IOException action >>= either (throwIO . GhProcessFailed phase) pure
+
     cleanUp spawned = uninterruptibleCleanup (abandonGh guard repository spawned)
 
     ghProcess ghPath =
@@ -456,13 +477,21 @@ runGh guard repository arguments = do
     -- closing it. Closing from here instead would mean closing a handle a
     -- reader thread may still be blocked on, which takes the handle's lock
     -- and would hang the very cleanup that has to finish promptly.
-    drain Nothing = newEmptyMVar >>= \captured -> putMVar captured (Right "") >> pure captured
+    --
+    -- Bytes, not locale-decoded text. 'hGetContents'' would have run @gh@'s
+    -- output through whatever encoding the environment happened to name, so
+    -- a non-ASCII issue title under a C or POSIX locale — the everyday case
+    -- over SSH, cron and launchd — threw an invalid-byte 'IOException' out
+    -- of a perfectly healthy fetch. Reading raw and decoding once, leniently,
+    -- as UTF-8 keeps both the success and the failure paths independent of
+    -- the environment.
+    drain Nothing = newEmptyMVar >>= \captured -> putMVar captured (Right ByteString.empty) >> pure captured
     drain (Just handle) = do
       captured <- newEmptyMVar
       void . forkIO $ do
-        text <- try @IOException (hGetContents' handle)
+        bytes <- try @IOException (ByteString.hGetContents handle)
         ignoreIOException (hClose handle)
-        putMVar captured text
+        putMVar captured bytes
       pure captured
 
 -- | Cleans up the @gh@ an abandoned fetch walked away from: TERM, then KILL,
@@ -820,6 +849,40 @@ data GhFetchAborted
 
 instance Exception GhFetchAborted
 
+-- | An 'IOException' raised somewhere in the @gh@ path, carrying the phase it
+-- escaped from. The phase travels with it because the exception alone cannot
+-- answer the only question the board asks of it: whether the user should be
+-- sent to install @gh@.
+data GhProcessFailed = GhProcessFailed GhFailurePhase IOException
+  deriving stock (Show)
+
+instance Exception GhProcessFailed
+
+-- | Which half of a @gh@ run a failure came out of.
+data GhFailurePhase
+  = -- | No child exists yet: @gh@ is still being resolved on @PATH@ or
+    -- spawned. This is the only phase in which "there is no runnable @gh@"
+    -- is still a possible explanation.
+    GhLaunching
+  | -- | The child was created, so @gh@ launched. Anything that goes wrong
+    -- from here — a read that fails mid-response, a pipe that breaks, a
+    -- descriptor limit — is about this request, not about the installation.
+    GhRunning
+  deriving stock (Eq, Show)
+
+-- | Maps one @gh@ failure onto the vocabulary §17 renders. 'ExecutableMissing'
+-- becomes @NOT INSTALLED@, which is only ever the truth for a launch that
+-- failed because there was nothing to launch: no such file, or a file that
+-- cannot be executed. Every other launch error — a descriptor limit, a fork
+-- failure — and every post-launch error is 'RequestFailed', so a working,
+-- authenticated @gh@ is never reported as absent.
+ghFailureKind :: GhFailurePhase -> IOException -> ProviderErrorKind
+ghFailureKind GhLaunching exception
+  | isDoesNotExistError exception = ExecutableMissing
+  | isPermissionError exception = ExecutableMissing
+  | otherwise = RequestFailed
+ghFailureKind GhRunning _ = RequestFailed
+
 -- | Writes the guard for a @gh@ that has just been spawned, before it is
 -- used for anything. The entry names only the process group, because that is
 -- all that is known this early and all a later run needs: an uncensused
@@ -1118,9 +1181,16 @@ authenticationPhrases =
     "bad credentials"
   ]
 
-compactError :: String -> Text
+-- | The one decoding every byte @gh@ writes goes through. GitHub's API output
+-- is UTF-8 by contract, and 'lenientDecode' means a truncated or corrupted
+-- response still yields a readable diagnostic instead of an exception raised
+-- from inside the decoder.
+decodeGhOutput :: ByteString.ByteString -> Text
+decodeGhOutput = TextEncoding.decodeUtf8With lenientDecode
+
+compactError :: Text -> Text
 compactError rawMessage =
-  let message = normalizeSpacing (Text.pack rawMessage)
+  let message = normalizeSpacing rawMessage
    in if Text.null message then "GitHub request failed" else Text.take providerMessageLimit message
 
 -- | How much provider-authored text section 17's single status line will
