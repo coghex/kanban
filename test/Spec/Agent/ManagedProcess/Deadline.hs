@@ -39,6 +39,7 @@ import Kanban.Solve
 import Kanban.Worker
   ( ProviderSlot (..),
     SolveWorkerTask (..),
+    SupervisorCells (..),
     WorkerEvent (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -48,6 +49,7 @@ import Kanban.Worker
     WorkerTask (..),
     acquireWorkerLease,
     discoverWorkerHistory,
+    newSupervisorCells,
     runWorker,
     runWorkerWithTask,
     spawnDetachedSupervisor,
@@ -966,21 +968,19 @@ examples = do
                   workerStateLastActivity = "",
                   workerStateKnownProcesses = []
                 }
-        stateLock <- newMVar fixtureState
-        pendingOutcomeRef <- newIORef (Just (True, SolveCompleted))
-        signalShutdownRef <- newIORef False
-        watchdogAdjudicatedVar <- newEmptyMVar
+        -- Fresh cells, so this poll's 'claimLeaseRelease' necessarily wins
+        -- on its very first attempt (nothing else has ever contended for
+        -- them): this directly constructs the exact interleaving the
+        -- reviewer flagged — the orphan-poll winning the lease-release race
+        -- before the watchdog thread has ever been scheduled to contend for
+        -- it — rather than approximating it with real thread timing, so
+        -- this reliably exercises 'waitForOrphanResolution's own post-win
+        -- wall-clock recheck on every run.
+        cells <- newSupervisorCells fixtureState
+        writeIORef cells.supervisorPendingOutcome (Just (True, SolveCompleted))
         emittedRef <- newIORef []
-        -- 'claimLeaseRelease' always "wins" on its very first attempt: this
-        -- directly constructs the exact interleaving the reviewer flagged
-        -- (the orphan-poll winning the lease-release race before the
-        -- watchdog thread has ever been scheduled to contend for it) rather
-        -- than approximating it with real thread timing, so this reliably
-        -- exercises 'waitForOrphanResolution's own post-win wall-clock
-        -- recheck on every run.
-        let claimLeaseRelease = pure True
-            emit event = atomicModifyIORef' emittedRef (\events -> (events <> [event], ()))
-        wonLease <- waitForOrphanResolution descriptor spec stateLock readProcessSnapshot signalShutdownRef emit pendingOutcomeRef claimLeaseRelease watchdogAdjudicatedVar
+        let emit event = atomicModifyIORef' emittedRef (\events -> (events <> [event], ()))
+        wonLease <- waitForOrphanResolution descriptor spec readProcessSnapshot cells emit
         wonLease `shouldBe` True
         emitted <- readIORef emittedRef
         emitted `shouldBe` [WorkerFinished (SolveFailed workerDeadlineReason)]
