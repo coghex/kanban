@@ -13,6 +13,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Char (isControl)
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
+import Data.Foldable (for_)
 import Data.List (findIndex, isInfixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -3719,6 +3720,24 @@ main = hspec $ do
         Left message -> do
           message `shouldSatisfy` isInfixOf (replicate 400 'a' <> "; " <> replicate 98 'b')
           message `shouldSatisfy` (not . isInfixOf (replicate 99 'b'))
+
+    -- A page Aeson cannot read fails on Aeson's own text, which never passed
+    -- through the structural checks and so never met the errors GitHub sent.
+    -- Those failures are exactly the ones with an explanation available, and
+    -- it has to survive them too -- not only the shapes the decoder itself
+    -- rejects.
+    it "keeps the GraphQL messages when the page itself cannot be decoded" $ do
+      let respondWith nodes = LazyByteString.pack (githubPageWithErrors ["Something went wrong while executing your query"] Nothing nodes [])
+          -- An item missing a scalar the parser requires.
+          numberlessIssue = respondWith ["{\"title\":\"no number here\"}"]
+          -- A requested connection that is not an object at all.
+          brokenConnection =
+            "{\"errors\":[{\"message\":\"Something went wrong while executing your query\"}],"
+              <> "\"data\":{\"repository\":{\"issues\":5,\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
+      for_ [numberlessIssue, brokenConnection] $ \response ->
+        case decodeGitHubItems response of
+          Right values -> expectationFailure ("unexpected decode: " <> show values)
+          Left message -> message `shouldSatisfy` isInfixOf "Something went wrong while executing your query"
 
     let initialFetchState =
           FetchState

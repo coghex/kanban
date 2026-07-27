@@ -42,7 +42,7 @@ import Data.Aeson
     (.!=),
   )
 import Data.Aeson.Key (Key)
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser, Result (..), parse, parseEither)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -1172,19 +1172,28 @@ instance FromJSON GraphQLError where
 instance FromJSON GitHubPage where
   parseJSON = withObject "GraphQL response" $ \root -> do
     errors <- map graphQLErrorMessage <$> (root .:? "errors" .!= [])
-    let refuse :: Text -> Parser a
-        refuse reason = fail (Text.unpack (withGraphQLErrors errors reason))
-    dataValue <- root .:? "data"
-    dataObject <- maybe (refuse "GitHub GraphQL response contained no data") pure dataValue
-    repositoryValue <- dataObject .:? "repository"
-    repositoryObject <- maybe (refuse "GitHub repository was not found") pure repositoryValue
-    withObject "repository" (parseRepositoryPage errors) repositoryObject
+    -- Everything past the errors is run for its result rather than being left
+    -- to abort the parse on its own. A failure anywhere below -- an absent
+    -- @data@, a connection that is not an object, an item missing a scalar --
+    -- is a response GitHub has already said something about, and letting
+    -- Aeson's text propagate alone would drop that explanation on the floor:
+    -- the exact loss this decoder exists to end. 'parse' rather than
+    -- 'parseEither' because only it leaves the reason unformatted, and the
+    -- caller's own decode adds the one @Error in $@ this should carry.
+    case parse (parseRepositoryPage errors) root of
+      Error reason -> fail (Text.unpack (withGraphQLErrors errors (Text.pack reason)))
+      Success page -> pure page
     where
-      parseRepositoryPage errors repositoryObject =
-        GitHubPage
-          <$> parseOptionalConnection parseIssue repositoryObject "issues"
-          <*> parseOptionalConnection parsePullRequest repositoryObject "pullRequests"
-          <*> pure errors
+      parseRepositoryPage errors root = do
+        dataValue <- root .:? "data"
+        dataObject <- maybe (fail "GitHub GraphQL response contained no data") pure dataValue
+        repositoryValue <- dataObject .:? "repository"
+        repositoryObject <- maybe (fail "GitHub repository was not found") pure repositoryValue
+        flip (withObject "repository") repositoryObject $ \repository ->
+          GitHubPage
+            <$> parseOptionalConnection parseIssue repository "issues"
+            <*> parseOptionalConnection parsePullRequest repository "pullRequests"
+            <*> pure errors
 
 instance FromJSON PageInfo where
   parseJSON = withObject "pageInfo" $ \object ->
