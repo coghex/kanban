@@ -1015,6 +1015,12 @@ repository at all.
 - Cached data after refresh failure: dashed/dim treatment plus snapshot time.
 - Malformed tracker checklist: tracker remains visible; unparsed children fall
   back to Standalone and the tracker gets an amber parse warning.
+- Partial GraphQL response: a response GitHub answers with both data and
+  errors renders the data it did deliver and reports the errors as a refresh
+  warning, so long as every requested connection arrived; errors accompanying
+  a page the decoder cannot reason about fail the refresh instead. Either way
+  the messages GitHub sent are what the dashboard shows, bounded to one line,
+  never a generic sentence standing in for them.
 - Item-local decode anomaly: the affected card is amber and an amber banner
   names it as `Issue #N`/`PR #N: incomplete data`, naming the first few and
   counting the rest. The card states what is unknown rather than asserting the

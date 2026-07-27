@@ -188,11 +188,12 @@ unicodeIssueTitles =
     Data.Text.pack "\1055\1088\1080\1074\1077\1090 \955 \8730"
   ]
 
--- | A refusal gh reports in a non-ASCII language. Its classification keyword
--- is ASCII, so what the assertion on the message proves is the decoding: a
--- locale-decoded stderr never reached the classifier at all, it threw.
+-- | A refusal gh reports in a non-ASCII language, carrying one of the phrases
+-- 'Kanban.GitHub.classifyFailure' recognizes. That phrase is ASCII, so what
+-- the assertion on the message proves is the decoding: a locale-decoded stderr
+-- never reached the classifier at all, it threw.
 unicodeFailureText :: Text
-unicodeFailureText = Data.Text.pack "gh: authentication token expir\233 \8212 r\233essayez"
+unicodeFailureText = Data.Text.pack "gh: Bad credentials (HTTP 401) \8212 v\233rifiez le jeton"
 
 unicodeFailureMessage :: ByteString.ByteString
 unicodeFailureMessage = TextEncoding.encodeUtf8 unicodeFailureText
