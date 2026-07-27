@@ -6,6 +6,8 @@ module Spec.Support.Json
     githubCappedChecksResponse,
     githubChecksResponse,
     githubPageWith,
+    githubPageWithErrors,
+    graphqlErrorsOnly,
     issueNodeJson,
     pullRequestNodeJson,
     emptyLabelsJson,
@@ -157,6 +159,39 @@ githubPageWith issueNodes pullRequestNodes =
       "\"pullRequests\":{\"nodes\":[" <> intercalate "," pullRequestNodes <> "],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
       "}}}"
     ]
+
+-- | The partial response GraphQL sends for a query it could only partly
+-- resolve: both requested connections present and complete, and an @errors@
+-- array naming what it could not deliver. The cursor is the one GitHub
+-- returns when another page follows, so a test can chain two of these the way
+-- the fetch loop does. Messages are inserted verbatim, so a caller wanting a
+-- JSON escape writes it itself.
+githubPageWithErrors :: [String] -> Maybe String -> [String] -> [String] -> String
+githubPageWithErrors messages nextCursor issueNodes pullRequestNodes =
+  unlines
+    [ "{\"errors\":[" <> intercalate "," (map errorObjectJson messages) <> "],",
+      "\"data\":{\"repository\":{",
+      "\"issues\":{\"nodes\":[" <> intercalate "," issueNodes <> "]," <> pageInfoJson <> "},",
+      "\"pullRequests\":{\"nodes\":[" <> intercalate "," pullRequestNodes <> "]," <> pageInfoJson <> "}",
+      "}}}"
+    ]
+  where
+    pageInfoJson = case nextCursor of
+      Nothing -> "\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}"
+      Just cursor -> "\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"" <> cursor <> "\"}"
+
+-- | The fatal shape: errors and a null @data@, which is what GitHub answers
+-- when the whole query failed rather than part of it.
+graphqlErrorsOnly :: [String] -> String
+graphqlErrorsOnly messages =
+  "{\"errors\":[" <> intercalate "," (map errorObjectJson messages) <> "],\"data\":null}"
+
+-- | A GraphQL error object with the siblings @message@ really arrives beside,
+-- so a decoder that stringified the whole entry rather than reading the one
+-- field would be visible.
+errorObjectJson :: String -> String
+errorObjectJson message =
+  "{\"path\":[\"repository\"],\"message\":\"" <> message <> "\",\"locations\":[{\"line\":1,\"column\":1}]}"
 
 -- | One issue node whose nested connections are supplied verbatim, so a test
 -- can null one out or leave it off the node entirely.

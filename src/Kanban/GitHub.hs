@@ -1,6 +1,9 @@
 module Kanban.GitHub
-  ( -- 'FetchState' and 'graphqlArguments' are internal, exported so the
-    -- suite can assert the exact argv handed to gh without a live request.
+  ( -- 'FetchState', 'advanceState', 'classifyFailure', 'compactError' and
+    -- 'graphqlArguments' are internal, exported so the suite can assert the
+    -- exact argv handed to gh, the way one decoded page advances the fetch,
+    -- and how a failed one is classified and reported, all without a live
+    -- request.
     FetchState (..),
     GhCleanupFailure (..),
     GhCleanupGuard (..),
@@ -9,6 +12,9 @@ module Kanban.GitHub
     groupConfirmedEmpty,
     GhFetchGuard,
     GitHubResult (..),
+    advanceState,
+    classifyFailure,
+    compactError,
     decodeGitHubItems,
     fetchGitHubSnapshot,
     ghFetchCleanupFailure,
@@ -36,7 +42,7 @@ import Data.Aeson
     (.!=),
   )
 import Data.Aeson.Key (Key)
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser, Result (..), parse, parseEither)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -89,7 +95,14 @@ data Connection item = Connection
 
 data GitHubPage = GitHubPage
   { pageIssues :: Maybe (Connection Issue),
-    pagePullRequests :: Maybe (Connection PullRequest)
+    pagePullRequests :: Maybe (Connection PullRequest),
+    -- | The messages from the response's GraphQL @errors@ array, in the order
+    -- GitHub reported them. GraphQL answers a partly-resolvable query with
+    -- both @data@ and @errors@, so these accompany a decoded page rather than
+    -- replacing it: 'advanceState' turns them into a refresh warning when the
+    -- page is structurally complete and folds them into the failure when it
+    -- is not.
+    pageGraphQLErrors :: [Text]
   }
   deriving stock (Eq, Show)
 
@@ -101,7 +114,12 @@ data FetchState = FetchState
     fetchMoreIssues :: Bool,
     fetchMorePullRequests :: Bool,
     issuesTruncated :: Bool,
-    pullRequestsTruncated :: Bool
+    pullRequestsTruncated :: Bool,
+    -- | One warning per page that arrived with GraphQL errors. A refresh spans
+    -- several pages and only the last one builds the result, so a page's
+    -- errors have to be carried here or they are lost with the state that
+    -- decoded them.
+    fetchWarnings :: [Text]
   }
 
 -- | One decoded rollup context. 'checkContextKey' is the deduplication
@@ -205,7 +223,7 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
   where
     reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
 
-    initialState = FetchState [] [] Nothing Nothing True True False False
+    initialState = FetchState [] [] Nothing Nothing True True False False []
 
     fetchPages state
       | not state.fetchMoreIssues && not state.fetchMorePullRequests = do
@@ -217,7 +235,7 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
                   fetchedAt
                   state.issuesTruncated
                   state.pullRequestsTruncated
-          pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot)))
+          pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot <> state.fetchWarnings)))
       | otherwise = do
           pageResult <- fetchPage guard limits repository state
           case pageResult of
@@ -952,8 +970,18 @@ reclaimGhGroup group = go group.ownedProcessGroupMembers groupCleanupPasses
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action)
 
+-- | Folds one decoded page into the fetch, deciding what a response GitHub
+-- answered with errors is worth.
+--
+-- The structural checks below are what separates a partial response worth
+-- rendering from a broken one. A page that passes them holds every connection
+-- this request asked for, so the errors describe fields that are missing from
+-- within items rather than the page itself: the board shows the data and says
+-- what GitHub could not resolve. A page that fails them has a hole the
+-- decoder cannot reason about, and the same messages become the explanation
+-- for the failure instead of a warning beside data nobody should trust.
 advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError FetchState
-advanceState limits previous page = do
+advanceState limits previous page = first explainStructuralFailure $ do
   issueConnection <- requireConnection "issues" previous.fetchMoreIssues page.pageIssues
   pullRequestConnection <- requireConnection "pull requests" previous.fetchMorePullRequests page.pagePullRequests
   let newIssues = maybe [] (.connectionNodes) issueConnection
@@ -973,11 +1001,17 @@ advanceState limits previous page = do
         fetchMoreIssues = moreIssues,
         fetchMorePullRequests = morePullRequests,
         issuesTruncated = previous.issuesTruncated || truncatedIssues,
-        pullRequestsTruncated = previous.pullRequestsTruncated || truncatedPullRequests
+        pullRequestsTruncated = previous.pullRequestsTruncated || truncatedPullRequests,
+        fetchWarnings = previous.fetchWarnings <> pageWarnings
       }
   where
     issueLimit = limits.limitsMaxOpenIssues
     pullRequestLimit = limits.limitsMaxOpenPullRequests
+    pageWarnings = [partialResponseWarning page.pageGraphQLErrors | not (null page.pageGraphQLErrors)]
+    explainStructuralFailure providerError =
+      providerError
+        { providerErrorMessage = withGraphQLErrors page.pageGraphQLErrors providerError.providerErrorMessage
+        }
 
 requireConnection :: Text -> Bool -> Maybe (Connection item) -> Either ProviderError (Maybe (Connection item))
 requireConnection _ False connection = Right connection
@@ -1052,29 +1086,114 @@ boolText :: Bool -> String
 boolText True = "true"
 boolText False = "false"
 
+-- | Sorts a failed @gh@ invocation onto the vocabulary section 17 renders,
+-- which for this path is the choice between @AUTH REQUIRED@ and
+-- @REQUEST ERROR@.
+--
+-- The match is by phrase, and deliberately not by keyword. \"token\" alone
+-- occurs in messages that say nothing about credentials -- a rate limiter's
+-- token bucket, a cursor rejected as an invalid pagination token -- and
+-- @AUTH REQUIRED@ tells a fully authenticated user to go and log in again
+-- over what is usually a transient server error. Misclassifying the other way
+-- costs far less: a real authentication failure reported as @REQUEST ERROR@
+-- still carries gh's own message, which says what to do.
 classifyFailure :: Text -> ProviderErrorKind
 classifyFailure message
-  | any (`Text.isInfixOf` Text.toCaseFold message) ["authentication", "not logged", "oauth", "token"] = AuthenticationRequired
+  | any (`Text.isInfixOf` Text.toCaseFold message) authenticationPhrases = AuthenticationRequired
   | otherwise = RequestFailed
+
+-- | The phrases @gh@ and the GitHub API actually use when the credentials are
+-- what failed, already case-folded so 'classifyFailure' can compare them
+-- against a folded message.
+authenticationPhrases :: [Text]
+authenticationPhrases =
+  [ -- gh's own remediation line, which it prints on every auth failure.
+    "gh auth login",
+    "authentication required",
+    -- The body GitHub returns with an HTTP 401.
+    "requires authentication",
+    -- \"You are not logged into any GitHub hosts.\"
+    "not logged into",
+    -- A token that is present but rejected.
+    "bad credentials"
+  ]
 
 compactError :: String -> Text
 compactError rawMessage =
-  let message = Text.unwords (Text.words (Text.pack rawMessage))
-   in if Text.null message then "GitHub request failed" else Text.take 500 message
+  let message = normalizeSpacing (Text.pack rawMessage)
+   in if Text.null message then "GitHub request failed" else Text.take providerMessageLimit message
 
+-- | How much provider-authored text section 17's single status line will
+-- carry. gh's stderr and GitHub's GraphQL messages are both unbounded, and
+-- both share this line with the counts and the snapshot time.
+providerMessageLimit :: Int
+providerMessageLimit = 500
+
+-- | Collapses the newlines and runs of spaces external text arrives with, so
+-- it occupies one line rather than wrapping the banner.
+normalizeSpacing :: Text -> Text
+normalizeSpacing = Text.unwords . Text.words
+
+-- | Joins a response's GraphQL error messages for display, in the order
+-- GitHub reported them and under the same bound as gh's stderr.
+graphQLErrorSummary :: [Text] -> Text
+graphQLErrorSummary = Text.take providerMessageLimit . Text.intercalate "; "
+
+-- | Adds the messages GitHub sent to the structural reason a response was
+-- rejected. The shape complaint says what the decoder could not find; only
+-- these say why GitHub did not send it.
+withGraphQLErrors :: [Text] -> Text -> Text
+withGraphQLErrors [] reason = reason
+withGraphQLErrors messages reason = reason <> ": " <> graphQLErrorSummary messages
+
+-- | The banner line a structurally complete response carrying errors earns.
+-- The board renders the page it did deliver; this is what says the page is
+-- not the whole answer.
+partialResponseWarning :: [Text] -> Text
+partialResponseWarning messages =
+  "GitHub could not resolve part of this refresh: " <> graphQLErrorSummary messages
+
+-- | One entry of a GraphQL response's @errors@ array. The specification makes
+-- @message@ mandatory, so the fallback covers only a malformed entry -- but a
+-- response already reporting errors is the worst moment to fail decoding over
+-- one of them and surface nothing at all.
+newtype GraphQLError = GraphQLError {graphQLErrorMessage :: Text}
+
+instance FromJSON GraphQLError where
+  parseJSON value = GraphQLError <$> (messageOf value <|> pure "(GitHub reported an error with no message)")
+    where
+      messageOf = withObject "GraphQL error" (fmap normalizeSpacing . (.: "message"))
+
+-- | Decodes the GraphQL envelope. Errors no longer condemn the response on
+-- their own: GraphQL reports a partly-resolvable query as @data@ /and/
+-- @errors@, so what decides the outcome is whether there is a repository page
+-- behind them. When there is not, the messages are the failure's explanation,
+-- which is the whole of what GitHub said about it.
 instance FromJSON GitHubPage where
   parseJSON = withObject "GraphQL response" $ \root -> do
-    errors <- root .:? "errors" .!= ([] :: [Value])
-    unless (null errors) (fail "GitHub GraphQL response contained errors")
-    dataObject <- root .: "data"
-    repositoryValue <- dataObject .:? "repository"
-    repositoryObject <- maybe (fail "GitHub repository was not found") pure repositoryValue
-    withObject "repository" parseRepositoryPage repositoryObject
+    errors <- map graphQLErrorMessage <$> (root .:? "errors" .!= [])
+    -- Everything past the errors is run for its result rather than being left
+    -- to abort the parse on its own. A failure anywhere below -- an absent
+    -- @data@, a connection that is not an object, an item missing a scalar --
+    -- is a response GitHub has already said something about, and letting
+    -- Aeson's text propagate alone would drop that explanation on the floor:
+    -- the exact loss this decoder exists to end. 'parse' rather than
+    -- 'parseEither' because only it leaves the reason unformatted, and the
+    -- caller's own decode adds the one @Error in $@ this should carry.
+    case parse (parseRepositoryPage errors) root of
+      Error reason -> fail (Text.unpack (withGraphQLErrors errors (Text.pack reason)))
+      Success page -> pure page
     where
-      parseRepositoryPage repositoryObject =
-        GitHubPage
-          <$> parseOptionalConnection parseIssue repositoryObject "issues"
-          <*> parseOptionalConnection parsePullRequest repositoryObject "pullRequests"
+      parseRepositoryPage errors root = do
+        dataValue <- root .:? "data"
+        dataObject <- maybe (fail "GitHub GraphQL response contained no data") pure dataValue
+        repositoryValue <- dataObject .:? "repository"
+        repositoryObject <- maybe (fail "GitHub repository was not found") pure repositoryValue
+        flip (withObject "repository") repositoryObject $ \repository ->
+          GitHubPage
+            <$> parseOptionalConnection parseIssue repository "issues"
+            <*> parseOptionalConnection parsePullRequest repository "pullRequests"
+            <*> pure errors
 
 instance FromJSON PageInfo where
   parseJSON = withObject "pageInfo" $ \object ->
