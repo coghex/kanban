@@ -116,6 +116,7 @@ test-suite kanban-test
     Spec.Support.Expect
     Spec.Support.Fixtures
     Spec.Support.Json
+    Spec.Support.Locale
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render

@@ -61,10 +61,12 @@ import Kanban.GitHub
   ( FetchState (..),
     GhCleanupFailure (..),
     GhCleanupGuard (..),
+    GhFailurePhase (..),
     GitHubResult (..),
     confirmsOwnGroupLeadership,
     decodeGitHubItems,
     ghBehindBarrier,
+    ghFailureKind,
     groupConfirmedEmpty,
     graphqlArguments,
     paginationDecision,
@@ -404,6 +406,14 @@ import Spec.Support.Json
     versionThreeCacheFile,
     versionTwoCacheFile
   )
+import Spec.Support.Locale
+  ( LocaleProbe (..),
+    localeProbeVariable,
+    runLocaleProbe,
+    unicodeFailureText,
+    unicodeIssueTitles,
+    withLocaleProbe
+  )
 import Spec.Support.Preflight
   ( BackendFixture (..),
     allowedProbeInvocations,
@@ -478,6 +488,13 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (hClose)
+import System.IO.Error
+  ( doesNotExistErrorType,
+    fullErrorType,
+    mkIOError,
+    permissionErrorType,
+    resourceVanishedErrorType
+  )
 import System.Posix.Files (setFileMode)
 import System.Process
   ( CreateProcess (..),
@@ -492,8 +509,15 @@ import System.Process
 import System.Timeout (timeout)
 import Test.Hspec
 
+-- | Ordinarily the suite. When 'localeProbeVariable' is set this process is
+-- the C-locale child a single test re-ran the binary as, and it runs that
+-- probe instead — see "Spec.Support.Locale" for why the condition cannot be
+-- established from inside an already-started test process.
 main :: IO ()
-main = hspec $ do
+main = lookupEnv localeProbeVariable >>= maybe (hspec suite) runLocaleProbe
+
+suite :: Spec
+suite = do
   ManagedProcess.spec
   describe "review tool process ownership" $ do
     it "keeps two overlapping same-thread invocations independently killable" $
@@ -3742,6 +3766,34 @@ main = hspec $ do
       flagForVariable "issueCursor" firstPageArguments `shouldBe` Nothing
       flagForVariable "pullRequestCursor" firstPageArguments `shouldBe` Nothing
 
+  -- NOT INSTALLED is a claim about the installation, so only a launch that
+  -- failed because there was nothing runnable to launch may make it. The
+  -- phase is what carries that distinction: the same errno means opposite
+  -- things before and after the child exists.
+  describe "gh failure classification" $ do
+    it "reports a gh that is not on PATH as a missing executable" $
+      ghFailureKind GhLaunching (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh"))
+        `shouldBe` ExecutableMissing
+
+    it "reports a gh that cannot be executed as a missing executable" $
+      ghFailureKind GhLaunching (mkIOError permissionErrorType "gh" Nothing (Just "gh"))
+        `shouldBe` ExecutableMissing
+
+    it "reports a launch that ran out of resources as a failed request, not a missing gh" $
+      ghFailureKind GhLaunching (mkIOError fullErrorType "runInteractiveProcess" Nothing Nothing)
+        `shouldBe` RequestFailed
+
+    it "reports a failure after the child exists as a failed request" $
+      ghFailureKind GhRunning (mkIOError resourceVanishedErrorType "hGetContents" Nothing Nothing)
+        `shouldBe` RequestFailed
+
+    -- The regression itself: gh had already launched, so whatever the errno
+    -- says, it is not missing. A classifier that read the exception alone
+    -- would send a user with a working gh off to install it.
+    it "never blames the installation for a does-not-exist error raised after the child exists" $
+      ghFailureKind GhRunning (mkIOError doesNotExistErrorType "hGetContents" Nothing (Just "gh"))
+        `shouldBe` RequestFailed
+
   describe "board refresh gh process group cleanup" $ do
     it "kills the abandoned gh's whole process group, credential-helper descendant included, before it publishes the timeout" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -3831,6 +3883,45 @@ main = hspec $ do
                 providerError.providerErrorKind `shouldBe` AuthenticationRequired
                 Data.Text.unpack providerError.providerErrorMessage `shouldContain` "authentication token expired"
               other -> expectationFailure ("expected a reported gh failure, got " <> show other)
+
+    -- The output is read as bytes and decoded once, leniently, as UTF-8, so a
+    -- response GitHub truncated mid-character is a page with a replacement
+    -- character in it rather than an exception thrown out of the decoder --
+    -- which the locale path reported as a missing executable.
+    it "replaces malformed bytes inside a decoded page instead of failing the refresh" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withFakeGh
+          temporaryRoot
+          -- \377 is never a legal UTF-8 byte anywhere, so it cannot be read
+          -- as a lone continuation or a truncated sequence.
+          [ "printf '%s\\377%s' "
+              <> "'{\"data\":{\"repository\":{\"issues\":{\"nodes\":[{\"number\":41,\"title\":\"Broken "
+              <> "' '"
+              <> "byte\",\"body\":\"B\",\"url\":\"https://example.test/issues/41\","
+              <> "\"createdAt\":\"2026-01-01T00:00:00Z\",\"updatedAt\":\"2026-01-02T00:00:00Z\"}],"
+              <> "\"pageInfo\":{\"hasNextPage\":false}},"
+              <> "\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}'"
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right githubResult) ->
+                map issueTitle githubResult.githubSnapshot.snapshotIssues
+                  `shouldBe` [Data.Text.pack "Broken \65533byte"]
+              other -> expectationFailure ("expected a decoded snapshot, got " <> show other)
+
+    -- The one condition that cannot be established from in here: GHC fixes
+    -- the locale encoding before main runs, so this re-runs the test binary
+    -- as a child under LC_ALL=C and asserts on the bytes it wrote back.
+    it "decodes a non-ASCII page and a non-ASCII failure identically under a C locale" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withLocaleProbe temporaryRoot $ \probe -> do
+          -- Asserted before the decodes, so a fixture that never handed the
+          -- child a C locale reports that rather than passing vacuously.
+          probe.localeProbeLcAll `shouldBe` Data.Text.pack "C"
+          probe.localeProbeTitles `shouldBe` Data.Text.intercalate "\n" unicodeIssueTitles
+          probe.localeProbeFailureKind `shouldBe` Data.Text.pack (show AuthenticationRequired)
+          probe.localeProbeFailureMessage `shouldBe` unicodeFailureText
 
     it "re-kills a gh group recorded by an earlier run before it fetches again, then clears the record" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

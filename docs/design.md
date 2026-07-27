@@ -771,6 +771,12 @@ required scalar, a malformed rollup container, and a nested connection that is
 present but malformed — including one whose `totalCount` is below its own node
 list — all still fail the refresh, which retains the last good snapshot.
 
+`gh`'s output is read as raw bytes and decoded once as UTF-8, replacing
+malformed sequences rather than failing on them. Neither refresh success nor
+decoded text depends on the environment's locale, so a board with non-ASCII
+titles or bodies behaves identically under a UTF-8 locale and under the
+C/POSIX locale an SSH, cron, or launchd session commonly supplies (§1).
+
 No request is retried in a tight loop. Rate limits and transient failures are
 shown to the user while retaining the last good snapshot.
 
@@ -997,7 +1003,11 @@ Errors should remain inside the dashboard unless startup cannot identify a
 repository at all.
 
 - Authentication failure: named provider shows `AUTH REQUIRED`.
-- Missing executable: provider shows `NOT INSTALLED`.
+- Missing executable: provider shows `NOT INSTALLED`. Only a launch that failed
+  because there was nothing runnable to launch reports this — no such file, or
+  a file that cannot be executed. Any other failure to spawn the provider, and
+  anything that goes wrong once it is running, is a request error instead, so a
+  working installation is never reported as absent.
 - Unsupported CLI format or protocol: provider shows `UNSUPPORTED VERSION`.
 - Timeout: provider shows `TIMED OUT` and retains cached data.
 - GitHub truncation: affected count shows its configured cap followed by `+`
