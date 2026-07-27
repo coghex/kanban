@@ -7,8 +7,8 @@ module Main (main) where
 import Brick (BrickEvent (..), Location (..))
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (throwIO, throwTo)
-import Control.Monad (void)
-import Data.Aeson (Value (..), object, (.=))
+import Control.Monad (foldM, void)
+import Data.Aeson (Value (..), eitherDecode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Char (isControl)
@@ -62,6 +62,9 @@ import Kanban.GitHub
     GhCleanupFailure (..),
     GhCleanupGuard (..),
     GitHubResult (..),
+    advanceState,
+    classifyFailure,
+    compactError,
     confirmsOwnGroupLeadership,
     decodeGitHubItems,
     ghBehindBarrier,
@@ -392,8 +395,10 @@ import Spec.Support.Json
     githubChecksResponse,
     githubMixedChecksResponse,
     githubPageWith,
+    githubPageWithErrors,
     githubRerunResponse,
     githubResponse,
+    graphqlErrorsOnly,
     issueNodeJson,
     namelessCheckRunJson,
     pullRequestNodeJson,
@@ -3685,9 +3690,112 @@ main = hspec $ do
       decodeGitHubItems (pageWithRollup "\"statusCheckRollup\":{\"contexts\":{\"nodes\":[]}}") `shouldSatisfy` isLeft
       decodeGitHubItems (pageWithRollup "\"statusCheckRollup\":{}") `shouldSatisfy` isLeft
 
-    it "rejects GraphQL error responses" $
+    it "rejects a response that reported errors and delivered no repository" $
       decodeGitHubItems "{\"errors\":[{\"message\":\"boom\"}],\"data\":{}}"
         `shouldSatisfy` isLeft
+
+    -- Errors with nothing usable behind them still fail the refresh, but the
+    -- line section 17 shows now says what GitHub said. It used to read
+    -- "contained errors" and never the rate limit, NOT_FOUND, or field
+    -- problem that actually stopped the request.
+    it "carries the GraphQL error messages into a fatal failure" $
+      case decodeGitHubItems (LazyByteString.pack (graphqlErrorsOnly ["API rate limit exceeded for user ID 1"])) of
+        Right values -> expectationFailure ("unexpected decode: " <> show values)
+        Left message -> message `shouldSatisfy` isInfixOf "API rate limit exceeded for user ID 1"
+
+    -- Every message, in the order GitHub reported them, folded onto the one
+    -- line the banner has: GraphQL messages routinely arrive with newlines.
+    it "joins every GraphQL message in order onto one line" $
+      case decodeGitHubItems (LazyByteString.pack (graphqlErrorsOnly ["first problem", "second\\n   problem"])) of
+        Right values -> expectationFailure ("unexpected decode: " <> show values)
+        Left message -> message `shouldSatisfy` isInfixOf "first problem; second problem"
+
+    -- The messages are GitHub's and unbounded, and they share that line with
+    -- the counts and the snapshot time, so the aggregate is capped exactly
+    -- where gh's stderr already is.
+    it "caps the joined GraphQL messages at the provider message bound" $
+      case decodeGitHubItems (LazyByteString.pack (graphqlErrorsOnly [replicate 400 'a', replicate 400 'b'])) of
+        Right values -> expectationFailure ("unexpected decode: " <> show values)
+        Left message -> do
+          message `shouldSatisfy` isInfixOf (replicate 400 'a' <> "; " <> replicate 98 'b')
+          message `shouldSatisfy` (not . isInfixOf (replicate 99 'b'))
+
+    let initialFetchState =
+          FetchState
+            { fetchedIssues = [],
+              fetchedPullRequests = [],
+              issueCursor = Nothing,
+              pullRequestCursor = Nothing,
+              fetchMoreIssues = True,
+              fetchMorePullRequests = True,
+              issuesTruncated = False,
+              pullRequestsTruncated = False,
+              fetchWarnings = []
+            }
+
+    -- GraphQL answers a partly-resolvable query with data and errors
+    -- together. This page is structurally complete -- both requested
+    -- connections, both paginated to the end -- so the board shows what did
+    -- arrive and the messages become the warning saying it is not everything.
+    it "keeps a structurally complete response that carried errors, as a warning" $ do
+      let response =
+            githubPageWithErrors
+              ["Could not resolve reviewDecision for pull request 9"]
+              Nothing
+              [issueNodeJson 41 [emptyLabelsJson, emptyAssigneesJson]]
+              [pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson]]
+      case eitherDecode (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right page -> case advanceState defaultLimitsConfig initialFetchState page of
+          Left providerError -> expectationFailure ("unexpectedly failed: " <> show providerError)
+          Right state -> do
+            map (.issueNumber) state.fetchedIssues `shouldBe` [41]
+            map (.pullRequestNumber) state.fetchedPullRequests `shouldBe` [9]
+            state.fetchWarnings
+              `shouldBe` ["GitHub could not resolve part of this refresh: Could not resolve reviewDecision for pull request 9"]
+
+    -- A refresh spans pages and only the last one builds the result, so a
+    -- warning an earlier page raised has to survive the pages after it -- and
+    -- none of the items it arrived with may be dropped on the way.
+    it "accumulates one warning per page without losing decoded items" $ do
+      let pageJson messages cursor issueNumber pullRequestNumber =
+            githubPageWithErrors
+              messages
+              cursor
+              [issueNodeJson issueNumber [emptyLabelsJson, emptyAssigneesJson]]
+              [pullRequestNodeJson pullRequestNumber [emptyLabelsJson, emptyClosingIssuesJson]]
+          pages =
+            [ pageJson ["field errored on issue 41"] (Just "cursor-1") 41 9,
+              pageJson ["field errored on issue 42"] Nothing 42 10
+            ]
+      case traverse (eitherDecode . LazyByteString.pack) pages of
+        Left message -> expectationFailure message
+        Right decoded -> case foldM (advanceState defaultLimitsConfig) initialFetchState decoded of
+          Left providerError -> expectationFailure ("unexpectedly failed: " <> show providerError)
+          Right state -> do
+            map (.issueNumber) state.fetchedIssues `shouldBe` [41, 42]
+            map (.pullRequestNumber) state.fetchedPullRequests `shouldBe` [9, 10]
+            state.fetchWarnings
+              `shouldBe` [ "GitHub could not resolve part of this refresh: field errored on issue 41",
+                           "GitHub could not resolve part of this refresh: field errored on issue 42"
+                         ]
+
+    -- Errors beside data the decoder cannot reason about are not a partial
+    -- response: a connection this request asked for is missing outright. The
+    -- page fails as it always did, and the messages explain the hole instead
+    -- of leaving a bare shape complaint with no cause.
+    it "fails a response whose errors came with an incomplete page, keeping the messages" $ do
+      let response =
+            "{\"errors\":[{\"message\":\"Timeout resolving pullRequests\"}],\"data\":{\"repository\":"
+              <> "{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}"
+      case eitherDecode response of
+        Left message -> expectationFailure message
+        Right page -> case advanceState defaultLimitsConfig initialFetchState page of
+          Right state -> expectationFailure ("unexpectedly advanced: " <> show state.fetchWarnings)
+          Left providerError -> do
+            providerError.providerErrorKind `shouldBe` InvalidResponse
+            providerError.providerErrorMessage
+              `shouldBe` "GitHub response omitted the pull requests connection: Timeout resolving pullRequests"
 
     it "marks a capped connection incomplete instead of requesting beyond its limit" $
       paginationDecision 250 250 True (Just "next") `shouldBe` Right (False, Nothing, True)
@@ -3697,6 +3805,45 @@ main = hspec $ do
 
     it "requires a cursor whenever another page is needed" $
       paginationDecision 250 100 True Nothing `shouldSatisfy` isLeft
+
+  describe "GitHub failure classification" $ do
+    -- Verbatim from gh 2.83.1: the signed-out text it prints instead of
+    -- running a command, the same state reported by `gh auth status`, and
+    -- what it prints when a token is present but rejected. Phrase matching
+    -- only earns its keep if it still recognizes these.
+    it "reports a real gh authentication failure as authentication" $ do
+      classifyFailure
+        ( "To get started with GitHub CLI, please run:  gh auth login\n"
+            <> "Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token."
+        )
+        `shouldBe` AuthenticationRequired
+      classifyFailure "You are not logged into any GitHub hosts. To log in, run: gh auth login" `shouldBe` AuthenticationRequired
+      classifyFailure "gh: Bad credentials (HTTP 401)" `shouldBe` AuthenticationRequired
+      -- The API's own 401 body, which gh passes through for endpoints that
+      -- answer with it rather than with Bad credentials.
+      classifyFailure "gh: Requires authentication (HTTP 401)" `shouldBe` AuthenticationRequired
+      classifyFailure "GraphQL: Authentication required (repository)" `shouldBe` AuthenticationRequired
+      -- Recognition is case-insensitive, and does not depend on a phrase
+      -- arriving beside any of the others.
+      classifyFailure "BAD CREDENTIALS" `shouldBe` AuthenticationRequired
+      classifyFailure "gh: You Are Not Logged Into github.com" `shouldBe` AuthenticationRequired
+
+    -- The word "token" says nothing about credentials. AUTH REQUIRED over a
+    -- rate limiter's token bucket sends a fully authenticated user off to log
+    -- in again for what is a transient server error.
+    it "does not read a bare token mention as an authentication failure" $ do
+      classifyFailure "GraphQL: token bucket exhausted, retry after 60s" `shouldBe` RequestFailed
+      classifyFailure "GraphQL: invalid pagination token" `shouldBe` RequestFailed
+      classifyFailure "gh: OAuth application rate limit reached" `shouldBe` RequestFailed
+
+    -- Reclassifying those is only half of it: what the user is left with has
+    -- to be gh's own text, folded onto one line rather than replaced by a
+    -- category name.
+    it "preserves gh's own text for a failure that is not about credentials" $ do
+      compactError "GraphQL: token bucket exhausted,\n  retry after 60s"
+        `shouldBe` "GraphQL: token bucket exhausted, retry after 60s"
+      compactError "GraphQL: invalid pagination token"
+        `shouldBe` "GraphQL: invalid pagination token"
 
   describe "GraphQL argument construction" $ do
     -- GitHub permits all-numeric accounts and repositories, and gh's typed
@@ -3713,7 +3860,8 @@ main = hspec $ do
               fetchMoreIssues = True,
               fetchMorePullRequests = True,
               issuesTruncated = False,
-              pullRequestsTruncated = False
+              pullRequestsTruncated = False,
+              fetchWarnings = []
             }
         firstPageState = pagedState {issueCursor = Nothing, pullRequestCursor = Nothing}
         pagedArguments = graphqlArguments defaultLimitsConfig numericRepository pagedState
@@ -3817,11 +3965,14 @@ main = hspec $ do
                 githubResult.githubSnapshot.snapshotPullRequests `shouldBe` []
               other -> expectationFailure ("expected a decoded snapshot, got " <> show other)
 
+    -- The stderr is gh 2.83.1's own text for a token it was given and the
+    -- API rejected, so the refresh is reporting a failure gh can really
+    -- produce rather than one shaped to match the classifier.
     it "leaves a failing gh's exit status and stderr untouched" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withFakeGh
           temporaryRoot
-          [ "printf '%s\\n' 'gh: authentication token expired' >&2",
+          [ "printf '%s\\n' 'gh: Bad credentials (HTTP 401)' >&2",
             "exit 1"
           ]
           $ do
@@ -3829,7 +3980,7 @@ main = hspec $ do
             case outcome of
               BoardRefreshCompleted (Left providerError) -> do
                 providerError.providerErrorKind `shouldBe` AuthenticationRequired
-                Data.Text.unpack providerError.providerErrorMessage `shouldContain` "authentication token expired"
+                Data.Text.unpack providerError.providerErrorMessage `shouldContain` "Bad credentials (HTTP 401)"
               other -> expectationFailure ("expected a reported gh failure, got " <> show other)
 
     it "re-kills a gh group recorded by an earlier run before it fetches again, then clears the record" $
