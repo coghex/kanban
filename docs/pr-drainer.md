@@ -23,6 +23,29 @@ than acting on this checkout's job behind its back. Point both at one
 repository by setting `remote_name` in the shared configuration, which moves
 the dashboard and the drainer together.
 
+### Changing `remote_name` after installing
+
+An installed job is pinned to the repository it was installed for: its plist
+records that identity, and its LaunchAgent refuses to drain anything if the
+checkout stops resolving to it. So changing `remote_name` in the shared
+configuration does not silently re-point an existing drainer at whatever
+repository the new remote names — it stops that drainer instead, with a line in
+its own service log saying so.
+
+Re-run the installer to pick the change up:
+
+```console
+python3 tools/install_drainer.py
+```
+
+That installs a job for the repository now configured. The superseded job stays
+loaded but inert; remove it when convenient with
+
+```console
+launchctl bootout gui/$(id -u)/com.coghex.drain-prs.<old-slug>
+rm ~/Library/LaunchAgents/com.coghex.drain-prs.<old-slug>.plist
+```
+
 ## Install
 
 The installer is for macOS and does not require `sudo`.

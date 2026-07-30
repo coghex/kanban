@@ -429,9 +429,25 @@ def require_requested_identity(job: DrainerJob, requested: str | None) -> None:
         raise ServiceError(
             f"--repo {requested} names {wanted}, but {job.repo_path} is a checkout of "
             f"{job.identity}; refusing to control another repository's drainer. "
-            "Set remote_name in the shared Kanban configuration so the dashboard "
-            "and the drainer resolve one repository."
+            "Restore remote_name in the shared Kanban configuration, or re-run "
+            "tools/install_drainer.py to install a job for the repository it now names."
         )
+
+
+def requested_job(repo_path: Path, requested: str | None, fallback: DrainerJob) -> DrainerJob:
+    """The job the *caller* believes it is addressing.
+
+    Its paths are a pure function of the identity, so this reconstructs the
+    installed job's log directory even when the checkout no longer resolves to
+    that identity — which is exactly when a refusal has to be readable, since
+    launchd's stdout and stderr, and `logs`, all still point there.
+    """
+    if requested is None:
+        return fallback
+    try:
+        return job_for_identity(repo_path, normalize_identity(requested))
+    except ServiceError:
+        return fallback
 
 
 def utc_stamp() -> str:
@@ -910,6 +926,15 @@ def render_plist(job: DrainerJob) -> bytes:
             str(CONTROLLER_PATH),
             "--path",
             str(job.repo_path),
+            # The identity this label, and every path beside it, was derived
+            # from — recorded here because the plist outlives the configuration
+            # it was written from. Without it the runner would re-resolve the
+            # identity at launch, and a shared `remote_name` changed after
+            # installation would silently point this job at another
+            # repository's status file, incidents and logs while the dashboard
+            # could neither discover nor control it.
+            "--repo",
+            job.identity,
             "run",
         ],
         "WorkingDirectory": str(job.repo_path),
@@ -1529,7 +1554,27 @@ def drainer_command(job: DrainerJob) -> list[str]:
     return command
 
 
-def run_service(job: DrainerJob) -> int:
+def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
+    """Run the drainer for this job, first proving the job is still the one the
+    LaunchAgent was installed for.
+
+    `requested_identity` is what the plist recorded at installation. A checkout
+    that no longer resolves to it means the shared configuration's remote
+    changed underneath an installed job, so this exits having drained nothing
+    rather than writing another repository's status file and logs. It stays
+    refused until the installer is re-run, which is what mints the job for
+    whichever repository the configuration now names.
+    """
+    try:
+        require_requested_identity(job, requested_identity)
+    except ServiceError as exc:
+        # Into the installed job's own log directory, not this run's: that is
+        # where the plist sends stdout and stderr, and where `logs` looks.
+        service_log(
+            requested_job(job.repo_path, requested_identity, job),
+            f"PR drainer did not start: {exc}",
+        )
+        return 0
     try:
         require_default_branch(job.repo_path, job.remote_name)
     except ServiceError as exc:
@@ -1671,9 +1716,12 @@ def main() -> int:
         if not (repo_path / ".git").exists():
             raise ServiceError(f"Repository path has no .git entry: {repo_path}")
         job = resolve_job(repo_path)
-        require_requested_identity(job, args.repo)
+        # `run` checks the same assertion inside the runner, which can report a
+        # mismatch into the installed job's log rather than only onto a stderr
+        # stream launchd routes by the plist's own paths.
         if args.command == "run":
-            return run_service(job)
+            return run_service(job, args.repo)
+        require_requested_identity(job, args.repo)
         if args.command == "install":
             value = install_job(job)
         elif args.command == "start":

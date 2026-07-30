@@ -320,6 +320,8 @@ class ControllerConfigurationTests(RedirectedControllerTestCase):
                 str(self.install_dir / "drain_prs_service.py"),
                 "--path",
                 str(repo),
+                "--repo",
+                "acme/widgets",
                 "run",
             ],
         )
@@ -487,6 +489,90 @@ class RequestedIdentityTests(RedirectedControllerTestCase):
         self.assertIn("upstream-owner/widgets", message)
         self.assertIn("acme/widgets", message)
         self.assertIn("remote_name", message)
+
+
+class InstalledJobIdentityTests(RedirectedControllerTestCase):
+    """A plist outlives the configuration it was written from, so the identity
+    its label was derived from travels in it."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout(
+            "widgets",
+            "git@github.com:acme/widgets.git",
+            upstream="git@github.com:upstream-owner/widgets.git",
+        )
+        self.job = drain_prs_service.resolve_job(self.repo)
+
+    def _config_naming(self, remote_name):
+        config = self.root / f"{remote_name}.toml"
+        config.write_text(f'remote_name = "{remote_name}"\n', encoding="utf-8")
+        return mock.patch.object(
+            drain_prs_service,
+            "discovery_remote_name",
+            return_value=remote_name,
+        )
+
+    def test_the_installed_plist_names_the_identity_its_label_came_from(self):
+        self.install(self.job)
+        arguments = plistlib.loads(self.job.plist_path.read_bytes())["ProgramArguments"]
+        self.assertEqual(arguments[-3:], ["--repo", "acme/widgets", "run"])
+        self.assertIn(drain_prs_service.repository_slug("acme/widgets"), self.job.label)
+
+    def test_the_runner_drains_nothing_once_the_configured_remote_moves(self):
+        # The failure this prevents: the shared remote_name changes after
+        # installation, the old label re-resolves as the *other* repository,
+        # and it drains under that repository's status file, incidents and
+        # logs while the dashboard can neither discover nor control it.
+        self.install(self.job)
+        with self._config_naming("upstream"):
+            moved = drain_prs_service.resolve_job(self.repo)
+            self.assertEqual(moved.identity, "upstream-owner/widgets")
+            with (
+                mock.patch.object(drain_prs_service, "require_default_branch") as branch,
+                mock.patch.object(drain_prs_service.subprocess, "Popen") as popen,
+            ):
+                result = drain_prs_service.run_service(moved, "acme/widgets")
+
+        self.assertEqual(result, 0)
+        popen.assert_not_called()
+        branch.assert_not_called()
+        # Nothing was written under the identity the runner would have moved to.
+        self.assertFalse(moved.status_path.exists())
+        self.assertFalse(moved.log_dir.exists())
+        # And the refusal is readable where the plist sends this job's output.
+        service_log = self.job.service_log_path.read_text(encoding="utf-8")
+        self.assertIn("acme/widgets", service_log)
+        self.assertIn("upstream-owner/widgets", service_log)
+        self.assertIn("install_drainer.py", service_log)
+
+    def test_the_runner_still_starts_while_the_identity_matches(self):
+        with (
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(
+                drain_prs_service, "service_log"
+            ),
+            mock.patch.object(drain_prs_service.subprocess, "Popen") as popen,
+        ):
+            popen.return_value.pid = os.getpid()
+            popen.return_value.wait.return_value = 0
+            with mock.patch.object(drain_prs_service, "write_incident") as incident:
+                drain_prs_service.run_service(self.job, "acme/widgets")
+        popen.assert_called_once()
+        incident.assert_called_once()
+
+    def test_a_reinstall_after_the_change_mints_the_job_now_configured(self):
+        self.install(self.job)
+        with self._config_naming("upstream"):
+            moved = drain_prs_service.resolve_job(self.repo)
+            self.install(moved)
+            arguments = plistlib.loads(moved.plist_path.read_bytes())["ProgramArguments"]
+        self.assertEqual(arguments[-3:], ["--repo", "upstream-owner/widgets", "run"])
+        self.assertNotEqual(moved.plist_path, self.job.plist_path)
+        self.assertEqual(
+            set(self.read_record()["repositories"]),
+            {"acme/widgets", "upstream-owner/widgets"},
+        )
 
 
 class DiscoveryRecordTests(RedirectedControllerTestCase):

@@ -941,8 +941,18 @@ a countdown.
   repository. Neither `--repo OWNER/NAME` nor a `--config` naming another
   remote can therefore select or create another repository's drainer, or make
   the dashboard act on this checkout's job while reporting a different
-  repository. The refusal names the shared configuration's `remote_name` as
-  what moves the dashboard and the drainer together.
+  repository. The refusal names the shared configuration's `remote_name`, and
+  re-running the installer, as what moves the dashboard and the drainer
+  together.
+- The installed plist records the identity its label was derived from, and the
+  launchd runner is held to it by the same check. A plist outlives the
+  configuration it was written from, so a runner that re-derived its identity
+  at launch would follow a changed `remote_name` into another repository's
+  status file, incidents, and logs under a label the dashboard cannot
+  discover. Instead the job drains nothing, writes the refusal to its own
+  service log, and stays refused until the installer is re-run — which mints
+  the job for whichever repository the configuration now names, leaving the
+  superseded one inert.
   A second checkout of the same repository is that repository's own drainer,
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
@@ -1266,6 +1276,9 @@ repository, whose label is derived from that repository's normalized identity.
   before starting it, refuse a second concurrent drainer for the same canonical
   repository from another checkout, and retire the machine-wide singleton that
   predates per-repository jobs before its replacement starts.
+- Record the installed identity in the plist and hold the launchd runner to it,
+  so a configuration change after installation stops that job instead of
+  re-pointing it at another repository.
 - Decode the managed wrapper's structured status and incident data.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.

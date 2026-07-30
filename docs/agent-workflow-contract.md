@@ -199,7 +199,10 @@ everything else.
   identity but that one, including another remote of the same checkout, so
   neither a `kanban --repo` nor a `kanban --config` override can select or
   create another repository's drainer, or act on this checkout's job while the
-  dashboard reports a different repository.
+  dashboard reports a different repository. The installed plist carries the
+  same `--repo` for its own `run` invocation, so a shared `remote_name` changed
+  after installation stops that job rather than re-pointing it: it drains
+  nothing and logs the refusal until `tools/install_drainer.py` is re-run.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
   notifications. A `--pr` run additionally writes exactly one versioned JSON
   result document to stdout — the pull request, its outcome (`merged`,
