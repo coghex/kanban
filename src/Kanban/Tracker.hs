@@ -144,9 +144,13 @@ splitIssueReference text = case Text.breakOn "#" text of
 -- ahead of their keyless siblings and could pick the wrong primary tracker.
 findImplementationKey :: Text -> Maybe Text
 findImplementationKey contents =
-  keyAtStart contents <|> (keyAtStart . afterSeparator . snd =<< splitIssueReference contents)
+  keyAtStart contents <|> (keyAtStart =<< (afterSeparator . snd =<< splitIssueReference contents))
   where
-    afterSeparator = Text.stripStart . Text.dropWhile isKeySeparator . Text.stripStart
+    -- The separator is part of the position rather than optional spacing, so a
+    -- key that merely follows the reference is not in the after-reference one.
+    afterSeparator text =
+      let (separators, rest) = Text.span isKeySeparator (Text.stripStart text)
+       in if Text.null separators then Nothing else Just (Text.stripStart rest)
 
 -- A key is recognized only when it opens the text and is closed by a colon, as
 -- in "A1:", "**A1:**", or "_A1:_". Emphasis is skipped on either side of the

@@ -3532,6 +3532,9 @@ suite = do
       keysUnderChildren "- [ ] _A1:_ #742 — Underscored ahead of the reference\n" `shouldBe` [Just "A1"]
       keysUnderChildren "- [ ] #742 - A1: ASCII hyphen separator\n" `shouldBe` [Just "A1"]
       keysUnderChildren "- [ ] #742 – A1: En dash separator\n" `shouldBe` [Just "A1"]
+      -- The separator is part of the after-reference position, so a key that
+      -- merely follows the reference is not in it.
+      keysUnderChildren "- [ ] #742 A1: No separator after the reference\n" `shouldBe` [Nothing]
 
     it "leaves key-shaped words elsewhere in a child title keyless" $ do
       keysUnderChildren "- [x] **#88 — Move assets to S3 storage**\n" `shouldBe` [Nothing]
