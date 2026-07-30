@@ -9,7 +9,8 @@ module Spec.Support.Env
     permissionsOf,
     waitForFileToExist,
     ignoringIOException,
-    installFakeExecutable
+    installFakeExecutable,
+    withFakeOnPath
   )
 where
 
@@ -17,8 +18,10 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.Maybe (fromMaybe)
 import System.Directory
-  ( doesFileExist,
+  ( createDirectoryIfMissing,
+    doesFileExist,
     getTemporaryDirectory,
     removePathForcibly
   )
@@ -34,6 +37,19 @@ import System.Posix.Files
   )
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (FileMode)
+
+-- | Puts one shell script first on PATH under @name@, so whatever resolves
+-- that name — the board's @gh@, a census's @ps@, a repository probe's
+-- @git@ — drives the script instead of the real thing. The body is written
+-- as bytes, so a fake can emit output no encoding would accept.
+withFakeOnPath :: FilePath -> (String, [ByteString.ByteString]) -> IO result -> IO result
+withFakeOnPath temporaryRoot (name, body) action = do
+  let binaryRoot = temporaryRoot </> "bin"
+  createDirectoryIfMissing True binaryRoot
+  ByteString.writeFile (binaryRoot </> name) (ByteString.unlines ("#!/bin/sh" : body))
+  setFileMode (binaryRoot </> name) 0o700
+  originalPath <- fromMaybe "" <$> lookupEnv "PATH"
+  withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) action
 
 installFakeExecutable :: FilePath -> (String, [ByteString.ByteString]) -> IO ()
 installFakeExecutable binaryRoot (name, body) = do

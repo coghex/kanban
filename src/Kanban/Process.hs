@@ -40,11 +40,12 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
+import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import System.Exit (ExitCode (..))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (CPid)
 import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (ProcessHandle, getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
+import System.Process (ProcessHandle, getPid, proc, terminateProcess, waitForProcess)
 import Text.Read (readMaybe)
 
 data ProcessIdentity = ProcessIdentity
@@ -137,13 +138,22 @@ managedProcessStopsWithDashboard :: ManagedProcess -> Bool
 managedProcessStopsWithDashboard (LocalManagedProcess _ _) = True
 managedProcessStopsWithDashboard (PersistentManagedProcess _) = False
 
+-- | The census every liveness check in this module rests on. `ps` output is
+-- captured as bytes and decoded once, leniently, rather than through the
+-- locale's encoding: a command line carrying a byte the active locale
+-- cannot decode used to raise an 'IOException' here, which
+-- 'defaultProcessSnapshot' then retried into the same deterministic
+-- failure, and the fail-closed contract turned that into a refusal to
+-- refresh, solve or review at all (issue #172). A row is now parsed with
+-- the undecodable byte replaced, which keeps it in the census in its
+-- original position rather than losing the whole snapshot to it.
 readProcessSnapshot :: IO (Either Text [ProcessIdentity])
 readProcessSnapshot = do
-  result <- try @IOException (readCreateProcessWithExitCode (proc "ps" ["-axo", "pid=,ppid=,pgid=,stat=,lstart=,command="]) "")
+  result <- try @IOException (readProcessBytes (proc "ps" ["-axo", "pid=,ppid=,pgid=,stat=,lstart=,command="]))
   pure $ case result of
     Left exception -> Left (Text.pack (show exception))
-    Right (ExitFailure code, _, diagnostics) -> Left ("ps exited " <> Text.pack (show code) <> ": " <> Text.strip (Text.pack diagnostics))
-    Right (ExitSuccess, output, _) -> Right (mapMaybeProcessLine (Text.lines (Text.pack output)))
+    Right (ExitFailure code, _, diagnostics) -> Left ("ps exited " <> Text.pack (show code) <> ": " <> Text.strip (decodeCommandText diagnostics))
+    Right (ExitSuccess, output, _) -> Right (mapMaybeProcessLine (Text.lines (decodeCommandText output)))
 
 -- | A recorded identity survives into `snapshot` only if the PID it names is
 -- still held by a process with the same start time; a reused PID never
