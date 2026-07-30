@@ -67,6 +67,7 @@ import Data.Maybe (isNothing, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction)
 import Kanban.Review (canonicalIssueReviewerPath)
 import Kanban.Solve (SolverBrand (..))
@@ -74,7 +75,7 @@ import System.Directory (doesFileExist, doesPathExist, findExecutable, pathIsSym
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Error (catchIOError)
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.Process (CreateProcess (..), proc)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
@@ -859,14 +860,21 @@ worseObservation left right = case (left, right) of
 
 -- | Bounded, non-interactive, output-capturing probe. Empty stdin and a
 -- hard timeout keep a probe from ever waiting on a prompt.
+--
+-- Output is captured as bytes and decoded leniently, so what reaches the
+-- classifiers is the CLI's real exit status and its real output. Decoding
+-- through the locale's encoding instead meant one byte it could not read —
+-- from a version banner, a sign-in message, or a plugin listing — was
+-- raised as an 'IOException' and reported as a probe that could not be run,
+-- replacing the provider's own answer with a decoder failure (issue #172).
 runProbe :: FilePath -> FilePath -> [String] -> IO ProbeResult
 runProbe workingDirectory executable arguments = do
   let spec = (proc executable arguments) {cwd = Just workingDirectory}
-  outcome <- timeout probeTimeoutMicros (try (readCreateProcessWithExitCode spec ""))
+  outcome <- timeout probeTimeoutMicros (try (readProcessBytes spec))
   pure $ case outcome of
     Nothing -> Left (Text.pack (takeFileName' executable) <> " " <> Text.unwords (map Text.pack arguments) <> " timed out")
     Just (Left exception) -> Left (Text.pack (show (exception :: IOException)))
-    Just (Right (code, out, err)) -> Right (code, Text.pack out <> Text.pack err)
+    Just (Right (code, out, err)) -> Right (code, decodeCommandText out <> decodeCommandText err)
 
 takeFileName' :: FilePath -> FilePath
 takeFileName' = reverse . takeWhile (/= '/') . reverse

@@ -17,10 +17,9 @@ import Kanban.Domain
 import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..))
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
 import Kanban.UI (BoardRefreshOutcome (..), runBoardRefreshWith)
-import Spec.Support.Env (withEnvironmentValue)
+import Spec.Support.Env (withEnvironmentValue, withFakeOnPath)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import System.Directory (createDirectoryIfMissing)
-import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
 import Test.Hspec
@@ -75,13 +74,7 @@ forcedCleanupRun temporaryRoot githubSeconds psFailures = do
 -- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
 -- it instead of the real thing.
 withFakeGh :: FilePath -> [ByteString.ByteString] -> IO result -> IO result
-withFakeGh temporaryRoot body action = do
-  let binaryRoot = temporaryRoot </> "bin"
-  createDirectoryIfMissing True binaryRoot
-  ByteString.writeFile (binaryRoot </> "gh") (ByteString.unlines ("#!/bin/sh" : body))
-  setFileMode (binaryRoot </> "gh") 0o700
-  originalPath <- maybe "" id <$> lookupEnv "PATH"
-  withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) action
+withFakeGh temporaryRoot body = withFakeOnPath temporaryRoot ("gh", body)
 
 -- | Runs a board refresh against whatever @gh@ is on PATH and reports both
 -- the published outcome and the process table as of the exact moment it was

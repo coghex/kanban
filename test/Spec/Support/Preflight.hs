@@ -21,9 +21,11 @@ module Spec.Support.Preflight
     readyCodexFake,
     signedOutCodexFake,
     bundlelessCodexFake,
+    undecodableCodexFake,
     readyClaudeFake,
     readyGitHubFake,
     signedOutGitHubFake,
+    hangingGitHubFake,
     python3Fake
   )
 where
@@ -232,6 +234,23 @@ bundlelessCodexFake =
     ]
   )
 
+-- | A perfectly healthy codex whose banner and sign-in message each carry
+-- one byte no locale can decode. \\377 is never legal UTF-8, so it stands in
+-- for both the C-locale case and genuinely malformed provider output. Every
+-- probe still exits and still says what it means; only the decoder is
+-- given something to choke on.
+undecodableCodexFake :: (String, [ByteString.ByteString])
+undecodableCodexFake =
+  ( "codex",
+    [ "case \"$*\" in",
+      "  '--version') printf 'codex-cli 0.144.6\\377\\n' ;;",
+      "  'login status') printf 'Not logged in\\377\\n'; exit 1 ;;",
+      "  'plugin list --json') printf '%s\\n' '{\"installed\":[{\"pluginId\":\"kanban@kanban\",\"installed\":true,\"enabled\":true}]}' ;;",
+      "  *) exit 1 ;;",
+      "esac"
+    ]
+  )
+
 readyClaudeFake :: (String, [ByteString.ByteString])
 readyClaudeFake =
   ( "claude",
@@ -263,6 +282,11 @@ signedOutGitHubFake =
       "esac"
     ]
   )
+
+-- | A gh that never answers and never exits, so the probe's own timeout is
+-- the only thing that can end it.
+hangingGitHubFake :: (String, [ByteString.ByteString])
+hangingGitHubFake = ("gh", ["while :; do sleep 1; done"])
 
 -- | Only ever resolved, never run: the canonical review backend's
 -- interpreter has to exist for the backend check to be about the backend.
