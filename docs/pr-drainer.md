@@ -367,7 +367,10 @@ python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 Every command selects the repository `--path` is a checkout of, including
 `logs`, which shows that repository's own dated log. Add
 `--repo OWNER/NAME` to assert which repository you expect; the controller
-refuses it when the checkout's remote says otherwise.
+refuses it unless some remote of that checkout names it. Kanban passes this
+automatically, which is how a dashboard started with `--repo` or with a
+`--config` naming a different remote still controls this checkout's own
+drainer — the assertion is a guard, and never changes which job is acted on.
 
 Do not run `drain_prs.py` directly during normal operation, apart from the
 single-pull-request mode above, which is meant to be invoked on request.

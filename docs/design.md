@@ -928,16 +928,25 @@ a countdown.
   Kanban derives none of those: it selects the entry by its own normalized
   repository identity, reads the plist path from that entry, and reads the
   controller command from the plist, which stays authoritative for what launchd
-  runs. Each way that lookup can fail — a host that is not macOS, no document,
+  runs. When no entry carries that identity, the lookup falls back to the entry
+  recorded for this exact checkout: a dashboard configured with `--repo` or
+  with a `--config` naming a different remote is about the same checkout the
+  installer filed under its own configuration's remote, and must not report a
+  drainer it installed itself as not installed. The fallback reaches no other
+  repository's job — an entry names one checkout — and a checkout named by two
+  entries is ambiguous rather than guessed at. Each way the lookup can fail — a
+  host that is not macOS, no document,
   no entry for this repository, an entry that does not name a job, or a plist
   that cannot be read — is reported as its own status naming the remediation,
   never as a raw exception. Discovery then reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
   and stop operations run asynchronously and expose transitional UI state.
   Every controller call includes both the dashboard's resolved repository root
-  and its repository identity; the controller resolves the checkout's own
-  remote and refuses an identity that names a different repository, so
-  `--repo OWNER/NAME` can never select or create another repository's drainer.
+  and its repository identity. That identity is a guard, never a selector: the
+  controller accepts it only when some remote of the checkout names that
+  repository, and acts on the job the checkout's own discovery remote names, so
+  no dashboard configuration can select or create a second drainer identity for
+  one checkout, or reach a repository the checkout has nothing to do with.
   A second checkout of the same repository is that repository's own drainer,
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
