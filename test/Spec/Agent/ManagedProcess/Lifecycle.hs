@@ -15,7 +15,7 @@ import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import Kanban.Domain
 import Kanban.Process
   ( IdentityPresence (..),
@@ -59,6 +59,7 @@ import Kanban.Worker
     WorkerStatus (..),
     WorkerTask (..),
     acquireWorkerLease,
+    collectWorkerCacheWith,
     consumeJournalLines,
     discoverWorkerHistory,
     monitorWorker,
@@ -70,7 +71,7 @@ import Kanban.Worker
     terminateWorkerWith,
     waitForWorkerStart
   )
-import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Env (permissionsOf, withEnvironmentValue, withFakeOnPath, withFileCreationMask, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
 import Spec.Support.Fixtures (epoch)
 import Spec.Support.Process
@@ -1484,3 +1485,319 @@ examples = do
                 leaseReleased `shouldBe` False
                 finalEvents <- readIORef collected
                 finalEvents `shouldBe` [WorkerFinished SolveCompleted]
+
+    -- §16 requires 0600 on every file Kanban creates, and a worker journal
+    -- carries issue bodies and whole agent transcripts for repositories that
+    -- may well be private. The mask here is fully permissive on purpose: an
+    -- append that merely inherited the umask would land at 0666, so only the
+    -- code forcing the mode can produce this result.
+    it "creates a worker journal as 0600 under a permissive umask" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = (workerFixtureSpec repository (WorkerId "solve-900-journal") 900) {workerCreatedAt = now}
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-900-journal.spec.json"
+            eventPath = workerRoot </> "solve-900-journal.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
+            withFileCreationMask 0o000 $ do
+              runWorker specPath `shouldReturn` Right ()
+              permissionsOf eventPath `shouldReturn` 0o600
+
+    -- A journal an earlier release created before the mode was enforced has
+    -- to be tightened before this call appends more private bytes to it,
+    -- rather than left for a rewrite that never comes: nothing else in the
+    -- worker directory ever rewrites a journal in place.
+    it "tightens a permissive journal an earlier release left behind, without losing it" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = (workerFixtureSpec repository (WorkerId "solve-901-journal") 901) {workerCreatedAt = now}
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            specPath = workerRoot </> "solve-901-journal.spec.json"
+            eventPath = workerRoot </> "solve-901-journal.events.jsonl"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        LazyByteString.writeFile specPath (encode spec)
+        ByteString.writeFile eventPath "{\"legacy\":true}\n"
+        setFileMode eventPath 0o644
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withFakeOnPath temporaryRoot ("codex", completingProviderLines) $
+            withFileCreationMask 0o000 $ do
+              runWorker specPath `shouldReturn` Right ()
+              permissionsOf eventPath `shouldReturn` 0o600
+              journal <- ByteString.readFile eventPath
+              journal `shouldSatisfy` ByteString.isPrefixOf "{\"legacy\":true}"
+              journal `shouldSatisfy` ByteString.isInfixOf "WorkerFinished"
+
+    -- 'retireStaleLease' only ever renamed a lease it had proven dead, so one
+    -- '.stale-*' directory accumulated for every recovered-from-crash launch
+    -- and nothing removed any of them.
+    it "collects a retired stale lease whose recorded processes are all gone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            staleSpec = workerFixtureSpec repository (WorkerId "solve-910-stale") 910
+            freshSpec = workerFixtureSpec repository (WorkerId "solve-910-fresh") 910
+            heldSpec = workerFixtureSpec repository (WorkerId "solve-911-held") 911
+            terminalSpec = workerFixtureSpec repository (WorkerId "solve-912-terminal") 912
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            retiredLease = workerRoot </> "issue-910.lease.stale-solve-910-fresh"
+            heldLease = workerRoot </> "issue-911.lease"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        mapM_ (writeWorkerSpec workerRoot) [staleSpec, freshSpec, heldSpec]
+        writeTerminalWorker workerRoot terminalSpec now
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          stale <- descriptorFor descriptors staleSpec
+          fresh <- descriptorFor descriptors freshSpec
+          held <- descriptorFor descriptors heldSpec
+          acquireWorkerLease stale `shouldReturn` Right ()
+          acquireWorkerLease held `shouldReturn` Right ()
+          mismatched <- mismatchedIdentity
+          LazyByteString.writeFile (workerRoot </> "solve-910-stale.state.json") (encode (runningWorkerState staleSpec.workerId mismatched.processIdentityPid (Just mismatched)))
+          -- The real retirement path, rather than a hand-built directory:
+          -- what the janitor has to collect is exactly what this produces.
+          acquireWorkerLease fresh `shouldReturn` Right ()
+          doesDirectoryExist retiredLease `shouldReturn` True
+          collectWorkerCacheWith readProcessSnapshot repository
+          doesDirectoryExist retiredLease `shouldReturn` False
+          -- A live lease, the fresh worker's own lease, and an unacknowledged
+          -- terminal worker inside the window are all left alone.
+          doesDirectoryExist heldLease `shouldReturn` True
+          doesDirectoryExist (workerRoot </> "issue-910.lease") `shouldReturn` True
+          workerIsDiscoverable workerRoot terminalSpec.workerId `shouldReturn` True
+
+    it "retains a retired stale lease it cannot prove dead" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            staleSpec = workerFixtureSpec repository (WorkerId "solve-913-stale") 913
+            freshSpec = workerFixtureSpec repository (WorkerId "solve-913-fresh") 913
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            statePath = workerRoot </> "solve-913-stale.state.json"
+            retiredLease = workerRoot </> "issue-913.lease.stale-solve-913-fresh"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        mapM_ (writeWorkerSpec workerRoot) [staleSpec, freshSpec]
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          stale <- descriptorFor descriptors staleSpec
+          fresh <- descriptorFor descriptors freshSpec
+          acquireWorkerLease stale `shouldReturn` Right ()
+          mismatched <- mismatchedIdentity
+          LazyByteString.writeFile statePath (encode (runningWorkerState staleSpec.workerId mismatched.processIdentityPid (Just mismatched)))
+          acquireWorkerLease fresh `shouldReturn` Right ()
+          -- A snapshot that cannot be taken says nothing about whether the
+          -- recorded processes are gone, so the directory stays.
+          collectWorkerCacheWith (pure (Left "ps unavailable")) repository
+          doesDirectoryExist retiredLease `shouldReturn` True
+          -- Neither does an identity that matches again — a reused PID with
+          -- the same recorded start time is exactly what fail-closed is for.
+          live <- liveIdentity
+          LazyByteString.writeFile statePath (encode (runningWorkerState staleSpec.workerId live.processIdentityPid (Just live)))
+          collectWorkerCacheWith readProcessSnapshot repository
+          doesDirectoryExist retiredLease `shouldReturn` True
+
+    -- A worker directory is keyed by 'safeKey' over @owner-name@, and that
+    -- mapping collides: coghex-kan/ban and coghex/kan-ban both key to
+    -- coghex-kan-ban and share one directory. Scanning it for '.stale-*'
+    -- entries alone would let either repository's startup delete the other's
+    -- retired lease, so the owner has to be one this repository's history
+    -- actually contains.
+    it "leaves a colliding repository's retired stale lease alone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let neighbour = Repository (temporaryRoot </> "neighbour") "coghex-kan" "ban"
+            ours = Repository (temporaryRoot </> "ours") "coghex" "kan-ban"
+            staleSpec = workerFixtureSpec neighbour (WorkerId "solve-930-neighbour-stale") 930
+            freshSpec = workerFixtureSpec neighbour (WorkerId "solve-930-neighbour-fresh") 930
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kan-ban"
+            retiredLease = workerRoot </> "issue-930.lease.stale-solve-930-neighbour-fresh"
+        createDirectory neighbour.repositoryRoot
+        createDirectory ours.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        mapM_ (writeWorkerSpec workerRoot) [staleSpec, freshSpec]
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory neighbour
+          stale <- descriptorFor descriptors staleSpec
+          fresh <- descriptorFor descriptors freshSpec
+          acquireWorkerLease stale `shouldReturn` Right ()
+          mismatched <- mismatchedIdentity
+          LazyByteString.writeFile (workerRoot </> "solve-930-neighbour-stale.state.json") (encode (runningWorkerState staleSpec.workerId mismatched.processIdentityPid (Just mismatched)))
+          acquireWorkerLease fresh `shouldReturn` Right ()
+          doesDirectoryExist retiredLease `shouldReturn` True
+          -- Our repository shares the directory but owns nothing in it, so
+          -- its pass must collect nothing even though the recorded processes
+          -- are provably gone.
+          collectWorkerCacheWith readProcessSnapshot ours
+          doesDirectoryExist retiredLease `shouldReturn` True
+          workerIsDiscoverable workerRoot staleSpec.workerId `shouldReturn` True
+          -- The repository that does own it still collects it.
+          collectWorkerCacheWith readProcessSnapshot neighbour
+          doesDirectoryExist retiredLease `shouldReturn` False
+
+    -- Milestone 8 keeps a terminal journal until a newer worker is durable
+    -- proof its workflow step was superseded, so inside the window that proof
+    -- plus acknowledgement is what makes one collectable — and the newest
+    -- session for an item, the one the debugging contract promises, is not.
+    it "collects an acknowledged terminal worker a newer durable worker superseded, keeping the newest" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            olderSpec = (workerFixtureSpec repository (WorkerId "solve-920-older") 920) {workerCreatedAt = addUTCTime (-3600) now}
+            newerSpec = (workerFixtureSpec repository (WorkerId "solve-920-newer") 920) {workerCreatedAt = now}
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        writeTerminalWorker workerRoot olderSpec now
+        writeTerminalWorker workerRoot newerSpec now
+        ByteString.writeFile (workerRoot </> "solve-920-older.ack") "handled\n"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          collectWorkerCacheWith readProcessSnapshot repository
+          workerIsDiscoverable workerRoot olderSpec.workerId `shouldReturn` False
+          doesFileExist (workerRoot </> "solve-920-older.events.jsonl") `shouldReturn` False
+          doesFileExist (workerRoot </> "solve-920-older.state.json") `shouldReturn` False
+          doesFileExist (workerRoot </> "solve-920-older.ack") `shouldReturn` False
+          workerIsDiscoverable workerRoot newerSpec.workerId `shouldReturn` True
+
+    it "retains an unsuperseded terminal worker until its retention window expires" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            unacknowledgedSpec = workerFixtureSpec repository (WorkerId "solve-921-unacked") 921
+            acknowledgedSpec = workerFixtureSpec repository (WorkerId "solve-922-acked") 922
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            expired = addUTCTime (-15 * 24 * 60 * 60) now
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        writeTerminalWorker workerRoot unacknowledgedSpec now
+        writeTerminalWorker workerRoot acknowledgedSpec now
+        ByteString.writeFile (workerRoot </> "solve-922-acked.ack") "handled\n"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          -- Inside the window neither is collectable: one is unacknowledged,
+          -- and acknowledgement alone is not supersession.
+          collectWorkerCacheWith readProcessSnapshot repository
+          workerIsDiscoverable workerRoot unacknowledgedSpec.workerId `shouldReturn` True
+          workerIsDiscoverable workerRoot acknowledgedSpec.workerId `shouldReturn` True
+          -- Past it, the promise has expired and the rest is collected
+          -- whatever its acknowledgement or supersession.
+          writeTerminalState workerRoot unacknowledgedSpec.workerId expired
+          writeTerminalState workerRoot acknowledgedSpec.workerId expired
+          collectWorkerCacheWith readProcessSnapshot repository
+          workerIsDiscoverable workerRoot unacknowledgedSpec.workerId `shouldReturn` False
+          workerIsDiscoverable workerRoot acknowledgedSpec.workerId `shouldReturn` False
+
+    -- Terminal status alone is never enough: lease recovery re-verifies
+    -- recorded identities before releasing a terminal lease, and expiry must
+    -- not become a way around that.
+    it "keeps an expired terminal worker's artifacts while a recorded identity is still live" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do
+          now <- getCurrentTime
+          threadDelay 100000
+          identity <- identityForProcess process
+          let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+              spec = workerFixtureSpec repository (WorkerId "solve-923-live") 923
+              workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+              expired = addUTCTime (-15 * 24 * 60 * 60) now
+              liveState = (terminalWorkerState spec.workerId expired) {workerStateKnownProcesses = [identity]}
+          createDirectory repository.repositoryRoot
+          createDirectoryIfMissing True workerRoot
+          writeTerminalWorker workerRoot spec expired
+          LazyByteString.writeFile (workerRoot </> "solve-923-live.state.json") (encode liveState)
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            collectWorkerCacheWith readProcessSnapshot repository
+            workerIsDiscoverable workerRoot spec.workerId `shouldReturn` True
+            managedProcessFor process >>= killManagedProcess
+            void (timeout 3000000 (waitForProcess process))
+            collectWorkerCacheWith readProcessSnapshot repository
+            workerIsDiscoverable workerRoot spec.workerId `shouldReturn` False
+
+    it "keeps an expired terminal worker's artifacts while it still owns its item's lease" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        now <- getCurrentTime
+        let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
+            spec = workerFixtureSpec repository (WorkerId "solve-924-leased") 924
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
+            expired = addUTCTime (-15 * 24 * 60 * 60) now
+        createDirectory repository.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        writeTerminalWorker workerRoot spec expired
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory repository
+          descriptor <- descriptorFor descriptors spec
+          acquireWorkerLease descriptor `shouldReturn` Right ()
+          collectWorkerCacheWith readProcessSnapshot repository
+          workerIsDiscoverable workerRoot spec.workerId `shouldReturn` True
+          releaseWorkerLease descriptor
+          collectWorkerCacheWith readProcessSnapshot repository
+          workerIsDiscoverable workerRoot spec.workerId `shouldReturn` False
+
+-- | A fake @codex@ that identifies a session and reports a completed solve,
+-- so a real worker reaches its terminal envelope in a fraction of a second.
+completingProviderLines :: [ByteString.ByteString]
+completingProviderLines =
+  [ "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"journal-fixture-session\"}'",
+    "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Created PR #999\"}}'"
+  ]
+
+writeWorkerSpec :: FilePath -> WorkerSpec -> IO ()
+writeWorkerSpec workerRoot spec =
+  LazyByteString.writeFile (workerBase workerRoot spec.workerId <> ".spec.json") (encode spec)
+
+-- | The durable file set a finished worker leaves behind: the @.spec.json@
+-- discovery finds it through, the state recording its terminal status, and a
+-- journal. Retention is measured from the state's heartbeat, so that is what
+-- the caller chooses.
+writeTerminalWorker :: FilePath -> WorkerSpec -> UTCTime -> IO ()
+writeTerminalWorker workerRoot spec heartbeat = do
+  writeWorkerSpec workerRoot spec
+  writeTerminalState workerRoot spec.workerId heartbeat
+  ByteString.writeFile (workerBase workerRoot spec.workerId <> ".events.jsonl") "{}\n"
+
+writeTerminalState :: FilePath -> WorkerId -> UTCTime -> IO ()
+writeTerminalState workerRoot identifier heartbeat =
+  LazyByteString.writeFile (workerBase workerRoot identifier <> ".state.json") (encode (terminalWorkerState identifier heartbeat))
+
+terminalWorkerState :: WorkerId -> UTCTime -> WorkerState
+terminalWorkerState identifier heartbeat =
+  (runningWorkerState identifier 999999 Nothing)
+    { workerStateStatus = WorkerTerminal SolveCompleted,
+      workerStateHeartbeatAt = heartbeat
+    }
+
+-- | Discovery reaches a worker only through its @.spec.json@, so that file's
+-- presence is what "still in the cache" means.
+workerIsDiscoverable :: FilePath -> WorkerId -> IO Bool
+workerIsDiscoverable workerRoot identifier = doesFileExist (workerBase workerRoot identifier <> ".spec.json")
+
+workerBase :: FilePath -> WorkerId -> FilePath
+workerBase workerRoot identifier = workerRoot </> Data.Text.unpack identifier.unWorkerId
+
+descriptorFor :: [WorkerDescriptor] -> WorkerSpec -> IO WorkerDescriptor
+descriptorFor descriptors spec =
+  requireJust
+    ("worker fixture " <> Data.Text.unpack spec.workerId.unWorkerId <> " was not discoverable")
+    (find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors)
+
+-- | This process's real identity, so a recorded process provably matches a
+-- live one.
+liveIdentity :: IO ProcessIdentity
+liveIdentity = do
+  ownPid <- fromIntegral <$> getProcessID
+  snapshot <- readProcessSnapshot
+  case snapshot of
+    Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+    Right identities -> requireJust "could not find this test process in a process snapshot" (identityForPid ownPid identities)
+
+-- | The same identity with a start time no live process can have, which is
+-- how the suite makes a recorded process provably gone without waiting for
+-- one to exit.
+mismatchedIdentity :: IO ProcessIdentity
+mismatchedIdentity = do
+  identity <- liveIdentity
+  pure identity {processIdentityStartedAt = "Wed Jan 01 00:00:00 2020"}
