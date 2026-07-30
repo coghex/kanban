@@ -10,8 +10,8 @@ valid membership and standalone fallbacks. The sidebar also controls and
 monitors the local launchd-managed PR drainer. Native GitHub sub-issue membership,
 canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
-usage-command escape hatch and broader provider-version fixtures remain for
-subsequent slices.
+usage-command escape hatch is also implemented. Broader provider-version
+fixtures remain for subsequent slices.
 
 ## 1. Purpose
 
@@ -1173,8 +1173,8 @@ intended `A1`, `A2`, `B1`, `C1` implementation order across all four columns.
 
 ### Milestone 4 — Codex usage
 
-Core built-in provider and cache implemented. The external-command escape hatch
-and broader version fixtures remain follow-up slices.
+Core built-in provider, cache, and the shared external-command escape hatch
+are implemented. Broader version fixtures remain a follow-up slice.
 
 - Implement on-demand app-server startup and JSON-RPC initialization.
 - Request and decode account rate limits.
