@@ -58,7 +58,7 @@ import System.IO
     hSetBuffering,
     hWaitForInput,
   )
-import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -330,22 +330,30 @@ distinctGroups :: [ProcessIdentity] -> [Int]
 distinctGroups = nub . map (.processIdentityGroupPid)
 
 -- | The last resort when nothing could be censused (no pid, or `ps` itself
--- failed): a bounded, best-effort INT/TERM/KILL of the group the handle's own
--- pid leads, with no verification at all. Always reports the escalation as
--- forced, since nothing here confirms a clean outcome.
+-- failed): with no fresh snapshot, there is no way to confirm which process
+-- group a bare pid still denotes -- a group that emptied when its process
+-- exited can have its id reissued to a same-user process this fetch never
+-- spawned, so signalling it as a group could hit that unrelated process,
+-- exactly what the approved issue requires this never do. Group semantics
+-- are therefore never used here: only the wrapper's own pid is signalled,
+-- individually, which needs no snapshot to be safe -- as this process's own
+-- still-unreaped child, POSIX guarantees its pid stays reserved to it
+-- (running or a zombie) until 'waitForProcess' actually reaps it, which does
+-- not happen until after this returns. Nothing here is verified either way,
+-- so the escalation is always reported as unconfirmed.
 fallbackTerminate :: ProcessHandle -> IO Bool
 fallbackTerminate processHandle = do
   maybePid <- getPid processHandle
   case maybePid of
-    Nothing -> pure True
+    Nothing -> pure ()
     Just pid -> do
-      ignoreIOException (signalProcessGroup sigINT pid)
+      ignoreIOException (signalProcess sigINT pid)
       threadDelay interruptGraceMicros
-      ignoreIOException (signalProcessGroup sigTERM pid)
+      ignoreIOException (signalProcess sigTERM pid)
       threadDelay terminationGraceMicros
-      ignoreIOException (signalProcessGroup sigKILL pid)
+      ignoreIOException (signalProcess sigKILL pid)
       threadDelay killGraceMicros
-      pure True
+  pure True
 
 ignoreIOException :: IO () -> IO ()
 ignoreIOException action = void (try @IOException action :: IO (Either IOException ()))
