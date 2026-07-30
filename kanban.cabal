@@ -112,6 +112,7 @@ test-suite kanban-test
     Spec.Agent.ManagedProcess.Deadline
     Spec.Agent.ManagedProcess.Lifecycle
     Spec.Support.Board
+    Spec.Support.ClaudeProbe
     Spec.Support.Env
     Spec.Support.Expect
     Spec.Support.Fixtures

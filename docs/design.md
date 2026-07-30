@@ -823,7 +823,11 @@ The built-in provider therefore:
 4. Sends `/usage`.
 5. Captures and strips terminal control sequences.
 6. Parses five-hour and weekly percentages and reset timestamps.
-7. Exits immediately.
+7. Exits immediately. If it does not, termination escalates group-wide —
+   INT, then TERM, then KILL, each bounded — so a client that ignores an
+   interrupt cannot outlive `script`'s pseudo-terminal wrapper; a client that
+   requires SIGKILL to stop is reported as a failed refresh rather than a
+   decoded snapshot, even when usage was already captured.
 8. Rejects unrecognized output and retains the previous snapshot.
 
 The provider does not read or reuse Claude OAuth credentials directly. It

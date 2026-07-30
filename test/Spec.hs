@@ -37,7 +37,7 @@ import Kanban.Cache
     writeUsageCache
   )
 import Kanban.Card (CardChip (..), boundedLines, displayWidth, labelChipRows)
-import Kanban.Claude (decodeClaudeUsageText)
+import Kanban.Claude (decodeClaudeUsageText, runClaudeProvider)
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
@@ -326,6 +326,11 @@ import Spec.Support.Board
     heldOffMessage,
     readMarkerPid,
     withFakeGh
+  )
+import Spec.Support.ClaudeProbe
+  ( ClaudeProbeFixture (..),
+    ClaudeSignalPolicy (..),
+    withClaudeProbeFixture
   )
 import Spec.Support.Env
   ( createTemporaryDirectory,
@@ -4977,6 +4982,65 @@ suite = do
     it "fails closed when the interactive usage request fails" $
       decodeClaudeUsageText (minutesToTimeZone (-420)) epoch "Current session\nFailed to load usage data"
         `shouldSatisfy` isLeft
+
+  describe "Claude usage probe termination" $ do
+    it "decodes a clean-exiting probe's usage without ever needing TERM or KILL" $
+      -- separateGroup=True so the wrapper's background job keeps its real
+      -- stdin (bash redirects a backgrounded job's stdin to /dev/null unless
+      -- job control put it in its own process group) -- the fake claude
+      -- child needs the actual bytes Kanban writes to know when to exit.
+      -- The descendant exits on its own once it has drained them, so
+      -- escalation never needs to signal anyone.
+      withClaudeProbeFixture True ClaudeExitsCleanly True $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Nothing -> expectationFailure "expected the clean-exit probe to return well within its bound"
+          Just (Left providerError) -> expectationFailure ("expected a decoded snapshot, got " <> show providerError)
+          Just (Right snapshot) -> map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["5 hour", "week"]
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` False
+
+    it "kills a reaped wrapper's INT-resistant claude child even though a pty gave it a separate session" $
+      -- The wrapper has no INT handler of its own and dies immediately, well
+      -- before the claude child (which ignores INT, in its own process
+      -- group) does -- exactly the "leader reaped, descendant survives"
+      -- shape 'script''s pty produces in production.
+      withClaudeProbeFixture True ClaudeIgnoresInterrupt False $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+          other -> expectationFailure ("expected a clean timeout, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        -- Confirms escalation actually reached TERM for the child, rather
+        -- than the assertions above passing for some unrelated reason.
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
+
+    it "kills an INT-resistant claude child that still shares the wrapper's own process group" $
+      withClaudeProbeFixture False ClaudeIgnoresInterrupt False $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+          other -> expectationFailure ("expected a clean timeout, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
+        doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
+
+    it "reports a forced-kill failure instead of a decoded snapshot when a captured probe refuses TERM and needs SIGKILL" $
+      -- Valid /usage was already captured -- the transcript decodes cleanly
+      -- on its own -- but the claude child ignores both INT and TERM, so
+      -- only SIGKILL ends it; the provider must report that as a failure
+      -- rather than silently decode the snapshot it already has.
+      withClaudeProbeFixture True ClaudeIgnoresInterruptAndTerminate True $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` RequestFailed
+            providerError.providerErrorMessage `shouldMention` "forced kill"
+          other -> expectationFailure ("expected a forced-kill failure, got " <> show other)
+        shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
+        shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
 
   describe "PR drainer LaunchAgent discovery" $ do
     let recordDocument label plist =
