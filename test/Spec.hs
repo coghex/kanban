@@ -193,10 +193,6 @@ import Kanban.Solve
     SolveWorkflow (..),
     SolverBrand (..),
     StreamEvent (..),
-    claudeReviewerModel,
-    claudeSolverModel,
-    codexReviewerModel,
-    codexSolverModel,
     maxUnknownNoticeLength,
     newUnknownAggregator,
     parseSolveOutputLine,
@@ -1345,7 +1341,7 @@ suite = do
       outcome <- runStreamReaderWith readLine "stdout" (\line -> modifyIORef onLineSeen (line :)) (\reason -> modifyIORef abandonSeen (reason :))
       outcome `shouldBe` StreamCompleted
       seenLines <- reverse <$> readIORef onLineSeen
-      length seenLines `shouldBe` rounds
+      seenLines `shouldBe` [ByteString.pack ("line-" <> show n) | n <- [1 .. rounds]]
       readIORef abandonSeen `shouldReturn` []
 
     it "gives up after maxConsecutiveReadFailures consecutive read failures instead of retrying forever or abandoning silently" $ do
@@ -1497,20 +1493,19 @@ suite = do
       flowFailure `shouldBe` SolveFailed ("PR agent exited with status 1: " <> Data.Text.replicate 1000 "x")
 
   describe "solve process protocol" $ do
-    it "pins the canonical solver and reviewer model contract" $ do
-      codexSolverModel `shouldBe` "gpt-5.4 high"
-      claudeSolverModel `shouldBe` "Sonnet 5 high"
-      codexReviewerModel `shouldBe` "GPT-5.6-Terra xhigh"
-      claudeReviewerModel `shouldBe` "Opus 5 xhigh"
-
-    it "launches each solver with its pinned model and effort" $ do
+    it "launches each solver with its pinned model and effort, including the separately constructed Codex resume branch" $ do
       let codexArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
           claudeArguments = solveArguments 844 SolveOnly ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer ""
+          codexResumeArguments = solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B"
       codexArguments `shouldContain` ["--model", "gpt-5.4"]
       codexArguments `shouldContain` ["model_reasoning_effort=\"high\""]
       codexArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
       claudeArguments `shouldContain` ["--model", "claude-sonnet-5"]
       claudeArguments `shouldContain` ["--effort", "high"]
+      codexResumeArguments `shouldContain` ["--model", "gpt-5.4"]
+      codexResumeArguments `shouldContain` ["model_reasoning_effort=\"high\""]
+      codexResumeArguments `shouldContain` ["model_reasoning_summary=\"detailed\""]
+      codexResumeArguments `shouldContain` ["approval_policy=\"never\""]
 
     it "runs the ordinary solve command for both S and Kanban-owned A orchestration" $ do
       let codexSolvePrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
@@ -1538,12 +1533,15 @@ suite = do
       forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to the read-only v2 gate check"
 
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
+      -- Short distinguishing substrings rather than whole sentences, so this
+      -- fails when the underlying instruction is lost or reversed but not on
+      -- an unrelated copy edit to the surrounding prose.
       let solvePrompt = last (solveArguments 782 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
-      solvePrompt `shouldContain` "existing worktree for issue #782"
-      solvePrompt `shouldContain` "prior solve was interrupted; it is recovery work, not a collision"
-      solvePrompt `shouldContain` "inspect `git status`, committed progress relative to that base, and both staged and unstaged diffs"
-      solvePrompt `shouldContain` "Do not discard, reset, or overwrite unfinished changes merely to start clean"
-      solvePrompt `shouldContain` "Only create a new sibling worktree when no same-issue worktree exists"
+      solvePrompt `shouldContain` "issue #782"
+      solvePrompt `shouldContain` "not a collision"
+      solvePrompt `shouldContain` "inspect `git status`"
+      solvePrompt `shouldContain` "Do not discard, reset, or overwrite"
+      solvePrompt `shouldContain` "when no same-issue worktree exists"
 
     it "frames a resumed solve prompt with the true provenance of the resumed message instead of always claiming a user answer" $ do
       let answerPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
@@ -3127,14 +3125,13 @@ suite = do
     it "keeps draft approved pull requests in Reviewing" $ do
       let pullRequest = basePullRequest 10 [] True [Label "reviewed:approve" "00ff00"]
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
-      Map.size columns `shouldBe` 4
-      length (Map.findWithDefault [] Reviewing columns) `shouldBe` 1
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10]
       Map.findWithDefault [] Done columns `shouldBe` []
 
     it "classifies non-draft approved pull requests as Done" $ do
       let pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
-      length (Map.findWithDefault [] Done columns) `shouldBe` 1
+      map (itemNumber . entryItem) (Map.findWithDefault [] Done columns) `shouldBe` [10]
 
     it "shows labeled trackers without children as empty headers" $ do
       let tracker = (baseIssue 12 []) {issueLabels = [Label "epic" "5319e7"]}
@@ -3497,6 +3494,8 @@ suite = do
           pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2 [CheckDetail "review-approved" CheckFailed]
           let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch True True)
           length warnings `shouldBe` 3
+          warnings `shouldSatisfy` any (Data.Text.isInfixOf "open issues; board is truncated")
+          warnings `shouldSatisfy` any (Data.Text.isInfixOf "open pull requests; board is truncated")
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
