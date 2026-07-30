@@ -12,6 +12,10 @@
 -- 'startCapture' and 'awaitCommandOutcome' rather than rebuilding capture
 -- and re-introducing the omission.
 --
+-- Unbounded runs share this module too, through 'readProcessBytes': the
+-- short status-only commands that have no deadline of their own still need
+-- capture that reads *bytes*, for the reason 'readProcessBytes' documents.
+--
 -- Nothing here knows anything about reviews, GitHub, or any particular
 -- executable. Callers own the diagnostics: this module reports what was
 -- observed ('CommandOutcome'), and they decide what that means.
@@ -24,6 +28,8 @@ module Kanban.CommandCapture
     captureGraceMicros,
     capturedBytes,
     commandRanToCompletion,
+    decodeCommandText,
+    readProcessBytes,
     releaseCapture,
     renderWindow,
     startCapture,
@@ -32,15 +38,17 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, newEmptyMVar, putMVar)
 import Control.Concurrent.MVar (MVar, readMVar, tryReadMVar)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, bracket, throwIO, try)
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hClose)
-import System.Process (ProcessHandle, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (CreatePipe), waitForProcess, withCreateProcess)
 import System.Timeout (timeout)
 
 -- | The two independent bounds every short-lived command subprocess runs
@@ -160,6 +168,58 @@ releaseCapture capture = do
     Just _ -> pure ()
     Nothing -> killThread capture.streamCaptureThread
   void (try (hClose capture.streamCaptureHandle) :: IO (Either IOException ()))
+
+-- | 'System.Process.readCreateProcessWithExitCode' with its decoding step
+-- removed: the same empty stdin, concurrently drained streams and wait for
+-- the child's exit, but each stream comes back as the bytes the child
+-- actually wrote.
+--
+-- The decoding step is what had to go. It ran a child's output through
+-- whatever encoding the environment happened to name, so a single byte the
+-- active locale cannot decode — routine under the C\/POSIX locales of SSH,
+-- tmux, cron and launchd sessions — raised an 'IOException' out of a child
+-- that had run perfectly well, before its caller's own handling of the exit
+-- status ever ran (issues #42, #172). Callers decode what they captured
+-- themselves: 'decodeCommandText' for text, and the filesystem encoding for
+-- a path that has to survive being handed back to another process.
+readProcessBytes :: CreateProcess -> IO (ExitCode, ByteString.ByteString, ByteString.ByteString)
+readProcessBytes spec =
+  withCreateProcess piped $ \input output errors processHandle ->
+    withDrain output $ \awaitOutput ->
+      withDrain errors $ \awaitErrors -> do
+        -- Empty stdin, closed rather than left open, so a child that reads
+        -- sees EOF instead of waiting on a prompt that will never come.
+        mapM_ (\handle -> void (try (hClose handle) :: IO (Either IOException ()))) input
+        capturedOutput <- awaitOutput
+        capturedErrors <- awaitErrors
+        exitCode <- waitForProcess processHandle
+        pure (exitCode, capturedOutput, capturedErrors)
+  where
+    piped = spec {std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
+
+-- | One stream's reader thread, alive for exactly as long as the body needs
+-- it. A body that leaves early — an enclosing 'System.Timeout.timeout'
+-- firing on a hung child, say — kills the reader before the process cleanup
+-- closes its handle, for the reason 'releaseCapture' gives: a blocked
+-- reader holds that handle's lock, and a close attempted first would block
+-- right behind it.
+withDrain :: Maybe Handle -> (IO ByteString.ByteString -> IO result) -> IO result
+withDrain Nothing body = body (pure ByteString.empty)
+withDrain (Just handle) body =
+  bracket startReader (killThread . fst) $ \(_, captured) ->
+    body (readMVar captured >>= either throwIO pure)
+  where
+    startReader = do
+      captured <- newEmptyMVar
+      reader <- forkIO (try @IOException (ByteString.hGetContents handle) >>= putMVar captured)
+      pure (reader, captured)
+
+-- | The one decoding a captured stream's text goes through. Lenient UTF-8
+-- rather than the locale's encoding: what a child writes is bytes, so a
+-- corrupted or truncated one leaves a replacement character in a readable
+-- diagnostic instead of an exception raised from inside the decoder.
+decodeCommandText :: ByteString.ByteString -> Text
+decodeCommandText = TextEncoding.decodeUtf8With lenientDecode
 
 -- | Renders a bound for a diagnostic. Sub-second bounds only ever come from
 -- tests, but they are rendered honestly rather than rounded to \"0 seconds\".

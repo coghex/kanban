@@ -6,14 +6,18 @@ module Kanban.Repository
 where
 
 import Control.Exception (IOException, try)
+import qualified Data.ByteString as ByteString
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit, isSpace)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified GHC.Foreign
+import GHC.IO.Encoding (getFileSystemEncoding)
+import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import Kanban.Domain (Repository (..))
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
-import System.Process (readProcessWithExitCode)
+import System.Process (CreateProcess (..), proc)
 
 resolveRepository :: Text -> FilePath -> Maybe String -> IO (Either Text Repository)
 resolveRepository remoteName requestedPath explicitRepository = do
@@ -25,12 +29,12 @@ resolveRepository remoteName requestedPath explicitRepository = do
       case rootResult of
         Left message -> pure (Left message)
         Right rootOutput -> do
-          let root = trimString rootOutput
+          root <- trimString <$> decodeRepositoryPath rootOutput
           identityResult <- case explicitRepository of
             Just repositoryName -> pure (parseRepositoryName (Text.pack repositoryName))
             Nothing -> do
               remoteResult <- runGit root ["remote", "get-url", Text.unpack remoteName]
-              pure (remoteResult >>= parseRemoteRepository . Text.pack . trimString)
+              pure (remoteResult >>= parseRemoteRepository . decodeCommandText)
           pure $ do
             (owner, name) <- identityResult
             pure
@@ -40,14 +44,48 @@ resolveRepository remoteName requestedPath explicitRepository = do
                   repositoryName = name
                 }
 
-runGit :: FilePath -> [String] -> IO (Either Text String)
+-- | Git's output stays bytes until its caller decides what it is: a path
+-- ('decodeRepositoryPath') or text ('decodeCommandText'). Decoding it here
+-- through the locale's encoding is what turned a checkout whose path or
+-- remote the active locale cannot decode into @could not run git@ — a git
+-- that had answered correctly, reported as one that could not be run at all
+-- (issue #172).
+--
+-- The directory travels as @cwd@ rather than as @git -C@'s argument, which
+-- is the same channel every other consumer of a resolved root already uses
+-- ("Kanban.Solve", "Kanban.Review", "Kanban.PullRequestFlow",
+-- 'Kanban.Preflight.gatherPreflightEnvironment'). It is not a stylistic
+-- choice: @System.Process@ marshals @cwd@ and the executable through
+-- 'System.Posix.Internals.withFilePath' — the filesystem encoding, with the
+-- surrogate escaping 'decodeRepositoryPath' relies on — but marshals
+-- /arguments/ through 'Foreign.C.String.withCString', the foreign encoding,
+-- whose failure mode drops what it cannot represent. A path that only the
+-- filesystem encoding can carry therefore reaches git intact as @cwd@ and
+-- arrives truncated as an argument. @git -C \<dir\>@ is defined as running
+-- git as if it had started in @\<dir\>@, so the two are equivalent whenever
+-- both work.
+runGit :: FilePath -> [String] -> IO (Either Text ByteString.ByteString)
 runGit path arguments = do
-  result <- try @IOException (readProcessWithExitCode "git" (["-C", path] <> arguments) "")
+  result <- try @IOException (readProcessBytes ((proc "git" arguments) {cwd = Just path}))
   pure $ case result of
     Left exception -> Left ("could not run git: " <> Text.pack (show exception))
-    Right (ExitSuccess, stdoutText, _) -> Right stdoutText
-    Right (ExitFailure _, _, stderrText) ->
-      Left ("git could not identify a repository: " <> Text.pack (trimString stderrText))
+    Right (ExitSuccess, stdoutBytes, _) -> Right stdoutBytes
+    Right (ExitFailure _, _, stderrBytes) ->
+      Left ("git could not identify a repository: " <> Text.strip (decodeCommandText stderrBytes))
+
+-- | Decodes bytes that *name a path* the way GHC itself decodes one, rather
+-- than as text. The repository root is not a diagnostic: it is handed
+-- straight back to the operating system as a subprocess @cwd@, and
+-- 'System.Process' encodes a @cwd@ with this very encoding. Round-tripping
+-- through it therefore reproduces git's original bytes, so the root still
+-- names the real checkout even under a locale whose encoding cannot
+-- represent it — where a replacement character would have named a path that
+-- does not exist. Under a locale that decodes the path outright this is the
+-- string the locale decoder produced anyway.
+decodeRepositoryPath :: ByteString.ByteString -> IO FilePath
+decodeRepositoryPath bytes = do
+  encoding <- getFileSystemEncoding
+  ByteString.useAsCStringLen bytes (GHC.Foreign.peekCStringLen encoding)
 
 -- | Parses an explicit @--repo@ value, which the user chose deliberately:
 -- the documented bare @OWNER\/NAME@ form, or any remote URL that
