@@ -169,10 +169,16 @@ runLocaleProbe probeRoot = do
 
 -- | The repository half of the same child: a real checkout whose path is
 -- ordinary UTF-8 the C locale cannot decode, resolved and then put back to
--- work. Handing the resolved root back to git as a @-C@ argument is the
--- part that matters — a root carrying replacement characters would read
--- plausibly and name nothing — so what is recorded is git's own answer
--- about the root, not the root's textual form.
+-- work. Putting it back to work is the part that matters — a root carrying
+-- replacement characters would read plausibly and name nothing — so what is
+-- recorded is git's own answer about the root, not the root's textual form.
+--
+-- The root goes back as a subprocess @cwd@, which is how every consumer of
+-- a resolved root uses one and the only channel that can carry it: @cwd@ is
+-- marshalled through the filesystem encoding, whereas an /argument/ (@git
+-- -C \<root\>@) is marshalled through the foreign encoding, which drops the
+-- escapes a C locale's filesystem encoding produces. A fixture asserting
+-- through @-C@ would therefore fail on a correct root.
 recordRepositoryResolution :: FilePath -> IO ()
 recordRepositoryResolution probeRoot = do
   -- Built from bytes, because a C-locale child cannot write a non-ASCII
@@ -196,7 +202,7 @@ recordRepositoryResolution probeRoot = do
 
 runGitFixture :: StdStream -> FilePath -> [String] -> IO ()
 runGitFixture sink path arguments = do
-  (_, _, _, child) <- createProcess (proc "git" (["-C", path] <> arguments)) {std_out = sink}
+  (_, _, _, child) <- createProcess (proc "git" arguments) {cwd = Just path, std_out = sink}
   void (waitForProcess child)
 
 -- | Bytes to the 'FilePath' GHC itself would produce for them, through the

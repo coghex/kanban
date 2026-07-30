@@ -17,7 +17,7 @@ import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import Kanban.Domain (Repository (..))
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
-import System.Process (proc)
+import System.Process (CreateProcess (..), proc)
 
 resolveRepository :: Text -> FilePath -> Maybe String -> IO (Either Text Repository)
 resolveRepository remoteName requestedPath explicitRepository = do
@@ -50,9 +50,23 @@ resolveRepository remoteName requestedPath explicitRepository = do
 -- remote the active locale cannot decode into @could not run git@ — a git
 -- that had answered correctly, reported as one that could not be run at all
 -- (issue #172).
+--
+-- The directory travels as @cwd@ rather than as @git -C@'s argument, which
+-- is the same channel every other consumer of a resolved root already uses
+-- ("Kanban.Solve", "Kanban.Review", "Kanban.PullRequestFlow",
+-- 'Kanban.Preflight.gatherPreflightEnvironment'). It is not a stylistic
+-- choice: @System.Process@ marshals @cwd@ and the executable through
+-- 'System.Posix.Internals.withFilePath' — the filesystem encoding, with the
+-- surrogate escaping 'decodeRepositoryPath' relies on — but marshals
+-- /arguments/ through 'Foreign.C.String.withCString', the foreign encoding,
+-- whose failure mode drops what it cannot represent. A path that only the
+-- filesystem encoding can carry therefore reaches git intact as @cwd@ and
+-- arrives truncated as an argument. @git -C \<dir\>@ is defined as running
+-- git as if it had started in @\<dir\>@, so the two are equivalent whenever
+-- both work.
 runGit :: FilePath -> [String] -> IO (Either Text ByteString.ByteString)
 runGit path arguments = do
-  result <- try @IOException (readProcessBytes (proc "git" (["-C", path] <> arguments)))
+  result <- try @IOException (readProcessBytes ((proc "git" arguments) {cwd = Just path}))
   pure $ case result of
     Left exception -> Left ("could not run git: " <> Text.pack (show exception))
     Right (ExitSuccess, stdoutBytes, _) -> Right stdoutBytes
@@ -61,13 +75,13 @@ runGit path arguments = do
 
 -- | Decodes bytes that *name a path* the way GHC itself decodes one, rather
 -- than as text. The repository root is not a diagnostic: it is handed
--- straight back to the operating system as a subprocess @cwd@ and as @git
--- -C@'s argument, and 'System.Process' encodes it with this very encoding.
--- Round-tripping through it therefore reproduces git's original bytes, so
--- the root still names the real checkout even under a locale whose encoding
--- cannot represent it — where a replacement character would have named a
--- path that does not exist. Under a locale that decodes the path outright
--- this is the string the locale decoder produced anyway.
+-- straight back to the operating system as a subprocess @cwd@, and
+-- 'System.Process' encodes a @cwd@ with this very encoding. Round-tripping
+-- through it therefore reproduces git's original bytes, so the root still
+-- names the real checkout even under a locale whose encoding cannot
+-- represent it — where a replacement character would have named a path that
+-- does not exist. Under a locale that decodes the path outright this is the
+-- string the locale decoder produced anyway.
 decodeRepositoryPath :: ByteString.ByteString -> IO FilePath
 decodeRepositoryPath bytes = do
   encoding <- getFileSystemEncoding

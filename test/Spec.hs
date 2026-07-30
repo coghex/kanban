@@ -4767,14 +4767,22 @@ suite = do
   -- has to re-run the test binary to establish a locale at all.
   describe "byte-safe subprocess capture" $ do
     -- A git that answers the two questions 'resolveRepository' asks: where
-    -- the checkout is (its own -C argument), and what the remote URL is.
-    -- The URL is a printf format, so a fixture can put a byte no encoding
-    -- accepts inside it.
-    let gitRemoteFake remoteUrl =
+    -- the checkout is, and what the remote URL is. The URL is a printf
+    -- format, so a fixture can put a byte no encoding accepts inside it.
+    --
+    -- The marker check is the fixture refusing to answer from anywhere but
+    -- the checkout. resolveRepository conveys the directory as a cwd rather
+    -- than as an argument -- the only channel that survives a path the
+    -- locale cannot encode -- and a fixture that simply ignored the
+    -- directory would answer just as happily from nowhere in particular.
+    let checkoutMarker = "kanban-fixture-checkout"
+        gitRemoteFake remoteUrl =
           ( "git",
-            [ "case \"$*\" in",
-              "  *'rev-parse --show-toplevel') printf '%s\\n' \"$2\" ;;",
-              "  *'remote get-url origin') printf '" <> remoteUrl <> "\\n' ;;",
+            [ "[ -f ./" <> ByteString.pack checkoutMarker <> " ] || "
+                <> "{ printf 'fake git: not started in the checkout\\n' >&2; exit 9; }",
+              "case \"$*\" in",
+              "  'rev-parse --show-toplevel') pwd -P ;;",
+              "  'remote get-url origin') printf '" <> remoteUrl <> "\\n' ;;",
               "  *) exit 1 ;;",
               "esac"
             ]
@@ -4826,6 +4834,7 @@ suite = do
     it "hands a remote carrying an undecodable byte to the remote parser" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withFakeOnPath temporaryRoot (gitRemoteFake "https://u\\377ser@github.com/coghex/kanban.git") $ do
+          ByteString.writeFile (temporaryRoot </> checkoutMarker) ""
           -- The byte lands in the URL's optional userinfo, which the parser
           -- drops: the identity is decided by the parser on what it was
           -- given, exactly as it would have been for wholly decodable
@@ -4840,6 +4849,7 @@ suite = do
     it "rejects an undecodable remote identity semantically rather than as a git failure" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withFakeOnPath temporaryRoot (gitRemoteFake "https://github.com/coghex/kanb\\377an.git") $ do
+          ByteString.writeFile (temporaryRoot </> checkoutMarker) ""
           -- Here the byte lands inside the repository name, which git ran
           -- perfectly well to report. The existing ASCII-only identity rule
           -- still refuses it -- and says so about the remote, not about git.
