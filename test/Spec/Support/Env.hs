@@ -18,15 +18,12 @@ import Control.Exception (IOException, bracket, try)
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
 import System.Directory
-  ( createDirectory,
-    doesFileExist,
+  ( doesFileExist,
     getTemporaryDirectory,
-    removeFile,
     removePathForcibly
   )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
 import System.Posix.Files
   ( accessModes,
     fileMode,
@@ -35,6 +32,7 @@ import System.Posix.Files
     setFileCreationMask,
     setFileMode
   )
+import System.Posix.Temp (mkdtemp)
 import System.Posix.Types (FileMode)
 
 installFakeExecutable :: FilePath -> (String, [ByteString.ByteString]) -> IO ()
@@ -59,14 +57,14 @@ ignoringIOException action = void (try @IOException action)
 withTemporaryCacheRoot :: (FilePath -> IO result) -> IO result
 withTemporaryCacheRoot = bracket createTemporaryDirectory removePathForcibly
 
+-- | Atomically allocates a fresh directory under the system temp root via
+-- POSIX @mkdtemp@, so two suite processes racing this call can never observe
+-- (or clobber) the same path -- unlike open-a-file/remove-it/create-a-directory,
+-- which leaves the freed name up for grabs between the second and third step.
 createTemporaryDirectory :: IO FilePath
 createTemporaryDirectory = do
   temporaryRoot <- getTemporaryDirectory
-  (path, handle) <- openTempFile temporaryRoot "kanban-cache-test"
-  hClose handle
-  removeFile path
-  createDirectory path
-  pure path
+  mkdtemp (temporaryRoot </> "kanban-cache-test-")
 
 withEnvironmentValue :: String -> String -> IO result -> IO result
 withEnvironmentValue name value action =
