@@ -958,7 +958,16 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
     legacy_repository = legacy_job_repository()
     if legacy_repository is not None:
         try:
-            legacy_identity = repository_identity(legacy_repository, job.remote_name)
+            # Through the discovery remote, because the answer is compared
+            # against `job.identity`, which was resolved through that same
+            # remote. Using the repository's own `--config` remote here would
+            # resolve this very checkout to a different identity whenever that
+            # configuration names a different remote — reading as "the legacy
+            # job serves another repository" and leaving it loadable beside the
+            # derived job that replaces it.
+            legacy_identity = repository_identity(
+                legacy_repository, discovery_remote_name()
+            )
         except ServiceError:
             legacy_identity = None
         if legacy_identity is not None and legacy_identity != job.identity:

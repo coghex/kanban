@@ -994,6 +994,33 @@ class LegacyJobMigrationTests(RedirectedControllerTestCase):
         self.assertFalse(result["legacy_job"]["retired"])
         self.assertEqual(result["legacy_job"]["repository"], "acme/gadgets")
 
+    def test_a_repository_config_naming_another_remote_still_retires_its_legacy_job(
+        self,
+    ):
+        # Identities are only ever comparable when both were resolved through
+        # the discovery remote. Resolving the legacy job's checkout through
+        # this repository's own --config remote instead would make the very
+        # checkout being installed look like another repository, and the
+        # singleton would stay loadable beside its replacement.
+        self.remotes[(str(self.widgets), "upstream")] = (
+            "git@github.com:upstream-owner/widgets.git"
+        )
+        config = self.root / "config.toml"
+        config.write_text('remote_name = "upstream"\n', encoding="utf-8")
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"config_path": str(config)}
+        )
+        job = drain_prs_service.resolve_job(self.widgets)
+        self.assertEqual(job.identity, "acme/widgets")
+        self.assertEqual(job.remote_name, "upstream")
+
+        self.write_legacy_plist(self.widgets)
+        result = self.install(job)
+
+        self.assertTrue(result["legacy_job"]["retired"])
+        self.assertFalse(self.legacy_plist.exists())
+        self.assertIn(["launchctl", "bootout", self.legacy_target], self.commands)
+
     def test_a_legacy_job_naming_no_resolvable_repository_is_retired(self):
         # Its checkout is gone or is no longer a supported GitHub clone, so it
         # can serve no repository — and leaving it loadable would leave a job
