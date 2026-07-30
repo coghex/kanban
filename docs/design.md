@@ -957,6 +957,8 @@ Suggested paths:
 ~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
+~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
+~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
 ```
 
 Defaults:
@@ -971,10 +973,28 @@ Defaults:
   directory level Kanban creates below the XDG cache and config roots carries
   `0700`, whatever the umask and whichever writer created it first; the roots
   themselves are shared and keep their own modes.
-- Create cache files with user-only permissions (`0600`).
+- Create cache files with user-only permissions (`0600`). A file that is
+  appended to rather than rewritten — a worker's event journal — is created
+  `0600` whatever the umask, and is tightened to `0600` before each append, so
+  one an earlier release left loose self-corrects instead of waiting for a
+  rewrite that never comes.
 - Cache issue and PR bodies regardless of repository visibility so startup can
   render rich cards without network access; user-only permissions protect
   private content.
+- Bound the per-repository worker cache during startup discovery, so neither
+  retired leases nor finished workers accumulate for the life of the cache. A
+  retired `.stale-*` lease directory is collected once every identity it
+  records — its own lease owner and that worker's durable state — is confirmed
+  gone. A terminal worker's spec, state, journal, and ack marker are collected
+  once it has been acknowledged and a newer durable worker supersedes its
+  workflow step, and in any case once it is past a 14-day retention window
+  measured from its terminal heartbeat. The pass never touches a live lease, a
+  non-terminal worker, a worker that still owns its item's lease or still
+  matches a live process, or anything belonging to another repository. It fails
+  closed whenever a record will not decode or a process snapshot cannot be
+  taken, removes the `.spec.json` discovery anchor last so a partial removal
+  stays discoverable and retryable, and is quiet and non-fatal so discovery
+  proceeds regardless.
 - Include a `schemaVersion` in every snapshot. A snapshot with an unknown
   version is treated as absent rather than as corruption: the version is read
   before the payload, so a file another release wrote is silent even when its
@@ -1247,7 +1267,8 @@ The first solve/autosolve-compatible slice is implemented.
   autosolve parent state, and replays output without rerunning the provider.
   Terminal journals remain discoverable until a newer worker is durable proof
   that their workflow step was superseded, closing the crash window between a
-  terminal event and its GitHub-refresh handoff.
+  terminal event and its GitHub-refresh handoff, and in no case longer than
+  section 16's retention window.
 - A provider event the parser does not recognize — an unknown top-level type,
   an unknown Codex item, or an unknown Claude content block — contributes at
   most one bounded single-line notice: a normalized, truncated type label and
