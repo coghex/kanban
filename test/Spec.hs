@@ -15,7 +15,7 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Char (isControl)
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Foldable (for_)
-import Data.List (findIndex, isInfixOf, nub, sort, sortOn)
+import Data.List (findIndex, intercalate, isInfixOf, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -3110,6 +3110,17 @@ suite = do
         `shouldBe` sanitizeText "First paragraph.\nstill first.\n\nSecond paragraph."
     it "normalizes a lone carriage return to a line break" $
       sanitizeText "left\rright" `shouldBe` "left\nright"
+    -- NFC is the final step, so a decomposed base-plus-accent input and its
+    -- precomposed twin converge on the identical result.
+    it "sanitizes NFC-equivalent composed and decomposed input identically" $ do
+      sanitizeText "Caf\233" `shouldBe` sanitizeText "Cafe\769"
+      sanitizeText "Cafe\769" `shouldBe` "Caf\233"
+    -- A combining mark over a digit has no precomposed form -- Unicode never
+    -- defines one -- so it survives both the safe-character filter (general
+    -- category Mn, not Format or a bidi control) and NFC, which has nothing
+    -- to fold it into.
+    it "preserves an ordinary combining mark that has no precomposed form" $
+      sanitizeText "5\817" `shouldBe` "5\817"
 
   describe "workflow classification" $ do
     it "keeps linked issues visible while showing their pull requests as separate cards" $ do
@@ -3294,6 +3305,123 @@ suite = do
           trackingContext.trackingPrimary.membershipTracker.trackerIssue.issueNumber `shouldBe` 200
           map (.membershipTracker.trackerIssue.issueNumber) trackingContext.trackingAdditional `shouldBe` [100]
         values -> expectationFailure ("unexpected multi-tracked entries: " <> show values)
+
+    -- attentionKey orders on two independent booleans (problem, approved)
+    -- before age, so an item carrying both a changes-requested and an
+    -- approval label sits in its own tier rather than collapsing into either
+    -- one alone.
+    it "orders standalone issues by all four problem/approved tiers, then by age within each tier" $ do
+      let older = epoch
+          newer = addUTCTime 3600 epoch
+          problemLabel = Label "reviewed:changes" "d73a4a"
+          approvedLabel = Label "reviewed:approve" "0e8a16"
+          tiered number labels createdAt = (baseIssue number []) {issueLabels = labels, issueCreatedAt = createdAt}
+          bothOld = tiered 1 [problemLabel, approvedLabel] older
+          bothNew = tiered 2 [problemLabel, approvedLabel] newer
+          problemOld = tiered 3 [problemLabel] older
+          problemNew = tiered 4 [problemLabel] newer
+          approvedOld = tiered 5 [approvedLabel] older
+          approvedNew = tiered 6 [approvedLabel] newer
+          neitherOld = tiered 7 [] older
+          neitherNew = tiered 8 [] newer
+          snapshot =
+            RepoSnapshot
+              [neitherNew, bothOld, approvedOld, problemNew, bothNew, neitherOld, approvedNew, problemOld]
+              []
+              epoch
+              False
+              False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
+
+    -- classifyPullRequest routes a non-draft approved PR to Done regardless
+    -- of its tier, which would split the four tiers across two columns.
+    -- Keeping every fixture a draft holds them all in Reviewing (drafts stay
+    -- there no matter their approval label), so the same four-tier,
+    -- age-ordered assertion applies to pull requests too.
+    it "orders standalone pull requests by all four problem/approved tiers, then by age within each tier" $ do
+      let older = epoch
+          newer = addUTCTime 3600 epoch
+          approvedLabel = Label "reviewed:approve" "0e8a16"
+          tiered number labels mergeState createdAt =
+            (basePullRequest number [] True labels) {pullRequestMergeState = mergeState, pullRequestCreatedAt = createdAt}
+          bothOld = tiered 1 [approvedLabel] MergeConflicting older
+          bothNew = tiered 2 [approvedLabel] MergeConflicting newer
+          problemOld = tiered 3 [] MergeConflicting older
+          problemNew = tiered 4 [] MergeConflicting newer
+          approvedOld = tiered 5 [approvedLabel] MergeClean older
+          approvedNew = tiered 6 [approvedLabel] MergeClean newer
+          neitherOld = tiered 7 [] MergeClean older
+          neitherNew = tiered 8 [] MergeClean newer
+          snapshot =
+            RepoSnapshot
+              []
+              [neitherNew, bothOld, approvedOld, problemNew, bothNew, neitherOld, approvedNew, problemOld]
+              epoch
+              False
+              False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
+
+    -- trackerGroupKey reads the same two booleans off a group's tracked
+    -- children rather than the tracker issue itself, so the "both" tier here
+    -- comes from two different children each contributing one flag.
+    it "orders tracker groups by the four problem/approved tiers, then by the tracker's own age within a tier" $ do
+      let older = epoch
+          newer = addUTCTime 3600 epoch
+          problemLabel = Label "reviewed:changes" "d73a4a"
+          approvedLabel = Label "reviewed:approve" "0e8a16"
+          tracker number createdAt childrenBody =
+            (baseIssue number [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueCreatedAt = createdAt,
+                issueBody = "## Children\n" <> childrenBody
+              }
+          bothTracker = tracker 100 older "- [ ] #10 — A1: Problem child\n- [ ] #11 — A2: Approved child"
+          problemTracker = tracker 200 older "- [ ] #12 — A1: Problem child"
+          approvedTracker = tracker 300 older "- [ ] #13 — A1: Approved child"
+          neitherOldTracker = tracker 400 older "- [ ] #14 — A1: Ordinary child"
+          neitherNewTracker = tracker 500 newer "- [ ] #15 — A1: Ordinary child"
+          children =
+            [ (baseIssue 10 []) {issueLabels = [problemLabel]},
+              (baseIssue 11 []) {issueLabels = [approvedLabel]},
+              (baseIssue 12 []) {issueLabels = [problemLabel]},
+              (baseIssue 13 []) {issueLabels = [approvedLabel]},
+              baseIssue 14 [],
+              baseIssue 15 []
+            ]
+          snapshot =
+            RepoSnapshot
+              ([neitherNewTracker, approvedTracker, bothTracker, neitherOldTracker, problemTracker] <> children)
+              []
+              epoch
+              False
+              False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [10, 11, 12, 13, 14, 15]
+
+    -- trackedChildKey ranks only rereview status ahead of checklist order;
+    -- isProblem never enters it, so a later child carrying a blocked label
+    -- must not jump ahead of an earlier, ordinary one.
+    it "keeps a later problematic child in its natural implementation position rather than promoting it" $ do
+      let tracker =
+            (baseIssue 100 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "## Children\n- [ ] #1 — A1: Earlier\n- [ ] #2 — A2: Later problem"
+              }
+          problemChild = (baseIssue 2 []) {issueLabels = [Label "blocked" "d73a4a"]}
+          snapshot = RepoSnapshot [tracker, baseIssue 1 [], problemChild] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2]
+
+    -- sortOn is stable, so standalone issues sharing an identical attention
+    -- key -- no labels, the same creation time -- keep the order the
+    -- snapshot listed them in rather than picking up an incidental
+    -- numeric or canonical-identity ordering.
+    it "preserves snapshot input order for standalone issues with equal attention keys" $ do
+      let snapshot = RepoSnapshot [baseIssue 7 [], baseIssue 3 [], baseIssue 9 []] [] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [7, 3, 9]
 
   describe "epic collapse selection normalization" $ do
     it "moves another column's remembered row to the tracker's first row there once collapse hides it" $ do
@@ -4067,6 +4195,107 @@ suite = do
                 providerError.providerErrorKind `shouldBe` AuthenticationRequired
                 Data.Text.unpack providerError.providerErrorMessage `shouldContain` "Bad credentials (HTTP 401)"
               other -> expectationFailure ("expected a reported gh failure, got " <> show other)
+
+    -- classifyFailure's phrase list is unit-tested on its own; this is the
+    -- integration half, proving an ordinary (non-credential) gh failure
+    -- reaches the board as RequestFailed rather than AuthenticationRequired.
+    it "classifies a non-authentication gh failure as an ordinary request failure" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withFakeGh
+          temporaryRoot
+          [ "printf '%s\\n' 'gh: GraphQL: Something went wrong while executing your query (repository)' >&2",
+            "exit 1"
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Left providerError) -> do
+                providerError.providerErrorKind `shouldBe` RequestFailed
+                Data.Text.unpack providerError.providerErrorMessage
+                  `shouldContain` "Something went wrong while executing your query"
+              other -> expectationFailure ("expected a reported gh failure, got " <> show other)
+
+    -- graphqlArguments' construction is unit-tested on its own; this drives
+    -- a real two-page fetch through the actual gh invocation and proves the
+    -- exact argv it builds is what reaches the subprocess on both the first
+    -- page and the cursor-carrying follow-up, while accumulating both
+    -- connections in the order the pages arrived.
+    it "observes the exact first-page and cursor-page argv gh is invoked with, and preserves page order" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+            argvLog = temporaryRoot </> "argv.log"
+            counterFile = temporaryRoot </> "invocation.count"
+            firstPage =
+              githubPageWithErrors
+                []
+                (Just "cursor-1")
+                [issueNodeJson 41 [emptyLabelsJson, emptyAssigneesJson]]
+                [pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson]]
+            secondPage =
+              githubPageWithErrors
+                []
+                Nothing
+                [issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]]
+                [pullRequestNodeJson 10 [emptyLabelsJson, emptyClosingIssuesJson]]
+            initialState = FetchState [] [] Nothing Nothing True True False False []
+        decodedFirstPage <- case eitherDecode (LazyByteString.pack firstPage) of
+          Left message -> fail ("undecodable fixture page: " <> message)
+          Right page -> pure page
+        secondPageState <- case advanceState defaultLimitsConfig initialState decodedFirstPage of
+          Left providerError -> fail ("fixture page unexpectedly failed to advance: " <> show providerError)
+          Right state -> pure state
+        outcome <-
+          withFakeGh
+            temporaryRoot
+            [ "for arg in \"$@\"; do printf '%s\\037' \"$arg\" >> " <> ByteString.pack argvLog <> "; done",
+              "printf '\\036' >> " <> ByteString.pack argvLog,
+              "count=$(( $(cat " <> ByteString.pack counterFile <> " 2>/dev/null || echo 0) + 1 ))",
+              "printf '%s' \"$count\" > " <> ByteString.pack counterFile,
+              "if [ \"$count\" -eq 1 ]; then printf '%s' '"
+                <> ByteString.pack firstPage
+                <> "'; else printf '%s' '"
+                <> ByteString.pack secondPage
+                <> "'; fi"
+            ]
+            (fst <$> captureBoardRefresh temporaryRoot 30)
+        case outcome of
+          BoardRefreshCompleted (Right githubResult) -> do
+            map (.issueNumber) githubResult.githubSnapshot.snapshotIssues `shouldBe` [41, 42]
+            map (.pullRequestNumber) githubResult.githubSnapshot.snapshotPullRequests `shouldBe` [9, 10]
+          other -> expectationFailure ("expected a decoded two-page snapshot, got " <> show other)
+        recordedBytes <- ByteString.readFile argvLog
+        let invocations =
+              map
+                (map ByteString.unpack . init . ByteString.split '\US')
+                (filter (not . ByteString.null) (ByteString.split '\RS' recordedBytes))
+        case invocations of
+          [firstArgv, secondArgv] -> do
+            firstArgv `shouldBe` graphqlArguments defaultLimitsConfig repository initialState
+            secondArgv `shouldBe` graphqlArguments defaultLimitsConfig repository secondPageState
+          other -> expectationFailure ("expected exactly two recorded gh invocations, got " <> show (length other))
+
+    -- The pull-request cap is 100, equal to the page size, so a single full
+    -- page reaching it truncates immediately without needing a second
+    -- fetch -- the exact shape a capped connection takes in production.
+    it "reports the pull-request truncation fields and warning once a connection reaches its configured cap" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let cappedPullRequestNodes = intercalate "," [pullRequestNodeJson number [emptyLabelsJson, emptyClosingIssuesJson] | number <- [1 .. 100]]
+            cappedPage =
+              "{\"data\":{\"repository\":{"
+                <> "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},"
+                <> "\"pullRequests\":{\"nodes\":["
+                <> cappedPullRequestNodes
+                <> "],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"more\"}}"
+                <> "}}}"
+        withFakeGh temporaryRoot ["printf '%s' '" <> ByteString.pack cappedPage <> "'"] $ do
+          (outcome, _) <- captureBoardRefresh temporaryRoot 30
+          case outcome of
+            BoardRefreshCompleted (Right githubResult) -> do
+              githubResult.githubSnapshot.snapshotPullRequestsTruncated `shouldBe` True
+              githubResult.githubSnapshot.snapshotIssuesTruncated `shouldBe` False
+              length githubResult.githubSnapshot.snapshotPullRequests `shouldBe` 100
+              githubResult.githubWarnings `shouldBe` ["100+ open pull requests; board is truncated"]
+            other -> expectationFailure ("expected a truncated snapshot, got " <> show other)
 
     -- The output is read as bytes and decoded once, leniently, as UTF-8, so a
     -- response GitHub truncated mid-character is a page with a replacement
@@ -6261,6 +6490,30 @@ suite = do
       -- §9's vocabulary is what the overlay leads with, so its sentence can
       -- never disagree with the word the card already showed.
       map explain states `shouldBe` map (\state -> Just (mergeText state <> " — " <> mergeExplanation state)) states
+
+  -- The card frame pre-wraps its title and excerpt with Kanban.Card's own
+  -- 'boundedLines'/'displayWidth' (already covered directly), but the details
+  -- overlay hands its title and body to Brick's own 'txtWrap'. These render
+  -- through that production Brick/Vty path -- not a duplicate width
+  -- algorithm -- and stay separate from the full golden-frame scope of #55.
+  describe "Unicode rendering through Brick's own reflow" $ do
+    -- A CJK title has no whitespace for txtWrap to break on, so it emits the
+    -- title as one unbroken line; the frame then relies on Vty to clip that
+    -- line to the width it was given rather than reflow it onto more rows.
+    -- This is the "clipping" half of the wrapping-or-clipping contract, and
+    -- it holds regardless: no row may ever exceed the given width.
+    it "clips an unbroken CJK title to the given width rather than overrunning it" $ do
+      let wideTitle = Data.Text.replicate 40 "漢"
+          issue = (baseIssue 5 []) {issueTitle = wideTitle}
+          rendered = renderDetailsAt 20 (fixtureBoard []) (IssueItem issue)
+      map displayWidth rendered `shouldSatisfy` all (<= 20)
+      Data.Text.count "漢" (Data.Text.concat rendered) `shouldBe` 20 `div` 2
+
+    it "renders a base-plus-combining-mark title intact through the same path" $ do
+      let combiningTitle = "5\817"
+          issue = (baseIssue 6 []) {issueTitle = combiningTitle}
+          rendered = renderDetailsAt 40 (fixtureBoard []) (IssueItem issue)
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf combiningTitle)
 
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
