@@ -5194,6 +5194,16 @@ suite = do
         Just (Left providerError) -> providerError.providerErrorKind `shouldBe` ExecutableMissing
         other -> expectationFailure ("expected a not-installed error, got " <> show other)
 
+    it "reports a scratch-directory setup failure as a request error rather than escaping the caller" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
+        ByteString.writeFile unwritableCacheRoot "not a directory"
+        withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $ do
+          result <- timeout 5000000 (runUsageCommand 3000000 ["irrelevant-because-setup-fails-first"])
+          case result of
+            Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestFailed
+            other -> expectationFailure ("expected a request-failed error, got " <> show other)
+
     it "times out a sleeping command and confirms its process group is gone" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         let markerPath = temporaryRoot </> "usage-command.pid"

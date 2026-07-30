@@ -62,18 +62,27 @@ import System.Process
 runUsageCommand :: Int -> [Text] -> IO (Either ProviderError UsageSnapshot)
 runUsageCommand _ [] = pure (Left (ProviderError ExecutableMissing "usage command is not configured"))
 runUsageCommand timeoutMicros (executableText : argumentTexts) = do
-  scratchDirectory <- usageCommandScratchDirectory
-  createPrivateDirectory XdgCache scratchDirectory
-  let processSpec = usageCommandProcess scratchDirectory (Text.unpack executableText) (map Text.unpack argumentTexts)
-  started <- try @IOException (createProcess processSpec)
-  case started of
-    Left exception -> pure (Left (usageCommandSpawnFailure exception))
-    Right (Nothing, Just outputHandle, Just errorHandle, processHandle) ->
-      runSpawnedUsageCommand timeoutMicros processHandle outputHandle errorHandle
-    Right (_, _, _, processHandle) -> do
-      (managed, _) <- managedProcess processHandle
-      killManagedProcess managed
-      pure (Left (ProviderError RequestFailed "usage command did not provide stdout and stderr pipes"))
+  -- Kept out of 'usageCommandSpawnFailure's classification on purpose: a
+  -- scratch directory we could not create or chmod ourselves -- e.g. an
+  -- unwritable or file-valued XDG_CACHE_HOME -- says nothing about whether
+  -- the configured executable exists, and must not surface as NOT INSTALLED.
+  -- Left uncaught, this would also escape the refresh worker entirely and
+  -- leave the provider stuck loading, since no finished event would ever be
+  -- published.
+  scratchDirectoryResult <- try @IOException (usageCommandScratchDirectory >>= \directory -> createPrivateDirectory XdgCache directory >> pure directory)
+  case scratchDirectoryResult of
+    Left exception -> pure (Left (ProviderError RequestFailed ("could not prepare the usage command's scratch directory: " <> Text.pack (show exception))))
+    Right scratchDirectory -> do
+      let processSpec = usageCommandProcess scratchDirectory (Text.unpack executableText) (map Text.unpack argumentTexts)
+      started <- try @IOException (createProcess processSpec)
+      case started of
+        Left exception -> pure (Left (usageCommandSpawnFailure exception))
+        Right (Nothing, Just outputHandle, Just errorHandle, processHandle) ->
+          runSpawnedUsageCommand timeoutMicros processHandle outputHandle errorHandle
+        Right (_, _, _, processHandle) -> do
+          (managed, _) <- managedProcess processHandle
+          killManagedProcess managed
+          pure (Left (ProviderError RequestFailed "usage command did not provide stdout and stderr pipes"))
 
 -- | Only a launch that failed because there was nothing runnable to launch —
 -- no such file, or a file that cannot be executed — is reported as missing;
