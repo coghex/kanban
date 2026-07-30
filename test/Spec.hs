@@ -3508,6 +3508,8 @@ suite = do
         `shouldBe` map (("• " <>) . renderTrackerDiagnostic) zeroChildDiagnostics
 
   describe "tracker checklist parsing" $ do
+    let keysUnderChildren rows = map (.trackerChildImplementationKey) (parseTrackerChildren [] ("## Children\n" <> rows))
+
     it "parses supported checkboxes, progress, and natural keys only in tracker sections" $ do
       let body =
             "## Related\n- [ ] #99 — A1: Ignore\n"
@@ -3517,6 +3519,43 @@ suite = do
       map (.trackerChildIssueNumber) children `shouldBe` [2, 1]
       map (.trackerChildComplete) children `shouldBe` [False, True]
       map (.trackerChildImplementationKey) (sortOn implementationSortKey children) `shouldBe` [Just "A2", Just "A10"]
+
+    -- The key occupies a fixed position in every documented form, so it is read
+    -- there rather than found by scanning the item text for a key-shaped word.
+    it "recognizes an implementation key only in the two documented key positions" $ do
+      keysUnderChildren "- [ ] #756 — **A1:** Define the persistence contract.\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [ ] #742 — A1: Modal ownership with debug pass-through\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [x] **#88 — Data-driven location definitions**\n" `shouldBe` [Nothing]
+      keysUnderChildren "- [x] **#1 — A2: Earlier**\n" `shouldBe` [Just "A2"]
+      keysUnderChildren "- [ ] A1: #742 — Key ahead of the reference\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [ ] **A1:** #742 — Emphasized ahead of the reference\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [ ] _A1:_ #742 — Underscored ahead of the reference\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [ ] #742 - A1: ASCII hyphen separator\n" `shouldBe` [Just "A1"]
+      keysUnderChildren "- [ ] #742 – A1: En dash separator\n" `shouldBe` [Just "A1"]
+
+    it "leaves key-shaped words elsewhere in a child title keyless" $ do
+      keysUnderChildren "- [x] **#88 — Move assets to S3 storage**\n" `shouldBe` [Nothing]
+      keysUnderChildren "- [ ] #742 — Prepare the V2 save envelope\n" `shouldBe` [Nothing]
+      keysUnderChildren "- [ ] #5 — Raise the macOS26 build floor\n" `shouldBe` [Nothing]
+      keysUnderChildren "- [ ] #6 — Pin CI to GHC2024\n" `shouldBe` [Nothing]
+      -- The after-reference position belongs to the leading reference alone; a
+      -- later one embedded in the title must not open a second key position.
+      keysUnderChildren "- [ ] #88 — Discuss #99 — A1: detail\n" `shouldBe` [Nothing]
+
+    it "sorts keys naturally ahead of keyless children, which keep checklist order" $ do
+      let body =
+            "## Children\n"
+              <> "- [ ] #1 — B1: Fourth key\n"
+              <> "- [ ] #2 — Prepare the V2 save envelope\n"
+              <> "- [ ] #3 — A10: Third key\n"
+              <> "- [ ] #4 — Move assets to S3 storage\n"
+              <> "- [ ] #5 — A1: First key\n"
+              <> "- [ ] #6 — A2: Second key\n"
+              <> "- [ ] #7 — A1: Ties the first key, later in the checklist\n"
+          ordered = sortOn implementationSortKey (parseTrackerChildren [] body)
+      map (.trackerChildImplementationKey) ordered
+        `shouldBe` [Just "A1", Just "A1", Just "A2", Just "A10", Just "B1", Nothing, Nothing]
+      map (.trackerChildIssueNumber) ordered `shouldBe` [5, 7, 6, 3, 1, 2, 4]
 
     it "reports structural checklist loss while retaining valid children" $ do
       let body = "## Children\n- [ ] #2 — A1: Valid\n- [ ] missing reference\n- [?] #3\n- [x] #2 — duplicate"

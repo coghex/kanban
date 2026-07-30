@@ -120,19 +120,52 @@ stripCheckbox rawLine = do
     stripped = Text.dropWhile isSpace rawLine
 
 findIssueNumber :: Text -> Maybe Int
-findIssueNumber text = case Text.breakOn "#" text of
+findIssueNumber = fmap fst . splitIssueReference
+
+-- The first issue reference in the text, paired with everything following its
+-- digits. Splitting rather than only reporting the number lets the key parser
+-- anchor on the leading reference instead of scanning the whole item.
+splitIssueReference :: Text -> Maybe (Int, Text)
+splitIssueReference text = case Text.breakOn "#" text of
   (_, suffix)
     | Text.null suffix -> Nothing
     | otherwise ->
-        let digits = Text.takeWhile isDigit (Text.drop 1 suffix)
-         in parsePositiveInt digits <|> findIssueNumber (Text.drop 1 suffix)
+        let afterHash = Text.drop 1 suffix
+            (digits, rest) = Text.span isDigit afterHash
+         in case parsePositiveInt digits of
+              Just number -> Just (number, rest)
+              Nothing -> splitIssueReference afterHash
 
+-- docs/design.md section 12 puts the implementation key in one of two fixed
+-- positions: immediately after the leading child reference and its separator,
+-- or ahead of that reference at the item's start. Scanning every word instead,
+-- as this once did, promoted ordinary title words such as "S3" or "V2" -- and
+-- the "OS26" fragment of "macOS26" -- to keys, which sorted those children
+-- ahead of their keyless siblings and could pick the wrong primary tracker.
 findImplementationKey :: Text -> Maybe Text
-findImplementationKey = firstJust . map parseKeyToken . Text.words . Text.map normalizeKeyCharacter
+findImplementationKey contents =
+  keyAtStart contents <|> (keyAtStart . afterSeparator . snd =<< splitIssueReference contents)
   where
-    normalizeKeyCharacter character
-      | isAsciiUpper character || isDigit character = character
-      | otherwise = ' '
+    afterSeparator = Text.stripStart . Text.dropWhile isKeySeparator . Text.stripStart
+
+-- A key is recognized only when it opens the text and is closed by a colon, as
+-- in "A1:", "**A1:**", or "_A1:_". Emphasis is skipped on either side of the
+-- token so both key-local emphasis and a whole item wrapped in it parse.
+keyAtStart :: Text -> Maybe Text
+keyAtStart text =
+  if ":" `Text.isPrefixOf` Text.dropWhile isEmphasisMarker afterCandidate
+    then parseKeyToken candidate
+    else Nothing
+  where
+    start = Text.dropWhile isEmphasisMarker (Text.stripStart text)
+    candidate = Text.takeWhile isKeyCharacter start
+    afterCandidate = Text.drop (Text.length candidate) start
+    isKeyCharacter character = isAsciiUpper character || isDigit character
+
+-- The dash variants ordinary Markdown uses between a reference and its title:
+-- ASCII hyphen, en dash, and em dash.
+isKeySeparator :: Char -> Bool
+isKeySeparator character = character == '-' || character == '–' || character == '—'
 
 parseKeyToken :: Text -> Maybe Text
 parseKeyToken token =
@@ -292,13 +325,6 @@ renderTrackerDiagnostic (TrackerDuplicateChild lineNumber issueNumber) =
 
 showText :: Show value => value -> Text
 showText = Text.pack . show
-
-firstJust :: [Maybe value] -> Maybe value
-firstJust = caseMap
-  where
-    caseMap [] = Nothing
-    caseMap (Just value : _) = Just value
-    caseMap (Nothing : rest) = caseMap rest
 
 (<|>) :: Maybe value -> Maybe value -> Maybe value
 Just value <|> _ = Just value
