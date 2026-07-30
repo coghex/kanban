@@ -12,6 +12,17 @@ regard to case — so `Acme/Widgets` and `acme/widgets` are one drainer, and two
 clones of one repository cannot drain it at the same time. A checkout whose
 remote is not a supported github.com URL cannot have a drainer at all.
 
+That name comes from the remote the **shared** Kanban configuration
+(`~/.config/kanban/config.toml`, or `$XDG_CONFIG_HOME/kanban/config.toml`)
+names — the same remote Kanban itself resolves the board's repository through.
+A dashboard that resolves a *different* repository, because it was started with
+`kanban --repo OWNER/NAME` or with a `--config` naming another remote, is
+talking about another canonical repository: it reports the drainer as not
+installed for that repository, and the controller refuses its requests rather
+than acting on this checkout's job behind its back. Point both at one
+repository by setting `remote_name` in the shared configuration, which moves
+the dashboard and the drainer together.
+
 ## Install
 
 The installer is for macOS and does not require `sudo`.
@@ -367,10 +378,7 @@ python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 Every command selects the repository `--path` is a checkout of, including
 `logs`, which shows that repository's own dated log. Add
 `--repo OWNER/NAME` to assert which repository you expect; the controller
-refuses it unless some remote of that checkout names it. Kanban passes this
-automatically, which is how a dashboard started with `--repo` or with a
-`--config` naming a different remote still controls this checkout's own
-drainer — the assertion is a guard, and never changes which job is acted on.
+refuses it when the checkout's remote says otherwise.
 
 Do not run `drain_prs.py` directly during normal operation, apart from the
 single-pull-request mode above, which is meant to be invoked on request.

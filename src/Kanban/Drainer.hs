@@ -189,38 +189,16 @@ drainerRecordPath = do
 -- second is a record that parses without identifying anything, since an empty
 -- label or a relative plist path names no job either. Both send the user back
 -- to the installer rather than on to a lookup that cannot succeed.
---
--- The identity is the key, and the checkout is the fallback. Which repository
--- a dashboard is *about* comes from its own configuration — @--repo@, or the
--- remote a @--config@ names — while the installer files a checkout's job under
--- the remote its own configuration names, and the two need not be the same
--- remote of the same checkout. Falling back to the entry recorded for this
--- exact checkout is what keeps a deliberately configured dashboard from
--- reporting a drainer it installed itself as not installed. It cannot reach
--- another repository's job: an entry names one checkout, and this only matches
--- the one the dashboard is already showing.
 drainerRecordFromBytes ::
-  Repository -> ByteString.ByteString -> Either Text (Maybe DrainerRecord)
-drainerRecordFromBytes repository bytes = do
+  Text -> ByteString.ByteString -> Either Text (Maybe DrainerRecord)
+drainerRecordFromBytes identity bytes = do
   DrainerRecordDocument records <- case eitherDecodeStrict bytes of
     Left message -> Left (withoutJsonPath (Text.pack message))
     Right document -> Right document
-  case Map.lookup (normalizedRepositoryIdentity repository) records of
+  case Map.lookup identity records of
+    Nothing -> Right Nothing
     Just value -> Just <$> validated value
-    Nothing -> case recordedForThisCheckout records of
-      -- Two entries naming one checkout is an installation that changed
-      -- identity without being reinstalled; picking either would be a guess,
-      -- and re-running the installer is the repair for both.
-      [value] -> Just <$> validated value
-      _ -> Right Nothing
   where
-    recordedForThisCheckout records =
-      [ value
-        | value <- Map.elems records,
-          Right record <- [parseEither parseJSON value :: Either String DrainerRecord],
-          record.drainerRecordRepository == repository.repositoryRoot
-      ]
-
     validated value = case parseEither parseJSON value of
       Left message -> Left (withoutJsonPath (Text.pack message))
       Right record
@@ -233,10 +211,10 @@ drainerRecordFromBytes repository bytes = do
 -- | Resolves this repository's installed plist through that document, naming
 -- the remediation for every way the lookup can fail rather than letting an
 -- @IOException@ render itself as the drainer's status. Parameterised by the
--- host operating system, the repository, and the document path so each branch
--- is exercisable off a macOS host.
-resolveDrainerPlist :: String -> Repository -> FilePath -> IO (Either Text FilePath)
-resolveDrainerPlist hostOperatingSystem repository recordPath
+-- host operating system, the repository identity, and the document path so
+-- each branch is exercisable off a macOS host.
+resolveDrainerPlist :: String -> Text -> FilePath -> IO (Either Text FilePath)
+resolveDrainerPlist hostOperatingSystem identity recordPath
   | hostOperatingSystem /= "darwin" =
       pure (Left "the PR drainer is a launchd job and needs macOS to run")
   | otherwise = do
@@ -245,7 +223,7 @@ resolveDrainerPlist hostOperatingSystem repository recordPath
         then pure (Left notInstalled)
         else do
           contents <- try @IOException (ByteString.readFile recordPath)
-          case fmap (drainerRecordFromBytes repository) contents of
+          case fmap (drainerRecordFromBytes identity) contents of
             Left _ -> pure (Left (unreadableRecord "it could not be read"))
             Right (Left message) -> pure (Left (unreadableRecord message))
             Right (Right Nothing) -> pure (Left notInstalled)
@@ -253,7 +231,7 @@ resolveDrainerPlist hostOperatingSystem repository recordPath
   where
     notInstalled =
       "the PR drainer is not installed for "
-        <> normalizedRepositoryIdentity repository
+        <> identity
         <> ", or predates its per-repository install record; "
         <> reinstallHint
 
@@ -295,7 +273,7 @@ withoutJsonPath message = case Text.stripPrefix "Error in " message of
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do
   recordPath <- drainerRecordPath
-  resolved <- resolveDrainerPlist os repository recordPath
+  resolved <- resolveDrainerPlist os (normalizedRepositoryIdentity repository) recordPath
   case resolved of
     Left message -> pure (Left message)
     Right plist -> do

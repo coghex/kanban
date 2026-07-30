@@ -406,58 +406,32 @@ def incident_job(repo_path: Path) -> DrainerJob:
         return unmanaged_job(repo_path)
 
 
-def checkout_identities(repo_path: Path) -> set[str]:
-    """Every canonical GitHub repository this checkout's remotes name.
-
-    A checkout is a clone of all of them, which is what makes this the right
-    question to ask of an asserted identity: with a fork remote and an upstream
-    remote, "the checkout's remote" names two repositories, and a dashboard
-    configured to follow either one is talking about this same checkout.
-    """
-    listed = run_command(["git", "-C", str(repo_path), "remote"], check=False)
-    if listed.returncode != 0:
-        return set()
-    identities: set[str] = set()
-    for remote_name in (listed.stdout or "").split():
-        url = run_command(
-            ["git", "-C", str(repo_path), "remote", "get-url", remote_name],
-            check=False,
-        )
-        if url.returncode != 0:
-            continue
-        try:
-            identities.add(normalize_identity(url.stdout))
-        except ServiceError:
-            continue
-    return identities
-
-
 def require_requested_identity(job: DrainerJob, requested: str | None) -> None:
-    """Refuses a caller naming a repository this checkout is not a clone of.
+    """Refuses a caller whose repository is not the one this job is for.
 
     Kanban resolves the board's repository through its own configuration —
-    `--repo OWNER/NAME` outright, or the remote named by a `--config` this
-    module never sees — and passes the result here. Refusing anything but this
-    job's own identity would break the legitimate case where the dashboard
-    follows a different remote of the *same* checkout, so the test is whether
-    the checkout names the asserted repository at all.
+    `--repo OWNER/NAME` outright, or the remote a `--config` names — and passes
+    the result here. Anything but this job's own identity is refused, including
+    another remote of this same checkout: a fork's upstream is a different
+    canonical repository, and quietly acting on the origin job while the
+    dashboard is for the upstream one is precisely the divergence per-repository
+    identities exist to prevent.
 
-    What it still refuses is the case the containment exists for: a repository
-    the checkout has nothing to do with. And an accepted assertion is never a
-    selector — the job stays the one this checkout's own discovery remote
-    names, so no dashboard configuration can create a second drainer identity
-    for one checkout.
+    So the two sides have to agree rather than accommodate each other, and the
+    message says which configuration to change. Aligning them is a real repair:
+    the identity comes from `discovery_remote_name`, so setting `remote_name` in
+    the shared Kanban configuration moves the dashboard and this job together.
     """
     if requested is None:
         return
     wanted = normalize_identity(requested)
-    if wanted == job.identity or wanted in checkout_identities(job.repo_path):
-        return
-    raise ServiceError(
-        f"--repo {requested} names {wanted}, but no remote of {job.repo_path} does; "
-        f"it is a checkout of {job.identity}. Refusing to control another "
-        "repository's drainer."
-    )
+    if wanted != job.identity:
+        raise ServiceError(
+            f"--repo {requested} names {wanted}, but {job.repo_path} is a checkout of "
+            f"{job.identity}; refusing to control another repository's drainer. "
+            "Set remote_name in the shared Kanban configuration so the dashboard "
+            "and the drainer resolve one repository."
+        )
 
 
 def utc_stamp() -> str:

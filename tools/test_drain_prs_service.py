@@ -75,11 +75,6 @@ class RedirectedControllerTestCase(unittest.TestCase):
             return _completed(0)
         if args[:2] == ["launchctl", "bootstrap"]:
             return _completed(0)
-        if args[0] == "git" and args[3:] == ["remote"]:
-            names = [name for path, name in self.remotes if path == args[2]]
-            if not names:
-                return _completed(1, stderr="fatal: not a git repository")
-            return _completed(0, stdout="\n".join(sorted(names)) + "\n")
         if args[0] == "git" and args[3:5] == ["remote", "get-url"]:
             url = self.remotes.get((args[2], args[5]))
             if url is None:
@@ -437,19 +432,14 @@ def _real_run_command(args, *, check=True):
 
 class RequestedIdentityTests(RedirectedControllerTestCase):
     """Kanban resolves the board's repository through its own configuration —
-    `--repo OWNER/NAME` outright, or the remote a `--config` names — and passes
-    the result here, where it is checked against the checkout rather than
-    believed."""
+    `--repo OWNER/NAME` outright, or the remote a `--config` names — so the
+    identity it passes here is asserted rather than believed."""
 
     def setUp(self):
         super().setUp()
-        self.checkout_path = self.checkout(
-            "widgets",
-            "git@github.com:acme/widgets.git",
-            upstream="git@github.com:upstream-owner/widgets.git",
-            fork="git@github.com:someone/widgets.git",
+        self.job = drain_prs_service.job_for_identity(
+            self.root / "a", "acme/widgets"
         )
-        self.job = drain_prs_service.resolve_job(self.checkout_path)
 
     def test_a_matching_identity_is_accepted_however_it_is_spelled(self):
         for requested in (
@@ -464,25 +454,7 @@ class RequestedIdentityTests(RedirectedControllerTestCase):
     def test_no_identity_at_all_still_controls_this_checkout(self):
         drain_prs_service.require_requested_identity(self.job, None)
 
-    def test_another_remote_of_this_same_checkout_is_accepted(self):
-        # A dashboard started with `--config` naming `upstream`, or with
-        # `--repo upstream-owner/widgets`, is talking about this very checkout.
-        # Refusing it would make the drainer uncontrollable from a dashboard
-        # the user deliberately configured.
-        for requested in ("upstream-owner/widgets", "someone/widgets"):
-            with self.subTest(requested=requested):
-                drain_prs_service.require_requested_identity(self.job, requested)
-
-    def test_an_accepted_assertion_never_becomes_the_job_identity(self):
-        # It is a guard, not a selector: no dashboard configuration may create
-        # a second drainer identity for one checkout.
-        drain_prs_service.require_requested_identity(self.job, "upstream-owner/widgets")
-        self.assertEqual(self.job.identity, "acme/widgets")
-        self.assertEqual(
-            drain_prs_service.resolve_job(self.checkout_path).identity, "acme/widgets"
-        )
-
-    def test_a_repository_this_checkout_does_not_name_is_refused(self):
+    def test_another_repository_cannot_be_selected_or_created(self):
         with self.assertRaises(drain_prs_service.ServiceError) as raised:
             drain_prs_service.require_requested_identity(self.job, "acme/gadgets")
         message = str(raised.exception)
@@ -493,15 +465,28 @@ class RequestedIdentityTests(RedirectedControllerTestCase):
         with self.assertRaises(drain_prs_service.ServiceError):
             drain_prs_service.require_requested_identity(self.job, "/tmp/acme/widgets")
 
-    def test_a_remote_that_names_no_github_repository_is_simply_skipped(self):
-        local = self.checkout(
-            "local-remotes",
+    def test_another_remote_of_this_same_checkout_is_refused_too(self):
+        # A fork's upstream is a different canonical repository. Accepting it
+        # because the checkout happens to have a remote for it would act on the
+        # origin job while the dashboard is for the upstream one — the exact
+        # divergence per-repository identities exist to prevent — so the two
+        # configurations have to be aligned instead.
+        checkout = self.checkout(
+            "widgets",
             "git@github.com:acme/widgets.git",
-            backup="/srv/backups/widgets.git",
+            upstream="git@github.com:upstream-owner/widgets.git",
         )
+        job = drain_prs_service.resolve_job(checkout)
         self.assertEqual(
-            drain_prs_service.checkout_identities(local), {"acme/widgets"}
+            drain_prs_service.repository_identity(checkout, "upstream"),
+            "upstream-owner/widgets",
         )
+        with self.assertRaises(drain_prs_service.ServiceError) as raised:
+            drain_prs_service.require_requested_identity(job, "upstream-owner/widgets")
+        message = str(raised.exception)
+        self.assertIn("upstream-owner/widgets", message)
+        self.assertIn("acme/widgets", message)
+        self.assertIn("remote_name", message)
 
 
 class DiscoveryRecordTests(RedirectedControllerTestCase):

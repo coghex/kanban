@@ -191,17 +191,15 @@ everything else.
   `tools/drain_prs_service.py` derives from that repository's normalized
   identity. Kanban names none of them: it selects this repository's entry in
   the discovery record `tools/drain_prs_service.py` writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json` — falling back
-  to the entry recorded for this exact checkout when no entry carries that
-  identity, since a dashboard configured with `--repo` or a `--config` naming
-  another remote is about the same checkout — resolves the
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, resolves the
   plist path from that entry, then reads `ProgramArguments` out of the plist
   itself, which stays authoritative for what launchd will actually run. Kanban
   passes its own repository identity as `--repo OWNER/NAME` alongside
-  `--path`; the controller accepts it only when some remote of the checkout
-  names that repository, and still acts on the job the checkout's own discovery
-  remote names, so a `kanban --repo` or `--config` override can neither select
-  nor create another repository's drainer.
+  `--path`; the controller resolves the checkout's own remote and refuses any
+  identity but that one, including another remote of the same checkout, so
+  neither a `kanban --repo` nor a `kanban --config` override can select or
+  create another repository's drainer, or act on this checkout's job while the
+  dashboard reports a different repository.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
   notifications. A `--pr` run additionally writes exactly one versioned JSON
   result document to stdout — the pull request, its outcome (`merged`,
