@@ -11,6 +11,7 @@ override merge/array-replacement rules).
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -133,12 +134,20 @@ def default_config_path() -> Path:
 
 
 def parse_repository_name(raw_value: str) -> str:
-    """Derives OWNER/NAME from a git remote URL. Mirrors
-    Kanban.Repository.parseRepositoryName: accepts https://, http://,
-    ssh://, and git:// schemes, git@host:owner/name SCP-shorthand, and an
-    already-bare owner/name, not just git@github.com:/https://github.com/
-    (the narrower forms approve_issues.py's and drain_prs.py's own
-    parse_repo_slug used to accept before delegating here)."""
+    """Derives a display OWNER/NAME slug from a git remote URL.
+
+    Deliberately permissive, and *not* the same accept set as
+    Kanban.Repository.parseRepositoryName: it keeps the last two nonempty
+    segments of anything, so a plain local path remote such as
+    `/tmp/acme/widgets.git` still names `acme/widgets`. That is what lets
+    approve_issues.py and drain_prs.py address a fixture repository that has
+    no GitHub URL at all, and it is why this value is only ever used to build
+    `gh` arguments and log lines.
+
+    Anything that has to *name a canonical GitHub repository* — the drainer's
+    per-repository job identity above all — must use parse_github_repository
+    below instead, which mirrors the Haskell parser's accept set exactly.
+    """
     stripped = raw_value.strip()
     for prefix in ("https://", "http://", "ssh://", "git://"):
         if stripped.startswith(prefix):
@@ -154,6 +163,110 @@ def parse_repository_name(raw_value: str) -> str:
     if not owner or not name:
         raise KanbanConfigError(f"cannot derive OWNER/NAME from repository value: {raw_value}")
     return f"{owner}/{name}"
+
+
+# The canonical-identity parser. Every rule below is a transcription of
+# src/Kanban/Repository.hs, function for function, because the two sides have
+# to agree on which checkouts name a GitHub repository at all: Kanban selects
+# the drainer's job record by the identity it resolved, and this module derives
+# the job's launchd label from the identity the checkout's remote resolved to.
+# A value one side accepts and the other rejects would present as a drainer
+# that is installed and simultaneously not installed.
+_GITHUB_URL_SCHEMES = ("https://", "ssh://", "git://")
+_GITHUB_HOSTS = ("github.com", "www.github.com")
+# Kanban.Repository.isIdentityCharacter, and Data.Char.isDigit, which are both
+# ASCII-only — str.isdigit() is not, and would accept a non-ASCII port.
+_GITHUB_IDENTITY = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+_GITHUB_PORT = re.compile(r"\A[0-9]+\Z")
+
+
+def _github_host_of(authority: str) -> str:
+    """Kanban.Repository.hostOf: drops optional userinfo, which may itself
+    contain '@'."""
+    return authority.rsplit("@", 1)[-1]
+
+
+def _is_github_host(host: str) -> bool:
+    return host.lower() in _GITHUB_HOSTS
+
+
+def _is_github_authority(authority: str) -> bool:
+    host, separator, port = _github_host_of(authority).partition(":")
+    if not _is_github_host(host):
+        return False
+    return not separator or bool(_GITHUB_PORT.fullmatch(port))
+
+
+def _github_owner_name(path: str) -> str | None:
+    """Exactly OWNER/NAME[.git], with leading and trailing slashes ignored. An
+    extra path segment is ambiguous rather than ignorable, so it fails."""
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) != 2:
+        return None
+    owner, name = segments
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not _GITHUB_IDENTITY.fullmatch(owner) or not _GITHUB_IDENTITY.fullmatch(name):
+        return None
+    return f"{owner}/{name}"
+
+
+def _github_url_identity(after_scheme: str) -> str | None:
+    authority, _, path = after_scheme.partition("/")
+    if not _is_github_authority(authority):
+        return None
+    return _github_owner_name(path)
+
+
+def _github_scp_identity(value: str) -> str | None:
+    """SCP-style [user@]host:path. The colon starts the path rather than a
+    port, so git@github.com:22/owner/name is a three-segment path and fails. A
+    slash before the colon means git reads the value as a local path."""
+    authority, separator, path = value.partition(":")
+    if not separator or "/" in authority or "@" not in authority:
+        return None
+    if not _is_github_host(_github_host_of(authority)):
+        return None
+    return _github_owner_name(path)
+
+
+def _github_remote_identity(value: str) -> str | None:
+    lowered = value.lower()
+    for scheme in _GITHUB_URL_SCHEMES:
+        if lowered.startswith(scheme):
+            return _github_url_identity(value[len(scheme) :])
+    return _github_scp_identity(value)
+
+
+def parse_github_repository(raw_value: str) -> str:
+    """Derives OWNER/NAME for a value that must name a repository on
+    github.com, accepting exactly what Kanban.Repository.parseRepositoryName
+    accepts: the bare OWNER/NAME form, and https://, ssh://, or git:// URLs
+    and git@github.com: SCP shorthand pointing at github.com. Foreign hosts,
+    http://, extra path segments, local paths, and identity segments carrying
+    anything outside [A-Za-z0-9._-] all fail closed."""
+    stripped = raw_value.strip()
+    identity = None
+    # Kanban.Repository.bareIdentity: URL authority punctuation means this is
+    # not a bare OWNER/NAME, so a remote URL cannot slip through as one.
+    if ":" not in stripped and "@" not in stripped:
+        identity = _github_owner_name(stripped)
+    if identity is None:
+        identity = _github_remote_identity(stripped)
+    if identity is None:
+        raise KanbanConfigError(
+            "cannot derive a github.com OWNER/NAME from repository value: "
+            f"{raw_value}"
+        )
+    return identity
+
+
+def normalize_github_repository(raw_value: str) -> str:
+    """The canonical identity, case-folded. GitHub owner and repository names
+    are case-insensitive, so two spellings that differ only in case name one
+    repository and must resolve to one drainer — otherwise two clones of the
+    same repository could drain it concurrently."""
+    return parse_github_repository(raw_value).lower()
 
 
 def _join(path: str, key: str) -> str:

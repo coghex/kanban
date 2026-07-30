@@ -344,9 +344,11 @@ class UnknownKeyWarningTests(unittest.TestCase):
 
 
 class RepositoryNameParsingTests(unittest.TestCase):
-    """parse_repository_name is the single source of truth approve_issues.py
-    and drain_prs.py's own parse_repo_slug now delegate to, and mirrors
-    Kanban.Repository.parseRepositoryName's supported forms exactly."""
+    """parse_repository_name is the permissive display-slug parser
+    approve_issues.py and drain_prs.py's own parse_repo_slug delegate to. It
+    keeps the last two segments of anything, which is what lets a fixture
+    repository with a plain local-path remote address itself; see
+    GithubRepositoryParsingTests for the canonical-identity parser."""
 
     def test_accepts_ssh_shorthand(self):
         self.assertEqual(kc.parse_repository_name("git@github.com:coghex/kanban.git"), "coghex/kanban")
@@ -366,6 +368,120 @@ class RepositoryNameParsingTests(unittest.TestCase):
     def test_raises_on_an_unparseable_value(self):
         with self.assertRaises(kc.KanbanConfigError):
             kc.parse_repository_name("not-a-repo")
+
+    def test_keeps_the_last_two_segments_of_a_local_path(self):
+        # Relied on by tools/test_single_pr_drain.py, whose bare remote lives
+        # at <tmp>/acme/widgets.git precisely so the drainer resolves its own
+        # repository context without a GitHub URL.
+        self.assertEqual(
+            kc.parse_repository_name("/tmp/xyz/acme/widgets.git"), "acme/widgets"
+        )
+
+
+class GithubRepositoryParsingTests(unittest.TestCase):
+    """parse_github_repository names a repository *on github.com*, and mirrors
+    Kanban.Repository.parseRepositoryName's accept set exactly. The drainer's
+    per-repository job identity is derived from it, and Kanban selects that
+    job's record by the identity its own parser resolved, so a value one side
+    accepts and the other rejects would present as a drainer that is installed
+    and simultaneously not installed."""
+
+    def test_accepts_the_bare_owner_name_form(self):
+        self.assertEqual(kc.parse_github_repository("coghex/kanban"), "coghex/kanban")
+        self.assertEqual(
+            kc.parse_github_repository("  coghex/kanban.git  "), "coghex/kanban"
+        )
+        self.assertEqual(kc.parse_github_repository("/coghex/kanban/"), "coghex/kanban")
+
+    def test_accepts_the_url_and_scp_forms_github_actually_serves(self):
+        for value in (
+            "https://github.com/coghex/kanban",
+            "https://github.com/coghex/kanban.git",
+            "HTTPS://GitHub.com/coghex/kanban",
+            "https://www.github.com/coghex/kanban",
+            "https://user@github.com/coghex/kanban",
+            "https://github.com:443/coghex/kanban",
+            "ssh://git@github.com/coghex/kanban.git",
+            "git://github.com/coghex/kanban.git",
+            "git@github.com:coghex/kanban.git",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(kc.parse_github_repository(value), "coghex/kanban")
+
+    def test_accepts_the_full_identity_charset(self):
+        for name in ("kan.ban", "kan-ban", "kan_ban", "k", "0"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    kc.parse_github_repository(f"cog-hex.1_x/{name}"),
+                    f"cog-hex.1_x/{name}",
+                )
+
+    def test_rejects_a_foreign_host(self):
+        for value in (
+            "git@gitlab.com:coghex/kanban.git",
+            "https://gitlab.com/coghex/kanban.git",
+            "ssh://git@git.example.test/coghex/kanban.git",
+            "https://github.com.example.test/coghex/kanban",
+            "git@evil-github.com:coghex/kanban.git",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(kc.KanbanConfigError):
+                    kc.parse_github_repository(value)
+
+    def test_rejects_the_http_scheme_github_does_not_serve_clone_urls_over(self):
+        with self.assertRaises(kc.KanbanConfigError):
+            kc.parse_github_repository("http://github.com/coghex/kanban")
+
+    def test_rejects_ambiguous_extra_path_segments(self):
+        for value in (
+            "https://github.com/coghex/kanban/tree/master",
+            "https://github.com/coghex/kanban/pull/147",
+            "git@github.com:22/coghex/kanban",
+            "coghex/kanban/extra",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(kc.KanbanConfigError):
+                    kc.parse_github_repository(value)
+
+    def test_rejects_everything_else_rather_than_deriving_a_label_from_it(self):
+        for value in (
+            "/tmp/acme/widgets.git",
+            "file:///tmp/acme/widgets.git",
+            "../acme/widgets",
+            "not-a-repo",
+            "coghex",
+            "coghex/",
+            "/",
+            "",
+            "coghex/kan ban",
+            "coghex/kan~ban",
+            "coghex/kan/ban",
+            "https://github.com/coghex",
+            "https://github.com",
+            "https://github.com:notaport/coghex/kanban",
+            "github.com:coghex/kanban",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(kc.KanbanConfigError):
+                    kc.parse_github_repository(value)
+
+    def test_normalization_folds_case_only_spellings_together(self):
+        # GitHub owner and repository names are case-insensitive, so two
+        # spellings that differ only in case name one repository — and
+        # therefore one drainer.
+        for value in (
+            "CogHex/Kanban",
+            "coghex/kanban",
+            "COGHEX/KANBAN",
+            "git@GitHub.com:CogHex/Kanban.git",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    kc.normalize_github_repository(value), "coghex/kanban"
+                )
+        # And the unnormalized parser keeps the spelling it was given, so the
+        # folding is a decision this module makes rather than a side effect.
+        self.assertEqual(kc.parse_github_repository("CogHex/Kanban"), "CogHex/Kanban")
 
 
 if __name__ == "__main__":
