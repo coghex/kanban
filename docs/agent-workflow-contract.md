@@ -184,13 +184,20 @@ everything else.
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
   request, and is covered by `tools/test_single_pr_drain.py`.
-- **Inputs:** repository path; the drainer LaunchAgent plist under
-  `~/Library/LaunchAgents`, which is a Kanban-owned convention (see §5), not a
-  personal path. Kanban does not name that plist: it resolves the path from
+- **Inputs:** repository path and repository identity; the repository's drainer
+  LaunchAgent plist under `~/Library/LaunchAgents`, which is a Kanban-owned
+  convention (see §5), not a personal path. There is one such plist per
+  canonical GitHub repository, named for the label
+  `tools/drain_prs_service.py` derives from that repository's normalized
+  identity. Kanban names none of them: it selects this repository's entry in
   the discovery record `tools/drain_prs_service.py` writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, then reads
-  `ProgramArguments` out of the plist itself, which stays authoritative for
-  what launchd will actually run.
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, resolves the
+  plist path from that entry, then reads `ProgramArguments` out of the plist
+  itself, which stays authoritative for what launchd will actually run. Kanban
+  passes its own repository identity as `--repo OWNER/NAME` alongside
+  `--path`; the controller resolves the checkout's remote and refuses an
+  identity naming a different repository, so a `kanban --repo` override cannot
+  select or create another repository's drainer.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
   notifications. A `--pr` run additionally writes exactly one versioned JSON
   result document to stdout — the pull request, its outcome (`merged`,
@@ -202,8 +209,11 @@ everything else.
 - **Failure semantics:** an unresolved incident surfaces in Kanban's
   sidebar as `DrainerWarning`/`DrainerError` with the incident summary
   (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
-  incident rules independently of Kanban. Incidents come in three kinds. A
-  crash incident says the drainer process died and is cleared per
+  incident rules independently of Kanban. Every incident is attributed to the
+  normalized canonical repository rather than to the checkout that raised it,
+  so any clone of that repository lists, acknowledges, and clears it — only
+  *running* a drainer is exclusive per identity. Incidents come in three
+  kinds. A crash incident says the drainer process died and is cleared per
   repository. A merge-conflict incident says a healthy drainer stopped
   merging one pull request; it carries that pull-request number and its
   conflicting paths, is unique per open (repository, pull request), changes
@@ -219,24 +229,35 @@ everything else.
   not running.
 - **Required authority:** the same GitHub write scope, plus local launchd
   control for the signed-in user.
-- **Durable state:** the LaunchAgent plist under `~/Library/LaunchAgents`,
-  named for the label `tools/drain_prs_service.py` owns; the discovery record
-  at `~/Library/Application Support/kanban/pr-drainer/config.json`, which
-  names that label, the plist's absolute path, and the repository the job was
-  installed for, and which every path that writes the plist refreshes from
-  those same values; the installer-managed script directory at
-  `~/Library/Application Support/kanban/pr-drainer`; a versioned drain-state
-  JSON file, which records both the approved head each queued pull request
-  was cleared at and the post-merge obligations a merged pull request still
-  owes, and which migrates forward from the shapes earlier versions wrote; and
-  a per-repository run lock held on `.git/drain_prs.lock` — which holds the
-  holder's bare PID — and then on the `.git` directory, beside a
+- **Durable state:** per canonical GitHub repository — a LaunchAgent plist
+  under `~/Library/LaunchAgents`, named for the label
+  `tools/drain_prs_service.py` derives from that repository's normalized
+  identity; a runtime directory holding the status file and incidents at
+  `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>`; and a log
+  directory holding the service and dated logs at
+  `~/Library/Logs/kanban/pr-drainer/<slug>`. Shared across repositories — the
+  discovery record at
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
+  `repositories` table carries one entry per installed repository naming that
+  job's label, the plist's absolute path, the checkout it was installed for,
+  and that repository's optional `config_path`, and which every path that
+  writes a plist refreshes from those same values without disturbing another
+  repository's entry; the global `ntfy_url` beside it; and the
+  installer-managed script directory at
+  `~/Library/Application Support/kanban/pr-drainer`. Per checkout — a
+  versioned drain-state JSON file, which records both the approved head each
+  queued pull request was cleared at and the post-merge obligations a merged
+  pull request still owes, and which migrates forward from the shapes earlier
+  versions wrote; and a run lock held on `.git/drain_prs.lock` — which holds
+  the holder's bare PID — and then on the `.git` directory, beside a
   `.git/drain_prs.lock.owner.json` sidecar recording whether that PID is the
   polling service or a single-PR run. One lock covers both modes, so whichever
   starts second fails immediately naming the holder rather than acting. A dry
   run locks the directory alone, since it writes nothing; holding the
   directory without the file is therefore what identifies it, atomically and
-  at every instant.
+  at every instant. That lock is per checkout and remains a secondary guard:
+  two clones of one repository resolve to one job identity, and the second
+  install or start is refused on that basis, which the lock cannot see.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
   stops it, and nothing in Kanban's build or normal startup path installs
   or runs it.
@@ -484,6 +505,13 @@ find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKIL
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 ```
 
+`drainer-launchagent-label`'s token is the shared prefix, which is all a single
+token can be: an installed job's label appends the repository's own slug to it
+(`com.coghex.drain-prs.coghex.kanban`), so there is one label per canonical
+GitHub repository rather than one for the account. The bare prefix is also the
+label of the machine-wide singleton that predates per-repository jobs, which
+`tools/drain_prs_service.py` retires rather than installs.
+
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 the installed Codex plugin's shared review coordinator from `$pr-review`,
 `$pr-rereview`, `$pr-revise`, and `$repair`, themselves optional AI actions,
@@ -502,25 +530,38 @@ the Codex plugin being installed.
   the repository at all, it prefers a small, clearly namespaced footprint:
   the drainer installer's default install directory is
   `~/Library/Application Support/kanban/pr-drainer`, and its LaunchAgent
-  label and plist path are a Kanban-owned convention rather than a personal
-  one. The component that writes the plist owns the label:
-  `tools/drain_prs_service.py` defines it, renders the plist from it, builds
-  every `launchctl` target from it, and — from those same values — records the
-  label, the plist's absolute path, and the repository the job was installed
-  for in `~/Library/Application Support/kanban/pr-drainer/config.json`.
-  `tools/install_drainer.py` imports the label, plist path, and launchd target
-  from that module rather than restating any of them, and
-  `src/Kanban/Drainer.hs` carries no label at all: it resolves the plist by
-  reading that record. Haskell cannot import a Python constant, so a record
-  one side writes and the other reads is the only coupling here that cannot
-  drift. Its location stays fixed even when `--install-dir` moves everything
+  labels and plist paths are a Kanban-owned convention rather than a personal
+  one. The component that writes the plists owns the labels:
+  `tools/drain_prs_service.py` derives each one from its repository's
+  normalized canonical GitHub identity, renders the plist from it, builds
+  every `launchctl` target from it, partitions the runtime and log paths by
+  the same identity, and — from those same values — records that job's label,
+  the plist's absolute path, and the checkout it was installed for under that
+  repository's entry in
+  `~/Library/Application Support/kanban/pr-drainer/config.json`. The
+  derivation is total, produces a valid nonempty label for every supported
+  `owner/name`, and is injective across distinct normalized identities, so no
+  two repositories can name one job. `tools/install_drainer.py` resolves a job
+  through that module rather than restating any of it, and
+  `src/Kanban/Drainer.hs` derives no label at all: it selects the entry for
+  the identity it resolved and reads the label and plist path out of it.
+  Haskell cannot import a Python constant, so a record one side writes and the
+  other reads is the only coupling here that cannot drift. Its location stays
+  fixed even when `--install-dir` moves everything
   else, since a dashboard that never inherits `KANBAN_DRAINER_INSTALL_DIR`
   still has to find it: that option relocates the script links and the runtime
   state, not this document. It is one document rather than two — the
-  installer's `ntfy_url` and `config_path` live in it beside the record, each
-  writer merging rather than overwriting — and an installer run folds in any
+  installer's global `ntfy_url` and each repository's `config_path` live in it
+  beside the records, every writer merging rather than overwriting, at both
+  levels, so installing one repository can never displace another's entry —
+  and an installer run folds in any
   copy an earlier `--install-dir` install left beside its script links, which
-  the controller keeps reading until then. `tools/install_issue_review.py` follows the same install-directory
+  the controller keeps reading until then. A repository with no `config_path`
+  of its own runs on the shared Kanban default; the single scalar the
+  pre-per-repository installer wrote is deliberately not read as a fallback,
+  because doing so would let a later installation silently change the
+  configuration an earlier repository's drainer restarts with.
+  `tools/install_issue_review.py` follows the same install-directory
   convention for the canonical issue-review backend under
   `~/Library/Application Support/kanban/issue-review`, read by
   `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer` — but through a

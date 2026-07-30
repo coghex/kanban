@@ -901,21 +901,37 @@ a countdown.
 - Brick owns the blocking terminal event loop.
 - The GitHub and usage providers each run once in short-lived startup workers
   and again only after an explicit unified update.
+- Every canonical GitHub repository has its own PR drainer: its own LaunchAgent
+  label and plist, its own runtime status, its own service and dated logs, and
+  its own `--config` selection. Starting, stopping, querying, logs, status, and
+  incidents for one repository do not affect another. One installed copy of the
+  controller, the drainer, and the configuration parser serves all of them.
+- A drainer's identity is the checkout's canonical GitHub `owner/name`,
+  normalized case-insensitively, so two spellings that differ only in case name
+  one drainer and two clones of one repository cannot drain it concurrently. A
+  checkout whose remote does not resolve to a supported github.com repository
+  can neither install nor control a drainer.
 - The PR drainer controller discovers the installed LaunchAgent through the
   record its installer writes at
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, which names
-  the launchd label, the plist's absolute path, and the installed repository.
-  Kanban restates none of those: it reads the plist path from the record and
-  the controller command from the plist, which stays authoritative for what
-  launchd runs. Each way that lookup can fail — a host that is not macOS, no
-  record, a record that does not name a job, or a plist that cannot be read —
-  is reported as its own status naming the remediation, never as a raw
-  exception. Discovery then reads its
+  `~/Library/Application Support/kanban/pr-drainer/config.json`, whose
+  `repositories` table holds one entry per installed repository naming that
+  job's launchd label, the plist's absolute path, and the installed checkout.
+  Kanban derives none of those: it selects the entry by its own normalized
+  repository identity, reads the plist path from that entry, and reads the
+  controller command from the plist, which stays authoritative for what launchd
+  runs. Each way that lookup can fail — a host that is not macOS, no document,
+  no entry for this repository, an entry that does not name a job, or a plist
+  that cannot be read — is reported as its own status naming the remediation,
+  never as a raw exception. Discovery then reads its
   wrapper's JSON status every ten seconds, and never contacts a network. Start
   and stop operations run asynchronously and expose transitional UI state.
-  Every controller call includes the dashboard's resolved repository root; a
-  singleton already serving another repository is reported as foreign and is
-  never stopped or replaced implicitly.
+  Every controller call includes both the dashboard's resolved repository root
+  and its repository identity; the controller resolves the checkout's own
+  remote and refuses an identity that names a different repository, so
+  `--repo OWNER/NAME` can never select or create another repository's drainer.
+  A second checkout of the same repository is that repository's own drainer,
+  not a foreign one: it is reported as running, and a second install or start
+  is refused naming the checkout that already holds it.
 - A controller invocation runs as its own process group, and ownership of that
   group is established while the controller is known alive rather than at
   cleanup time, so a timeout can terminate what the controller started even
@@ -935,7 +951,13 @@ a countdown.
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
   those links after repository relocation, and repairs a missing or stale
   discovery record in place without an uninstall and without changing the
-  LaunchAgent's identity.
+  LaunchAgent's identity. Installing a second repository adds its entry beside
+  the first rather than replacing it. Before enabling a repository's derived
+  job, the installer retires the machine-wide `com.coghex.drain-prs` singleton
+  that predates per-repository jobs when that singleton served the same
+  repository — unloading it and setting its plist aside so the two can never
+  run together — and leaves a singleton installed for a different repository to
+  migrate on its own next install.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, or explicit terminal repaint.
@@ -1210,17 +1232,26 @@ Claude version.
 
 ### Milestone 6 — Local PR drainer control
 
-Implemented for the installed `com.coghex.drain-prs` LaunchAgent.
+Implemented for one independently controlled LaunchAgent per canonical GitHub
+repository, whose label is derived from that repository's normalized identity.
 
 - Track the canonical drainer and controller implementations under `tools/`.
-- Install stable per-user links and the LaunchAgent through an idempotent
-  installer that refuses active services and ordinary-file replacement, and
-  never starts the drainer implicitly.
+- Install stable per-user links, shared by every repository, and one
+  LaunchAgent per repository through an idempotent installer that refuses
+  active services and ordinary-file replacement, and never starts the drainer
+  implicitly.
 - Discover the controller command from the LaunchAgent plist, located through
-  the installer-written discovery record rather than a label Kanban restates.
-- Bind controller status and start/stop operations to the current repository.
-- Reinstall the stopped singleton LaunchAgent with that repository path before
-  starting it, and reject cross-repository start/stop requests while it runs.
+  this repository's entry in the installer-written discovery record rather than
+  a label Kanban derives.
+- Partition the launchd label, plist, runtime status, service logs, dated logs,
+  incidents, and `--config` selection by normalized repository identity, so
+  several repositories drain independently on one account.
+- Bind controller status and start/stop operations to the current repository,
+  and refuse a `--repo` identity the checkout's own remote contradicts.
+- Reinstall this repository's stopped LaunchAgent with that repository path
+  before starting it, refuse a second concurrent drainer for the same canonical
+  repository from another checkout, and retire the machine-wide singleton that
+  predates per-repository jobs before its replacement starts.
 - Decode the managed wrapper's structured status and incident data.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.

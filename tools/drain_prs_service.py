@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -15,19 +16,31 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import kanban_config
 
 
-# This module writes the plist, so it also owns the label the plist is named
-# and targeted by. Nothing else may restate it: `tools/install_drainer.py`
-# imports it from here, and `src/Kanban/Drainer.hs` never sees it at all —
-# it resolves the installed job through DISCOVERY_RECORD_PATH below.
-LABEL = "com.coghex.drain-prs"
+# This module writes the plists, so it also owns the labels they are named and
+# targeted by. Nothing else may restate one: `tools/install_drainer.py` builds
+# them through this module, and `src/Kanban/Drainer.hs` derives none at all —
+# it reads an installed job's label and plist path out of the per-repository
+# record under DISCOVERY_RECORD_PATH below.
+#
+# There is one label, and one of every mutable runtime path, per canonical
+# GitHub repository: that partitioning is what lets several repositories be
+# drained independently on one account. LABEL_PREFIX on its own is the
+# machine-wide singleton those replace; it survives only as the legacy job
+# `retire_legacy_job` unloads before a derived job for the same repository is
+# allowed to start.
+LABEL_PREFIX = "com.coghex.drain-prs"
+LEGACY_LABEL = LABEL_PREFIX
 HOME = Path.home()
-# The record Kanban reads to find that job. Its location is fixed rather than
+LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
+LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
+# The record Kanban reads to find those jobs. Its location is fixed rather than
 # INSTALL_DIR-relative on purpose: a dashboard that never inherits
 # KANBAN_DRAINER_INSTALL_DIR still has to discover an install made with
 # --install-dir, so the record's own path is the one thing that cannot move.
@@ -41,21 +54,24 @@ INSTALL_DIR = Path(
 CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
 DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
 # One document, at that same fixed location, carries both the installer's keys
-# and the discovery record: --install-dir relocates the script links and the
-# runtime state, not the file Kanban and this service both have to resolve
-# without an environment override.
+# and every repository's discovery record: --install-dir relocates the script
+# links and the runtime state, not the file Kanban and this service both have
+# to resolve without an environment override.
 CONFIG_PATH = DISCOVERY_RECORD_PATH
 # Where a --install-dir install made before that consolidation left them. The
 # installer migrates this copy on its next run; until then it is still read.
 LEGACY_CONFIG_PATH = INSTALL_DIR / "config.json"
-LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "pr-drainer"
-RUNTIME_DIR = INSTALL_DIR / "runtime"
-INCIDENT_DIR = RUNTIME_DIR / "incidents"
-STATUS_PATH = RUNTIME_DIR / "status.json"
-SERVICE_LOG_PATH = LOG_DIR / "service.log"
-SERVICE_OUT_PATH = LOG_DIR / "service.out"
-SERVICE_ERR_PATH = LOG_DIR / "service.err"
-PLIST_PATH = HOME / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+# The roots the per-repository log and runtime directories hang off. The
+# singleton wrote its own state directly into these; a derived job never does.
+LOG_ROOT = HOME / "Library" / "Logs" / "kanban" / "pr-drainer"
+RUNTIME_ROOT = INSTALL_DIR / "runtime"
+# The key every repository's record, label, and runtime directory is filed
+# under in the shared document.
+RECORD_REPOSITORIES_KEY = "repositories"
+# Long enough for every GitHub owner/name pair spelled with ordinary
+# characters, short enough that `<label>.plist` stays well inside the 255-byte
+# filename limit even after escaping. See `repository_slug`.
+MAX_LABEL_LENGTH = 180
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -87,22 +103,53 @@ def configured_ntfy_url() -> str | None:
     return configured if isinstance(configured, str) and configured else None
 
 
-def configured_config_path() -> str | None:
-    configured = _read_service_config().get("config_path")
+def installed_repository_records() -> dict[str, dict[str, Any]]:
+    """Every installed repository's record, keyed by normalized identity.
+
+    A separate entry per repository is the whole point: installing or
+    refreshing one repository must leave every other repository's label, plist
+    metadata, runtime and log locations, and configuration selection exactly as
+    they were.
+    """
+    records = _read_service_config().get(RECORD_REPOSITORIES_KEY)
+    if not isinstance(records, dict):
+        return {}
+    return {
+        identity: record
+        for identity, record in records.items()
+        if isinstance(identity, str) and isinstance(record, dict)
+    }
+
+
+def installed_repository_record(identity: str) -> dict[str, Any]:
+    return installed_repository_records().get(identity, {})
+
+
+def configured_config_path(identity: str) -> str | None:
+    """The kanban config.toml this repository's drainer was installed with.
+
+    Read only out of that repository's own record. The pre-#147 installs wrote
+    one shared scalar, which is deliberately not consulted as a fallback: it
+    would make a later `--config` install for a second repository silently
+    change the configuration an earlier repository's drainer restarts with,
+    which is exactly the coupling per-repository records exist to break. A
+    repository with no override runs on the normal shared Kanban default;
+    `docs/pr-drainer.md` documents re-passing `--config` per repository as part
+    of the migration.
+    """
+    configured = installed_repository_record(identity).get("config_path")
     return configured if isinstance(configured, str) and configured else None
 
 
-def configured_remote_name() -> str:
+def configured_remote_name(config_path: str | None) -> str:
     try:
-        raw_config, _ = kanban_config.load_raw_config(configured_config_path())
+        raw_config, _ = kanban_config.load_raw_config(config_path)
     except kanban_config.KanbanConfigError:
         return "origin"
     return raw_config.remote_name
 
 
 NTFY_URL = configured_ntfy_url()
-CONFIGURED_CONFIG_PATH = configured_config_path()
-CONFIGURED_REMOTE_NAME = configured_remote_name()
 # Incident kinds. A crash incident says the drainer process died; a conflict
 # incident says a healthy drainer stopped working one pull request; a cleanup
 # incident says a merge landed but its post-merge obligations keep failing.
@@ -126,6 +173,237 @@ class ServiceError(RuntimeError):
     pass
 
 
+def _escape_identity_segment(segment: str) -> str:
+    """Encodes one identity segment into `[A-Za-z0-9_-]`, reversibly.
+
+    `-` is the escape character and always consumes exactly one following
+    character, so the encoding is a prefix code and therefore injective: `-`
+    encodes as `--` and `.` as `-d`, and nothing else in the GitHub identity
+    charset `[A-Za-z0-9._-]` needs escaping. `.` never survives into the
+    output, which is what lets the label keep it as the owner/name separator.
+    """
+    escapes = {"-": "--", ".": "-d"}
+    return "".join(escapes.get(character, character) for character in segment)
+
+
+def repository_slug(identity: str) -> str:
+    """A launchd- and filename-safe name for one normalized identity.
+
+    Total, nonempty, and injective across distinct normalized identities:
+    each segment is escaped into an alphabet that excludes `.`, so the single
+    `.` in the result is unambiguously the owner/name separator, and the escape
+    itself is reversible. Case-only spellings never reach here as distinct
+    values — `normalize_identity` folded them together first — which is what
+    stops two clones of one GitHub repository from naming two drainers.
+
+    Escaping can double a segment's length, so an identity spelled almost
+    entirely in separators could outgrow the 255-byte limit on the plist's
+    filename. Those fall back to a hash of the whole identity, which cannot
+    collide with an escaped slug because it contains no `.` at all.
+    """
+    owner, _, name = identity.partition("/")
+    slug = f"{_escape_identity_segment(owner)}.{_escape_identity_segment(name)}"
+    if len(LABEL_PREFIX) + 1 + len(slug) > MAX_LABEL_LENGTH:
+        return "h" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return slug
+
+
+def normalize_identity(raw_value: str) -> str:
+    """The canonical GitHub identity a value names, case-folded, or a
+    ServiceError naming the value that could not be one."""
+    try:
+        return kanban_config.normalize_github_repository(raw_value)
+    except kanban_config.KanbanConfigError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class DrainerJob:
+    """One repository's drainer: its identity, its launchd job, and every
+    mutable path that belongs to it alone.
+
+    Built once per invocation and threaded through, so no two code paths can
+    derive a different label or status file for the same repository. Every
+    field except `repo_path` is a function of `identity`, which is why a second
+    checkout of the same GitHub repository resolves to this same job rather
+    than to a second one.
+    """
+
+    repo_path: Path
+    identity: str
+    slug: str
+    label: str
+    plist_path: Path
+    runtime_dir: Path
+    incident_dir: Path
+    status_path: Path
+    log_dir: Path
+    service_log_path: Path
+    service_out_path: Path
+    service_err_path: Path
+    config_path: str | None
+    remote_name: str
+
+
+def _job(
+    repo_path: Path,
+    *,
+    identity: str,
+    slug: str,
+    label: str,
+    plist_path: Path,
+    runtime_dir: Path,
+    log_dir: Path,
+    config_path: str | None,
+    remote_name: str,
+) -> DrainerJob:
+    return DrainerJob(
+        repo_path=repo_path,
+        identity=identity,
+        slug=slug,
+        label=label,
+        plist_path=plist_path,
+        runtime_dir=runtime_dir,
+        incident_dir=runtime_dir / "incidents",
+        status_path=runtime_dir / "status.json",
+        log_dir=log_dir,
+        service_log_path=log_dir / "service.log",
+        service_out_path=log_dir / "service.out",
+        service_err_path=log_dir / "service.err",
+        config_path=config_path,
+        remote_name=remote_name,
+    )
+
+
+def repository_identity(repo_path: Path, remote_name: str) -> str:
+    """The canonical GitHub repository this checkout is a clone of.
+
+    Fails closed. A checkout whose remote does not name a repository on
+    github.com has no drainer identity, so it can neither install nor control
+    one — deriving a label from an unsupported value would invent an identity
+    Kanban's own resolver would never agree with.
+    """
+    proc = run_command(
+        ["git", "-C", str(repo_path), "remote", "get-url", remote_name], check=False
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise ServiceError(
+            f"Could not read the {remote_name!r} remote of {repo_path}: {detail}"
+        )
+    try:
+        return normalize_identity(proc.stdout)
+    except ServiceError as exc:
+        raise ServiceError(
+            f"{repo_path} is not a checkout of a supported GitHub repository, so it "
+            f"cannot install or control a PR drainer: {exc}"
+        ) from exc
+
+
+def job_for_identity(
+    repo_path: Path,
+    identity: str,
+    *,
+    config_path: str | None = None,
+    remote_name: str = "origin",
+) -> DrainerJob:
+    """The job one normalized identity names, from that identity alone.
+
+    Every label and path below is a function of the identity, which is what
+    makes two checkouts of one GitHub repository resolve to the same job — and
+    two different repositories to jobs that share nothing.
+    """
+    slug = repository_slug(identity)
+    return _job(
+        repo_path,
+        identity=identity,
+        slug=slug,
+        label=f"{LABEL_PREFIX}.{slug}",
+        plist_path=LAUNCH_AGENTS_DIR / f"{LABEL_PREFIX}.{slug}.plist",
+        runtime_dir=RUNTIME_ROOT / slug,
+        log_dir=LOG_ROOT / slug,
+        config_path=config_path,
+        remote_name=remote_name,
+    )
+
+
+def resolve_job(repo_path: Path) -> DrainerJob:
+    """This checkout's drainer job, resolved through its canonical identity.
+
+    Identity resolution takes two passes on purpose. The identity is what
+    selects a repository's record, and that record is where its `--config`
+    override lives, so the first pass has to use the shared configuration's
+    remote name just to find the record. Only a record naming a *different*
+    remote needs the second pass. Nothing beyond that is chased: a
+    configuration whose remote points at a third repository is a
+    misconfiguration, not a case with a fixed point.
+    """
+    remote_name = configured_remote_name(None)
+    identity = repository_identity(repo_path, remote_name)
+    config_path = configured_config_path(identity)
+    overridden = configured_remote_name(config_path)
+    if overridden != remote_name:
+        remote_name = overridden
+        identity = repository_identity(repo_path, remote_name)
+        config_path = configured_config_path(identity)
+    return job_for_identity(
+        repo_path, identity, config_path=config_path, remote_name=remote_name
+    )
+
+
+def unmanaged_job(repo_path: Path) -> DrainerJob:
+    """The singleton's own unpartitioned surface, for a checkout that has no
+    canonical GitHub identity.
+
+    Such a checkout cannot install or control a drainer at all, so this never
+    names a job launchd runs. It exists because `drain_prs.py` also runs
+    standalone — `--pr <number>` against a fixture whose remote is a plain
+    local path — and still records conflict and cleanup incidents. Those land
+    where the singleton always put them, which by construction can never be any
+    repository's partition.
+    """
+    return _job(
+        repo_path,
+        identity="",
+        slug="",
+        label=LEGACY_LABEL,
+        plist_path=LEGACY_PLIST_PATH,
+        runtime_dir=RUNTIME_ROOT,
+        log_dir=LOG_ROOT,
+        config_path=None,
+        remote_name=configured_remote_name(None),
+    )
+
+
+def incident_job(repo_path: Path) -> DrainerJob:
+    """The job whose incident directory this checkout writes to, resolved
+    leniently: `drain_prs.py` records incidents in both its managed and its
+    standalone mode, and only the managed one is guaranteed an identity."""
+    try:
+        return resolve_job(repo_path)
+    except ServiceError:
+        return unmanaged_job(repo_path)
+
+
+def require_requested_identity(job: DrainerJob, requested: str | None) -> None:
+    """Refuses a caller naming a repository this checkout is not a clone of.
+
+    Kanban may be started with `--repo OWNER/NAME`, which bypasses remote
+    resolution for the board, and it passes that identity here. Honouring it
+    would let a dashboard select or create a drainer for a repository its
+    checkout has nothing to do with, so the checkout's own remote stays
+    authoritative and a mismatch is refused outright.
+    """
+    if requested is None:
+        return
+    wanted = normalize_identity(requested)
+    if wanted != job.identity:
+        raise ServiceError(
+            f"--repo {requested} names {wanted}, but {job.repo_path} is a checkout of "
+            f"{job.identity}; refusing to control another repository's drainer."
+        )
+
+
 def utc_stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -134,17 +412,17 @@ def local_stamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def ensure_dirs() -> None:
-    for path in (INSTALL_DIR, RUNTIME_DIR, INCIDENT_DIR, LOG_DIR):
+def ensure_dirs(job: DrainerJob) -> None:
+    for path in (INSTALL_DIR, job.runtime_dir, job.incident_dir, job.log_dir):
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
-    PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    job.plist_path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def service_log(message: str) -> None:
-    ensure_dirs()
+def service_log(job: DrainerJob, message: str) -> None:
+    ensure_dirs(job)
     line = f"[{local_stamp()}] {message}"
-    with SERVICE_LOG_PATH.open("a", encoding="utf-8") as handle:
+    with job.service_log_path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
     print(line, flush=True)
 
@@ -199,17 +477,38 @@ def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
     return path
 
 
-def write_discovery_record(repo_path: Path) -> Path:
-    """Record where the LaunchAgent this module just wrote actually lives, so
-    Kanban resolves it by reading rather than by restating the label. Written
-    from the same LABEL and PLIST_PATH `render_plist` and `launch_target` use,
-    which is what keeps a label change from needing a second edit anywhere."""
+def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
+    """Merge `updates` into one repository's entry under the shared document's
+    `repositories` table, leaving every sibling entry and every top-level key
+    untouched.
+
+    Two levels of merge, not one: `merge_json_document` replaces the value of
+    each key it is given, so handing it a `repositories` table built from
+    `updates` alone would delete every other installed repository. The entry
+    itself is merged for the same reason one level down — the installer writes
+    `config_path` and the controller writes the label and plist path, and
+    either may run without the other.
+    """
+    records = installed_repository_records()
+    entry = dict(records.get(identity, {}))
+    entry.update(updates)
+    records[identity] = entry
     return merge_json_document(
-        DISCOVERY_RECORD_PATH,
+        DISCOVERY_RECORD_PATH, {RECORD_REPOSITORIES_KEY: records}
+    )
+
+
+def write_discovery_record(job: DrainerJob) -> Path:
+    """Record where the LaunchAgent this module just wrote actually lives, so
+    Kanban resolves it by reading rather than by deriving the label a second
+    time. Written from the same label and plist path `render_plist` and
+    `launch_target` use, and filed under the identity Kanban selects it by."""
+    return merge_repository_record(
+        job.identity,
         {
-            "launchd_label": LABEL,
-            "plist_path": str(PLIST_PATH),
-            "repository": str(repo_path),
+            "launchd_label": job.label,
+            "plist_path": str(job.plist_path),
+            "repository": str(job.repo_path),
         },
     )
 
@@ -238,8 +537,12 @@ def launch_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def launch_target() -> str:
-    return f"{launch_domain()}/{LABEL}"
+def launch_target(job: DrainerJob) -> str:
+    return launch_target_for(job.label)
+
+
+def launch_target_for(label: str) -> str:
+    return f"{launch_domain()}/{label}"
 
 
 def run_command(
@@ -252,8 +555,15 @@ def run_command(
     return proc
 
 
-def launchd_loaded() -> bool:
-    return run_command(["launchctl", "print", launch_target()], check=False).returncode == 0
+def launchd_loaded(job: DrainerJob) -> bool:
+    return label_loaded(job.label)
+
+
+def label_loaded(label: str) -> bool:
+    return (
+        run_command(["launchctl", "print", launch_target_for(label)], check=False).returncode
+        == 0
+    )
 
 
 def lock_pid(repo_path: Path) -> int | None:
@@ -305,8 +615,7 @@ def require_no_operation_in_progress(repo_path: Path) -> None:
         )
 
 
-def require_default_branch(repo_path: Path, remote_name: str | None = None) -> None:
-    remote_name = remote_name if remote_name is not None else CONFIGURED_REMOTE_NAME
+def require_default_branch(repo_path: Path, remote_name: str) -> None:
     current = run_command(
         ["git", "-C", str(repo_path), "branch", "--show-current"],
         check=False,
@@ -347,19 +656,33 @@ def incident_kind(incident: dict[str, Any]) -> str:
     return kind if isinstance(kind, str) else CRASH_INCIDENT_KIND
 
 
+def incident_belongs_to(incident: dict[str, Any], job: DrainerJob) -> bool:
+    """Attribution keys on the normalized canonical identity, not the checkout
+    path that raised the incident: only *running* a drainer is exclusive per
+    identity, so an incident raised while one clone held the drainer still has
+    to be listed, acknowledged, and cleared from another clone of the same
+    repository. An incident predating the identity field — or one raised by a
+    checkout that has none — falls back to the path it recorded."""
+    recorded = incident.get("repository")
+    if isinstance(recorded, str) and recorded:
+        return recorded == job.identity
+    return incident.get("repo") == str(job.repo_path)
+
+
 def incident_files(
+    job: DrainerJob,
     *,
-    repo_path: Path | None = None,
+    all_repositories: bool = False,
     open_only: bool = False,
     kind: str | None = None,
 ) -> list[Path]:
-    if not INCIDENT_DIR.exists():
+    if not job.incident_dir.exists():
         return []
-    paths = sorted(INCIDENT_DIR.glob("incident-*.json"), reverse=True)
+    paths = sorted(job.incident_dir.glob("incident-*.json"), reverse=True)
     selected: list[Path] = []
     for path in paths:
         incident = read_json(path) or {}
-        if repo_path is not None and incident.get("repo") != str(repo_path):
+        if not all_repositories and not incident_belongs_to(incident, job):
             continue
         if open_only and incident.get("status") != "open":
             continue
@@ -369,8 +692,11 @@ def incident_files(
     return selected
 
 
-def latest_log_path() -> Path | None:
-    paths = sorted(LOG_DIR.glob("20??-??-??.log"), reverse=True)
+def latest_log_path(job: DrainerJob) -> Path | None:
+    """The newest dated log `drain_prs.py` wrote for *this* repository. The
+    directory is already the repository's own, which is what keeps `logs
+    --path <repo>` from reporting another repository's activity."""
+    paths = sorted(job.log_dir.glob("20??-??-??.log"), reverse=True)
     return paths[0] if paths else None
 
 
@@ -407,20 +733,30 @@ def stored_repo_path(stored: dict[str, Any]) -> Path | None:
     return None
 
 
-def status_snapshot(repo_path: Path) -> dict[str, Any]:
-    stored = read_json(STATUS_PATH) or {}
+def status_snapshot(job: DrainerJob) -> dict[str, Any]:
+    """This repository's drainer state, read from this repository's own status
+    file.
+
+    There is no cross-repository state left to report. The status file is one
+    of the paths partitioned by identity, so another repository's running
+    drainer is invisible here rather than an error — which is what retired the
+    `foreign` state. A running drainer whose `active_repo` is a *different*
+    checkout is therefore never another project: it is a second clone of this
+    same GitHub repository, which is genuinely this repository's drainer and
+    is reported as running. `active_repo` names which checkout it runs from,
+    and `install_job` and `start_service` refuse to add a second one.
+    """
+    stored = read_json(job.status_path) or {}
     active_repo = stored_repo_path(stored)
     runner_pid = stored.get("runner_pid")
     child_pid = stored.get("drainer_pid")
     runner_alive = pid_alive(runner_pid if isinstance(runner_pid, int) else None)
     child_alive = pid_alive(child_pid if isinstance(child_pid, int) else None)
-    locked_pid = lock_pid(repo_path)
+    locked_pid = lock_pid(job.repo_path)
     locked_alive = pid_alive(locked_pid)
 
     operation: str | None = None
-    if runner_alive and active_repo is not None and active_repo != repo_path:
-        state = "foreign"
-    elif runner_alive and child_alive:
+    if runner_alive and child_alive:
         state = "running"
     elif runner_alive:
         state = "starting"
@@ -430,21 +766,23 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
         # Only probed for a drainer that is not running: this is the one state
         # in which starting is the next question, and an unfinished operation
         # is the one repository condition that still answers it "no".
-        operation = in_progress_operation(repo_path)
+        operation = in_progress_operation(job.repo_path)
         state = "mid_operation" if operation else "stopped"
 
-    open_incidents = incident_files(repo_path=repo_path, open_only=True)
+    open_incidents = incident_files(job, open_only=True)
     latest_incident = read_json(open_incidents[0]) if open_incidents else None
-    log_path = latest_log_path()
+    log_path = latest_log_path(job)
     log_tail = tail_lines(log_path, 1)
     return {
         "state": state,
         "operation": operation,
-        "launchd_loaded": launchd_loaded(),
+        "launchd_loaded": launchd_loaded(job),
         "runner_pid": runner_pid if runner_alive else None,
         "drainer_pid": child_pid if child_alive else (locked_pid if locked_alive else None),
         "started_at": stored.get("started_at") if runner_alive else None,
-        "repo": str(repo_path),
+        "repo": str(job.repo_path),
+        "repository": job.identity,
+        "label": job.label,
         "active_repo": str(active_repo) if runner_alive and active_repo else None,
         "drainer": str(DRAINER_PATH),
         "log": str(log_path) if log_path else None,
@@ -453,7 +791,24 @@ def status_snapshot(repo_path: Path) -> dict[str, Any]:
     }
 
 
-def render_plist(repo_path: Path) -> bytes:
+def another_checkout_running(job: DrainerJob, snapshot: dict[str, Any]) -> str | None:
+    """The other checkout of this same GitHub repository whose drainer is
+    already running, if there is one.
+
+    The per-checkout `.git/drain_prs.lock` cannot see this: two clones have two
+    lock files. Their shared canonical identity is what makes them one job, and
+    this is the guard that says so — the run lock remains a secondary one for
+    everything inside a single checkout.
+    """
+    active_repo = snapshot.get("active_repo")
+    if snapshot.get("state") not in {"running", "starting"}:
+        return None
+    if not isinstance(active_repo, str) or active_repo == str(job.repo_path):
+        return None
+    return active_repo
+
+
+def render_plist(job: DrainerJob) -> bytes:
     python = str(Path(sys.executable).resolve())
     path_entries = [
         str(HOME / ".local" / "bin"),
@@ -471,41 +826,117 @@ def render_plist(repo_path: Path) -> bytes:
         "KANBAN_DRAINER_INSTALL_DIR": str(INSTALL_DIR),
     }
     data: dict[str, Any] = {
-        "Label": LABEL,
+        "Label": job.label,
         "ProgramArguments": [
             python,
             str(CONTROLLER_PATH),
             "--path",
-            str(repo_path),
+            str(job.repo_path),
             "run",
         ],
-        "WorkingDirectory": str(repo_path),
+        "WorkingDirectory": str(job.repo_path),
         "RunAtLoad": False,
         "KeepAlive": False,
         "ProcessType": "Background",
         "ThrottleInterval": 10,
-        "StandardOutPath": str(SERVICE_OUT_PATH),
-        "StandardErrorPath": str(SERVICE_ERR_PATH),
+        "StandardOutPath": str(job.service_out_path),
+        "StandardErrorPath": str(job.service_err_path),
         "EnvironmentVariables": environment,
     }
     return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
-def install_job(repo_path: Path) -> dict[str, Any]:
-    ensure_dirs()
-    snapshot = status_snapshot(repo_path)
-    if snapshot["state"] in {"running", "starting", "external", "foreign"}:
+def legacy_job_repository() -> Path | None:
+    """Which checkout the machine-wide singleton's plist still names, if it is
+    installed at all. Read out of the plist rather than the discovery record,
+    because the plist is what launchd would actually run."""
+    try:
+        with LEGACY_PLIST_PATH.open("rb") as handle:
+            document = plistlib.load(handle)
+    except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    arguments = document.get("ProgramArguments")
+    if isinstance(arguments, list):
+        for index, argument in enumerate(arguments):
+            if argument == "--path" and index + 1 < len(arguments):
+                candidate = arguments[index + 1]
+                if isinstance(candidate, str) and candidate:
+                    return Path(candidate).expanduser()
+    working_directory = document.get("WorkingDirectory")
+    if isinstance(working_directory, str) and working_directory:
+        return Path(working_directory).expanduser()
+    return None
+
+
+def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
+    """Unload and set aside the singleton `com.coghex.drain-prs` job before a
+    derived job for the same repository is enabled.
+
+    The two would otherwise drain one repository concurrently: the singleton's
+    plist is still in `~/Library/LaunchAgents`, so login would bootstrap it
+    alongside its replacement. A singleton installed for a *different*
+    repository is left exactly as it is — that repository migrates on its own
+    next install — and so is one whose checkout still resolves to some other
+    canonical identity. A singleton whose repository can no longer be
+    identified at all is retired: it names a checkout that is gone or is no
+    longer a supported GitHub clone, so it can serve no repository, and leaving
+    it loadable would leave a job nothing can ever migrate.
+    """
+    if not LEGACY_PLIST_PATH.exists() or job.label == LEGACY_LABEL:
+        return None
+    legacy_repository = legacy_job_repository()
+    if legacy_repository is not None:
+        try:
+            legacy_identity = repository_identity(legacy_repository, job.remote_name)
+        except ServiceError:
+            legacy_identity = None
+        if legacy_identity is not None and legacy_identity != job.identity:
+            return {
+                "retired": False,
+                "label": LEGACY_LABEL,
+                "repository": legacy_identity,
+                "reason": "the legacy job serves another repository",
+            }
+    if label_loaded(LEGACY_LABEL):
+        run_command(["launchctl", "bootout", launch_target_for(LEGACY_LABEL)])
+    retired_path = LEGACY_PLIST_PATH.with_name(LEGACY_PLIST_PATH.name + ".retired")
+    os.replace(LEGACY_PLIST_PATH, retired_path)
+    return {
+        "retired": True,
+        "label": LEGACY_LABEL,
+        "repository": str(legacy_repository) if legacy_repository else None,
+        "plist": str(retired_path),
+    }
+
+
+def install_job(job: DrainerJob) -> dict[str, Any]:
+    ensure_dirs(job)
+    snapshot = status_snapshot(job)
+    conflict = another_checkout_running(job, snapshot)
+    if conflict is not None:
+        raise ServiceError(
+            f"The PR drainer for {job.identity} is already running from {conflict}, "
+            f"which is another checkout of the same repository as {job.repo_path}. "
+            "Stop it before installing this checkout's launchd job."
+        )
+    if snapshot["state"] in {"running", "starting", "external"}:
         raise ServiceError("Stop the running drainer before installing its launchd job.")
 
-    payload = render_plist(repo_path)
-    fd, tmp_name = tempfile.mkstemp(prefix=PLIST_PATH.name, dir=PLIST_PATH.parent)
+    # Before the replacement is written, so the singleton can never be loadable
+    # at the same instant as the job that supersedes it.
+    retired = retire_legacy_job(job)
+
+    payload = render_plist(job)
+    fd, tmp_name = tempfile.mkstemp(prefix=job.plist_path.name, dir=job.plist_path.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, PLIST_PATH)
+        os.replace(tmp_name, job.plist_path)
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
@@ -514,49 +945,52 @@ def install_job(repo_path: Path) -> dict[str, Any]:
     # record describes where the job is, so it has to be true the moment the
     # job exists. Every install path reaches here — `install`, and the refresh
     # `start_service` performs — so no route can leave the record stale.
-    record = write_discovery_record(repo_path)
+    record = write_discovery_record(job)
 
-    if launchd_loaded():
-        run_command(["launchctl", "bootout", launch_target()])
-    run_command(["launchctl", "bootstrap", launch_domain(), str(PLIST_PATH)])
+    if launchd_loaded(job):
+        run_command(["launchctl", "bootout", launch_target(job)])
+    run_command(["launchctl", "bootstrap", launch_domain(), str(job.plist_path)])
     return {
         "installed": True,
-        "plist": str(PLIST_PATH),
-        "target": launch_target(),
+        "repository": job.identity,
+        "label": job.label,
+        "plist": str(job.plist_path),
+        "target": launch_target(job),
         "record": str(record),
+        "legacy_job": retired,
     }
 
 
-def start_service(repo_path: Path) -> dict[str, Any]:
+def start_service(job: DrainerJob) -> dict[str, Any]:
     # Ahead of the default-branch check: a rebase or a bisect commonly leaves
     # a detached HEAD, so checking the branch first would report the symptom
     # instead of naming the operation the user has to finish.
-    require_no_operation_in_progress(repo_path)
-    require_default_branch(repo_path)
-    ensure_dirs()
-    snapshot = status_snapshot(repo_path)
+    require_no_operation_in_progress(job.repo_path)
+    require_default_branch(job.repo_path, job.remote_name)
+    ensure_dirs(job)
+    snapshot = status_snapshot(job)
+    conflict = another_checkout_running(job, snapshot)
+    if conflict is not None:
+        raise ServiceError(
+            f"The PR drainer for {job.identity} is already running from {conflict}, "
+            f"which is another checkout of the same repository as {job.repo_path}. "
+            "One repository drains from one checkout at a time."
+        )
     if snapshot["state"] in {"running", "starting"}:
         return {"started": False, "message": "PR drainer is already running", **snapshot}
     if snapshot["state"] == "external":
         raise ServiceError(
             f"A drainer outside launchd is already running as PID {snapshot['drainer_pid']}."
         )
-    if snapshot["state"] == "foreign":
-        raise ServiceError(
-            "The managed drainer is already running for "
-            f"{snapshot['active_repo']}; stop it before starting {repo_path}."
-        )
-    install_job(repo_path)
+    install_job(job)
 
-    previous_incidents = {
-        path.name for path in incident_files(repo_path=repo_path, open_only=True)
-    }
-    run_command(["launchctl", "kickstart", launch_target()])
+    previous_incidents = {path.name for path in incident_files(job, open_only=True)}
+    run_command(["launchctl", "kickstart", launch_target(job)])
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     running_since: float | None = None
     while time.monotonic() < deadline:
         time.sleep(0.25)
-        snapshot = status_snapshot(repo_path)
+        snapshot = status_snapshot(job)
         if snapshot["state"] == "running":
             if running_since is None:
                 running_since = time.monotonic()
@@ -566,7 +1000,7 @@ def start_service(repo_path: Path) -> dict[str, Any]:
             running_since = None
         new_incidents = [
             path
-            for path in incident_files(repo_path=repo_path, open_only=True)
+            for path in incident_files(job, open_only=True)
             if path.name not in previous_incidents
         ]
         if new_incidents:
@@ -578,8 +1012,8 @@ def start_service(repo_path: Path) -> dict[str, Any]:
     raise ServiceError("Timed out waiting for the PR drainer to start.")
 
 
-def stop_service(repo_path: Path) -> dict[str, Any]:
-    snapshot = status_snapshot(repo_path)
+def stop_service(job: DrainerJob) -> dict[str, Any]:
+    snapshot = status_snapshot(job)
     state = snapshot["state"]
     if state == "stopped":
         return {"stopped": False, "message": "PR drainer is already stopped", **snapshot}
@@ -588,27 +1022,22 @@ def stop_service(repo_path: Path) -> dict[str, Any]:
         if not isinstance(pid, int):
             raise ServiceError("Could not identify the external drainer PID.")
         os.kill(pid, signal.SIGINT)
-    elif state == "foreign":
-        raise ServiceError(
-            "Refusing to stop the managed drainer for another repository: "
-            f"{snapshot['active_repo']}"
-        )
     else:
-        run_command(["launchctl", "kill", "SIGTERM", launch_target()])
+        run_command(["launchctl", "kill", "SIGTERM", launch_target(job)])
 
     deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(0.25)
-        current = status_snapshot(repo_path)
+        current = status_snapshot(job)
         if current["state"] == "stopped":
             cleared_incidents = resolve_open_incidents(
-                repo_path,
+                job,
                 "Cleared when the PR drainer was intentionally stopped.",
             )
             return {
                 "stopped": True,
                 "cleared_incidents": len(cleared_incidents),
-                **status_snapshot(repo_path),
+                **status_snapshot(job),
             }
     raise ServiceError("Timed out waiting for the PR drainer to stop.")
 
@@ -654,14 +1083,14 @@ def publish_ntfy(
 
 def write_incident(
     *,
-    repo_path: Path,
+    job: DrainerJob,
     exit_code: int | None,
     command: list[str],
     exception_text: str | None = None,
 ) -> dict[str, Any]:
-    ensure_dirs()
+    ensure_dirs(job)
     incident_id = time.strftime("incident-%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
-    log_path = latest_log_path()
+    log_path = latest_log_path(job)
     log_tail = tail_lines(log_path)
     last_line = log_tail[-1] if log_tail else None
     last_pr = infer_last_pr(log_tail)
@@ -681,18 +1110,19 @@ def write_incident(
         "last_pr": last_pr,
         "last_activity": last_line,
         "command": command,
-        "repo": str(repo_path),
+        "repo": str(job.repo_path),
+        "repository": job.identity,
         "drainer": str(DRAINER_PATH),
-        "drain_state": str(repo_path / ".git" / "drain_prs_state.json"),
+        "drain_state": str(job.repo_path / ".git" / "drain_prs_state.json"),
         "drainer_log": str(log_path) if log_path else None,
-        "service_log": str(SERVICE_LOG_PATH),
-        "service_stdout": str(SERVICE_OUT_PATH),
-        "service_stderr": str(SERVICE_ERR_PATH),
+        "service_log": str(job.service_log_path),
+        "service_stdout": str(job.service_out_path),
+        "service_stderr": str(job.service_err_path),
         "exception": exception_text,
         "log_tail": log_tail,
         "notification": {"delivered": False, "pending": True},
     }
-    incident_path = INCIDENT_DIR / f"{incident_id}.json"
+    incident_path = job.incident_dir / f"{incident_id}.json"
     incident["path"] = str(incident_path)
     atomic_write_json(incident_path, incident)
 
@@ -710,7 +1140,7 @@ def write_incident(
             "pending": False,
             "error": str(exc),
         }
-        service_log(str(exc))
+        service_log(job, str(exc))
     atomic_write_json(incident_path, incident)
     return incident
 
@@ -748,10 +1178,10 @@ def cleanup_summary(pull_request: int, steps: list[str]) -> str:
 
 
 def find_open_pr_incident(
-    repo_path: Path, pull_request: int, kind: str
+    job: DrainerJob, pull_request: int, kind: str
 ) -> tuple[Path, dict[str, Any]] | None:
     """The one open incident keyed by this repository, kind and PR, if any."""
-    for path in incident_files(repo_path=repo_path, open_only=True, kind=kind):
+    for path in incident_files(job, open_only=True, kind=kind):
         incident = read_json(path)
         if incident is not None and incident.get("pull_request") == pull_request:
             return path, incident
@@ -761,13 +1191,15 @@ def find_open_pr_incident(
 def find_open_conflict_incident(
     repo_path: Path, pull_request: int
 ) -> tuple[Path, dict[str, Any]] | None:
-    return find_open_pr_incident(repo_path, pull_request, CONFLICT_INCIDENT_KIND)
+    return find_open_pr_incident(
+        incident_job(repo_path), pull_request, CONFLICT_INCIDENT_KIND
+    )
 
 
 def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
     incidents: list[dict[str, Any]] = []
     for path in incident_files(
-        repo_path=repo_path, open_only=True, kind=CONFLICT_INCIDENT_KIND
+        incident_job(repo_path), open_only=True, kind=CONFLICT_INCIDENT_KIND
     ):
         incident = read_json(path)
         if incident is not None:
@@ -777,7 +1209,7 @@ def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
 
 def record_pr_incident(
     *,
-    repo_path: Path,
+    job: DrainerJob,
     pull_request: int,
     kind: str,
     summary: str,
@@ -797,7 +1229,7 @@ def record_pr_incident(
     first report standing would show work that is no longer outstanding. The
     incident keeps its id, its opening time and its one notification.
     """
-    existing = find_open_pr_incident(repo_path, pull_request, kind)
+    existing = find_open_pr_incident(job, pull_request, kind)
     if existing is not None:
         path, incident = existing
         if not refresh:
@@ -810,7 +1242,7 @@ def record_pr_incident(
         atomic_write_json(path, incident)
         return incident
 
-    INCIDENT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job.incident_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Second-granularity stamps repeat, and the same PR number can belong to
     # two repositories, so disambiguate rather than overwrite a live incident.
     base_id = (
@@ -819,10 +1251,10 @@ def record_pr_incident(
     )
     incident_id = base_id
     duplicate = 1
-    while (INCIDENT_DIR / f"{incident_id}.json").exists():
+    while (job.incident_dir / f"{incident_id}.json").exists():
         duplicate += 1
         incident_id = f"{base_id}-{duplicate}"
-    log_path = latest_log_path()
+    log_path = latest_log_path(job)
     incident: dict[str, Any] = {
         # Kind-specific detail first, so it can never displace the fields every
         # incident reader relies on.
@@ -833,13 +1265,14 @@ def record_pr_incident(
         "occurred_at": utc_stamp(),
         "summary": summary,
         "pull_request": pull_request,
-        "repo": str(repo_path),
+        "repo": str(job.repo_path),
+        "repository": job.identity,
         "drainer": str(DRAINER_PATH),
         "drainer_log": str(log_path) if log_path else None,
-        "service_log": str(SERVICE_LOG_PATH),
+        "service_log": str(job.service_log_path),
         "notification": {"delivered": False, "pending": True},
     }
-    incident_path = INCIDENT_DIR / f"{incident_id}.json"
+    incident_path = job.incident_dir / f"{incident_id}.json"
     incident["path"] = str(incident_path)
     atomic_write_json(incident_path, incident)
 
@@ -869,7 +1302,7 @@ def record_conflict_incident(
 ) -> dict[str, Any]:
     """Record that a healthy drainer stopped merging one conflicted PR."""
     return record_pr_incident(
-        repo_path=repo_path,
+        job=incident_job(repo_path),
         pull_request=pull_request,
         kind=CONFLICT_INCIDENT_KIND,
         summary=conflict_summary(pull_request, files),
@@ -899,7 +1332,7 @@ def record_cleanup_incident(
     that discharges some of it updates the open incident in place.
     """
     return record_pr_incident(
-        repo_path=repo_path,
+        job=incident_job(repo_path),
         pull_request=pull_request,
         kind=CLEANUP_INCIDENT_KIND,
         summary=cleanup_summary(pull_request, steps),
@@ -917,11 +1350,11 @@ def record_cleanup_incident(
 
 
 def resolve_pr_incident(
-    repo_path: Path, pull_request: int, kind: str, note: str
+    job: DrainerJob, pull_request: int, kind: str, note: str
 ) -> dict[str, Any] | None:
     """Resolve only this PR's incident of this kind, leaving every other open
     incident -- another PR's, another kind's, or a supervisor crash -- alone."""
-    found = find_open_pr_incident(repo_path, pull_request, kind)
+    found = find_open_pr_incident(job, pull_request, kind)
     if found is None:
         return None
     path, incident = found
@@ -935,23 +1368,29 @@ def resolve_pr_incident(
 def resolve_conflict_incident(
     repo_path: Path, pull_request: int, note: str
 ) -> dict[str, Any] | None:
-    return resolve_pr_incident(repo_path, pull_request, CONFLICT_INCIDENT_KIND, note)
+    return resolve_pr_incident(
+        incident_job(repo_path), pull_request, CONFLICT_INCIDENT_KIND, note
+    )
 
 
 def resolve_cleanup_incident(
     repo_path: Path, pull_request: int, note: str
 ) -> dict[str, Any] | None:
-    return resolve_pr_incident(repo_path, pull_request, CLEANUP_INCIDENT_KIND, note)
+    return resolve_pr_incident(
+        incident_job(repo_path), pull_request, CLEANUP_INCIDENT_KIND, note
+    )
 
 
 def acknowledge_incident(
-    repo_path: Path, incident_id: str | None, note: str | None
+    job: DrainerJob, incident_id: str | None, note: str | None
 ) -> dict[str, Any]:
-    paths = incident_files(repo_path=repo_path, open_only=True)
+    paths = incident_files(job, open_only=True)
     if incident_id:
         if not re.fullmatch(r"incident-[A-Za-z0-9TZ-]+", incident_id):
             raise ServiceError(f"Invalid incident ID: {incident_id}")
-        paths = [INCIDENT_DIR / f"{incident_id}.json"]
+        # Named incidents are still resolved inside this repository's own
+        # directory, so one repository can never acknowledge another's.
+        paths = [job.incident_dir / f"{incident_id}.json"]
     if not paths:
         raise ServiceError("There is no open incident to acknowledge.")
     path = paths[0]
@@ -966,9 +1405,9 @@ def acknowledge_incident(
     return incident
 
 
-def resolve_open_incidents(repo_path: Path, note: str) -> list[Path]:
+def resolve_open_incidents(job: DrainerJob, note: str) -> list[Path]:
     resolved: list[Path] = []
-    for path in incident_files(repo_path=repo_path, open_only=True):
+    for path in incident_files(job, open_only=True):
         incident = read_json(path)
         if incident is None:
             continue
@@ -980,24 +1419,37 @@ def resolve_open_incidents(repo_path: Path, note: str) -> list[Path]:
     return resolved
 
 
-def run_service(repo_path: Path) -> int:
-    try:
-        require_default_branch(repo_path)
-    except ServiceError as exc:
-        service_log(f"PR drainer did not start: {exc}")
-        return 0
-    ensure_dirs()
+def drainer_command(job: DrainerJob) -> list[str]:
+    """What this repository's runner starts.
+
+    Both repository-specific selections are made here: the dated logs go to
+    this repository's own log directory, and `--config` is forwarded only when
+    this repository has an override of its own. A repository without one runs
+    on the shared Kanban default, which is what keeps a later installation for
+    a different repository from changing it.
+    """
     command = [
         str(DRAINER_PATH),
         "--path",
-        str(repo_path),
+        str(job.repo_path),
         "--interval",
         str(INTERVAL_SECONDS),
         "--log-dir",
-        str(LOG_DIR),
+        str(job.log_dir),
     ]
-    if CONFIGURED_CONFIG_PATH:
-        command.extend(["--config", CONFIGURED_CONFIG_PATH])
+    if job.config_path:
+        command.extend(["--config", job.config_path])
+    return command
+
+
+def run_service(job: DrainerJob) -> int:
+    try:
+        require_default_branch(job.repo_path, job.remote_name)
+    except ServiceError as exc:
+        service_log(job, f"PR drainer did not start: {exc}")
+        return 0
+    ensure_dirs(job)
+    command = drainer_command(job)
     child: subprocess.Popen[str] | None = None
     stop_requested = False
     signal_count = 0
@@ -1016,26 +1468,27 @@ def run_service(repo_path: Path) -> int:
 
     signal.signal(signal.SIGTERM, handle_stop)
     signal.signal(signal.SIGINT, handle_stop)
-    service_log(f"Starting PR drainer: {' '.join(command)}")
+    service_log(job, f"Starting PR drainer: {' '.join(command)}")
     try:
         child_env = os.environ.copy()
         child_env["DRAIN_PRS_MANAGED"] = "1"
         child = subprocess.Popen(
             command,
-            cwd=str(repo_path),
+            cwd=str(job.repo_path),
             text=True,
             start_new_session=True,
             env=child_env,
         )
         atomic_write_json(
-            STATUS_PATH,
+            job.status_path,
             {
                 "state": "running",
                 "runner_pid": os.getpid(),
                 "drainer_pid": child.pid,
                 "started_at": utc_stamp(),
                 "command": command,
-                "repo": str(repo_path),
+                "repo": str(job.repo_path),
+                "repository": job.identity,
             },
         )
         exit_code = child.wait()
@@ -1043,9 +1496,9 @@ def run_service(repo_path: Path) -> int:
         if stop_requested:
             return 0
         exception_text = traceback.format_exc()
-        service_log("PR drainer runner failed before a normal child exit")
+        service_log(job, "PR drainer runner failed before a normal child exit")
         write_incident(
-            repo_path=repo_path,
+            job=job,
             exit_code=None,
             command=command,
             exception_text=exception_text,
@@ -1053,18 +1506,16 @@ def run_service(repo_path: Path) -> int:
         return 1
     finally:
         try:
-            STATUS_PATH.unlink()
+            job.status_path.unlink()
         except FileNotFoundError:
             pass
 
     if stop_requested:
-        service_log("PR drainer stopped intentionally; no incident notification sent")
+        service_log(job, "PR drainer stopped intentionally; no incident notification sent")
         return 0
 
-    incident = write_incident(
-        repo_path=repo_path, exit_code=exit_code, command=command
-    )
-    service_log(f"PR drainer stopped unexpectedly; wrote {incident['path']}")
+    incident = write_incident(job=job, exit_code=exit_code, command=command)
+    service_log(job, f"PR drainer stopped unexpectedly; wrote {incident['path']}")
     return 1
 
 
@@ -1083,8 +1534,9 @@ def print_value(value: Any, *, as_json: bool) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Control the launchd-managed PR drainer. A config.toml path "
-            "installed via install_drainer.py --config is forwarded to drain_prs.py."
+            "Control this repository's launchd-managed PR drainer. Each canonical "
+            "GitHub repository has its own job, and a config.toml path installed "
+            "via install_drainer.py --config is forwarded to its drain_prs.py."
         )
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1092,6 +1544,13 @@ def parse_args() -> argparse.Namespace:
         "--path",
         default=".",
         help="Repository path controlled by this invocation (default: current directory).",
+    )
+    parser.add_argument(
+        "--repo",
+        help=(
+            "OWNER/NAME the caller believes --path is a checkout of. Refused when "
+            "it names a different repository than the checkout's remote does."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("install", help="Install or refresh the launchd job.")
@@ -1124,30 +1583,32 @@ def main() -> int:
         repo_path = Path(args.path).expanduser().resolve()
         if not (repo_path / ".git").exists():
             raise ServiceError(f"Repository path has no .git entry: {repo_path}")
+        job = resolve_job(repo_path)
+        require_requested_identity(job, args.repo)
         if args.command == "run":
-            return run_service(repo_path)
+            return run_service(job)
         if args.command == "install":
-            value = install_job(repo_path)
+            value = install_job(job)
         elif args.command == "start":
-            value = start_service(repo_path)
+            value = start_service(job)
         elif args.command == "stop":
-            value = stop_service(repo_path)
+            value = stop_service(job)
         elif args.command == "status":
-            value = status_snapshot(repo_path)
+            value = status_snapshot(job)
         elif args.command == "logs":
-            path = latest_log_path()
+            path = latest_log_path(job)
             value = {"path": str(path) if path else None, "lines": tail_lines(path, args.lines)}
         elif args.command == "incident":
             if args.incident_id:
-                path = INCIDENT_DIR / f"{args.incident_id}.json"
+                path = job.incident_dir / f"{args.incident_id}.json"
                 value = read_json(path)
             else:
-                paths = incident_files(repo_path=repo_path, open_only=True)
+                paths = incident_files(job, open_only=True)
                 value = read_json(paths[0]) if paths else None
             if value is None:
                 raise ServiceError("No matching open incident was found.")
         elif args.command == "ack":
-            value = acknowledge_incident(repo_path, args.incident_id, args.note)
+            value = acknowledge_incident(job, args.incident_id, args.note)
         elif args.command == "notify-test":
             value = publish_ntfy(
                 "The PR drainer can deliver crash notifications to this topic.",
