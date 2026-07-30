@@ -33,8 +33,11 @@ codex_seconds = 10
 claude_seconds = 45
 
 # Omit `command` to use the built-in provider. When present it is a non-empty
-# argv array whose first element is a non-empty executable path/name. Parsed
-# and validated now; executing a configured command is a follow-up.
+# argv array whose first element is a non-empty executable path/name,
+# direct-exec'd (no shell) under the matching provider timeout above in place
+# of the built-in provider. It must print
+# {"windows": [{"label": "5 hour", "pct_left": 78, "resets_at": "2026-07-16T16:05:00Z"}]}
+# on stdout.
 [usage.codex]
 # command = ["/usr/local/bin/my-codex-usage", "--json"]
 

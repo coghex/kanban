@@ -10,7 +10,8 @@ module Spec.Support.Env
     waitForFileToExist,
     ignoringIOException,
     installFakeExecutable,
-    withFakeOnPath
+    withFakeOnPath,
+    writeExecutableScript
   )
 where
 
@@ -50,6 +51,15 @@ withFakeOnPath temporaryRoot (name, body) action = do
   setFileMode (binaryRoot </> name) 0o700
   originalPath <- fromMaybe "" <$> lookupEnv "PATH"
   withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) action
+
+-- | Writes a standalone shell script to an exact path and marks it
+-- executable, for a fixture that hands the script's own path to the code
+-- under test rather than resolving it off PATH.
+writeExecutableScript :: FilePath -> [ByteString.ByteString] -> IO FilePath
+writeExecutableScript path body = do
+  ByteString.writeFile path (ByteString.unlines ("#!/bin/sh" : body))
+  setFileMode path 0o700
+  pure path
 
 installFakeExecutable :: FilePath -> (String, [ByteString.ByteString]) -> IO ()
 installFakeExecutable binaryRoot (name, body) = do

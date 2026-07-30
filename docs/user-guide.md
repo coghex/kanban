@@ -33,9 +33,11 @@ override the git remote used to resolve `owner/name`. Repository-specific
 overrides live under `[repositories."owner/name"]` and replace the matching
 global values for that repository only.
 
-The `[usage.codex]`/`[usage.claude]` `command` keys are parsed and validated
-today but not yet executed by Kanban — usage refresh still uses the built-in
-provider regardless of what `command` names.
+The `[usage.codex]`/`[usage.claude]` `command` keys let a user-supplied
+executable replace the built-in Codex or Claude usage probe: when set, Kanban
+runs that command instead of the built-in provider on every usage refresh,
+under the same provider timeout, and expects it to print the JSON document
+`config.toml.example` documents.
 
 `tools/approve_issues.py` and `tools/drain_prs.py` read the same file (with
 the same `--config FILE` override) so the canonical issue reviewer and PR

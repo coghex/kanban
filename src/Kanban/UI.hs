@@ -1,6 +1,7 @@
 module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
+    AppEvent (..),
     BoardRefreshOutcome (..),
     CardEnv (..),
     ChatTranscript (..),
@@ -78,6 +79,8 @@ module Kanban.UI
     reviewTurnInterruptible,
     revisedAttr,
     runBoardRefreshWith,
+    runClaudeRefresh,
+    runCodexRefresh,
     runDashboard,
     solveSessionAlreadyResolved,
     themeFor,
@@ -129,7 +132,7 @@ import Kanban.Card
   )
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
-import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), TimeoutsConfig (..))
+import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerController,
@@ -218,6 +221,7 @@ import Kanban.Settings
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
+import Kanban.UsageCommand (runUsageCommand)
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, orderCardLabels, pullRequestStatus)
 import Kanban.Worker
   ( ProcessIdentity,
@@ -4999,10 +5003,13 @@ startCodexRefresh = do
       void
         . liftIO
         . forkIO
-        $ runCodexRefresh (codexRefreshTimeoutMicros state.appConfig) state.appEventChannel
+        $ runCodexRefresh (codexRefreshTimeoutMicros state.appConfig) state.appConfig.resolvedUsage.usageCodexCommand state.appEventChannel
 
-runCodexRefresh :: Int -> BChan AppEvent -> IO ()
-runCodexRefresh timeoutMicros eventChannel = fetchCodexUsage timeoutMicros >>= writeBChan eventChannel . CodexRefreshFinished
+-- | With a configured command, it *is* the provider (§14): the built-in
+-- integration is never invoked.
+runCodexRefresh :: Int -> Maybe UsageCommandConfig -> BChan AppEvent -> IO ()
+runCodexRefresh timeoutMicros command eventChannel =
+  runUsageProvider timeoutMicros command fetchCodexUsage >>= writeBChan eventChannel . CodexRefreshFinished
 
 startClaudeRefresh :: EventM Name AppState ()
 startClaudeRefresh = do
@@ -5020,10 +5027,18 @@ startClaudeRefresh = do
       void
         . liftIO
         . forkIO
-        $ runClaudeRefresh (claudeRefreshTimeoutMicros state.appConfig) state.appEventChannel
+        $ runClaudeRefresh (claudeRefreshTimeoutMicros state.appConfig) state.appConfig.resolvedUsage.usageClaudeCommand state.appEventChannel
 
-runClaudeRefresh :: Int -> BChan AppEvent -> IO ()
-runClaudeRefresh timeoutMicros eventChannel = fetchClaudeUsage timeoutMicros >>= writeBChan eventChannel . ClaudeRefreshFinished
+runClaudeRefresh :: Int -> Maybe UsageCommandConfig -> BChan AppEvent -> IO ()
+runClaudeRefresh timeoutMicros command eventChannel =
+  runUsageProvider timeoutMicros command fetchClaudeUsage >>= writeBChan eventChannel . ClaudeRefreshFinished
+
+-- | Routes a usage refresh to the configured external command when one is
+-- set, or to the built-in provider otherwise (§14: "the external command is
+-- the provider").
+runUsageProvider :: Int -> Maybe UsageCommandConfig -> (Int -> IO (Either ProviderError UsageSnapshot)) -> IO (Either ProviderError UsageSnapshot)
+runUsageProvider timeoutMicros Nothing builtIn = builtIn timeoutMicros
+runUsageProvider timeoutMicros (Just command) _ = runUsageCommand timeoutMicros command.usageCommandArgv
 
 applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
 applyBoardRefresh outcome = do

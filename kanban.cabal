@@ -71,6 +71,7 @@ library
     Kanban.Transcript
     Kanban.Tracker
     Kanban.UI
+    Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
   build-depends:
