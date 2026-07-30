@@ -641,7 +641,12 @@ Parsing rules:
 2. Do not infer membership from references in `Related`, prose, dependency
    diagrams, or acceptance text.
 3. Capture an explicit implementation key such as `A1`, `A2`, `B1`, `C3`, or
-   `D1` when present.
+   `D1` when present. A key is read only from its position in the forms above:
+   immediately after the leading `#N` reference and its separator (`-`, `–`, or
+   `—`), or ahead of that reference at the start of the item. In both positions
+   it may be wrapped in `*` or `_` emphasis and must be closed by `:`. A
+   key-shaped word anywhere else in the title, such as `S3` or `V2`, leaves the
+   child keyless.
 4. Preserve checklist order as the ultimate fallback.
 5. Order explicit keys naturally by letter and number: `A1`, `A2`, `A10`,
    `B1`, `C1`, `C2`.
