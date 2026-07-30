@@ -64,7 +64,6 @@ import System.Process
     ProcessHandle,
     StdStream (CreatePipe, NoStream),
     getPid,
-    getProcessExitCode,
     proc,
     waitForProcess,
     withCreateProcess,
@@ -218,44 +217,43 @@ requestCleanExit input = do
   threadDelay 100000
   sendInput input "/exit\r"
 
--- | Waits out a clean @/exit@, escalating group-wide only if that fails.
--- Identities are censused before this wait even starts, not after: 'script'
--- can be reaped by it (or, if the wait is itself interrupted by its own
--- timeout, reaped moments later by an abandoned reaping thread), and by then
--- its @claude@ child -- handed its own session and process group by
--- 'script''s pty, so a signal to 'script''s group never reaches it -- would
--- be reparented and unreachable by parent-walking. Returns whether SIGKILL
--- was required to reach a confirmed-clear state; the normal fast path (a
--- clean exit within the grace window) never touches the census or signals
--- anything.
+-- | Waits out a clean @/exit@, then verifies -- and, if needed, escalates --
+-- unconditionally. Identities are censused before this wait even starts, not
+-- after: 'script' can be reaped by it (or, if the wait is itself interrupted
+-- by its own timeout, reaped moments later by an abandoned reaping thread),
+-- and by then its @claude@ child -- handed its own session and process group
+-- by 'script''s pty, so a signal to 'script''s group never reaches it --
+-- would be reparented and unreachable by parent-walking. 'script' having
+-- already been reaped by the wait above is never itself treated as cleanup
+-- completion: 'terminateWithCensus' re-checks every censused identity
+-- against a fresh snapshot regardless, so a @claude@ that outlives a
+-- vanished 'script' is still caught and escalated against. Returns whether
+-- SIGKILL was required to reach a confirmed-clear state; the normal fast
+-- path (everyone already gone) sends no signal at all, just the one
+-- verifying snapshot.
 finishProcess :: ProcessHandle -> IO Bool
 finishProcess processHandle = do
-  alreadyExited <- getProcessExitCode processHandle
-  case alreadyExited of
-    Just _ -> pure False
-    Nothing -> do
-      census <- captureProbeCensus processHandle
-      cleanExit <- timeout cleanExitMicros (waitForProcess processHandle)
-      case cleanExit of
-        Just _ -> pure False
-        Nothing -> terminateWithCensus processHandle census
+  census <- captureProbeCensus processHandle
+  _ <- timeout cleanExitMicros (waitForProcess processHandle)
+  terminateWithCensus processHandle census
 
 -- | Escalates termination for a probe that has not exited on its own.
 -- Returns whether SIGKILL was required.
 stopProcess :: ProcessHandle -> IO Bool
-stopProcess processHandle = do
-  alreadyExited <- getProcessExitCode processHandle
-  case alreadyExited of
-    Just _ -> pure False
-    Nothing -> captureProbeCensus processHandle >>= terminateWithCensus processHandle
+stopProcess processHandle = captureProbeCensus processHandle >>= terminateWithCensus processHandle
 
 -- | Census of 'script' and every descendant it has spawned by the time this
 -- is called (walked recursively by parent pid, so a grandchild -- e.g. a
 -- helper @claude@ itself spawns -- is covered too), pinned by pid and start
 -- time so a later phase's signal can never land on a recycled identifier.
--- 'Nothing' means the handle's pid could not be read (already reaped) or a
--- process snapshot could not be taken; either way there is nothing safe to
--- census against, and the caller falls back to a best-effort raw signal.
+-- 'script' itself is included only if the snapshot still shows it as a live
+-- (non-zombie) process; if 'script' has already exited and not yet been
+-- reaped, its own entry is absent but its descendants remain discoverable by
+-- their recorded parent pid, so they are still censused rather than lost to
+-- a leader that is merely between exit and reap. 'Nothing' means the
+-- handle's pid could not be read at all (already reaped) or a process
+-- snapshot could not be taken; either way there is nothing safe to census
+-- against, and the caller falls back to a best-effort raw signal.
 captureProbeCensus :: ProcessHandle -> IO (Maybe [ProcessIdentity])
 captureProbeCensus processHandle = do
   maybePid <- getPid processHandle
@@ -263,10 +261,12 @@ captureProbeCensus processHandle = do
     Nothing -> pure Nothing
     Just pid -> do
       snapshotResult <- defaultProcessSnapshot
-      pure $ do
-        snapshot <- either (const Nothing) Just snapshotResult
-        leader <- identityForPid (fromIntegral pid) snapshot
-        pure (leader : descendantProcesses [leader.processIdentityPid] snapshot)
+      pure $ case snapshotResult of
+        Left _ -> Nothing
+        Right snapshot ->
+          let rootPid = fromIntegral pid
+              descendants = descendantProcesses [rootPid] snapshot
+           in Just (maybe descendants (: descendants) (identityForPid rootPid snapshot))
 
 -- | Runs the censused escalation (or, lacking a census, the raw fallback),
 -- then reaps 'script' -- this process's own direct child -- within a fixed
