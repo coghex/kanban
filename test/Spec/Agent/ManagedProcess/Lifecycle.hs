@@ -1603,6 +1603,43 @@ examples = do
           collectWorkerCacheWith readProcessSnapshot repository
           doesDirectoryExist retiredLease `shouldReturn` True
 
+    -- A worker directory is keyed by 'safeKey' over @owner-name@, and that
+    -- mapping collides: coghex-kan/ban and coghex/kan-ban both key to
+    -- coghex-kan-ban and share one directory. Scanning it for '.stale-*'
+    -- entries alone would let either repository's startup delete the other's
+    -- retired lease, so the owner has to be one this repository's history
+    -- actually contains.
+    it "leaves a colliding repository's retired stale lease alone" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let neighbour = Repository (temporaryRoot </> "neighbour") "coghex-kan" "ban"
+            ours = Repository (temporaryRoot </> "ours") "coghex" "kan-ban"
+            staleSpec = workerFixtureSpec neighbour (WorkerId "solve-930-neighbour-stale") 930
+            freshSpec = workerFixtureSpec neighbour (WorkerId "solve-930-neighbour-fresh") 930
+            workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kan-ban"
+            retiredLease = workerRoot </> "issue-930.lease.stale-solve-930-neighbour-fresh"
+        createDirectory neighbour.repositoryRoot
+        createDirectory ours.repositoryRoot
+        createDirectoryIfMissing True workerRoot
+        mapM_ (writeWorkerSpec workerRoot) [staleSpec, freshSpec]
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          descriptors <- discoverWorkerHistory neighbour
+          stale <- descriptorFor descriptors staleSpec
+          fresh <- descriptorFor descriptors freshSpec
+          acquireWorkerLease stale `shouldReturn` Right ()
+          mismatched <- mismatchedIdentity
+          LazyByteString.writeFile (workerRoot </> "solve-930-neighbour-stale.state.json") (encode (runningWorkerState staleSpec.workerId mismatched.processIdentityPid (Just mismatched)))
+          acquireWorkerLease fresh `shouldReturn` Right ()
+          doesDirectoryExist retiredLease `shouldReturn` True
+          -- Our repository shares the directory but owns nothing in it, so
+          -- its pass must collect nothing even though the recorded processes
+          -- are provably gone.
+          collectWorkerCacheWith readProcessSnapshot ours
+          doesDirectoryExist retiredLease `shouldReturn` True
+          workerIsDiscoverable workerRoot staleSpec.workerId `shouldReturn` True
+          -- The repository that does own it still collects it.
+          collectWorkerCacheWith readProcessSnapshot neighbour
+          doesDirectoryExist retiredLease `shouldReturn` False
+
     -- Milestone 8 keeps a terminal journal until a newer worker is durable
     -- proof its workflow step was superseded, so inside the window that proof
     -- plus acknowledgement is what makes one collectable — and the newest

@@ -62,7 +62,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (sortOn)
+import Data.List (find, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
@@ -1595,20 +1595,25 @@ collectWorkerCacheWith takeSnapshot repository = ignoreFileOperation $ do
   directory <- workerDirectory repository
   exists <- doesDirectoryExist directory
   when exists $ do
-    collectRetiredLeases takeSnapshot directory
-    collectTerminalArtifacts takeSnapshot repository directory
+    -- 'discoverWorkerHistory' is the only thing that decodes a spec and
+    -- proves it belongs to this repository, so it is the sole authority both
+    -- passes below use to decide what is theirs to remove. Taken once and
+    -- shared, since the terminal pass needs the whole list anyway.
+    history <- discoverWorkerHistory repository
+    collectRetiredLeases takeSnapshot directory history
+    collectTerminalArtifacts takeSnapshot directory history
 
 -- | Removes retired @.stale-*@ lease directories whose recorded processes are
 -- all provably gone.
 --
 -- Fails closed exactly as lease recovery itself does ('leaseIsActive' and
--- 'recordedIdentitiesActive'): an owner record that will not decode, a state
--- file that will not decode, a snapshot that cannot be taken, a single
--- surviving identity, or an unresolved pending termination all keep the
--- directory. Only a retired lease whose every recorded identity is confirmed
--- absent is collected.
-collectRetiredLeases :: IO (Either Text [ProcessIdentity]) -> FilePath -> IO ()
-collectRetiredLeases takeSnapshot directory = do
+-- 'recordedIdentitiesActive'): an owner record that will not decode, an owner
+-- this repository's history does not contain, a state file that will not
+-- decode, a snapshot that cannot be taken, a single surviving identity, or an
+-- unresolved pending termination all keep the directory. Only a retired lease
+-- whose every recorded identity is confirmed absent is collected.
+collectRetiredLeases :: IO (Either Text [ProcessIdentity]) -> FilePath -> [WorkerDescriptor] -> IO ()
+collectRetiredLeases takeSnapshot directory history = do
   entries <- listDirectoryOrEmpty directory
   mapM_ collect (filter isRetiredLeaseName entries)
   where
@@ -1617,7 +1622,7 @@ collectRetiredLeases takeSnapshot directory = do
       let leasePath = directory </> name
       isDirectory <- doesDirectoryExist leasePath
       when isDirectory $ do
-        retained <- retiredLeaseRetained takeSnapshot directory leasePath
+        retained <- retiredLeaseRetained takeSnapshot directory history leasePath
         unless retained $ do
           -- The owner record is the only file a lease directory ever holds.
           -- Removing it and then the directory itself — rather than a
@@ -1626,28 +1631,34 @@ collectRetiredLeases takeSnapshot directory = do
           ignoreFileOperation (removeFile (leasePath </> "owner.json"))
           ignoreFileOperation (removeDirectory leasePath)
 
-retiredLeaseRetained :: IO (Either Text [ProcessIdentity]) -> FilePath -> FilePath -> IO Bool
-retiredLeaseRetained takeSnapshot directory leasePath = do
+retiredLeaseRetained :: IO (Either Text [ProcessIdentity]) -> FilePath -> [WorkerDescriptor] -> FilePath -> IO Bool
+retiredLeaseRetained takeSnapshot directory history leasePath = do
   ownerResult <- decodeFile (leasePath </> "owner.json") :: IO (Either Text WorkerLease)
   case ownerResult of
     Left _ -> pure True
-    Right lease
-      | not (safePathComponent ownerBase) -> pure True
-      | otherwise -> do
-          recorded <- recordedStateIdentities (ownerPath <> ".state.json")
-          pending <- doesFileExist (ownerPath <> ".pending-termination")
-          case recorded of
-            Nothing -> pure True
-            Just identities -> do
-              let candidates = maybe [] (: []) lease.workerLeaseSupervisorIdentity <> identities
-              if pending || null candidates
-                then pure True
-                else do
-                  presence <- checkIdentityPresenceWith takeSnapshot candidates
-                  pure (presence /= IdentityAbsent)
-      where
-        ownerBase = Text.unpack lease.workerLeaseId.unWorkerId
-        ownerPath = directory </> ownerBase
+    Right lease -> case find ((== lease.workerLeaseId) . (.workerId) . (.workerDescriptorSpec)) history of
+      -- The retired lease names a worker whose spec this repository's history
+      -- does not contain, so nothing here proves the record is ours. A worker
+      -- directory is keyed by 'safeKey' over @owner-name@, and that mapping
+      -- collides — @a-b/c@ and @a/b-c@ both key to @a-b-c@ — so a shared
+      -- directory can just as easily hold another repository's retired lease,
+      -- which is never ours to remove. Keep it and let its own repository's
+      -- pass decide.
+      Nothing -> pure True
+      Just descriptor
+        | not (artifactsWithin directory descriptor) -> pure True
+        | otherwise -> do
+            recorded <- recordedStateIdentities descriptor.workerDescriptorStatePath
+            pending <- doesFileExist descriptor.workerDescriptorPendingTerminationPath
+            case recorded of
+              Nothing -> pure True
+              Just identities -> do
+                let candidates = maybe [] (: []) lease.workerLeaseSupervisorIdentity <> identities
+                if pending || null candidates
+                  then pure True
+                  else do
+                    presence <- checkIdentityPresenceWith takeSnapshot candidates
+                    pure (presence /= IdentityAbsent)
 
 -- | Every process identity a worker durably recorded, or 'Nothing' when a
 -- state file is present but will not decode — the case that cannot be
@@ -1674,12 +1685,11 @@ recordedIdentities state =
 -- worker for an item, which is the session the debugging contract promises,
 -- survives however many passes run. Past 'workerRetentionSeconds' that
 -- promise has expired and the rest is collected regardless.
-collectTerminalArtifacts :: IO (Either Text [ProcessIdentity]) -> Repository -> FilePath -> IO ()
-collectTerminalArtifacts takeSnapshot repository directory = do
+collectTerminalArtifacts :: IO (Either Text [ProcessIdentity]) -> FilePath -> [WorkerDescriptor] -> IO ()
+collectTerminalArtifacts takeSnapshot directory history = do
   now <- getCurrentTime
-  history <- discoverWorkerHistory repository
   candidates <- catMaybes <$> mapM withTerminalState history
-  mapM_ (collect now history) candidates
+  mapM_ (collect now) candidates
   where
     withTerminalState descriptor = do
       stateResult <- readWorkerState descriptor
@@ -1687,7 +1697,7 @@ collectTerminalArtifacts takeSnapshot repository directory = do
         Right state
           | WorkerTerminal _ <- state.workerStateStatus -> Just (descriptor, state)
         _ -> Nothing
-    collect now history (descriptor, state) = ignoreFileOperation $ do
+    collect now (descriptor, state) = ignoreFileOperation $ do
       -- Measured from the terminal heartbeat rather than 'workerCreatedAt':
       -- retention starts when a worker finished, and a long-running solve's
       -- launch time says nothing about how long its result has been sitting
