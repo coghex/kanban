@@ -242,8 +242,11 @@ everything else.
   job's label, the plist's absolute path, the checkout it was installed for,
   and that repository's optional `config_path`, and which every path that
   writes a plist refreshes from those same values without disturbing another
-  repository's entry; the global `ntfy_url` beside it; and the
-  installer-managed script directory at
+  repository's entry — every read-modify-write of that document happens under
+  an exclusive `flock` on a sibling lock file, because installs and starts for
+  different repositories run concurrently and an unserialized merge would drop
+  the entry a running repository is discovered through; the global `ntfy_url`
+  beside it; and the installer-managed script directory at
   `~/Library/Application Support/kanban/pr-drainer`. Per checkout — a
   versioned drain-state JSON file, which records both the approved head each
   queued pull request was cleared at and the post-merge obligations a merged
@@ -533,7 +536,9 @@ the Codex plugin being installed.
   labels and plist paths are a Kanban-owned convention rather than a personal
   one. The component that writes the plists owns the labels:
   `tools/drain_prs_service.py` derives each one from its repository's
-  normalized canonical GitHub identity, renders the plist from it, builds
+  normalized canonical GitHub identity — resolved through the remote the
+  shared Kanban configuration names, the same one the dashboard resolves its
+  own repository through — renders the plist from it, builds
   every `launchctl` target from it, partitions the runtime and log paths by
   the same identity, and — from those same values — records that job's label,
   the plist's absolute path, and the checkout it was installed for under that

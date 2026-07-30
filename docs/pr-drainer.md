@@ -70,6 +70,13 @@ Two things do not migrate themselves:
   repository that needs one: `python3 tools/install_drainer.py --config
   /path/to/config.toml`. A repository without one uses the normal shared
   Kanban configuration. `--ntfy-url` is global and is *not* re-entered.
+
+  Note that a `remote_name` set in that file selects the remote the drainer
+  *works against* — its default-branch check and its merges — but not which
+  repository the job is for. The drainer's identity always comes from the
+  remote the shared Kanban configuration names, which is the remote Kanban
+  itself resolves the board's repository through. To drain a fork's upstream
+  under that upstream's name, set `remote_name` in the shared configuration.
 - The old job's logs and runtime state under
   `~/Library/Logs/kanban/pr-drainer/` and the install directory's `runtime/`.
   New jobs write into per-repository subdirectories beside them; the old files

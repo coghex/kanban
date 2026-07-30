@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +18,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -275,6 +278,28 @@ def _job(
     )
 
 
+def discovery_remote_name() -> str:
+    """The remote a drainer's *identity* is resolved through.
+
+    Always the shared Kanban configuration's, never a repository's own
+    `--config`, and that is load-bearing in two directions. It is the remote
+    Kanban itself resolves its repository through, so both sides name the same
+    identity and agree on which record describes this repository's job. And it
+    breaks a circularity that would otherwise be unresolvable: a repository's
+    `--config` lives in the record its identity selects, so a `--config` that
+    named a different remote would decide an identity that had already been
+    used to find it — the installer and the installed controller would resolve
+    two different repositories from one checkout, and the install would abort
+    on its own identity assertion.
+
+    A repository's `--config` still decides what its drainer runs with,
+    including the remote `require_default_branch` and `drain_prs.py` use. It
+    decides which repository the job is *for* only through this shared
+    configuration.
+    """
+    return configured_remote_name(None)
+
+
 def repository_identity(repo_path: Path, remote_name: str) -> str:
     """The canonical GitHub repository this checkout is a clone of.
 
@@ -330,24 +355,20 @@ def job_for_identity(
 def resolve_job(repo_path: Path) -> DrainerJob:
     """This checkout's drainer job, resolved through its canonical identity.
 
-    Identity resolution takes two passes on purpose. The identity is what
-    selects a repository's record, and that record is where its `--config`
-    override lives, so the first pass has to use the shared configuration's
-    remote name just to find the record. Only a record naming a *different*
-    remote needs the second pass. Nothing beyond that is chased: a
-    configuration whose remote points at a third repository is a
-    misconfiguration, not a case with a fixed point.
+    One pass, in a fixed order: `discovery_remote_name` decides the identity,
+    the identity selects the record, and the record supplies the `--config`
+    this repository's drainer runs with — including the remote name that
+    configuration names. Nothing later in that order can change anything
+    earlier, so every caller resolving the same checkout resolves the same
+    job, whatever it has been configured with.
     """
-    remote_name = configured_remote_name(None)
-    identity = repository_identity(repo_path, remote_name)
+    identity = repository_identity(repo_path, discovery_remote_name())
     config_path = configured_config_path(identity)
-    overridden = configured_remote_name(config_path)
-    if overridden != remote_name:
-        remote_name = overridden
-        identity = repository_identity(repo_path, remote_name)
-        config_path = configured_config_path(identity)
     return job_for_identity(
-        repo_path, identity, config_path=config_path, remote_name=remote_name
+        repo_path,
+        identity,
+        config_path=config_path,
+        remote_name=configured_remote_name(config_path),
     )
 
 
@@ -371,7 +392,7 @@ def unmanaged_job(repo_path: Path) -> DrainerJob:
         runtime_dir=RUNTIME_ROOT,
         log_dir=LOG_ROOT,
         config_path=None,
-        remote_name=configured_remote_name(None),
+        remote_name=discovery_remote_name(),
     )
 
 
@@ -442,39 +463,80 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             os.unlink(tmp_name)
 
 
+@contextlib.contextmanager
+def document_lock(path: Path) -> Iterator[None]:
+    """Serializes read-modify-write on a shared JSON document.
+
+    The discovery record is the one document several repositories write to, and
+    every install *and every start* refreshes an entry in it. Without this,
+    two dashboards starting drainers for different repositories can both read
+    the table, and whichever replaces it last silently drops the other's
+    entry — leaving a repository whose drainer is running with no record for
+    Kanban to find it through. The lock lives beside the document rather than
+    on it because the document is replaced atomically, which would drop a lock
+    held on the old inode.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        descriptor = os.open(
+            lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+    except OSError as exc:
+        raise ServiceError(f"Refusing unsafe config lock path: {lock_path}") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def update_json_document(
+    path: Path, transform: Callable[[dict[str, Any]], dict[str, Any]]
+) -> Path:
+    """Replace the private JSON object at `path` with `transform` applied to
+    it, reading and writing under one exclusive lock so a concurrent writer
+    cannot lose either party's change."""
+    with document_lock(path):
+        if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+            raise ServiceError(f"Refusing unsafe config path: {path}")
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                loaded = None
+            if isinstance(loaded, dict):
+                existing = loaded
+        updated = transform(existing)
+        fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(updated, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.chmod(0o600)
+            os.replace(temporary, path)
+        finally:
+            if os.path.lexists(temporary):
+                temporary.unlink()
+    return path
+
+
 def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
     """Merge `updates` into the private JSON object at `path` rather than
     overwriting it, so a writer that sets one key does not delete a key
-    persisted by another. `tools/install_drainer.py` writes `ntfy_url` and
-    `config_path` into the same document this module records the installed
-    LaunchAgent in, and either may run without the other."""
-    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
-        raise ServiceError(f"Refusing unsafe config path: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
-    existing: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict):
-            existing = loaded
-    existing.update(updates)
-    fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(existing, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            temporary.unlink()
-    return path
+    persisted by another. `tools/install_drainer.py` writes `ntfy_url` into the
+    same document this module records installed LaunchAgents in, and either may
+    run without the other."""
+
+    def merged(document: dict[str, Any]) -> dict[str, Any]:
+        return {**document, **updates}
+
+    return update_json_document(path, merged)
 
 
 def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
@@ -482,20 +544,27 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
     `repositories` table, leaving every sibling entry and every top-level key
     untouched.
 
-    Two levels of merge, not one: `merge_json_document` replaces the value of
-    each key it is given, so handing it a `repositories` table built from
-    `updates` alone would delete every other installed repository. The entry
-    itself is merged for the same reason one level down — the installer writes
-    `config_path` and the controller writes the label and plist path, and
-    either may run without the other.
+    Two levels of merge, not one: replacing the value of each key given would
+    hand over a `repositories` table built from `updates` alone, deleting every
+    other installed repository. The entry itself is merged for the same reason
+    one level down — the installer writes `config_path` and the controller
+    writes the label and plist path, and either may run without the other.
+
+    The read that computes the merge happens inside `update_json_document`'s
+    lock, so a repository installed between another writer's read and its write
+    cannot be dropped.
     """
-    records = installed_repository_records()
-    entry = dict(records.get(identity, {}))
-    entry.update(updates)
-    records[identity] = entry
-    return merge_json_document(
-        DISCOVERY_RECORD_PATH, {RECORD_REPOSITORIES_KEY: records}
-    )
+
+    def merged(document: dict[str, Any]) -> dict[str, Any]:
+        records = document.get(RECORD_REPOSITORIES_KEY)
+        records = dict(records) if isinstance(records, dict) else {}
+        existing = records.get(identity)
+        entry = dict(existing) if isinstance(existing, dict) else {}
+        entry.update(updates)
+        records[identity] = entry
+        return {**document, RECORD_REPOSITORIES_KEY: records}
+
+    return update_json_document(DISCOVERY_RECORD_PATH, merged)
 
 
 def write_discovery_record(job: DrainerJob) -> Path:

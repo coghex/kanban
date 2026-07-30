@@ -911,6 +911,15 @@ a countdown.
   one drainer and two clones of one repository cannot drain it concurrently. A
   checkout whose remote does not resolve to a supported github.com repository
   can neither install nor control a drainer.
+- That identity is resolved through the remote the *shared* Kanban
+  configuration names — the same remote the dashboard resolves its own
+  repository through — never through a repository's installed `--config`. A
+  repository's `--config` lives in the record its identity selects, so letting
+  it decide the identity would decide it from a record already found by it: the
+  installer and the installed controller would resolve two different
+  repositories from one checkout. The `--config` still decides everything its
+  drainer runs with, including the remote its default-branch check and merges
+  use.
 - The PR drainer controller discovers the installed LaunchAgent through the
   record its installer writes at
   `~/Library/Application Support/kanban/pr-drainer/config.json`, whose

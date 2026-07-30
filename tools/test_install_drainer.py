@@ -82,8 +82,11 @@ class InstallerPolicyTests(unittest.TestCase):
             patched = mock.patch.object(controller, name, value)
             patched.start()
             self.addCleanup(patched.stop)
+        # Only the remote that decides the *identity* is pinned;
+        # configured_remote_name stays real so a repository's own --config
+        # still decides what its drainer runs with.
         patched = mock.patch.object(
-            controller, "configured_remote_name", return_value="origin"
+            controller, "discovery_remote_name", return_value="origin"
         )
         patched.start()
         self.addCleanup(patched.stop)
@@ -266,6 +269,38 @@ class InstallerPolicyTests(unittest.TestCase):
             contents["repositories"]["acme/widgets"]["config_path"],
             "/home/user/.config/kanban/config.toml",
         )
+
+    def test_a_config_naming_another_remote_still_installs_one_consistent_job(self):
+        # The installer resolves the job, stores --config under that identity,
+        # and asserts the identity to the installed controller, which resolves
+        # it again. A --config whose remote_name differs from the shared
+        # configuration's must not move the identity between those two
+        # resolutions, or the assertion fails and the install aborts.
+        config = self.root / "config.toml"
+        config.write_text('remote_name = "upstream"\n', encoding="utf-8")
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:upstream-owner/widgets.git",
+            ],
+            check=True,
+        )
+
+        before = install_drainer.repository_job(self.repo)
+        install_drainer.write_installed_config_path(before.identity, str(config))
+        after = install_drainer.repository_job(self.repo)
+
+        self.assertEqual(before.identity, "acme/widgets")
+        self.assertEqual(after.identity, before.identity)
+        self.assertEqual(after.label, before.label)
+        # And the configuration still selects what that job runs with.
+        self.assertEqual(after.config_path, str(config))
+        self.assertEqual(after.remote_name, "upstream")
 
     def test_one_repositorys_config_path_never_displaces_anothers(self):
         # The endpoint stays global; the configuration each drainer restarts

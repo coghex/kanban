@@ -5,11 +5,13 @@ real ~/Library/LaunchAgents or ~/Library/Application Support/kanban, and no
 test invokes launchctl, git against a real remote, or a network.
 """
 
+import fcntl
 import json
 import os
 import plistlib
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -73,20 +75,23 @@ class RedirectedControllerTestCase(unittest.TestCase):
             return _completed(0)
         if args[:2] == ["launchctl", "bootstrap"]:
             return _completed(0)
-        if args[0] == "git" and args[3:] == ["remote", "get-url", "origin"]:
-            url = self.remotes.get(args[2])
+        if args[0] == "git" and args[3:5] == ["remote", "get-url"]:
+            url = self.remotes.get((args[2], args[5]))
             if url is None:
-                return _completed(1, stderr="error: No such remote 'origin'")
+                return _completed(1, stderr=f"error: No such remote '{args[5]}'")
             return _completed(0, stdout=url + "\n")
         if args[0] == "git" and args[3:] == ["rev-parse", "--absolute-git-dir"]:
             return _completed(0, stdout=str(Path(args[2]) / ".git") + "\n")
         return _completed(0)
 
-    def checkout(self, name, remote_url):
-        """A checkout directory whose `origin` answers `remote_url`."""
+    def checkout(self, name, remote_url, **other_remotes):
+        """A checkout directory whose `origin` answers `remote_url`, plus any
+        further named remotes given as keyword arguments."""
         path = self.root / name
         (path / ".git").mkdir(parents=True)
-        self.remotes[str(path)] = remote_url
+        self.remotes[(str(path), "origin")] = remote_url
+        for remote_name, url in other_remotes.items():
+            self.remotes[(str(path), remote_name)] = url
         return path
 
     def install(self, job):
@@ -597,6 +602,38 @@ class PerRepositoryConfigurationTests(RedirectedControllerTestCase):
         )
         self.assertIsNone(drain_prs_service.configured_config_path("acme/gadgets"))
 
+    def test_a_config_naming_another_remote_never_moves_the_job_identity(self):
+        # The circularity this order exists to break: a repository's --config
+        # lives in the record its identity selects, so letting that config
+        # decide the identity would decide it from a record already found by
+        # it. The installer would store the config under one identity and the
+        # installed controller would resolve another from the same checkout,
+        # and the install would abort on its own --repo assertion.
+        checkout = self.checkout(
+            "widgets",
+            "git@github.com:acme/widgets.git",
+            upstream="git@github.com:upstream-owner/widgets.git",
+        )
+        config = self.root / "config.toml"
+        config.write_text('remote_name = "upstream"\n', encoding="utf-8")
+
+        before = drain_prs_service.resolve_job(checkout)
+        drain_prs_service.merge_repository_record(
+            before.identity, {"config_path": str(config)}
+        )
+        after = drain_prs_service.resolve_job(checkout)
+
+        self.assertEqual(before.identity, "acme/widgets")
+        self.assertEqual(after.identity, before.identity)
+        self.assertEqual(after.label, before.label)
+        drain_prs_service.require_requested_identity(after, before.identity)
+        # The configuration still decides everything the drainer runs with,
+        # including the remote its default-branch check and merges use.
+        self.assertEqual(after.config_path, str(config))
+        self.assertEqual(after.remote_name, "upstream")
+        self.assertEqual(before.remote_name, "origin")
+        self.assertIn("--config", drain_prs_service.drainer_command(after))
+
     def test_the_forwarded_command_carries_only_this_repository_selection(self):
         widgets = drain_prs_service.job_for_identity(
             self.root / "widgets", "acme/widgets", config_path="/home/user/widgets.toml"
@@ -619,6 +656,85 @@ class PerRepositoryConfigurationTests(RedirectedControllerTestCase):
         self.assertNotEqual(
             widgets_command[widgets_command.index("--log-dir") + 1],
             gadgets_command[gadgets_command.index("--log-dir") + 1],
+        )
+
+
+class SharedRecordConcurrencyTests(RedirectedControllerTestCase):
+    """The discovery record is the one document several repositories write to,
+    and every install *and every start* refreshes an entry in it."""
+
+    def test_a_merge_holds_an_exclusive_lock_across_its_read_and_write(self):
+        self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self.record.with_name(self.record.name + ".lock")
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        finished = threading.Event()
+
+        def merge():
+            drain_prs_service.merge_repository_record(
+                "acme/widgets", {"launchd_label": "held"}
+            )
+            finished.set()
+
+        worker = threading.Thread(target=merge, daemon=True)
+        worker.start()
+        # It cannot have completed: the lock it needs is held here.
+        self.assertFalse(finished.wait(0.5))
+        fcntl.flock(held, fcntl.LOCK_UN)
+        self.assertTrue(finished.wait(10))
+        worker.join(10)
+        self.assertEqual(
+            self.read_record()["repositories"]["acme/widgets"]["launchd_label"], "held"
+        )
+
+    def test_concurrent_merges_keep_every_repositorys_entry(self):
+        # Unserialized, two writers both snapshot the old table and whichever
+        # replaces it last drops the other's entry — leaving a repository whose
+        # drainer is running with no record for Kanban to find it through.
+        identities = [f"acme/repo-{index}" for index in range(8)]
+        errors = []
+
+        def install(identity):
+            try:
+                for round_number in range(12):
+                    drain_prs_service.merge_repository_record(
+                        identity, {"launchd_label": f"{identity}-{round_number}"}
+                    )
+            except Exception as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        workers = [
+            threading.Thread(target=install, args=(identity,))
+            for identity in identities
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(30)
+
+        self.assertEqual(errors, [])
+        records = self.read_record()["repositories"]
+        self.assertEqual(set(records), set(identities))
+        for identity in identities:
+            self.assertEqual(records[identity]["launchd_label"], f"{identity}-11")
+
+    def test_a_top_level_key_and_a_repository_entry_survive_each_other(self):
+        drain_prs_service.merge_json_document(
+            self.record, {"ntfy_url": "https://notify.example.test/topic"}
+        )
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"launchd_label": "com.example.drain"}
+        )
+        drain_prs_service.merge_json_document(
+            self.record, {"ntfy_url": "https://notify.example.test/other"}
+        )
+        record = self.read_record()
+        self.assertEqual(record["ntfy_url"], "https://notify.example.test/other")
+        self.assertEqual(
+            record["repositories"]["acme/widgets"]["launchd_label"],
+            "com.example.drain",
         )
 
 
