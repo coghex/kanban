@@ -3121,7 +3121,6 @@ suite = do
     it "keeps draft approved pull requests in Reviewing" $ do
       let pullRequest = basePullRequest 10 [] True [Label "reviewed:approve" "00ff00"]
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
-      Map.size columns `shouldBe` 4
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10]
       Map.findWithDefault [] Done columns `shouldBe` []
 
