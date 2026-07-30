@@ -5087,6 +5087,16 @@ suite = do
         Left providerError -> providerError.providerErrorKind `shouldBe` UnsupportedVersion
         Right snapshot -> expectationFailure ("expected a decode failure, got " <> show snapshot)
 
+    it "sanitizes a hostile label -- ANSI escape sequences reaching an arbitrary external command's stdout -- before it can reach the sidebar" $
+      case decodeUsageCommandDocument epoch "{\"windows\":[{\"label\":\"\\u001b[31mALERT\\u001b[0m\",\"pct_left\":50,\"resets_at\":\"2026-07-16T16:05:00Z\"}]}" of
+        Left providerError -> expectationFailure (show providerError)
+        Right snapshot -> map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["ALERT"]
+
+    it "rejects a label that sanitizes down to nothing but control sequences" $
+      case decodeUsageCommandDocument epoch "{\"windows\":[{\"label\":\"\\u001b[31m\\u001b[0m\",\"pct_left\":50,\"resets_at\":\"2026-07-16T16:05:00Z\"}]}" of
+        Left providerError -> providerError.providerErrorKind `shouldBe` UnsupportedVersion
+        Right snapshot -> expectationFailure ("expected a decode failure, got " <> show snapshot)
+
   describe "external usage-command execution" $ do
     it "runs the configured argv directly and passes shell metacharacters through as a literal argument" $
       withTemporaryCacheRoot $ \temporaryRoot -> do

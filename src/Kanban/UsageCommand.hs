@@ -188,9 +188,15 @@ parseUsageWindows = withObject "usage command document" $ \document -> do
   windows <- mapM parseUsageWindow windowValues
   if null windows then fail "windows must be a nonempty array" else pure windows
 
+-- | @label@ is arbitrary text from an external command's stdout, so it is
+-- sanitized here -- same as any other externally supplied text reaching the
+-- terminal -- before it can ever reach 'drawUsageWindow'. Checking
+-- nonemptiness after sanitizing, not before, rejects a label that is nothing
+-- but control sequences rather than accepting one that would render blank.
 parseUsageWindow :: Value -> Parser UsageWindow
 parseUsageWindow = withObject "usage window" $ \window -> do
-  label <- window .: "label"
+  rawLabel <- window .: "label"
+  let label = sanitizeText rawLabel
   when (Text.null label) (fail "label must be a nonempty string")
   pctLeft <- window .: "pct_left"
   when (pctLeft < 0 || pctLeft > 100) (fail "pct_left must be within 0-100")
