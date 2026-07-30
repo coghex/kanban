@@ -3328,6 +3328,35 @@ suite = do
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
 
+    -- classifyPullRequest routes a non-draft approved PR to Done regardless
+    -- of its tier, which would split the four tiers across two columns.
+    -- Keeping every fixture a draft holds them all in Reviewing (drafts stay
+    -- there no matter their approval label), so the same four-tier,
+    -- age-ordered assertion applies to pull requests too.
+    it "orders standalone pull requests by all four problem/approved tiers, then by age within each tier" $ do
+      let older = epoch
+          newer = addUTCTime 3600 epoch
+          approvedLabel = Label "reviewed:approve" "0e8a16"
+          tiered number labels mergeState createdAt =
+            (basePullRequest number [] True labels) {pullRequestMergeState = mergeState, pullRequestCreatedAt = createdAt}
+          bothOld = tiered 1 [approvedLabel] MergeConflicting older
+          bothNew = tiered 2 [approvedLabel] MergeConflicting newer
+          problemOld = tiered 3 [] MergeConflicting older
+          problemNew = tiered 4 [] MergeConflicting newer
+          approvedOld = tiered 5 [approvedLabel] MergeClean older
+          approvedNew = tiered 6 [approvedLabel] MergeClean newer
+          neitherOld = tiered 7 [] MergeClean older
+          neitherNew = tiered 8 [] MergeClean newer
+          snapshot =
+            RepoSnapshot
+              []
+              [neitherNew, bothOld, approvedOld, problemNew, bothNew, neitherOld, approvedNew, problemOld]
+              epoch
+              False
+              False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
+
     -- trackerGroupKey reads the same two booleans off a group's tracked
     -- children rather than the tracker issue itself, so the "both" tier here
     -- comes from two different children each contributing one flag.
