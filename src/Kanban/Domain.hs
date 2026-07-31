@@ -41,7 +41,7 @@ module Kanban.Domain
   )
 where
 
-import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
+import Data.Aeson (FromJSON (..), FromJSONKey, ToJSON, ToJSONKey, withObject, (.!=), (.:), (.:?))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -296,10 +296,35 @@ data WorkflowConfig = WorkflowConfig
     trackerLabels :: Set Text,
     additionalTrackerSectionHeadings :: [Text],
     approvalMode :: ApprovalMode,
-    blockingSeverity :: BlockingSeverity
+    blockingSeverity :: BlockingSeverity,
+    -- | Purely presentational: label names a repository wants tinted like a
+    -- problem, and like a UI concern, in the card and details label chips.
+    -- Neither carries workflow meaning — nothing reads them for status,
+    -- readiness, or ordering — and both default to empty, so a repository
+    -- that configures nothing gets ordinary chips rather than an invisible
+    -- built-in set of names.
+    problemStyleLabels :: Set Text,
+    uiStyleLabels :: Set Text
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Manual instance so a durable record written before the display-only
+-- styling collections existed still decodes — a worker spec persists a whole
+-- 'WorkflowConfig' (see 'Kanban.Worker.WorkerSpec'), and a legacy one simply
+-- has no opinion about chip styling, which is exactly the empty default.
+instance FromJSON WorkflowConfig where
+  parseJSON = withObject "WorkflowConfig" $ \object ->
+    WorkflowConfig
+      <$> object .: "approvalLabel"
+      <*> object .: "changesRequestedLabel"
+      <*> object .: "blockedLabels"
+      <*> object .: "trackerLabels"
+      <*> object .: "additionalTrackerSectionHeadings"
+      <*> object .: "approvalMode"
+      <*> object .: "blockingSeverity"
+      <*> object .:? "problemStyleLabels" .!= Set.empty
+      <*> object .:? "uiStyleLabels" .!= Set.empty
 
 defaultWorkflowConfig :: WorkflowConfig
 defaultWorkflowConfig =
@@ -310,7 +335,9 @@ defaultWorkflowConfig =
       trackerLabels = Set.singleton "epic",
       additionalTrackerSectionHeadings = [],
       approvalMode = ApprovalByLabel,
-      blockingSeverity = SeverityRed
+      blockingSeverity = SeverityRed,
+      problemStyleLabels = Set.empty,
+      uiStyleLabels = Set.empty
     }
 
 itemId :: BoardItem -> ItemId

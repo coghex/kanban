@@ -40,6 +40,12 @@ class WorkflowConfig:
     additional_tracker_section_headings: tuple[str, ...] = ()
     approval_mode: str = "label"
     blocking_severity: str = "red"
+    # Display-only: which label names the dashboard tints as problems and as
+    # UI concerns in its label chips. Python workers carry them so the shared
+    # schema stays one schema — a documented key must not warn as unknown —
+    # but nothing here reads their styling meaning.
+    problem_style_labels: frozenset[str] = frozenset()
+    ui_style_labels: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,8 @@ class WorkflowOverride:
     additional_tracker_section_headings: tuple[str, ...] | None = None
     approval_mode: str | None = None
     blocking_severity: str | None = None
+    problem_style_labels: frozenset[str] | None = None
+    ui_style_labels: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -382,6 +390,8 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
     headings = _pop_str_list(table, "additional_tracker_section_headings", path)
     approval_mode = _pop_enum(table, "approval_mode", path, APPROVAL_MODES)
     blocking_severity = _pop_enum(table, "blocking_severity", path, BLOCKING_SEVERITIES)
+    problem_style_labels = _pop_str_list(table, "problem_style_labels", path)
+    ui_style_labels = _pop_str_list(table, "ui_style_labels", path)
     _collect_unknown(table, path, warnings)
     return WorkflowOverride(
         approval_label=approval_label,
@@ -393,6 +403,10 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
         ),
         approval_mode=approval_mode,
         blocking_severity=blocking_severity,
+        problem_style_labels=(
+            frozenset(problem_style_labels) if problem_style_labels is not None else None
+        ),
+        ui_style_labels=frozenset(ui_style_labels) if ui_style_labels is not None else None,
     )
 
 

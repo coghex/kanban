@@ -7,6 +7,7 @@ module Kanban.Workflow
     isStatusLabel,
     orderCardLabels,
     pullRequestStatus,
+    rereviewLabel,
   )
 where
 

@@ -33,6 +33,8 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.workflow.additional_tracker_section_headings, ())
         self.assertEqual(raw.workflow.approval_mode, "label")
         self.assertEqual(raw.workflow.blocking_severity, "red")
+        self.assertEqual(raw.workflow.problem_style_labels, frozenset())
+        self.assertEqual(raw.workflow.ui_style_labels, frozenset())
         self.assertEqual(raw.limits.max_open_issues, 250)
         self.assertEqual(raw.limits.max_open_pull_requests, 100)
         self.assertEqual(raw.limits.excerpt_lines, 3)
@@ -69,6 +71,8 @@ tracker_labels = ["epic", "tracker"]
 additional_tracker_section_headings = ["Extra Heading"]
 approval_mode = "either"
 blocking_severity = "amber"
+problem_style_labels = ["defect"]
+ui_style_labels = ["interface", "input"]
 
 [limits]
 max_open_issues = 10
@@ -89,6 +93,7 @@ command = ["/usr/local/bin/my-claude-usage"]
 [repositories."acme/widgets".workflow]
 approval_label = "acme:go"
 blocked_labels = ["only-this"]
+ui_style_labels = ["widget-ui"]
 
 [repositories."acme/widgets".limits]
 max_open_issues = 999
@@ -115,6 +120,12 @@ class FullFixtureTests(unittest.TestCase):
         )
         self.assertEqual(raw.workflow.approval_mode, "either")
         self.assertEqual(raw.workflow.blocking_severity, "amber")
+        # Display-only on the Haskell side; carried here so the shared schema
+        # accepts a documented key instead of warning it as unknown.
+        self.assertEqual(raw.workflow.problem_style_labels, frozenset({"defect"}))
+        self.assertEqual(
+            raw.workflow.ui_style_labels, frozenset({"interface", "input"})
+        )
         self.assertEqual(raw.limits.max_open_issues, 10)
         self.assertEqual(raw.limits.max_open_pull_requests, 5)
         self.assertEqual(raw.limits.excerpt_lines, 7)
@@ -153,6 +164,10 @@ class MergeAndSelectionTests(unittest.TestCase):
         self.assertEqual(resolved.limits.max_open_pull_requests, 5)
         self.assertEqual(resolved.timeouts.claude_seconds, 999)
         self.assertEqual(resolved.timeouts.github_seconds, 11)
+        # The overridden styling array replaces the global one; the omitted
+        # one inherits it, exactly like every other workflow collection.
+        self.assertEqual(resolved.workflow.ui_style_labels, frozenset({"widget-ui"}))
+        self.assertEqual(resolved.workflow.problem_style_labels, frozenset({"defect"}))
 
     def test_selection_is_exact_and_case_sensitive(self):
         raw = self._raw()
