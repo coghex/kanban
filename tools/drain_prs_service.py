@@ -863,8 +863,17 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         operation = in_progress_operation(job.repo_path)
         state = "mid_operation" if operation else "stopped"
 
-    open_incidents = incident_files(job, open_only=True)
-    latest_incident = read_json(open_incidents[0]) if open_incidents else None
+    # `incident_files` sorts newest first, so the head of this list is the one
+    # the sidebar has always summarised. Both projections are reported: the
+    # full set is what Kanban's incidents panel lists, and `open_incident`
+    # stays exactly the newest-only summary the sidebar renders, so growing
+    # one cannot change the other.
+    open_incidents = [
+        incident
+        for incident in (read_json(path) for path in incident_files(job, open_only=True))
+        if incident is not None
+    ]
+    latest_incident = open_incidents[0] if open_incidents else None
     log_path = latest_log_path(job)
     log_tail = tail_lines(log_path, 1)
     return {
@@ -882,6 +891,7 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         "log": str(log_path) if log_path else None,
         "last_activity": log_tail[0] if log_tail else None,
         "open_incident": latest_incident,
+        "open_incidents": open_incidents,
     }
 
 

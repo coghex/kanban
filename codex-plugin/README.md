@@ -2,7 +2,7 @@
 
 This directory is a Codex marketplace, tracked in this repository, that
 packages the Codex-side workflows Kanban invokes by name — `$solve`,
-`$pr-review`, `$pr-rereview`, and `$pr-revise` — plus the issue-drafting and
+`$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
 `$issue`, `$autoissue`, and `$issue-review`. It exists so a clean Codex
 installation can perform these actions without depending on any developer's
@@ -59,13 +59,14 @@ without those subcommands cannot install this plugin.
 
 ## What's packaged
 
-Kanban's own CLI spawns the first four by name. The next three are drafting and
-readiness-gate workflows a user or the review daemon invokes directly; see
+Kanban's own CLI spawns five of these by name: the first four, plus `$repair`,
+which `r` selects for a Done pull request whose status is a problem (issue
+#127). The other three are drafting and readiness-gate workflows a user or the
+review daemon invokes directly; see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
-`$repair` is packaged ahead of the Done-column repair action that will spawn
-it, and is deliberately *not* part of that declared drafting surface. None of
-the last four is included in the Haskell invocation-parity pinning in
-`tools/test_codex_plugin.py`, which covers only the names Kanban's own code
+`$repair` is not part of that declared drafting surface either. Only the three
+drafting skills are excluded from the Haskell invocation-parity pinning in
+`tools/test_codex_plugin.py`, which covers exactly the names Kanban's own code
 spawns.
 
 | Skill | Codex command | Boundary |
@@ -85,11 +86,11 @@ breadth counterpart to `$issue`, is Claude-only by contract — see
 feature arc rather than independently hunting discretionary work, so it is not
 part of the drafting contract and is packaged in neither marketplace.
 
-`pr-review`, `pr-rereview`, and `pr-revise` all delegate publication to the
-bundled coordinator at `skills/pr-review/scripts/review_pr.py`. Kanban
+`pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
+to the bundled coordinator at `skills/pr-review/scripts/review_pr.py`. Kanban
 spawns each of these workflows with the *reviewed* repository as the
 working directory, not this plugin's own install location, so the other
-two skills locate the installed coordinator by searching under
+three skills locate the installed coordinator by searching under
 `$CODEX_HOME` rather than a path relative to the current directory — the
 same review logic and `pr-review:v2` marker/label state machine runs
 regardless of which command an agent session starts from. The coordinator
@@ -120,8 +121,9 @@ For known-origin `$pr-review`/`$pr-rereview` — the case Kanban's own
 invocation always produces — the calling session already *is* the
 correctly-pinned canonical reviewer, so it reviews directly and uses the
 coordinator (`--self-review`) only for safe publication; no nested,
-unpinned reviewer is spawned. Only `pr-revise`'s cross-brand handoff (it
-runs on the PR's own origin brand but must hand off to the opposite brand)
+unpinned reviewer is spawned. Only the cross-brand handoffs of `pr-revise`
+and `repair` (each runs on the PR's own origin brand but must hand off to the
+opposite brand)
 and the rare dual-review fallback for unknown/external origin — which
 Kanban's own invocation never triggers — spawn a nested `codex`/`claude`
 reviewer, and that nested call selects brand only, deferring to whatever
@@ -140,10 +142,10 @@ runs) checks that:
 - the marketplace and plugin manifests are valid and point at this
   directory;
 - the skills directory contains exactly the eight packaged workflows, and the
-  four Kanban spawns exactly match the `$`-prefixed tokens
+  five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  three drafting skills or the packaged-only `$repair`;
+  three drafting skills;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a

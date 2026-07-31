@@ -2,11 +2,21 @@ module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
     AppEvent (..),
+    AppState (..),
     BoardRefreshDispatch (..),
     BoardRefreshOutcome (..),
+    BoardWorkLocation (..),
     CardEnv (..),
     ChatTranscript (..),
     DetailsEnv (..),
+    DrainerSourceState (..),
+    IncidentActivation (..),
+    IncidentClickOutcome (..),
+    IncidentEntry (..),
+    IncidentRef (..),
+    IncidentSelection (..),
+    IncidentSource (..),
+    IncidentsAction (..),
     Name (..),
     Overlay (..),
     OverlayMouseAction (..),
@@ -14,6 +24,7 @@ module Kanban.UI
     ProcessClickOutcome (..),
     ProcessSelection (..),
     PullRequestReviewSession (..),
+    ReviewBackend (..),
     ReviewCancelAction (..),
     ReviewDigitAction (..),
     ReviewPhase (..),
@@ -40,13 +51,20 @@ module Kanban.UI
     decideReviewTickArm,
     decideReviewTickFire,
     displayedTranscript,
+    drainerSourceState,
+    drawApplication,
     drawCardFrame,
     drawDetails,
+    drawIncidents,
     drawUndeliveredSteers,
     failureActivity,
     followAfterScroll,
     followAfterTurnStarted,
     githubRefreshTimeoutMicros,
+    applyIncidentsAction,
+    incidentEntries,
+    incidentSourceLabel,
+    incidentsAction,
     itemHasAmberWarning,
     killSelectionNotice,
     labelApprovalAttr,
@@ -55,6 +73,7 @@ module Kanban.UI
     labelProblemAttr,
     labelUiAttr,
     liveReviewSessions,
+    locateBoardWork,
     mergeExplanation,
     mergeText,
     neutralAttr,
@@ -69,14 +88,20 @@ module Kanban.UI
     pullRequestSessionReusable,
     readyAttr,
     reconcileReviewSessions,
+    recoveredPullRequestSession,
     refreshOverlay,
     releaseQueuedBoardRefresh,
     requiredBoardRefreshDispatch,
     resolveReviewCancelAction,
+    resolveIncidentActivation,
+    resolveIncidentClick,
+    resolveIncidentSelection,
     resolveProcessClick,
     resolveProcessSelection,
     resolveReviewDigitAction,
     reusableSolveSession,
+    reviewIncidentPhase,
+    solveIncidentPhase,
     reviewAgentSessionEntry,
     reviewPhaseAttribute,
     reviewPhaseGlyphFor,
@@ -90,6 +115,8 @@ module Kanban.UI
     runClaudeRefresh,
     runCodexRefresh,
     runDashboard,
+    selectedAttr,
+    selectedTitleAttr,
     solveSessionAlreadyResolved,
     themeFor,
     trackerAttr,
@@ -148,9 +175,12 @@ import Kanban.Drainer
     DirectMergeOutcome,
     DrainerActivity (..),
     DrainerController,
+    DrainerIncident (..),
+    DrainerObservation (..),
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
+    crashIncidentKind,
     directMergeDecision,
     directMergeEffect,
     discoverDrainerController,
@@ -179,8 +209,10 @@ import Kanban.PullRequestFlow
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
     PullRequestVerdict (..),
-    actionForLabels,
     agentForAction,
+    authoredOnOwnBrand,
+    directPullRequestAction,
+    labelPullRequestAction,
     originFromBody,
     pullRequestVerdictForLabels,
   )
@@ -268,6 +300,7 @@ data Name
   | SolveViewport
   | PullRequestReviewViewport
   | ProcessesViewport
+  | IncidentsViewport
   | CardTarget BoardColumn Int
   | EpicTarget BoardColumn Int Int
   | DetailsPanel
@@ -276,6 +309,8 @@ data Name
   | PullRequestReviewPanel
   | ProcessesPanel
   | ProcessTarget AgentSessionRef
+  | IncidentsPanel
+  | IncidentTarget IncidentRef
   | DrainerButton
   deriving stock (Eq, Ord, Show)
 
@@ -283,6 +318,7 @@ data Overlay
   = HelpOverlay
   | SettingsOverlay
   | ProcessesOverlay
+  | IncidentsOverlay
   | DetailsOverlay BoardItem
   | ReviewOverlay Int
   | SolveChooser SolveWorkflow Issue
@@ -469,6 +505,75 @@ data AgentSessionEntry = AgentSessionEntry
   }
   deriving stock (Eq, Show)
 
+-- | Which of the incidents panel's sources a row came from. New sources are
+-- expected — every automated stage that can stop needing a human is a
+-- candidate — so the panel is written against this list rather than against
+-- the two members it starts with: a source contributes 'IncidentEntry'
+-- values and a label, and nothing else about the panel changes.
+data IncidentSource
+  = DrainerSource
+  | SessionSource
+  deriving stock (Eq, Ord, Show)
+
+-- | A row's identity, qualified by the source that minted it, so two sources
+-- can never collide on one identifier. Drainer rows carry the service's own
+-- incident ID and session rows the existing 'AgentSessionRef'; both survive a
+-- refresh that inserts, removes, or reorders rows, which is what keeps a
+-- keyboard or mouse action pointed at the incident it was aimed at.
+data IncidentRef
+  = DrainerIncidentRef Text
+  | SessionIncidentRef AgentSessionRef
+  deriving stock (Eq, Ord, Show)
+
+-- | One row of the incidents panel: what it concerns, what happened, and
+-- where it came from.
+--
+-- 'incidentEntryWork' is the /authoritative/ board target and is the only
+-- thing activation navigates by. An entry with no authoritative target — a
+-- supervisor crash, whose @last_pr@ is an inferred diagnostic — is cardless
+-- by construction rather than by a check at activation time.
+data IncidentEntry = IncidentEntry
+  { incidentEntryRef :: IncidentRef,
+    incidentEntrySource :: IncidentSource,
+    incidentEntryWork :: Maybe ItemId,
+    -- | The session overlay activation should open, when Kanban holds one
+    -- for this entry. Independent of 'incidentEntryWork': a drainer incident
+    -- names work without a session, and a session whose card has been
+    -- truncated off the board still has an overlay worth opening.
+    incidentEntrySession :: Maybe AgentSessionRef,
+    incidentEntrySubject :: Text,
+    incidentEntryDetail :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | Tracks the incidents panel selection by stable source-qualified
+-- identity, exactly as 'ProcessSelection' does for the processes overlay.
+data IncidentSelection = IncidentSelection
+  { incidentSelectionRef :: Maybe IncidentRef,
+    incidentSelectionRow :: Int
+  }
+  deriving stock (Eq, Show)
+
+data IncidentClickOutcome
+  = IncidentClickSelect IncidentSelection
+  | IncidentClickOpen
+  | IncidentClickIgnored
+  deriving stock (Eq, Show)
+
+-- | What the drainer source can currently say about itself, kept separate
+-- from the answer it gives so that "no incidents" and "no answer" cannot be
+-- confused.
+--
+-- Only 'DrainerSourceReported' is an observation: the controller ran, its
+-- response decoded, and it listed exactly these incidents. Everything else
+-- means this side does not know, and the panel says so instead of claiming
+-- that nothing needs attention.
+data DrainerSourceState
+  = DrainerSourceChecking
+  | DrainerSourceUnavailable Text
+  | DrainerSourceReported [DrainerIncident]
+  deriving stock (Eq, Show)
+
 -- | How a board refresh ended. 'BoardRefreshUnverified' is not just another
 -- failure: the @gh@ process group the refresh spawned could not be confirmed
 -- gone, so no second @gh@ may be started alongside one that may still be
@@ -483,8 +588,8 @@ data AppEvent
   = BoardRefreshFinished BoardRefreshOutcome
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
-  | DrainerStatusRefreshed (Either Text DrainerStatus)
-  | DrainerToggleFinished (Either Text DrainerStatus)
+  | DrainerStatusRefreshed (Either Text DrainerObservation)
+  | DrainerToggleFinished (Either Text DrainerObservation)
   | DirectMergeFinished Int (Either Text DirectMergeOutcome)
   | ReviewBackendStarted (Either Text ReviewClient)
   | ReviewProtocolEvent ReviewEvent
@@ -513,6 +618,7 @@ data AppState = AppState
     appSettings :: Settings,
     appLogRoot :: FilePath,
     appProcessSelection :: ProcessSelection,
+    appIncidentSelection :: IncidentSelection,
     appOverlay :: Maybe Overlay,
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
@@ -521,6 +627,11 @@ data AppState = AppState
     appPullRequestsTruncated :: Bool,
     appDrainerController :: Either Text DrainerController,
     appDrainerStatus :: DrainerStatus,
+    -- | The last observed set of open incidents, or 'Nothing' whenever no
+    -- successful observation stands: before the first poll answers, after a
+    -- query or decode failure, while a start or stop is in flight, and when
+    -- the controller reported no such set at all. See 'DrainerSourceState'.
+    appDrainerIncidents :: Maybe [DrainerIncident],
     appDrainerBusy :: Bool,
     -- | The pull request a direct @m@ merge is running for, if one is. Held
     -- apart from 'appDrainerStatus', which reports the launchd service and
@@ -582,6 +693,7 @@ runDashboard options config repository = do
             appSettings = initialSettings,
             appLogRoot = logRoot,
             appProcessSelection = ProcessSelection Nothing 0,
+            appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
             appNotice = Just (initialNotice <> maybe "" (" · " <>) usageNotice <> maybe "" (" · " <>) settingsNotice),
             appBoardFreshness = initialFreshness,
@@ -596,6 +708,10 @@ runDashboard options config repository = do
                 -- "off" must not read "no answer so far" as one.
                 Right _ -> DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing
                 Left message -> drainerErrorStatus message,
+            -- Nothing has been observed yet, and a failed discovery never
+            -- will be: both must read as an unanswered source rather than as
+            -- a drainer with no open incidents.
+            appDrainerIncidents = Nothing,
             appDrainerBusy = False,
             appDirectMergePending = Nothing,
             appBoardRefreshQueued = False,
@@ -1398,7 +1514,10 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    $ [ withAttr footerAttr (txt "j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  u update  d drainer  m merge  c sidebar  s settings  ? help  q quit"),
+    -- `m` is deliberately absent: the line is already at the width the
+    -- narrowest supported four-column board can show, and one more entry
+    -- truncates `q quit` off the end. The help overlay is the complete list.
+    $ [ withAttr footerAttr (txt "j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  i attention  u update  d drainer  c sidebar  s settings  ? help  q quit"),
         withAttr dimAttr (txt (boardFreshnessText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
@@ -1425,6 +1544,7 @@ drawOverlay state overlay =
       HelpOverlay -> drawHelp
       SettingsOverlay -> drawSettings state
       ProcessesOverlay -> drawProcesses state
+      IncidentsOverlay -> drawIncidents state
       DetailsOverlay item -> viewport DetailsViewport Vertical (drawDetails (detailsEnv state) item)
       ReviewOverlay issueNumber -> drawReview state issueNumber
       SolveChooser _ issue -> drawSolveChooser issue
@@ -1435,6 +1555,7 @@ drawOverlay state overlay =
       SolveChooser _ _ -> 42
       SettingsOverlay -> 68
       ProcessesOverlay -> 100
+      IncidentsOverlay -> 100
       _ -> 88
     overlayHeight = case overlay of
       SolveChooser _ _ -> 10
@@ -1445,6 +1566,7 @@ drawOverlay state overlay =
       HelpOverlay -> id
       SettingsOverlay -> id
       ProcessesOverlay -> clickable ProcessesPanel
+      IncidentsOverlay -> clickable IncidentsPanel
       DetailsOverlay _ -> clickable DetailsPanel
       ReviewOverlay _ -> clickable ReviewPanel
       SolveChooser _ _ -> id
@@ -1454,6 +1576,7 @@ drawOverlay state overlay =
       HelpOverlay -> " HELP "
       SettingsOverlay -> " SETTINGS "
       ProcessesOverlay -> " PROCESSES "
+      IncidentsOverlay -> " NEEDS ATTENTION "
       DetailsOverlay item -> " " <> itemHeading item <> " "
       ReviewOverlay issueNumber -> " " <> reviewOverlayTitle state issueNumber <> " #" <> showText issueNumber <> " "
       SolveChooser workflow issue -> " " <> workflowTitle workflow <> " #" <> showText issue.issueNumber <> " "
@@ -1478,7 +1601,7 @@ drawHelp =
       txt "g / G        first / last visible item",
       txt "e            expand / collapse focused epic",
       txt "Enter        details",
-      txt "r            review/revise selected issue or PR",
+      txt "r            review/revise/repair selected issue or PR",
       txt "S            solve selected issue (choose model brand)",
       txt "A            autosolve selected issue (choose model brand)",
       txt "u            update board and both usage providers",
@@ -1490,6 +1613,7 @@ drawHelp =
       txt "c            collapse / expand sidebar",
       txt "s            settings",
       txt "p            processes and agent sessions",
+      txt "i            everything needing attention; Enter goes to its work",
       txt "Ctrl-L       repaint",
       txt "Esc          close overlay",
       txt "Ctrl-C       interrupt open agent turn, then type guidance",
@@ -1560,6 +1684,71 @@ drawProcesses state =
               <> sessionText
           widget = clickable (ProcessTarget entry.agentSessionRef) (withAttr attribute (txt line))
        in if selected then visible widget else widget
+
+drawIncidents :: AppState -> Widget Name
+drawIncidents state =
+  vBox
+    [ withAttr (drainerSourceAttr source) (txtWrap (drainerSourceSummary source)),
+      txt "",
+      vLimit 23
+        . viewport IncidentsViewport Vertical
+        $ if null entries
+          then withAttr dimAttr (txtWrap (emptyStateText source))
+          else vBox (zipWith drawEntry [0 :: Int ..] entries),
+      hBorder,
+      withAttr footerAttr (txt "j/↓ next  k/↑ previous  Enter go to the work  wheel scroll  Esc close")
+    ]
+  where
+    entries = incidentEntries state
+    source = drainerSourceState state.appDrainerStatus state.appDrainerIncidents
+    selectedIndex = (resolveIncidentSelection entries state.appIncidentSelection).incidentSelectionRow
+    glyph = if state.appOptions.optionAscii then "!" else "×"
+    drawEntry index entry =
+      let selected = index == selectedIndex
+          attribute = if selected then selectedAttr else problemAttr
+          line =
+            glyph
+              <> " "
+              <> entry.incidentEntrySubject
+              <> " · "
+              <> entry.incidentEntryDetail
+              <> " · "
+              <> incidentSourceLabel entry.incidentEntrySource
+          widget = clickable (IncidentTarget entry.incidentEntryRef) (withAttr attribute (txt line))
+       in if selected then visible widget else widget
+
+-- | The overall "nothing needs attention" claim is only ever made from a
+-- drainer observation that reported no incidents. With the source still
+-- being checked or unavailable, the panel can only speak for the sessions it
+-- holds itself, and says exactly that.
+emptyStateText :: DrainerSourceState -> Text
+emptyStateText source = case source of
+  DrainerSourceReported _ -> "Nothing needs attention."
+  DrainerSourceChecking -> "No Kanban session needs attention; the PR drainer has not answered yet."
+  DrainerSourceUnavailable _ -> "No Kanban session needs attention; the PR drainer's open incidents are unavailable."
+
+-- | Says which of the source's states produced the list above, so an empty
+-- panel is never read as a verdict the drainer did not give. The detail is
+-- the status's own, which is a remediation when the controller could not be
+-- reached and simply names its state when the controller answered without
+-- reporting a set at all — hence "open incidents unavailable" rather than a
+-- bare "unavailable", which would contradict a drainer plainly reported on.
+drainerSourceSummary :: DrainerSourceState -> Text
+drainerSourceSummary source = case source of
+  DrainerSourceReported incidents ->
+    "PR drainer: "
+      <> showText (length incidents)
+      <> " open incident"
+      <> (if length incidents == 1 then "" else "s")
+  DrainerSourceChecking -> "PR drainer: checking for open incidents…"
+  DrainerSourceUnavailable detail -> "PR drainer: open incidents unavailable · " <> sanitizeText detail
+
+drainerSourceAttr :: DrainerSourceState -> AttrName
+drainerSourceAttr source = case source of
+  DrainerSourceReported [] -> dimAttr
+  DrainerSourceReported _ -> problemAttr
+  DrainerSourceChecking -> pendingAttr
+  DrainerSourceUnavailable _ -> pendingAttr
 
 -- | The single "is this review session live?" decision, shared by the
 -- processes-overlay rows ('reviewAgentSessionEntry'), the @x@ gate that
@@ -1708,6 +1897,268 @@ resolveProcessClick entries selection clickedRef =
     Just clickedIndex
       | (resolveProcessSelection entries selection).processSelectionRef == Just clickedRef -> ProcessClickOpen
       | otherwise -> ProcessClickSelect (ProcessSelection (Just clickedRef) clickedIndex)
+
+-- | The solve and pull-request phases that need a human. Written out rather
+-- than derived from 'agentSessionProblem', which is the /processes/
+-- overlay's narrower "this went wrong" marker and deliberately excludes
+-- 'SolveAttention': a session waiting for an answer is not a problem, but it
+-- is exactly the kind of thing this panel exists to surface (issue #128).
+solveIncidentPhase :: SolvePhase -> Bool
+solveIncidentPhase phase =
+  phase `elem` [SolveAttention, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+
+-- | The review phases that need a human. Written out rather than derived
+-- from 'reviewPhaseActive' or 'agentSessionProblem', both of which encode
+-- different questions: 'ReviewWaiting' is phase-active (the turn is still
+-- alive) yet is precisely a session waiting on the user, while
+-- 'ReviewRevised' and 'ReviewInterrupted' are terminal states the user
+-- already knows about and does not need chasing.
+reviewIncidentPhase :: ReviewPhase -> Bool
+reviewIncidentPhase phase =
+  phase `elem` [ReviewWaiting, ReviewNeedsChanges, ReviewFailed]
+
+-- | What the drainer source can say for itself, from the last observation
+-- and the status it produced. The set is the authority: a controller that
+-- reported one is a source that answered, whatever its state, and a
+-- controller that reported none has not answered at all — whether because
+-- the first poll has not landed, because the invocation or its decode
+-- failed, because discovery never found a controller, or because a start or
+-- stop is in flight.
+drainerSourceState :: DrainerStatus -> Maybe [DrainerIncident] -> DrainerSourceState
+drainerSourceState status incidents = case incidents of
+  Just reported -> DrainerSourceReported reported
+  Nothing
+    | status.drainerState `elem` [DrainerStarting, DrainerStopping] -> DrainerSourceChecking
+    | otherwise -> DrainerSourceUnavailable status.drainerDetail
+
+incidentSourceLabel :: IncidentSource -> Text
+incidentSourceLabel DrainerSource = "pr drainer"
+incidentSourceLabel SessionSource = "kanban session"
+
+-- | Every row the incidents panel lists, in a stable order: the drainer's
+-- own incidents newest first as the service returned them, then Kanban's
+-- qualifying sessions by kind and number. Order is presentational only —
+-- 'IncidentRef' is what selection and activation resolve against — so a
+-- refresh that reorders this list cannot redirect either.
+incidentEntries :: AppState -> [IncidentEntry]
+incidentEntries state = drainerEntries <> solveEntries <> pullRequestEntries <> reviewEntries
+  where
+    drainerEntries = case drainerSourceState state.appDrainerStatus state.appDrainerIncidents of
+      DrainerSourceReported incidents -> map (drainerIncidentEntry state) incidents
+      DrainerSourceChecking -> []
+      DrainerSourceUnavailable _ -> []
+    solveEntries =
+      [ sessionIncidentEntry
+          (SolveAgent issueNumber)
+          (IssueId issueNumber)
+          (workSubject "issue" issueNumber session.solveSessionIssue.issueTitle)
+          (solveProcessStatus session.solveSessionPhase)
+          session.solveSessionActivity
+        | (issueNumber, session) <- Map.toList state.appSolveSessions,
+          solveIncidentPhase session.solveSessionPhase
+      ]
+    pullRequestEntries =
+      [ sessionIncidentEntry
+          (PullRequestAgent number)
+          (PullRequestId number)
+          (workSubject "PR" number session.pullRequestSessionPullRequest.pullRequestTitle)
+          (solveProcessStatus session.pullRequestSessionPhase)
+          session.pullRequestSessionActivity
+        | (number, session) <- Map.toList state.appPullRequestReviewSessions,
+          solveIncidentPhase session.pullRequestSessionPhase
+      ]
+    reviewEntries =
+      [ sessionIncidentEntry
+          (ReviewAgent issueNumber)
+          (IssueId issueNumber)
+          (workSubject "issue" issueNumber session.reviewSessionIssue.issueTitle)
+          (reviewProcessStatus session.reviewSessionPhase)
+          session.reviewSessionActivity
+        | (issueNumber, session) <- Map.toList state.appReviewSessions,
+          reviewIncidentPhase session.reviewSessionPhase
+      ]
+    sessionIncidentEntry reference work subject status activity =
+      IncidentEntry
+        { incidentEntryRef = SessionIncidentRef reference,
+          incidentEntrySource = SessionSource,
+          incidentEntryWork = Just work,
+          incidentEntrySession = Just reference,
+          incidentEntrySubject = subject,
+          incidentEntryDetail = status <> " · " <> sanitizeText activity
+        }
+
+-- | One drainer incident as a row. The session is looked up rather than
+-- carried by the incident: the drainer knows nothing about Kanban's live
+-- sessions, but a pull request it is stuck on may well be one this dashboard
+-- is already running an agent against, and that agent's overlay is the
+-- fastest thing to reach.
+drainerIncidentEntry :: AppState -> DrainerIncident -> IncidentEntry
+drainerIncidentEntry state incident =
+  IncidentEntry
+    { incidentEntryRef = DrainerIncidentRef incident.incidentId,
+      incidentEntrySource = DrainerSource,
+      incidentEntryWork = work,
+      incidentEntrySession = session,
+      incidentEntrySubject = subject,
+      incidentEntryDetail = Text.intercalate " · " (summary : diagnostics)
+    }
+  where
+    -- Only the authoritative field. 'incidentLastPullRequest' is inferred by
+    -- the service from a log line and names whichever pull request was
+    -- mentioned last, not what the incident is about, so it never becomes a
+    -- navigation target — a supervisor crash stays cardless.
+    work = PullRequestId <$> incident.incidentPullRequest
+    session = do
+      number <- incident.incidentPullRequest
+      if Map.member number state.appPullRequestReviewSessions
+        then Just (PullRequestAgent number)
+        else Nothing
+    subject = case incident.incidentPullRequest of
+      Just number -> workSubject "PR" number (boardItemTitle state.appBoard (PullRequestId number))
+      Nothing -> "drainer supervisor"
+    summary =
+      maybe
+        ("open " <> sanitizeText incident.incidentKind <> " incident")
+        sanitizeText
+        incident.incidentSummary
+    -- A crash records more than its exit status, and the fields it does
+    -- record are what makes a cardless row worth reading.
+    diagnostics =
+      ["last activity: " <> sanitizeText activity | Just activity <- [incident.incidentActivity]]
+        <> [ "last logged PR #" <> showText number <> ", not a navigation target"
+             | Just number <- [incident.incidentLastPullRequest],
+               incident.incidentKind == crashIncidentKind
+           ]
+
+-- | "PR #42 — Fix the thing", or just "PR #42" when no title is known.
+workSubject :: Text -> Int -> Text -> Text
+workSubject noun number title
+  | Text.null trimmed = heading
+  | otherwise = heading <> " — " <> trimmed
+  where
+    heading = noun <> " #" <> showText number
+    trimmed = Text.strip (sanitizeText title)
+
+boardItemTitle :: Board -> ItemId -> Text
+boardItemTitle board target = maybe "" (\(_, _, item) -> itemTitle item) (findItem board target)
+
+-- | Resolves an incidents-panel selection against the current rows, exactly
+-- as 'resolveProcessSelection' does: follow the tracked identity to wherever
+-- it now sits, and otherwise clamp the last-known row so the panel still has
+-- something highlighted.
+--
+-- Only the highlight is clamped. Activation deliberately does not go through
+-- this: see 'resolveIncidentActivation'.
+resolveIncidentSelection :: [IncidentEntry] -> IncidentSelection -> IncidentSelection
+resolveIncidentSelection entries selection =
+  case selection.incidentSelectionRef of
+    Just reference
+      | Just index <- findIndex ((== reference) . incidentEntryRef) entries ->
+          IncidentSelection (Just reference) index
+    _ ->
+      let clampedRow = max 0 (min selection.incidentSelectionRow (length entries - 1))
+       in IncidentSelection (incidentEntryRef <$> safeIndex clampedRow entries) clampedRow
+
+-- | Resolves a click by the identity that was rendered into the clicked row,
+-- so a refresh between render and dispatch cannot redirect it to whatever
+-- now occupies that position.
+resolveIncidentClick :: [IncidentEntry] -> IncidentSelection -> IncidentRef -> IncidentClickOutcome
+resolveIncidentClick entries selection clickedRef =
+  case findIndex ((== clickedRef) . incidentEntryRef) entries of
+    Nothing -> IncidentClickIgnored
+    Just clickedIndex
+      | (resolveIncidentSelection entries selection).incidentSelectionRef == Just clickedRef ->
+          IncidentClickOpen
+      | otherwise -> IncidentClickSelect (IncidentSelection (Just clickedRef) clickedIndex)
+
+-- | Where the board holds a numbered piece of work, and which tracker has to
+-- be expanded for that row to be visible.
+data BoardWorkLocation = BoardWorkLocation
+  { boardWorkColumn :: BoardColumn,
+    boardWorkRow :: Int,
+    boardWorkExpands :: Maybe Int
+  }
+  deriving stock (Eq, Show)
+
+-- | Finds the row a number names, in the four shapes the board can hold it.
+--
+-- 'findEntryWithLocation' covers the first three: an ordinary issue or pull
+-- request, a childless tracker (whose header entry /is/ its issue), and a
+-- child of a tracker — which is present in the column whether or not its
+-- tracker is expanded, so it is found here and reported with the tracker
+-- that has to be opened for it to be seen.
+--
+-- The fourth has no entry of its own at all. A tracker with visible children
+-- is rendered as the header of their group instead of as a card, so its
+-- issue number appears on the board only through those children; the
+-- fallback below finds the group's first row, which is the row that header
+-- is drawn at. Without it the epic every child belongs to would report as
+-- absent from a board plainly showing it.
+locateBoardWork :: Board -> ItemId -> Maybe BoardWorkLocation
+locateBoardWork board target = case findEntryWithLocation board target of
+  Just (column, row, entry) -> Just (BoardWorkLocation column row (hiddenBeneath entry))
+  Nothing -> case target of
+    IssueId number -> firstColumnWith (representsTracker number)
+    PullRequestId _ -> Nothing
+  where
+    -- Only a tracked child can be hidden. A tracker header is drawn whether
+    -- its group is open or closed, so selecting one never has to expand it.
+    hiddenBeneath (Tracked context _) = Just (primaryTrackerNumber context)
+    hiddenBeneath (Standalone _) = Nothing
+    hiddenBeneath (TrackerHeader _) = Nothing
+
+    representsTracker number (Tracked context _) = primaryTrackerNumber context == number
+    representsTracker _ (Standalone _) = False
+    representsTracker _ (TrackerHeader _) = False
+
+    firstColumnWith matches = go allColumns
+      where
+        go [] = Nothing
+        go (column : rest) = case findIndex matches (entriesForBoard board column) of
+          Just row -> Just (BoardWorkLocation column row Nothing)
+          Nothing -> go rest
+
+-- | Everything activating one row does, decided before anything changes.
+data IncidentActivation = IncidentActivation
+  { incidentActivationWork :: Maybe BoardWorkLocation,
+    incidentActivationSession :: Maybe AgentSessionRef,
+    incidentActivationNotice :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | What activating the row with this identity does, or 'Nothing' when the
+-- list no longer holds it.
+--
+-- Keyed on an identity the caller names — the tracked selection for a key
+-- press, the clicked row's own for a click — and never on a row position.
+-- 'resolveIncidentSelection' clamps a vanished selection onto a neighbour so
+-- the panel keeps a highlight, and adopting that neighbour here is exactly
+-- the redirection this panel must not perform: an incident that disappeared
+-- between the last render and this key press refuses rather than sending the
+-- user to whatever moved into its place.
+resolveIncidentActivation :: Board -> [IncidentEntry] -> IncidentRef -> Maybe IncidentActivation
+resolveIncidentActivation board entries reference = activation <$> matching
+  where
+    matching = find ((== reference) . incidentEntryRef) entries
+    activation entry = case entry.incidentEntryWork of
+      -- Cardless by construction: the entry never named authoritative work,
+      -- so there is nothing to look for and nothing to leave unchanged
+      -- except by saying what happened.
+      Nothing ->
+        IncidentActivation
+          Nothing
+          entry.incidentEntrySession
+          (Just (entry.incidentEntrySubject <> " · " <> entry.incidentEntryDetail))
+      Just work -> case locateBoardWork board work of
+        Just location -> IncidentActivation (Just location) entry.incidentEntrySession Nothing
+        -- Absent from this board, or truncated off it. Either way there is
+        -- no row to select, and moving the selection somewhere else would be
+        -- worse than saying so.
+        Nothing -> IncidentActivation Nothing entry.incidentEntrySession (Just (workAbsentNotice work))
+
+workAbsentNotice :: ItemId -> Text
+workAbsentNotice (IssueId number) = "Issue #" <> showText number <> " is not on the current board"
+workAbsentNotice (PullRequestId number) = "PR #" <> showText number <> " is not on the current board"
 
 solveProcessStatus :: SolvePhase -> Text
 solveProcessStatus SolveStarting = "starting"
@@ -1871,9 +2322,10 @@ pullRequestActionText :: PullRequestAction -> Text
 pullRequestActionText PullRequestReview = "review"
 pullRequestActionText PullRequestRevision = "revision"
 pullRequestActionText PullRequestRereview = "rereview"
+pullRequestActionText PullRequestRepair = "repair"
 
 pullRequestAgentLabel :: PullRequestAction -> SolverBrand -> Text
-pullRequestAgentLabel PullRequestRevision brand = solverLabel brand
+pullRequestAgentLabel action brand | authoredOnOwnBrand action = solverLabel brand
 pullRequestAgentLabel _ CodexSolver = "codex · " <> codexReviewerModel
 pullRequestAgentLabel _ ClaudeSolver = "claude · " <> claudeReviewerModel
 
@@ -2329,6 +2781,8 @@ handleEvent event = do
     (Just ProcessesOverlay, MouseDown (ProcessTarget ref) Vty.BLeft _ _) -> selectOrOpenAgentSession ref
     (Just ProcessesOverlay, MouseDown ProcessesPanel _ _ _) -> pure ()
     (Just ProcessesOverlay, _) -> pure ()
+    (overlay, incidentEvent)
+      | Just action <- incidentsAction overlay incidentEvent -> handleIncidentsAction action
     (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (ReviewOverlay issueNumber), mouseEvent)
       | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
@@ -2498,6 +2952,134 @@ chooseChatVerbosity verbosity = do
                 appNotice = Just ("Chat output set to " <> Text.toLower (verbosityLabel verbosity) <> " · full logs remain unchanged")
               }
         )
+
+-- | What one event does to the incidents panel. Separated from the dispatch
+-- that carries it out so the whole interaction — opening the panel, moving,
+-- clicking, activating, closing — is decided by pure code that needs no
+-- terminal (docs\/design.md §18).
+data IncidentsAction
+  = OpenIncidentsPanel
+  | CloseIncidentsPanel
+  | MoveIncidentSelection Int
+  | ScrollIncidentsPanel Int
+  | ActivateSelectedIncident
+  | ClickIncidentRow IncidentRef
+  | IgnoreIncidentsEvent
+  deriving stock (Eq, Show)
+
+-- | The panel's event policy: @i@ opens it from the board, and while it is
+-- open it consumes its own keys and mouse events. 'Nothing' means the event
+-- is not the panel's business and the dashboard's other bindings decide it.
+incidentsAction :: Maybe Overlay -> BrickEvent Name AppEvent -> Maybe IncidentsAction
+incidentsAction Nothing (VtyEvent (Vty.EvKey (Vty.KChar 'i') [])) = Just OpenIncidentsPanel
+incidentsAction (Just IncidentsOverlay) event = Just $ case event of
+  VtyEvent (Vty.EvKey Vty.KEsc []) -> CloseIncidentsPanel
+  VtyEvent (Vty.EvKey Vty.KDown []) -> MoveIncidentSelection 1
+  VtyEvent (Vty.EvKey (Vty.KChar 'j') []) -> MoveIncidentSelection 1
+  VtyEvent (Vty.EvKey Vty.KUp []) -> MoveIncidentSelection (-1)
+  VtyEvent (Vty.EvKey (Vty.KChar 'k') []) -> MoveIncidentSelection (-1)
+  VtyEvent (Vty.EvKey Vty.KEnter []) -> ActivateSelectedIncident
+  -- Wheel events resolve to a scroll wherever they land: the rows are
+  -- clickable, so a wheel over one is reported against the row rather than
+  -- against the panel.
+  MouseDown _ Vty.BScrollUp _ _ -> ScrollIncidentsPanel (-3)
+  MouseDown _ Vty.BScrollDown _ _ -> ScrollIncidentsPanel 3
+  MouseDown (IncidentTarget reference) Vty.BLeft _ _ -> ClickIncidentRow reference
+  _ -> IgnoreIncidentsEvent
+incidentsAction _ _ = Nothing
+
+-- | Carries out one 'IncidentsAction'. Read-only with respect to everything
+-- the panel lists: it moves the dashboard's own selection and overlay and
+-- touches no incident, session, or GitHub state.
+applyIncidentsAction :: IncidentsAction -> AppState -> AppState
+applyIncidentsAction action state = case action of
+  OpenIncidentsPanel ->
+    state
+      { appOverlay = Just IncidentsOverlay,
+        appIncidentSelection = resolveIncidentSelection entries state.appIncidentSelection,
+        appNotice = Nothing
+      }
+  CloseIncidentsPanel -> state {appOverlay = Nothing, appNotice = Nothing}
+  MoveIncidentSelection amount -> state {appIncidentSelection = movedSelection amount}
+  ScrollIncidentsPanel amount -> state {appIncidentSelection = movedSelection amount}
+  ActivateSelectedIncident -> activate (activationTarget state.appIncidentSelection)
+  ClickIncidentRow clickedRef -> case resolveIncidentClick entries state.appIncidentSelection clickedRef of
+    IncidentClickIgnored -> state
+    IncidentClickOpen -> activate (Just clickedRef)
+    IncidentClickSelect selection -> state {appIncidentSelection = selection}
+  IgnoreIncidentsEvent -> state
+  where
+    entries = incidentEntries state
+
+    -- Which identity a key press aims at, which is not always the one
+    -- stored. A selection that already names a row keeps that name even
+    -- after the row disappears: that is what stops a refresh from handing
+    -- the key press to whatever moved into its place. A selection that
+    -- names nothing has no such claim to protect — it is what a panel
+    -- opened over an empty list leaves behind — and a poll that lands the
+    -- first row while the panel is open makes 'drawIncidents' resolve and
+    -- highlight it. Resolving here too is what keeps Enter acting on the
+    -- row the user can see highlighted.
+    activationTarget selection = case selection.incidentSelectionRef of
+      Just reference -> Just reference
+      Nothing -> (resolveIncidentSelection entries selection).incidentSelectionRef
+
+    movedSelection amount =
+      let resolved = resolveIncidentSelection entries state.appIncidentSelection
+          maximumIndex = max 0 (length entries - 1)
+          nextIndex = max 0 (min maximumIndex (resolved.incidentSelectionRow + amount))
+       in IncidentSelection (incidentEntryRef <$> safeIndex nextIndex entries) nextIndex
+
+    activate Nothing = state {appNotice = Just "No incident is selected"}
+    activate (Just reference) = case resolveIncidentActivation state.appBoard entries reference of
+      -- The row went away between the last render and this key press. The
+      -- panel stays open with nothing acted on, rather than sending the user
+      -- to whichever incident took its place.
+      Nothing -> state {appNotice = Just "That incident is no longer listed"}
+      Just activation -> applyIncidentActivation activation state
+
+applyIncidentActivation :: IncidentActivation -> AppState -> AppState
+applyIncidentActivation activation state =
+  selectWork
+    state
+      { appOverlay = activation.incidentActivationSession >>= sessionOverlayFor,
+        appNotice = activation.incidentActivationNotice
+      }
+  where
+    selectWork current = case activation.incidentActivationWork of
+      -- No row to go to: column, row, and tracker expansion are all left
+      -- exactly as they were.
+      Nothing -> current
+      Just location ->
+        current
+          { appSelectedColumn = location.boardWorkColumn,
+            appSelectedRows = Map.insert location.boardWorkColumn location.boardWorkRow current.appSelectedRows,
+            appExpandedTrackers = maybe id Set.insert location.boardWorkExpands current.appExpandedTrackers,
+            appEnsureSelectionVisible = True
+          }
+
+sessionOverlayFor :: AgentSessionRef -> Maybe Overlay
+sessionOverlayFor (SolveAgent issueNumber) = Just (SolveOverlay issueNumber)
+sessionOverlayFor (PullRequestAgent number) = Just (PullRequestReviewOverlay number)
+sessionOverlayFor (ReviewAgent issueNumber) = Just (ReviewOverlay issueNumber)
+sessionOverlayFor (WorkerAgent _) = Nothing
+
+-- | Dispatches one panel action, adding the two effects the pure transition
+-- cannot express: the viewport scroll a wheel event asks for, and settling a
+-- session overlay that activation just opened at its live tail.
+handleIncidentsAction :: IncidentsAction -> EventM Name AppState ()
+handleIncidentsAction action = do
+  before <- get
+  modify (applyIncidentsAction action)
+  case action of
+    ScrollIncidentsPanel amount -> vScrollBy (viewportScroll IncidentsViewport) amount
+    _ -> pure ()
+  after <- get
+  when (after.appOverlay /= before.appOverlay) $ case after.appOverlay of
+    Just (ReviewOverlay _) -> presentTranscriptTail >> armVisibleReviewTicks
+    Just (SolveOverlay _) -> presentTranscriptTail
+    Just (PullRequestReviewOverlay _) -> presentTranscriptTail
+    _ -> pure ()
 
 openProcesses :: EventM Name AppState ()
 openProcesses = do
@@ -4281,18 +4863,24 @@ selectedReviewItem state = case selectedEntry state of
   Just (TrackerHeader tracker) -> Just (IssueItem tracker.trackerIssue)
   Nothing -> Nothing
 
+-- | The user's own @r@ on a pull request, which is the only dispatch that
+-- derives repair: a Done card whose status is a problem needs its own code
+-- worked on rather than another review round.
 startPullRequestReview :: PullRequest -> EventM Name AppState ()
-startPullRequestReview = startPullRequestReviewWithOptions True False
+startPullRequestReview = startPullRequestReviewWithOptions directPullRequestAction True False
 
+-- | Autosolve's internal PR sessions, which stay on the label-derived
+-- review/revise progression they have always driven: a problem status on the
+-- pull request it is looping over must not silently become a repair launch.
 startPullRequestReviewWithVisibility :: Bool -> PullRequest -> EventM Name AppState ()
-startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions showOverlay False
+startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions labelPullRequestAction showOverlay False
 
-startPullRequestReviewWithOptions :: Bool -> Bool -> PullRequest -> EventM Name AppState ()
-startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
+startPullRequestReviewWithOptions :: (WorkflowConfig -> PullRequest -> PullRequestAction) -> Bool -> Bool -> PullRequest -> EventM Name AppState ()
+startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
   Right origin -> do
     state <- get
-    let action = actionForLabels state.appConfig.resolvedWorkflow (map (.labelName) pullRequest.pullRequestLabels)
+    let action = selectAction state.appConfig.resolvedWorkflow pullRequest
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
         | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
@@ -4930,6 +5518,9 @@ toggleDrainer = do
           ( \current ->
               current
                 { appDrainerStatus = transition,
+                  -- Mid-transition, the last poll's set describes a drainer
+                  -- that is being started or stopped underneath it.
+                  appDrainerIncidents = Nothing,
                   appDrainerBusy = True,
                   appNotice = Just (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
                 }
@@ -4939,23 +5530,37 @@ toggleDrainer = do
           . forkIO
           $ setDrainerRunning controller shouldRun >>= writeBChan state.appEventChannel . DrainerToggleFinished
 
-applyDrainerStatus :: Either Text DrainerStatus -> EventM Name AppState ()
+applyDrainerStatus :: Either Text DrainerObservation -> EventM Name AppState ()
 applyDrainerStatus result = modify $ \state ->
   if state.appDrainerBusy
     then state
-    else state {appDrainerStatus = either drainerErrorStatus id result}
+    else
+      state
+        { appDrainerStatus = observedStatusOr result,
+          appDrainerIncidents = observedIncidentsOr result
+        }
 
-applyDrainerToggle :: Either Text DrainerStatus -> EventM Name AppState ()
+applyDrainerToggle :: Either Text DrainerObservation -> EventM Name AppState ()
 applyDrainerToggle result = modify $ \state ->
-  let status = either drainerErrorStatus id result
+  let status = observedStatusOr result
       notice = case result of
         Left message -> "PR drainer control failed: " <> sanitizeText message
         Right _ -> "PR drainer is " <> status.drainerDetail
    in state
         { appDrainerStatus = status,
+          appDrainerIncidents = observedIncidentsOr result,
           appDrainerBusy = False,
           appNotice = Just notice
         }
+
+observedStatusOr :: Either Text DrainerObservation -> DrainerStatus
+observedStatusOr = either drainerErrorStatus (.observedStatus)
+
+-- | A failed invocation observed no incidents at all, which is not the same
+-- as observing none: the previous poll's set is dropped rather than left
+-- standing as though it were still current.
+observedIncidentsOr :: Either Text DrainerObservation -> Maybe [DrainerIncident]
+observedIncidentsOr = either (const Nothing) (.observedIncidents)
 
 -- | A controller that could not be discovered, run, or decoded leaves the
 -- service's actual state unknown — never "off" — so nothing that may only act
@@ -5613,6 +6218,9 @@ refreshOverlay _ Nothing = (Nothing, Nothing)
 refreshOverlay _ (Just HelpOverlay) = (Just HelpOverlay, Nothing)
 refreshOverlay _ (Just SettingsOverlay) = (Just SettingsOverlay, Nothing)
 refreshOverlay _ (Just ProcessesOverlay) = (Just ProcessesOverlay, Nothing)
+-- The panel is rebuilt from live state on every draw, so a refresh that
+-- changes what needs attention is picked up without closing it.
+refreshOverlay _ (Just IncidentsOverlay) = (Just IncidentsOverlay, Nothing)
 refreshOverlay _ (Just overlay@(ReviewOverlay _)) = (Just overlay, Nothing)
 refreshOverlay _ (Just overlay@(SolveOverlay _)) = (Just overlay, Nothing)
 refreshOverlay _ (Just overlay@(PullRequestReviewOverlay _)) = (Just overlay, Nothing)

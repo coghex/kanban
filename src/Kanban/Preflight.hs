@@ -68,7 +68,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
-import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction)
+import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction, authoredOnOwnBrand)
 import Kanban.Review (selectCanonicalIssueReviewer)
 import Kanban.Solve (SolverBrand (..))
 import System.Directory (doesFileExist, doesPathExist, findExecutable, pathIsSymbolicLink)
@@ -309,6 +309,7 @@ pullRequestActionLabel :: PullRequestAction -> Text
 pullRequestActionLabel PullRequestReview = "review"
 pullRequestActionLabel PullRequestRereview = "rereview"
 pullRequestActionLabel PullRequestRevision = "revise"
+pullRequestActionLabel PullRequestRepair = "repair"
 
 pullRequestOriginLabel :: PullRequestOrigin -> Text
 pullRequestOriginLabel PullRequestCodex = "codex-origin"
@@ -637,15 +638,16 @@ actionReport environment action = PreflightReport action (checksFor action)
         <> [gitHubCheck environment, reviewBackendCheck environment]
     -- Review and rereview run on the opposite brand from the PR's origin
     -- and are themselves the canonical reviewer, so they need only that
-    -- brand. Revision is the exception: it runs on the PR's *own* brand,
-    -- then hands off to exactly one canonical rereview by spawning the
-    -- opposite brand from inside that session (agent-workflow-contract
-    -- §2.2). That nested call is a direct `codex exec`/`claude -p`, so it
-    -- needs the executable and a sign-in but no packaged bundle.
+    -- brand. Revision and repair are the exception: each runs on the PR's
+    -- *own* brand, then hands off to exactly one canonical rereview by
+    -- spawning the opposite brand from inside that session
+    -- (agent-workflow-contract §2.2, §2.7). That nested call is a direct
+    -- `codex exec`/`claude -p`, so it needs the executable and a sign-in but
+    -- no packaged bundle.
     checksFor (ActionPullRequestFlow origin pullRequestAction) =
       providerChecks True (environmentProbe environment launched)
         <> [ check
-             | pullRequestAction == PullRequestRevision,
+             | authoredOnOwnBrand pullRequestAction,
                check <- providerChecks False (environmentProbe environment (oppositeBrand launched))
            ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
@@ -686,7 +688,9 @@ doctorActions =
     ActionPullRequestFlow PullRequestCodex PullRequestRereview,
     ActionPullRequestFlow PullRequestClaude PullRequestRereview,
     ActionPullRequestFlow PullRequestCodex PullRequestRevision,
-    ActionPullRequestFlow PullRequestClaude PullRequestRevision
+    ActionPullRequestFlow PullRequestClaude PullRequestRevision,
+    ActionPullRequestFlow PullRequestCodex PullRequestRepair,
+    ActionPullRequestFlow PullRequestClaude PullRequestRepair
   ]
 
 doctorReady :: PreflightEnvironment -> Bool

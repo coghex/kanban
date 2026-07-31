@@ -74,6 +74,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `c` | Hide or show the sidebar |
 | `s` | Change how much agent output is shown |
 | `p` | Open the jobs and processes list |
+| `i` | Open the list of everything needing attention |
 | `x` | Stop the selected running job |
 | `d` | Start or stop the optional PR drainer |
 | `m` | Merge the selected approved pull request in Done |
@@ -114,7 +115,7 @@ Every mouse action has a keyboard equivalent.
 These actions require a working Codex or Claude installation and login, plus
 the Kanban-owned workflow assets those actions call into (the canonical
 issue-review backend and the named `solve`/`pr-review`/`pr-rereview`/
-`pr-revise` commands). Provider installation alone does not make them ready;
+`pr-revise`/`repair` commands). Provider installation alone does not make them ready;
 install the components you want with `python3 tools/setup_workflows.py`, and
 see [workflow setup and preflight](workflow-setup.md) for the fresh-clone
 path and [the agent-workflow contract](agent-workflow-contract.md) for what
@@ -124,7 +125,7 @@ If one of these keys reports that the action cannot start, the message names
 the missing component and the command that installs it. To check every
 action at once without starting anything, run `cabal run kanban -- --doctor`.
 
-- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview.
+- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview. On an approved pull request in Done that has a problem — a merge conflict, a failed check, or a blocking label — the same key repairs it instead, then sends it back for a fresh review. It never merges.
 - Press `S` to work on an issue and open a pull request.
 - Press `A` to work on an issue, review the result, and send requested changes back for another pass.
 - Choose `1` for Codex or `2` for Claude when Kanban asks which service to use.
@@ -134,6 +135,16 @@ Agent work runs separately from the board. Press `Esc` to hide its window and `p
 Most issue and pull-request jobs continue if Kanban is closed. Opening Kanban again for the same repository reconnects to them. Kanban blocks quitting only when an older review type cannot safely continue on its own.
 
 Use `x` to stop a selected job. Inside an open job window, Ctrl-C interrupts the current turn so you can provide new guidance.
+
+## What needs attention
+
+Press `i` for one list of everything waiting on you: every open PR drainer incident, and every Kanban job that failed, was stopped, or is waiting for an answer. Each line says which issue or pull request it is about, what happened, and where it came from.
+
+Move with `j` and `k` or the arrow keys, or click a line. Press `Enter`, or click the selected line again, to close the list and go to that work — the card is selected, and its job window opens if Kanban is running one. If the work is not on the current board, Kanban says so and leaves your place on the board alone.
+
+The list only reads. Nothing in it resolves, retries, or dismisses anything.
+
+If the PR drainer has not answered yet, or could not be asked, the list says so rather than telling you nothing needs attention.
 
 ## Usage sidebar
 

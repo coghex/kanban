@@ -13,6 +13,10 @@ author:             coghex
 maintainer:         coghex
 category:           Development
 build-type:         Simple
+extra-source-files:
+  test/golden/*.attrs
+  test/golden/*.txt
+
 extra-doc-files:
   config.toml.example
   docs/README.md
@@ -133,17 +137,21 @@ test-suite kanban-test
     Spec.GitHub.PullRequestStatus
     Spec.Repository.Identity
     Spec.Repository.State
+    Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe
     Spec.Support.Env
     Spec.Support.Expect
     Spec.Support.Fixtures
+    Spec.Support.Golden
     Spec.Support.Json
     Spec.Support.Locale
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render
     Spec.UI.Cards
+    Spec.UI.Golden
+    Spec.UI.Incidents
     Spec.UI.Layout
     Spec.UI.ReviewSession
     Spec.UI.SolveChooser

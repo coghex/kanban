@@ -220,10 +220,11 @@ Initial bindings:
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
-| `r` | Start or reopen the selected issue's review session |
+| `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
+| `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` | Update GitHub board data and both usage providers |
 | `d` or click | Start or stop the launchd-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
@@ -262,8 +263,9 @@ review stage, or reopens the issue's existing session. Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on a collapsed epic targets the epic
 itself. On a PR, `r` is the unified
-review/revise key: it starts review, revision, or rereview according to the
-durable review labels. App-server starts on demand and one process hosts all
+review/revise/repair key: it starts review, revision, or rereview according to
+the durable review labels, except on a card that is both in Done and reporting
+a problem status, which starts a repair instead. App-server starts on demand and one process hosts all
 interactive revision threads for the running dashboard; PR actions use resumable
 canonical-model CLI sessions because their permissions include PR comments,
 labels, worktree edits, commits, and pushes.
@@ -285,11 +287,28 @@ separate:
 3. A PR still carrying a legacy `reviewed:revised` label (from before this
    unification) routes to the opposite brand for `pr-rereview` only, without
    editing the PR again, and removes the stale label once it publishes.
+4. A card that is in the Done column *and* whose §9 status is a problem —
+   a merge conflict, a failed check, or a blocking label while
+   `blocking_severity` is red — overrides all three above and runs the
+   packaged `repair` workflow. Both halves of that condition are required:
+   `pullRequestStatus` reports the same problems for a draft or unapproved PR,
+   and those stay in Reviewing under the routing above; a Done PR with no
+   problem status keeps whatever its labels derive, which includes revision.
+   Like `pr-revise`, repair works on the PR's own code, so it runs on the PR's
+   own origin brand and ends by invoking exactly one canonical rereview on the
+   opposite brand rather than reviewing itself. Repair never merges and never
+   removes a blocking label: it ends by triggering that rereview, and merging
+   stays a separate, explicit action.
 
-Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision;
-Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
-revision. A missing or contradictory `pr-origin` marker fails visibly rather
-than guessing.
+This fourth meaning belongs to the user's own `r` alone. Autosolve drives its
+pull request through the same session machinery internally, and keeps its
+label-derived review/revise progression so a problem status cannot divert a
+running loop into a repair.
+
+Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision and
+repair; Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh
+for revision and repair. A missing or contradictory `pr-origin` marker fails
+visibly rather than guessing.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
 Initial review and rereview synchronously invoke the vendored
@@ -645,6 +664,87 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 The overlay presents this content without editing any of it. The board actions
 that act on the selected card — `r`, `S`, `A`, `x`, and `m` — dispatch from it
 as well, against the item it is showing.
+
+### Incidents panel
+
+`i` opens a panel answering one question — what needs me? — from every source
+that can raise it, and takes the user to the work. `Esc` closes it. It is
+scrollable, keyboard-navigable, and mouse-selectable in the style of the
+processes overlay, and it is read-only: opening or activating an entry never
+resolves, dismisses, acknowledges, retries, or otherwise mutates an incident,
+a session, or GitHub state.
+
+Two sources contribute initially, and the list is written against a set of
+sources rather than against those two, so a later one is added by contributing
+rows and a label:
+
+- every repository-scoped open incident the PR drainer reports;
+- Kanban's own live agent sessions in the phases that need a human. Those are
+  exactly `SolveAttention`, `SolveFailedPhase`, `SolveKilledPhase`, and
+  `SolveOrphanedPhase` for solve and pull-request sessions, and `ReviewWaiting`,
+  `ReviewNeedsChanges`, and `ReviewFailed` for review sessions. Every other
+  phase is excluded, including the active and completed ones,
+  `ReviewRevised`, and `ReviewInterrupted`. These lists are the contract:
+  they are not derived from the narrower sets `reviewPhaseActive` and
+  `agentSessionProblem` express, which answer different questions.
+
+Source availability is represented separately from an empty result, so
+"nothing needs attention" is never said out of this side's ignorance:
+
+- Only a successful drainer observation reporting no open incidents is a
+  verified-empty source.
+- The initial checking state, a controller discovery failure, a query or
+  decode failure, and a start or stop in flight all leave the source
+  unanswered. The panel then says it is being checked or is unavailable, and
+  the overall empty state is withheld.
+- Session rows stay visible whichever of those the drainer source is in.
+- The overall empty state appears only when the drainer has successfully
+  reported no incidents and no session qualifies.
+
+The controller's status response therefore reports the complete
+repository-scoped set of open incidents alongside the existing newest-only
+`open_incident` projection, which the sidebar keeps using unchanged. A
+response carrying no set at all is an unanswered source, not an empty one.
+
+Each row states what it concerns — the issue or pull-request number, with its
+title where the board knows it — what happened, and which source it came
+from. Every title, summary, activity, and source label passes through the
+external-text sanitization contract above before it is rendered or reported.
+
+Rows carry stable source-qualified identities: the service-provided incident
+ID for a drainer row, the existing agent session reference for a session row.
+Selection and activation resolve those identities against the current list, so
+a refresh that inserts, removes, or reorders rows cannot redirect a keyboard
+or mouse action to a different incident. A row whose identity disappears
+before activation activates nothing: the highlight may clamp onto a neighbour
+so the panel stays usable, but that neighbour is never acted on in its place.
+
+Activating a row closes the panel and:
+
+- selects its connected board work when the entry names authoritative issue or
+  pull-request work present on the current board;
+- additionally opens that work's session overlay when Kanban holds a session
+  for it;
+- when the numbered work is absent or truncated from the board, leaves the
+  current column, row, and tracker expansion unchanged, reports that the work
+  is not on the board, and still opens the referenced session overlay if there
+  is one.
+
+Number-based selection recognizes every shape the board holds work in:
+ordinary issue and pull-request entries; a childless tracker, whose header
+entry is its issue; a tracker represented by grouped children, which has no
+card of its own and is targeted through its group's header row; and a child
+beneath a collapsed tracker, which is selected with its tracker expanded so
+the selected work is visible.
+
+A supervisor-crash incident is cardless: it carries no authoritative
+`pull_request` field. Its `last_pr` is inferred from a log line and is
+diagnostic only, never a navigation target. Activating one reports its
+summary and leaves board selection and tracker expansion unchanged. Its row
+is rendered from the diagnostic fields the service really records — which are
+not just an exit code and a command, but also the last activity, log
+metadata, and that non-navigable `last_pr` — so a cardless row still says
+enough to act on.
 
 ## 12. Epic and tracker grouping
 
@@ -1223,6 +1323,23 @@ minimum, and narrow single-column — and compares each frame with a checked-in
 snapshot. Layout and border regressions become reviewable diffs instead of
 manual checks.
 
+Every frame is drawn through the whole-application composition the dashboard
+itself hands Brick, so nothing is reconstructed for the test, and every input a
+frame can vary over — the fixture snapshot's timestamps, the redraw instant and
+time zone, freshness, the notice line, drainer status, and the session, process
+and worker maps — is pinned. Beyond the three sizes, the matrix covers the box
+and open border renderers, ASCII mode, a selected card, the details overlay,
+and the help overlay. Characters are the baseline; one frame additionally
+records a per-cell attribute grid, because §10's split selected border is a
+color contract on glyphs that are identical either way.
+
+The frames live in `test/golden/` and are compared, never rewritten, by an
+ordinary `cabal test` run. Regeneration is an explicit switch:
+
+```console
+KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
+```
+
 ### Fixture tests
 
 - GitHub GraphQL responses, including pagination and null mergeability.
@@ -1365,7 +1482,9 @@ repository, whose label is derived from that repository's normalized identity.
 - Record the installed identity in the plist and hold the launchd runner to it,
   so a configuration change after installation stops that job instead of
   re-pointing it at another repository.
-- Decode the managed wrapper's structured status and incident data.
+- Decode the managed wrapper's structured status and incident data, including
+  the complete repository-scoped set of open incidents the incidents panel
+  lists alongside the newest-only summary the sidebar renders.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.

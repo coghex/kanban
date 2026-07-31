@@ -29,6 +29,15 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 
 The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents.
 
+The Haskell suite includes the golden-frame tests, which compare rendered
+terminal frames with the files checked in under `test/golden/`. A normal run
+only ever reads them. After a deliberate rendering change, rewrite them with
+the explicit switch and read the resulting diff before committing it:
+
+```console
+KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
+```
+
 ## Source layout
 
 - `app/` — executable entry point.
