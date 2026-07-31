@@ -3,13 +3,13 @@ module Spec.Config.Consumers (spec) where
 
 import Kanban.CLI (Options (..))
 import Kanban.Config
-import Kanban.UI
-  ( cacheEnabled,
-    cardExcerptLimit,
-    claudeRefreshTimeoutMicros,
+import Kanban.UI.Board (cardExcerptLimit)
+import Kanban.UI.Refresh
+  ( claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
-    githubRefreshTimeoutMicros
+    githubRefreshTimeoutMicros,
   )
+import Kanban.UI.Util (cacheEnabled)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import Test.Hspec
 

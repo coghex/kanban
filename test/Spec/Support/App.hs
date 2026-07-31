@@ -26,7 +26,7 @@ import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI
+import Kanban.UI.Types
   ( AppState (..),
     ChatTranscript (..),
     IncidentSelection (..),
@@ -36,7 +36,7 @@ import Kanban.UI
     ReviewPhase (..),
     ReviewSession (..),
     SolvePhase (..),
-    SolveSession (..)
+    SolveSession (..),
   )
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 

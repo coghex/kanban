@@ -35,7 +35,10 @@ import Kanban.Solve
     unknownNoticeSamples
   )
 import Kanban.StreamReader (handleReadLine)
-import Kanban.UI (ChatTranscript (..), PullRequestReviewSession (..), pullRequestSessionReusable, autoSolveRevisionPrompt, recoveredPullRequestSession)
+import Kanban.UI.AutoSolve (autoSolveRevisionPrompt)
+import Kanban.UI.Session (pullRequestSessionReusable)
+import Kanban.UI.Types (ChatTranscript (..), PullRequestReviewSession (..))
+import Kanban.UI.Worker (recoveredPullRequestSession)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
     WorkerDescriptor (..),

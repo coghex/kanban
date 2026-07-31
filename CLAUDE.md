@@ -50,8 +50,12 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 - `Repository`, `GitHub`, `Cache`, `Config`, `Settings`, `Paths`, `CLI` — repository
   resolution, GitHub data, the last-good snapshot, configuration, and the private
   directories under the XDG roots.
-- `UI`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive layout, and
-  external-text sanitization.
+- `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive
+  layout, and external-text sanitization. `UI` itself is only the composition root;
+  the seams live beside it — `UI.Types` (state), `UI.Theme`, `UI.Board`, `UI.Overlay`,
+  and `UI.Details` (drawing), `UI.Events` (dispatch), `UI.Session`, `UI.Solve`,
+  `UI.Review`, `UI.PullRequest`, `UI.Worker` (lifecycles), `UI.Refresh` and
+  `UI.Reconcile` (refresh), and `UI.AutoSolve`, the autosolve loop as pure functions.
 - `Worker`, `Solve`, `Review`, `PullRequestFlow`, `Codex`, `Claude`, `Process`,
   `Transcript`, `Preflight`, `Provider`, `StreamReader`, `CommandCapture` — the agent
   execution layer.

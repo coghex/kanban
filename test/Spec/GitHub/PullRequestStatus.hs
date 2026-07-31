@@ -4,7 +4,7 @@ module Spec.GitHub.PullRequestStatus (spec) where
 import qualified Data.Map.Strict as Map
 import Data.Time (addUTCTime)
 import Kanban.Domain
-import Kanban.UI
+import Kanban.UI.Theme
   ( approvedAttr,
     approvedInteriorAttr,
     cardInteriorAttribute,
@@ -12,7 +12,7 @@ import Kanban.UI
     pendingAttr,
     problemAttr,
     pullRequestCardAttribute,
-    readyAttr
+    readyAttr,
   )
 import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isProblem, pullRequestStatus)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)

@@ -12,7 +12,8 @@ import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.UI (AppEvent (..), runClaudeRefresh, runCodexRefresh)
+import Kanban.UI.Refresh (runClaudeRefresh, runCodexRefresh)
+import Kanban.UI.Types (AppEvent (..))
 import Kanban.UsageCommand (decodeUsageCommandDocument, runUsageCommand)
 import Spec.Support.ClaudeProbe
   ( ClaudeProbeFixture (..),

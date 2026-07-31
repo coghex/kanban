@@ -4,7 +4,8 @@ module Spec.UI.SolveChooser (spec) where
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI (ChatTranscript (..), SolvePhase (..), SolveSession (..), reusableSolveSession)
+import Kanban.UI.Session (reusableSolveSession)
+import Kanban.UI.Types (ChatTranscript (..), SolvePhase (..), SolveSession (..))
 import Spec.Support.Fixtures (baseIssue, epoch)
 import Test.Hspec
 

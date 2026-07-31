@@ -101,7 +101,7 @@ import Kanban.Solve
     parseSolveOutputLine,
     unknownNoticeSamples
   )
-import Kanban.UI (ChatTranscript (..))
+import Kanban.UI.Types (ChatTranscript (..))
 import Kanban.Worker
   ( SolveWorkerTask (..),
     WorkerEvent (..),

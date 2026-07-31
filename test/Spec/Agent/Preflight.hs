@@ -35,12 +35,8 @@ import Kanban.Preflight
   )
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve (SolverBrand (..))
-import Kanban.UI
-  ( agentFailureNotice,
-    canonicalReviewActivity,
-    canonicalReviewNotice,
-    failureActivity
-  )
+import Kanban.UI.Review (canonicalReviewActivity, canonicalReviewNotice)
+import Kanban.UI.Util (agentFailureNotice, failureActivity)
 import Spec.Support.Expect (shouldMention)
 import Spec.Support.Preflight
   ( BackendFixture (..),

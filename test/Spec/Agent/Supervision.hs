@@ -28,19 +28,17 @@ import Kanban.Review
     withReservedToolSlot
   )
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..), SolveWorkflow (..), SolverBrand (..))
-import Kanban.UI
+import Kanban.UI.Events (killSelectionNotice)
+import Kanban.UI.Review (canonicalReviewActivity, canonicalReviewNotice)
+import Kanban.UI.Session (pullRequestSessionAlreadyResolved, solveSessionAlreadyResolved)
+import Kanban.UI.Types
   ( ChatTranscript (..),
     PullRequestReviewSession (..),
     SolvePhase (..),
     SolveSession (..),
-    canonicalReviewActivity,
-    canonicalReviewNotice,
-    failureActivity,
-    killSelectionNotice,
-    orphanMessage,
-    pullRequestSessionAlreadyResolved,
-    solveSessionAlreadyResolved
   )
+import Kanban.UI.Util (failureActivity)
+import Kanban.UI.Worker (orphanMessage)
 import Kanban.Worker (workerDeadlineReason)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust, requireLeft, requireRight, shouldMention, shouldNotMention)

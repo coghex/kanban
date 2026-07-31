@@ -24,6 +24,7 @@ import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
+import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
@@ -68,6 +69,7 @@ suite = do
   PullRequestStatus.spec
   ConfigConsumers.spec
   Cards.spec
+  AutoSolve.spec
   ConfigLoading.spec
   Layout.spec
   Golden.spec

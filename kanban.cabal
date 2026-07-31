@@ -75,6 +75,24 @@ library
     Kanban.Transcript
     Kanban.Tracker
     Kanban.UI
+    Kanban.UI.AutoSolve
+    Kanban.UI.Board
+    Kanban.UI.Details
+    Kanban.UI.Events
+    Kanban.UI.Overlay
+    Kanban.UI.PullRequest
+    Kanban.UI.Reconcile
+    Kanban.UI.Refresh
+    Kanban.UI.Review
+    Kanban.UI.Selection
+    Kanban.UI.Session
+    Kanban.UI.Solve
+    Kanban.UI.State
+    Kanban.UI.Theme
+    Kanban.UI.Transcript
+    Kanban.UI.Types
+    Kanban.UI.Util
+    Kanban.UI.Worker
     Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
@@ -149,6 +167,7 @@ test-suite kanban-test
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render
+    Spec.UI.AutoSolve
     Spec.UI.Cards
     Spec.UI.Golden
     Spec.UI.Incidents
