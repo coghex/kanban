@@ -1,10 +1,13 @@
 module Kanban.Drainer
   ( DrainerController (..),
+    DrainerIncident (..),
+    DrainerObservation (..),
     DrainerRecord (..),
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
     controllerFromProgramArguments,
+    crashIncidentKind,
     decodeDrainerStatus,
     discoverDrainerController,
     drainerIsRunning,
@@ -27,7 +30,7 @@ where
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
-import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -113,18 +116,81 @@ instance FromJSON RawIncident where
   parseJSON = withObject "PR drainer incident" $ \value ->
     RawIncident <$> value .:? "summary"
 
+-- | One open incident the controller reported, as the incidents panel lists
+-- it. Distinct from 'RawIncident', which is only ever the newest incident's
+-- summary for the sidebar and stays that way.
+--
+-- 'incidentPullRequest' is the only navigable field: it is written by the
+-- drainer as the pull request an incident is /about/, so a conflict or
+-- cleanup incident names a card. A supervisor crash has none, and its
+-- 'incidentLastPullRequest' — inferred by grepping @PR #\<n\>@ out of the
+-- last log lines — is diagnostic only. Following that would send a user to
+-- whichever pull request happened to be mentioned last, which is not what
+-- the crash is about.
+data DrainerIncident = DrainerIncident
+  { -- | The service-provided identity. Required: an incident that names
+    -- itself is what lets a selection survive a refresh that reorders the
+    -- list, and one that does not cannot be safely selected at all.
+    incidentId :: Text,
+    incidentKind :: Text,
+    incidentSummary :: Maybe Text,
+    incidentPullRequest :: Maybe Int,
+    incidentLastPullRequest :: Maybe Int,
+    incidentActivity :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON DrainerIncident where
+  parseJSON = withObject "PR drainer open incident" $ \value ->
+    DrainerIncident
+      <$> value .: "incident_id"
+      <*> value .:? "kind" .!= crashIncidentKind
+      <*> value .:? "summary"
+      <*> value .:? "pull_request"
+      <*> value .:? "last_pr"
+      <*> value .:? "last_activity"
+
+-- | The kind the service gives an incident written before the field existed,
+-- mirrored here so both sides classify a legacy incident the same way.
+crashIncidentKind :: Text
+crashIncidentKind = "drainer-exit"
+
 data RawStatus = RawStatus
   { rawState :: Text,
     -- | Which git operation a @mid_operation@ checkout is stopped part-way
     -- through, so the board can name what has to be finished.
     rawOperation :: Maybe Text,
-    rawIncident :: Maybe RawIncident
+    rawIncident :: Maybe RawIncident,
+    rawIncidents :: Maybe [DrainerIncident]
   }
   deriving stock (Eq, Show)
 
 instance FromJSON RawStatus where
   parseJSON = withObject "PR drainer status" $ \value ->
-    RawStatus <$> value .: "state" <*> value .:? "operation" <*> value .:? "open_incident"
+    RawStatus
+      <$> value .: "state"
+      <*> value .:? "operation"
+      <*> value .:? "open_incident"
+      <*> value .:? "open_incidents"
+
+-- | One controller response: the sidebar's status projection, and the
+-- complete repository-scoped set of open incidents behind it.
+--
+-- The two are separate fields rather than one enriched status because they
+-- answer different questions and must be allowed to differ. 'observedStatus'
+-- summarises the /newest/ incident only, and issue #128 keeps that sidebar
+-- behavior unchanged; 'observedIncidents' is the whole set the incidents
+-- panel lists.
+--
+-- 'Nothing' is not an empty set. A controller that reported no
+-- @open_incidents@ field at all — one predating it — has told this side
+-- nothing about the set, and the panel must present that as an unavailable
+-- source rather than as "nothing needs attention".
+data DrainerObservation = DrainerObservation
+  { observedStatus :: DrainerStatus,
+    observedIncidents :: Maybe [DrainerIncident]
+  }
+  deriving stock (Eq, Show)
 
 -- | What the drainer's installer recorded about the launchd job it wrote for
 -- one repository. The record carries the job's location, never its content:
@@ -320,19 +386,19 @@ controllerFromProgramArguments repository arguments = case arguments of
       controllerArguments = stripManagedArguments rawControllerArguments
   _ -> Left "launchd ProgramArguments do not identify the PR drainer controller"
 
-queryDrainerStatus :: DrainerController -> IO (Either Text DrainerStatus)
+queryDrainerStatus :: DrainerController -> IO (Either Text DrainerObservation)
 queryDrainerStatus controller = runDrainerCommand statusTimeoutSeconds controller "status"
 
-setDrainerRunning :: DrainerController -> Bool -> IO (Either Text DrainerStatus)
+setDrainerRunning :: DrainerController -> Bool -> IO (Either Text DrainerObservation)
 setDrainerRunning controller shouldRun =
   runDrainerCommand transitionTimeoutSeconds controller (if shouldRun then "start" else "stop")
 
-decodeDrainerStatus :: LazyByteString.ByteString -> Either Text DrainerStatus
+decodeDrainerStatus :: LazyByteString.ByteString -> Either Text DrainerObservation
 decodeDrainerStatus bytes = do
   rawStatus <- case eitherDecode bytes of
     Left message -> Left ("could not decode PR drainer status: " <> Text.pack message)
     Right value -> Right value
-  pure (statusFromRaw rawStatus)
+  pure (DrainerObservation (statusFromRaw rawStatus) rawStatus.rawIncidents)
 
 drainerIsRunning :: DrainerStatus -> Bool
 drainerIsRunning status = case status.drainerState of
@@ -356,7 +422,7 @@ drainerToggle busy status
 -- | The seconds-parameterised runner behind 'queryDrainerStatus' and
 -- 'setDrainerRunning', exported so the termination and timeout-wording tests
 -- can drive a wedged controller without waiting out a real transition budget.
-runDrainerCommand :: Int -> DrainerController -> String -> IO (Either Text DrainerStatus)
+runDrainerCommand :: Int -> DrainerController -> String -> IO (Either Text DrainerObservation)
 runDrainerCommand seconds controller command = do
   result <-
     runProcess
@@ -374,10 +440,10 @@ runDrainerCommand seconds controller command = do
 -- with the incident detail attached. So stdout is offered to the decoder
 -- first even when stderr carries diagnostics, and only output that does not
 -- decode falls back to the opaque error text.
-statusFromControllerExit :: ExitCode -> String -> String -> Either Text DrainerStatus
+statusFromControllerExit :: ExitCode -> String -> String -> Either Text DrainerObservation
 statusFromControllerExit exitCode output errors =
   case (decodeDrainerStatus (LazyByteString.pack output), exitCode) of
-    (Right status, _) -> Right status
+    (Right observation, _) -> Right observation
     (Left decodeFailure, ExitSuccess) -> Left decodeFailure
     (Left _, ExitFailure _) -> Left (diagnosticMessage output errors)
 

@@ -217,6 +217,7 @@ Initial bindings:
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
+| `i` | Open the incidents panel listing everything needing attention; Enter goes to that work |
 | `u` | Update GitHub board data and both usage providers |
 | `d` or click | Start or stop the launchd-managed PR drainer |
 | `c` | Collapse or expand the usage sidebar |
@@ -635,6 +636,87 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 - GitHub URL.
 
 The overlay is read-only.
+
+### Incidents panel
+
+`i` opens a panel answering one question — what needs me? — from every source
+that can raise it, and takes the user to the work. `Esc` closes it. It is
+scrollable, keyboard-navigable, and mouse-selectable in the style of the
+processes overlay, and it is read-only: opening or activating an entry never
+resolves, dismisses, acknowledges, retries, or otherwise mutates an incident,
+a session, or GitHub state.
+
+Two sources contribute initially, and the list is written against a set of
+sources rather than against those two, so a later one is added by contributing
+rows and a label:
+
+- every repository-scoped open incident the PR drainer reports;
+- Kanban's own live agent sessions in the phases that need a human. Those are
+  exactly `SolveAttention`, `SolveFailedPhase`, `SolveKilledPhase`, and
+  `SolveOrphanedPhase` for solve and pull-request sessions, and `ReviewWaiting`,
+  `ReviewNeedsChanges`, and `ReviewFailed` for review sessions. Every other
+  phase is excluded, including the active and completed ones,
+  `ReviewRevised`, and `ReviewInterrupted`. These lists are the contract:
+  they are not derived from the narrower sets `reviewPhaseActive` and
+  `agentSessionProblem` express, which answer different questions.
+
+Source availability is represented separately from an empty result, so
+"nothing needs attention" is never said out of this side's ignorance:
+
+- Only a successful drainer observation reporting no open incidents is a
+  verified-empty source.
+- The initial checking state, a controller discovery failure, a query or
+  decode failure, and a start or stop in flight all leave the source
+  unanswered. The panel then says it is being checked or is unavailable, and
+  the overall empty state is withheld.
+- Session rows stay visible whichever of those the drainer source is in.
+- The overall empty state appears only when the drainer has successfully
+  reported no incidents and no session qualifies.
+
+The controller's status response therefore reports the complete
+repository-scoped set of open incidents alongside the existing newest-only
+`open_incident` projection, which the sidebar keeps using unchanged. A
+response carrying no set at all is an unanswered source, not an empty one.
+
+Each row states what it concerns — the issue or pull-request number, with its
+title where the board knows it — what happened, and which source it came
+from. Every title, summary, activity, and source label passes through the
+external-text sanitization contract above before it is rendered or reported.
+
+Rows carry stable source-qualified identities: the service-provided incident
+ID for a drainer row, the existing agent session reference for a session row.
+Selection and activation resolve those identities against the current list, so
+a refresh that inserts, removes, or reorders rows cannot redirect a keyboard
+or mouse action to a different incident. A row whose identity disappears
+before activation activates nothing: the highlight may clamp onto a neighbour
+so the panel stays usable, but that neighbour is never acted on in its place.
+
+Activating a row closes the panel and:
+
+- selects its connected board work when the entry names authoritative issue or
+  pull-request work present on the current board;
+- additionally opens that work's session overlay when Kanban holds a session
+  for it;
+- when the numbered work is absent or truncated from the board, leaves the
+  current column, row, and tracker expansion unchanged, reports that the work
+  is not on the board, and still opens the referenced session overlay if there
+  is one.
+
+Number-based selection recognizes every shape the board holds work in:
+ordinary issue and pull-request entries; a childless tracker, whose header
+entry is its issue; a tracker represented by grouped children, which has no
+card of its own and is targeted through its group's header row; and a child
+beneath a collapsed tracker, which is selected with its tracker expanded so
+the selected work is visible.
+
+A supervisor-crash incident is cardless: it carries no authoritative
+`pull_request` field. Its `last_pr` is inferred from a log line and is
+diagnostic only, never a navigation target. Activating one reports its
+summary and leaves board selection and tracker expansion unchanged. Its row
+is rendered from the diagnostic fields the service really records — which are
+not just an exit code and a command, but also the last activity, log
+metadata, and that non-navigable `last_pr` — so a cardless row still says
+enough to act on.
 
 ## 12. Epic and tracker grouping
 
@@ -1325,7 +1407,9 @@ repository, whose label is derived from that repository's normalized identity.
 - Record the installed identity in the plist and hold the launchd runner to it,
   so a configuration change after installation stops that job instead of
   re-pointing it at another repository.
-- Decode the managed wrapper's structured status and incident data.
+- Decode the managed wrapper's structured status and incident data, including
+  the complete repository-scoped set of open incidents the incidents panel
+  lists alongside the newest-only summary the sidebar renders.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.

@@ -74,6 +74,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `c` | Hide or show the sidebar |
 | `s` | Change how much agent output is shown |
 | `p` | Open the jobs and processes list |
+| `i` | Open the list of everything needing attention |
 | `x` | Stop the selected running job |
 | `d` | Start or stop the optional PR drainer |
 | `?` | Open built-in help |
@@ -117,6 +118,16 @@ Agent work runs separately from the board. Press `Esc` to hide its window and `p
 Most issue and pull-request jobs continue if Kanban is closed. Opening Kanban again for the same repository reconnects to them. Kanban blocks quitting only when an older review type cannot safely continue on its own.
 
 Use `x` to stop a selected job. Inside an open job window, Ctrl-C interrupts the current turn so you can provide new guidance.
+
+## What needs attention
+
+Press `i` for one list of everything waiting on you: every open PR drainer incident, and every Kanban job that failed, was stopped, or is waiting for an answer. Each line says which issue or pull request it is about, what happened, and where it came from.
+
+Move with `j` and `k` or the arrow keys, or click a line. Press `Enter`, or click the selected line again, to close the list and go to that work — the card is selected, and its job window opens if Kanban is running one. If the work is not on the current board, Kanban says so and leaves your place on the board alone.
+
+The list only reads. Nothing in it resolves, retries, or dismisses anything.
+
+If the PR drainer has not answered yet, or could not be asked, the list says so rather than telling you nothing needs attention.
 
 ## Usage sidebar
 

@@ -5,8 +5,12 @@ module Spec.Drainer (spec) where
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Text
 import Kanban.Domain
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Text (Text)
 import Kanban.Drainer
   ( DrainerController (..),
+    DrainerIncident (..),
+    DrainerObservation (..),
     DrainerRecord (..),
     DrainerState (..),
     DrainerStatus (..),
@@ -251,18 +255,18 @@ spec = do
           ["/tmp/drain_prs_service.py", "--path", "/tmp/current-project", "--repo", "other/thing"]
 
     it "maps a running managed drainer to green/on" $ do
-      let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":null}"
+      let result = decodedStatus "{\"state\":\"running\",\"open_incident\":null}"
       result `shouldBe` Right (DrainerStatus DrainerOn "on")
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "makes a running drainer with an unresolved incident a warning" $ do
-      let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
+      let result = decodedStatus "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
       result `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "surfaces a per-pull-request merge-conflict incident on the board" $ do
       let result =
-            decodeDrainerStatus
+            decodedStatus
               "{\"state\":\"running\",\"open_incident\":{\"summary\":\"PR #42 has a merge conflict in README; the drainer left it unmerged.\",\"pull_request\":42,\"kind\":\"merge-conflict\"}}"
       result
         `shouldBe` Right
@@ -273,12 +277,12 @@ spec = do
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "makes a stopped drainer with an unresolved incident an error" $
-      decodeDrainerStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
+      decodedStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
 
     it "names the git operation a checkout stopped mid-operation has to finish" $ do
       let render operation =
-            decodeDrainerStatus
+            decodedStatus
               ( "{\"state\":\"mid_operation\",\"operation\":\""
                   <> operation
                   <> "\",\"open_incident\":null}"
@@ -289,9 +293,9 @@ spec = do
       render "bisect" `shouldBe` Right (DrainerStatus DrainerError "bisect in progress; finish or abort it")
 
     it "still says something actionable when the controller names no operation" $ do
-      decodeDrainerStatus "{\"state\":\"mid_operation\",\"operation\":null,\"open_incident\":null}"
+      decodedStatus "{\"state\":\"mid_operation\",\"operation\":null,\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
-      decodeDrainerStatus "{\"state\":\"mid_operation\",\"open_incident\":null}"
+      decodedStatus "{\"state\":\"mid_operation\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
 
     it "no longer recognises the uncommitted-changes state the removed gate produced" $
@@ -299,7 +303,7 @@ spec = do
       -- fast-forward by the drainer's own autostash, so a controller still
       -- reporting `dirty` is one that has had the blanket gate put back. The
       -- board must not have a rendering waiting for it.
-      decodeDrainerStatus "{\"state\":\"dirty\",\"open_incident\":null}"
+      decodedStatus "{\"state\":\"dirty\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: dirty")
 
     it "no longer recognises the cross-repository state the singleton produced" $
@@ -308,11 +312,11 @@ spec = do
       -- warning — and a controller still reporting `foreign` is one that has
       -- had the singleton put back. The board must not have a rendering
       -- waiting for it.
-      decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
+      decodedStatus "{\"state\":\"foreign\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: foreign")
 
     it "renders a state the controller reports but this version does not know as an error" $
-      decodeDrainerStatus "{\"state\":\"paused\"}"
+      decodedStatus "{\"state\":\"paused\"}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused")
 
     it "keeps a status document the controller printed while exiting nonzero" $ do
@@ -321,26 +325,26 @@ spec = do
       -- already renders it in red with the incident attached. Collapsing it
       -- to an opaque error blob would discard exactly the detail the nonzero
       -- exit is flagging.
-      statusFromControllerExit (ExitFailure 3) "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}" ""
+      statusFromExit (ExitFailure 3) "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}" ""
         `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
 
     it "prefers a decodable status over diagnostics the same failing run wrote to stderr" $
-      statusFromControllerExit
+      statusFromExit
         (ExitFailure 1)
         "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
         "launchctl: warning\n"
         `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
 
     it "falls back to stderr when a failing run's output does not decode" $
-      statusFromControllerExit (ExitFailure 2) "not json at all\n" "  controller exploded\n"
+      statusFromExit (ExitFailure 2) "not json at all\n" "  controller exploded\n"
         `shouldBe` Left "controller exploded"
 
     it "falls back to stdout when a failing run wrote no diagnostics" $
-      statusFromControllerExit (ExitFailure 2) "  not json at all\n" ""
+      statusFromExit (ExitFailure 2) "  not json at all\n" ""
         `shouldBe` Left "not json at all"
 
     it "still reports undecodable output from a successful run as a decode failure" $
-      statusFromControllerExit ExitSuccess "not json at all\n" ""
+      statusFromExit ExitSuccess "not json at all\n" ""
         `shouldSatisfy` either (Data.Text.isPrefixOf "could not decode PR drainer status") (const False)
 
     it "decodes the status a real controller process prints while exiting nonzero" $
@@ -354,13 +358,13 @@ spec = do
               "echo 'controller reported a failure' >&2",
               "exit 4"
             ]
-        runDrainerCommand 5 controller "status"
+        runDrainerStatus 5 controller "status"
           `shouldReturn` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
 
     it "reports a failing controller's diagnostics when it printed nothing decodable" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
         controller <- fakeController temporaryRoot ["echo 'launchd job is not loaded' >&2", "exit 1"]
-        runDrainerCommand 5 controller "status" `shouldReturn` Left "launchd job is not loaded"
+        runDrainerStatus 5 controller "status" `shouldReturn` Left "launchd job is not loaded"
 
     it "leaves no survivor from a wedged controller's process group, and says the transition's outcome is unknown" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -380,7 +384,7 @@ spec = do
               ByteString.pack ("echo $$ > " <> leaderFile),
               "while :; do sleep 1; done"
             ]
-        outcome <- runDrainerCommand 1 controller "start"
+        outcome <- runDrainerStatus 1 controller "start"
         -- Taken the instant the invocation returns, so this proves the group
         -- was already empty when the timeout was reported -- not merely that
         -- it emptied by the time an assertion got around to looking.
@@ -413,7 +417,7 @@ spec = do
               ByteString.pack ("echo $! > " <> descendantFile),
               "exit 0"
             ]
-        outcome <- runDrainerCommand 1 controller "status"
+        outcome <- runDrainerStatus 1 controller "status"
         snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the orphaned-descendant timeout"
         descendantPid <- readRecordedPid descendantFile
         identityForPid descendantPid snapshot `shouldBe` Nothing
@@ -445,7 +449,7 @@ spec = do
               ByteString.pack ("echo $$ > " <> leaderFile),
               "while :; do sleep 1; done"
             ]
-        outcome <- runDrainerCommand 1 controller "status"
+        outcome <- runDrainerStatus 1 controller "status"
         snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the forking-handler timeout"
         leaderPid <- readRecordedPid leaderFile
         forkedPid <- readRecordedPid forkedFile
@@ -461,7 +465,7 @@ spec = do
         -- A killed status query changed nothing, so there is no transition
         -- for the poll to reconcile and nothing unknown to promise about.
         controller <- fakeController temporaryRoot ["while :; do sleep 1; done"]
-        outcome <- runDrainerCommand 1 controller "status"
+        outcome <- runDrainerStatus 1 controller "status"
         message <- requireLeft "a wedged status query reported success" outcome
         message `shouldMention` "drainer status timed out after 1 seconds"
         message `shouldNotMention` "reconcile"
@@ -486,3 +490,107 @@ spec = do
       drainerToggle False (DrainerStatus DrainerOn "on") `shouldBe` StopDrainer
       drainerToggle False (DrainerStatus DrainerWarning "on · unresolved incident") `shouldBe` StopDrainer
       drainerToggle False (DrainerStatus DrainerError "merge in progress; finish or abort it") `shouldBe` StartDrainer
+
+  describe "PR drainer open incident set" $ do
+    let incidents = fmap (.observedIncidents) . decodeDrainerStatus
+        crash =
+          "{\"incident_id\":\"incident-A\",\"kind\":\"drainer-exit\","
+            <> "\"summary\":\"drain_prs.py exited unexpectedly with code 1\","
+            <> "\"exit_code\":1,\"last_pr\":7,\"last_activity\":\"merging PR #7\"}"
+        conflict =
+          "{\"incident_id\":\"incident-B\",\"kind\":\"merge-conflict\","
+            <> "\"summary\":\"PR #42 has a merge conflict in README.\",\"pull_request\":42}"
+
+    it "decodes every open incident while leaving the newest-only sidebar projection alone" $ do
+      let document =
+            "{\"state\":\"running\",\"open_incident\":"
+              <> crash
+              <> ",\"open_incidents\":["
+              <> crash
+              <> ","
+              <> conflict
+              <> "]}"
+      -- The sidebar keeps summarising exactly one incident, the newest.
+      decodedStatus document
+        `shouldBe` Right
+          ( DrainerStatus
+              DrainerWarning
+              "on · unresolved incident · drain_prs.py exited unexpectedly with code 1"
+          )
+      incidents document
+        `shouldBe` Right
+          ( Just
+              [ DrainerIncident
+                  { incidentId = "incident-A",
+                    incidentKind = "drainer-exit",
+                    incidentSummary = Just "drain_prs.py exited unexpectedly with code 1",
+                    incidentPullRequest = Nothing,
+                    incidentLastPullRequest = Just 7,
+                    incidentActivity = Just "merging PR #7"
+                  },
+                DrainerIncident
+                  { incidentId = "incident-B",
+                    incidentKind = "merge-conflict",
+                    incidentSummary = Just "PR #42 has a merge conflict in README.",
+                    incidentPullRequest = Just 42,
+                    incidentLastPullRequest = Nothing,
+                    incidentActivity = Nothing
+                  }
+              ]
+          )
+
+    it "tells a controller that reported no incidents apart from one that reported no set" $ do
+      -- The distinction the incidents panel needs: only the first of these is
+      -- a verified-empty source.
+      incidents "{\"state\":\"running\",\"open_incident\":null,\"open_incidents\":[]}"
+        `shouldBe` Right (Just [])
+      incidents "{\"state\":\"running\",\"open_incident\":null}" `shouldBe` Right Nothing
+
+    it "classifies an incident predating the kind field as a crash, exactly as the service does" $
+      incidents "{\"state\":\"stopped\",\"open_incidents\":[{\"incident_id\":\"incident-C\"}]}"
+        `shouldBe` Right
+          ( Just
+              [ DrainerIncident
+                  { incidentId = "incident-C",
+                    incidentKind = "drainer-exit",
+                    incidentSummary = Nothing,
+                    incidentPullRequest = Nothing,
+                    incidentLastPullRequest = Nothing,
+                    incidentActivity = Nothing
+                  }
+              ]
+          )
+
+    it "fails the whole observation on an incident that names no identity" $ do
+      -- A row whose identity a refresh cannot re-find is one a keyboard or
+      -- mouse action cannot be held to, so the response is refused rather
+      -- than listed. The panel then reports the source as unavailable, which
+      -- is the truth, instead of an incident set missing a member.
+      let document = "{\"state\":\"running\",\"open_incidents\":[{\"summary\":\"nameless\"}]}"
+      decodeDrainerStatus document
+        `shouldSatisfy` either (Data.Text.isPrefixOf "could not decode PR drainer status") (const False)
+
+    it "carries the incident set through a controller that exits nonzero" $
+      -- The same convention the sidebar already relies on: a nonzero exit
+      -- that still printed a status document is reporting state.
+      fmap
+        (.observedIncidents)
+        ( statusFromControllerExit
+            (ExitFailure 3)
+            "{\"state\":\"stopped\",\"open_incidents\":[{\"incident_id\":\"incident-B\",\"kind\":\"merge-conflict\",\"pull_request\":42}]}"
+            ""
+        )
+        `shouldBe` Right (Just [DrainerIncident "incident-B" "merge-conflict" Nothing (Just 42) Nothing Nothing])
+  where
+    -- The sidebar projection every test above this file's incident group
+    -- asserts on, taken out of the whole observation.
+    decodedStatus :: LazyByteString.ByteString -> Either Text DrainerStatus
+    decodedStatus = fmap (.observedStatus) . decodeDrainerStatus
+
+    statusFromExit :: ExitCode -> String -> String -> Either Text DrainerStatus
+    statusFromExit exitCode output errors =
+      (.observedStatus) <$> statusFromControllerExit exitCode output errors
+
+    runDrainerStatus :: Int -> DrainerController -> String -> IO (Either Text DrainerStatus)
+    runDrainerStatus seconds controller command =
+      fmap (fmap (.observedStatus)) (runDrainerCommand seconds controller command)

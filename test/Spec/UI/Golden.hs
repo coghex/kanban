@@ -43,6 +43,7 @@ import Kanban.UI
   ( AppEvent,
     AppState (..),
     Overlay (..),
+    IncidentSelection (..),
     ProcessSelection (..),
     ReviewBackend (..),
     approvedAttr,
@@ -280,6 +281,7 @@ restingState channel =
       appSettings = defaultSettings,
       appLogRoot = "/fixture/logs",
       appProcessSelection = ProcessSelection Nothing 0,
+      appIncidentSelection = IncidentSelection Nothing 0,
       appOverlay = Nothing,
       appNotice = Just "Cached GitHub snapshot loaded · press u to update",
       appBoardFreshness = Fresh goldenFetchedAt,
@@ -288,6 +290,9 @@ restingState channel =
       appPullRequestsTruncated = False,
       appDrainerController = Left "no drainer controller in the fixture",
       appDrainerStatus = DrainerStatus DrainerOff "off",
+      -- No controller, so no observation stands: the same unanswered source
+      -- a failed discovery leaves behind.
+      appDrainerIncidents = Nothing,
       appDrainerBusy = False,
       appReviewBackend = ReviewBackendStopped,
       appReviewSessions = Map.empty,

@@ -1287,6 +1287,81 @@ class IncidentSelectionTests(RedirectedControllerTestCase):
         self.assertEqual(snapshot["open_incident"]["pull_request"], 42)
         self.assertIn("#42", snapshot["open_incident"]["summary"])
 
+    def test_a_running_service_reports_every_open_incident_and_the_newest(self):
+        # Kanban's incidents panel lists the whole set while the sidebar keeps
+        # summarising only the newest, so both projections have to be present
+        # and have to agree about which incident is newest.
+        self.write_status(self.job, self.repo)
+        self.write_incident(
+            "incident-20250101T000000Z-1.json",
+            incident_id="incident-20250101T000000Z-1",
+            kind="drainer-exit",
+            status="open",
+            summary="drain_prs.py exited unexpectedly with code 1",
+            last_pr=7,
+            repository="acme/widgets",
+        )
+        drain_prs_service.record_conflict_incident(
+            repo_path=self.repo, pull_request=42, files=["README"]
+        )
+        drain_prs_service.record_conflict_incident(
+            repo_path=self.repo, pull_request=43, files=["README"]
+        )
+        # Another repository's incident is not this repository's business.
+        self.write_incident(
+            "incident-20990101T000000Z-9.json",
+            incident_id="incident-20990101T000000Z-9",
+            status="open",
+            summary="another repository's crash",
+            repository="acme/gadgets",
+        )
+        # Neither is a resolved one.
+        self.write_incident(
+            "incident-20990102T000000Z-9.json",
+            incident_id="incident-20990102T000000Z-9",
+            status="resolved",
+            summary="already handled",
+            repository="acme/widgets",
+        )
+
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        listed = snapshot["open_incidents"]
+
+        # This repository's three open incidents, and only those: the crash
+        # plus both conflicts, with the foreign and the resolved one absent.
+        self.assertEqual(len(listed), 3)
+        self.assertEqual(
+            {incident.get("pull_request") for incident in listed}, {None, 42, 43}
+        )
+        self.assertNotIn(
+            "incident-20990101T000000Z-9",
+            {incident["incident_id"] for incident in listed},
+        )
+        self.assertNotIn(
+            "incident-20990102T000000Z-9",
+            {incident["incident_id"] for incident in listed},
+        )
+        # The sidebar's projection is unchanged: the newest incident only,
+        # and the same object at the head of the full list.
+        self.assertEqual(snapshot["open_incident"], listed[0])
+        # A supervisor crash still records more than an exit code, and still
+        # carries no authoritative `pull_request` for Kanban to navigate by.
+        crash = next(
+            incident
+            for incident in listed
+            if incident["incident_id"] == "incident-20250101T000000Z-1"
+        )
+        self.assertEqual(crash["last_pr"], 7)
+        self.assertNotIn("pull_request", crash)
+
+    def test_a_repository_with_no_open_incidents_reports_an_empty_set(self):
+        # Verified-empty, which is what lets Kanban's panel say that nothing
+        # needs attention rather than that it could not tell.
+        self.write_status(self.job, self.repo)
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["open_incidents"], [])
+        self.assertIsNone(snapshot["open_incident"])
+
 
 class StatusAndTransitionTests(RedirectedControllerTestCase):
     def setUp(self):
