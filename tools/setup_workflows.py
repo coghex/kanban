@@ -210,15 +210,28 @@ def plan_issue_review(repo: Path, install_dir: Path) -> dict[str, Any]:
             scope="user (Kanban-namespaced install directory)",
             message=install_issue_review.symlink_refusal_reason(Path(refused["destination"])),
         )
-    status = "unchanged" if results == {"unchanged"} else "install"
+    # Setup is the other supported way to install this backend, so it has to
+    # publish the same discovery record the installer does -- otherwise a
+    # custom install made here would be undiscoverable. The record is part of
+    # the plan, not a side effect of it: an installation whose links are
+    # already correct but whose record predates them still has work to do, and
+    # reporting that as `unchanged` would skip the repair.
+    record = {
+        "path": str(install_issue_review.discovery_record_path()),
+        "backend_path": str(install_dir / "approve_issues.py"),
+        "result": install_issue_review.plan_discovery_record(install_dir, None),
+    }
+    converged = results == {"unchanged"} and record["result"] == "unchanged"
     return component_result(
         "issue-review",
-        status,
+        "unchanged" if converged else "install",
         links=links,
+        record=record,
         scope="user (Kanban-namespaced install directory)",
         message=(
             f"Canonical issue-review backend at {install_dir}: "
             + ", ".join(f"{Path(link['destination']).name} {link['result']}" for link in links)
+            + f"; discovery record {record['path']} {record['result']}"
         ),
     )
 
@@ -474,7 +487,17 @@ def apply_component(
         results = []
         for source, destination in issue_review_links(repo, install_dir):
             results.append(install_issue_review.install_symlink(source, destination))
-        plan = dict(plan, applied=True, results=results)
+        # After the links, never before: the record names a backend, so it
+        # must not name one that failed to arrive. `None` for the config
+        # reference because setup has no --config of its own -- the merge
+        # carries forward whatever a previous install stored.
+        record_path = install_issue_review.write_discovery_record(install_dir, None)
+        plan = dict(
+            plan,
+            applied=True,
+            results=results,
+            record=dict(plan["record"], path=str(record_path), result="written"),
+        )
         return plan
     if component == "legacy-launcher":
         # Re-checked here, not only at plan time: the backend this launcher
@@ -562,9 +585,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--install-dir",
-        default=os.environ.get(
-            "KANBAN_ISSUE_REVIEW_INSTALL_DIR", str(install_issue_review.DEFAULT_INSTALL_DIR)
-        ),
+        # The env-override-then-default rule itself lives in one place too,
+        # so this and the installer's own --install-dir cannot disagree.
+        default=str(install_issue_review.selected_install_dir()),
         help="Stable per-user script-link directory for the issue-review backend.",
     )
     parser.add_argument(

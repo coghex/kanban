@@ -348,21 +348,88 @@ def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list
     return sorted(set(numbers)), invalid
 
 
-def approver_path() -> Path:
-    """Resolve Kanban's canonical issue-review backend the same way
-    `Kanban.Review.canonicalIssueReviewerPath` does: `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
-    when set, otherwise the Kanban-managed install directory. This coordinator
-    never hard-codes the pre-migration compatibility launcher path; see
-    docs/agent-workflow-contract.md §3."""
-    override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
-    install_dir = Path(override).expanduser() if override else Path.home() / "Library" / "Application Support" / "kanban" / "issue-review"
-    path = install_dir / "approve_issues.py"
+def issue_review_record_path() -> Path:
+    """The fixed document `tools/install_issue_review.py` records the
+    installed backend in. Deliberately not derived from
+    KANBAN_ISSUE_REVIEW_INSTALL_DIR: an install made with --install-dir still
+    has to be discoverable by a coordinator that never saw that option, so the
+    record's own path is the one thing that cannot move."""
+    return Path(f"{Path.home()}/Library/Application Support/kanban/issue-review/config.json")
+
+
+def installed_backend(path: Path, repair: str) -> Path:
     if not path.is_file():
-        raise WorkflowError(
-            f"Canonical issue reviewer was not found at {path}. Run "
-            "`python3 tools/install_issue_review.py` from the Kanban checkout to install it."
-        )
+        raise WorkflowError(f"Canonical issue reviewer was not found at {path}. {repair}")
     return path
+
+
+def unreadable_record(record: Path, detail: str) -> WorkflowError:
+    return WorkflowError(
+        f"The canonical issue reviewer's install record at {record} is unreadable "
+        f"({detail}). Rewrite it by running `python3 tools/install_issue_review.py` from "
+        "the Kanban checkout, adding --install-dir if the backend lives elsewhere."
+    )
+
+
+def approver_path() -> Path:
+    """Resolve Kanban's canonical issue-review backend with the same
+    precedence `Kanban.Review.resolveCanonicalIssueReviewer` uses: a non-empty
+    KANBAN_ISSUE_REVIEW_INSTALL_DIR, then the backend the installer recorded,
+    then -- only when the record names none -- the directory the record itself
+    lives in, which is where an install predating the record put it. A
+    selected override or recorded backend that is missing fails there rather
+    than falling through, so this gate never silently runs an installation the
+    user did not choose. This coordinator never hard-codes the pre-migration
+    compatibility launcher path; see docs/agent-workflow-contract.md §3."""
+    override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
+    if override and override.strip():
+        return installed_backend(
+            Path(override).expanduser() / "approve_issues.py",
+            f"KANBAN_ISSUE_REVIEW_INSTALL_DIR selected {override}; install it there with "
+            f"`python3 tools/install_issue_review.py --install-dir {override}`, or unset "
+            "that variable to use the recorded installation.",
+        )
+    record = issue_review_record_path()
+    # Absence is decided by whether anything occupies the path, not by
+    # whether something readable does: `os.path.lexists` sees a symbolic link
+    # whose target is gone, which `read_text` reports as FileNotFoundError
+    # and which falling back would treat as "never installed". The installer
+    # refuses to write through a link here for the same reason.
+    if not os.path.lexists(record):
+        document = {}
+    else:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise unreadable_record(record, "it could not be read") from error
+        except json.JSONDecodeError as error:
+            raise unreadable_record(record, str(error)) from error
+    if not isinstance(document, dict):
+        raise unreadable_record(record, "it is not a JSON object")
+    if "backend_path" not in document:
+        # A well-formed document with no discovery field is an installation
+        # made before the record existed -- the installer has always written
+        # config.json for --config -- so it upgrades in place rather than
+        # failing. Membership, not `.get(...) is None`: an explicit null is a
+        # value this installer never writes, so it is a record corrupted into
+        # naming nothing and must fail closed like any other unusable value.
+        return installed_backend(
+            record.parent / "approve_issues.py",
+            f"No install directory is recorded at {record}, so this default was used. "
+            "Run `python3 tools/install_issue_review.py` from the Kanban checkout to "
+            "install and record it.",
+        )
+    recorded = document["backend_path"]
+    if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        raise unreadable_record(
+            record, f"it does not name an absolute backend path: {recorded!r}"
+        )
+    return installed_backend(
+        Path(recorded),
+        f"The install record at {record} still names it, so the installation moved or was "
+        "removed; re-run `python3 tools/install_issue_review.py` from the Kanban checkout "
+        "with the --install-dir you want, which also refreshes that record.",
+    )
 
 
 def check_issue(root: Path, repo: str, number: int, config_path: str | None = None) -> dict[str, Any]:

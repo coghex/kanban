@@ -219,18 +219,54 @@ brand, so drift from the parser's accepted format fails CI.
 
 The packaged issue-review workflows — including `autoissue`'s immediate
 review handoff — resolve the canonical backend the same way
-`Kanban.Review.canonicalIssueReviewerPath` and the packaged `solve`
+`Kanban.Review.resolveCanonicalIssueReviewer` and the packaged `solve`
 workflows do:
 
 ```bash
-BACKEND="${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}/approve_issues.py"
+RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
+BACKEND="$(python3 - "$RECORD" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+record = Path(sys.argv[1])
+override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
+if override and override.strip():
+    resolved = Path(override).expanduser() / "approve_issues.py"
+else:
+    if not os.path.lexists(record):
+        document = {}
+    else:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"The install record at {record} is not a JSON object.")
+    if "backend_path" not in document:
+        resolved = record.parent / "approve_issues.py"
+    else:
+        recorded = document["backend_path"]
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
+        resolved = Path(recorded)
+if not resolved.is_file():
+    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {record}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
+print(resolved)
+PY
+)"
 ```
 
-That is the Kanban-managed install path defined in
-[agent-workflow-contract.md §3](agent-workflow-contract.md#3-migration-boundary)
-and installed by `python3 tools/install_issue_review.py`. The packaged
-workflows must never reference `~/work/approve-issues.py` — the optional
-pre-migration compatibility launcher — or any other user-local workflow path.
+The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the
+backend path `tools/install_issue_review.py` recorded in that document, then
+— only when the record names none, which is what an installation predating
+the record looks like — the directory the record itself lives in. The
+document's own location is fixed even when `--install-dir` moves everything
+else, because a workflow that inherits no environment still has to find an
+installation made anywhere; see
+[agent-workflow-contract.md §5](agent-workflow-contract.md#5-portable-install-policy).
+No packaged workflow reconstructs the install path from its parts, and none
+may reference `~/work/approve-issues.py` — the optional pre-migration
+compatibility launcher — or any other user-local workflow path.
 
 Reviewer selection belongs to the backend, not to the packaged workflow. No
 packaged asset may pin a reviewer model, reasoning effort, display name,

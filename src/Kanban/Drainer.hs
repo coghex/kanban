@@ -42,6 +42,7 @@ import Kanban.Process
     defaultProcessSnapshot,
     killVerifiedGroup,
   )
+import Kanban.Text (withoutJsonPath)
 import System.Directory (doesFileExist, getHomeDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute)
@@ -258,17 +259,6 @@ resolveDrainerPlist hostOperatingSystem identity recordPath
 
 reinstallHint :: Text
 reinstallHint = "run `python3 tools/install_drainer.py` from the Kanban checkout"
-
--- | Drops the JSONPath Aeson prefixes a parse failure with (@Error in $: @),
--- which is noise inside a sentence already naming the one document it is
--- about, and costs sidebar width the remediation needs.
-withoutJsonPath :: Text -> Text
-withoutJsonPath message = case Text.stripPrefix "Error in " message of
-  Just located
-    | (_, remainder) <- Text.breakOn ": " located,
-      not (Text.null remainder) ->
-        Text.drop 2 remainder
-  _ -> message
 
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do

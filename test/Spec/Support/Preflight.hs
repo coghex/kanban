@@ -48,7 +48,12 @@ import Kanban.Preflight
     actionReport
   )
 import Kanban.Solve (SolverBrand (..))
-import Spec.Support.Env (installFakeExecutable, withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Env
+  ( installFakeExecutable,
+    withEnvironmentValue,
+    withTemporaryCacheRoot,
+    withoutEnvironmentValue,
+  )
 import System.Directory (createDirectoryIfMissing, createFileLink, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
@@ -130,6 +135,17 @@ data BackendFixture
   | BackendDanglingLink
   | BackendForeignLink
   | BackendCompanionMissing
+  | -- | Installed exactly as 'BackendInstalled' is, but discovered through
+    -- the installer's record with no environment override -- the shape a
+    -- @--install-dir@ installation has for a dashboard that never saw that
+    -- option. Preflight has to resolve it the same way
+    -- 'Kanban.Review.resolveCanonicalIssueReviewer' does, or a custom
+    -- installation would work from the board and still fail its own
+    -- readiness gate.
+    BackendRecordedElsewhere
+  | -- | A record that will not parse. Resolution fails before there is any
+    -- path to stat, which is a different report from "not installed".
+    BackendRecordUnreadable
 
 -- | A hermetic fresh machine: a PATH holding only the fake executables the
 -- scenario installs, a Kanban install directory it populates, and a log
@@ -159,6 +175,8 @@ withPreflightMachine executables backend action =
         installCompanion = installAsset "kanban_config.py"
     case backend of
       BackendInstalled -> installAsset "approve_issues.py" >> installCompanion
+      BackendRecordedElsewhere -> installAsset "approve_issues.py" >> installCompanion
+      BackendRecordUnreadable -> pure ()
       BackendMissing -> pure ()
       BackendOccupied -> createDirectoryIfMissing True backendPath >> installCompanion
       BackendOrdinaryFile -> ByteString.writeFile backendPath "#!/usr/bin/env python3\n" >> installCompanion
@@ -172,10 +190,31 @@ withPreflightMachine executables backend action =
         createFileLink (foreign_ </> "approve_issues.py") backendPath
         installCompanion
       BackendCompanionMissing -> installAsset "approve_issues.py"
+    -- The record cases drop the override and redirect $HOME instead, so the
+    -- fixed record path lands inside this machine and the real one is never
+    -- read. Everything else keeps selecting through the override.
+    let recordPath =
+          temporaryRoot
+            </> "home"
+            </> "Library/Application Support/kanban/issue-review/config.json"
+        withDiscovery continue = case backend of
+          BackendRecordedElsewhere -> viaRecord (recordDocument backendPath) continue
+          BackendRecordUnreadable -> viaRecord "{\"backend_path\": " continue
+          _ -> withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installRoot continue
+        viaRecord document continue = do
+          createDirectoryIfMissing True (takeDirectory recordPath)
+          ByteString.writeFile recordPath document
+          withEnvironmentValue "HOME" (temporaryRoot </> "home") $
+            withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" continue
     withEnvironmentValue "PATH" binaryRoot $
-      withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installRoot $
+      withDiscovery $
         withEnvironmentValue "KANBAN_TEST_PROBE_LOG" probeLog $
           action workingDirectory probeLog
+
+-- | The one field Kanban reads out of the installer's record.
+recordDocument :: FilePath -> ByteString.ByteString
+recordDocument backendPath =
+  ByteString.pack ("{\"backend_path\":\"" <> backendPath <> "\"}")
 
 -- | Everything on the fresh machine a probe could have written to,
 -- snapshotted so a test can prove the doctor path changed none of it.

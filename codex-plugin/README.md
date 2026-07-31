@@ -94,19 +94,21 @@ two skills locate the installed coordinator by searching under
 same review logic and `pr-review:v2` marker/label state machine runs
 regardless of which command an agent session starts from. The coordinator
 resolves the canonical issue-review backend the same way
-`Kanban.Review.canonicalIssueReviewerPath` does (`KANBAN_ISSUE_REVIEW_INSTALL_DIR`,
-falling back to the Kanban-managed install directory under
-`~/Library/Application Support/kanban/issue-review/`); it never hard-codes a
-personal path. None of the packaged skills set their own model, reasoning
+`Kanban.Review.resolveCanonicalIssueReviewer` does: a non-empty
+`KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path
+`tools/install_issue_review.py` recorded in
+`~/Library/Application Support/kanban/issue-review/config.json`, then — only
+when that record names none — the directory the record lives in; it never
+hard-codes a personal path and never reconstructs the installer's default. None of the packaged skills set their own model, reasoning
 effort, sandbox, approval policy, or working directory — Kanban's own CLI
 invocation pins those per action, and `tools/test_codex_plugin.py` asserts
 none of the packaged manifests (or the coordinator's own nested-reviewer
 invocations) override them.
 
 `$issue-review` — and `$autoissue`'s immediate review handoff — resolve the
-same canonical backend the same portable way, at
-`${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}/approve_issues.py`,
-installed by `python3 tools/install_issue_review.py` from a Kanban checkout.
+same canonical backend the same portable way, through the discovery record at
+`~/Library/Application Support/kanban/issue-review/config.json` that
+`python3 tools/install_issue_review.py` writes from a Kanban checkout.
 They never reference the pre-migration compatibility launcher described in
 [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary),
 and they never pin a reviewer model or display name:

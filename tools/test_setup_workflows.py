@@ -502,6 +502,72 @@ class ConflictTests(HermeticSetupTests):
         self.assertEqual(occupied.read_text(encoding="utf-8"), "someone else's file\n")
 
 
+class IssueReviewDiscoveryRecordTests(HermeticSetupTests):
+    """Setup is the other supported way to install this backend, so it must
+    publish the same discovery record `tools/install_issue_review.py` does --
+    otherwise a custom installation made here would be undiscoverable
+    (issue #155)."""
+
+    def setUp(self):
+        super().setUp()
+        self.record_path = (
+            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+        )
+
+    def record(self):
+        return json.loads(self.record_path.read_text(encoding="utf-8"))
+
+    def test_applying_publishes_the_record_for_a_custom_install_directory(self):
+        self.install_dir = self.root / "opt" / "kanban-review"
+
+        code, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        self.assertEqual(code, 0, payload)
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(entry["status"], "install")
+        self.assertEqual(entry["record"]["path"], str(self.record_path))
+        self.assertEqual(
+            self.record()["backend_path"],
+            str(self.install_dir.resolve() / "approve_issues.py"),
+        )
+
+    def test_a_dry_run_reports_the_planned_record_and_writes_nothing(self):
+        self.install_dir = self.root / "opt" / "kanban-review"
+
+        code, payload = self.run_setup("--component", "issue-review")
+
+        self.assertEqual(code, 0, payload)
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(entry["record"]["result"], "created")
+        self.assertFalse(self.record_path.exists())
+
+    def test_an_installation_predating_the_record_is_repaired_rather_than_reported_converged(self):
+        self.install_dir = self.root / "opt" / "kanban-review"
+        self.run_setup("--component", "issue-review", "--apply")
+        # Exactly the state an upgrade finds: correct links, no record.
+        self.record_path.unlink()
+
+        code, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        self.assertEqual(code, 0, payload)
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(entry["status"], "install")
+        self.assertEqual(
+            self.record()["backend_path"],
+            str(self.install_dir.resolve() / "approve_issues.py"),
+        )
+
+    def test_re_running_a_complete_installation_converges(self):
+        self.install_dir = self.root / "opt" / "kanban-review"
+        self.run_setup("--component", "issue-review", "--apply")
+
+        _, payload = self.run_setup("--component", "issue-review", "--apply")
+
+        entry = self.component(payload, "issue-review")
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertEqual(entry["record"]["result"], "unchanged")
+
+
 class DryRunPurityTests(unittest.TestCase):
     """A dry run must write nothing at all, which includes artefacts the
     interpreter itself would leave behind. Driven as a subprocess, because

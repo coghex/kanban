@@ -193,6 +193,24 @@ SUBSHELL_OR_PIPE_COMMAND_RE = re.compile(r'(?:\$\(|\|)\s*([A-Za-z][A-Za-z0-9_.-]
 # `python3 "$COORDINATOR" \` or `gh issue list ...`.
 LEADING_COMMAND_RE = re.compile(r'^([A-Za-z][A-Za-z0-9_.-]*)(?=[ \t]|$)')
 ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+# A heredoc: its body is the *input* to the command on the opening line, not
+# a sequence of commands. The issue-review workflows feed a Python program in
+# this way, and every one of its lines would otherwise read as an
+# undocumented external command. The opening line is kept — that is where the
+# real invocation (`python3 - "$RECORD" <<'PY'`) lives — and the body and its
+# terminator are dropped. Only the quoted form is matched, since an unquoted
+# delimiter permits expansion and is not the shape any packaged asset uses.
+HEREDOC_BODY_RE = re.compile(
+    r"(<<-?\s*(['\"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\2[^\n]*\n)"
+    r".*?^[ \t]*(?P=tag)[ \t]*$\n?",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def without_heredoc_bodies(body):
+    """`body` with every heredoc's content replaced by its opening line, so
+    data fed to a command is never mistaken for commands."""
+    return HEREDOC_BODY_RE.sub(lambda match: match.group(1), body)
 
 
 def discovered_plugin_commands(content):
@@ -200,7 +218,7 @@ def discovered_plugin_commands(content):
     whether as the leading word of a line or inside `$( ... )`/after `|`."""
     names = set()
     for fence in BASH_FENCE_RE.finditer(content):
-        body = fence.group(1)
+        body = without_heredoc_bodies(fence.group(1))
         names |= {match.group(1) for match in SUBSHELL_OR_PIPE_COMMAND_RE.finditer(body)}
         for line in body.splitlines():
             stripped = line.strip()
@@ -482,19 +500,45 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # Pins the extractor against the actual packaged issue-review assets
         # rather than a synthetic snippet, so a rewrite that stops naming the
         # Kanban-managed install path fails here instead of leaving the
-        # completeness check with nothing to discover.
+        # completeness check with nothing to discover. The discovery record is
+        # the only user-scoped path these assets name now: the backend itself
+        # is read out of that record rather than composed from a default, so
+        # there is no `$HOME`-anchored approve_issues.py left to find.
         for relative_path in (
             "claude-plugin/plugins/kanban/commands/issue-review.md",
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/solve.md",
+            "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
         ):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = markdown_home_relative_segments(content)
-            self.assertIn("/Library/Application Support/kanban/issue-review", found, relative_path)
             self.assertIn(
-                "/Library/Application Support/kanban/issue-review/approve_issues.py",
+                "/Library/Application Support/kanban/issue-review/config.json",
                 found,
                 relative_path,
             )
+
+    def test_heredoc_bodies_are_read_as_data_rather_than_commands(self):
+        # The issue-review workflows feed a Python resolver to `python3 -` as
+        # a heredoc. Its lines are input, not invocations; only the command on
+        # the opening line is one. Without this the extractor reports every
+        # Python statement as an undocumented external command.
+        snippet = (
+            "```bash\n"
+            'BACKEND="$(python3 - "$RECORD" <<\'PY\'\n'
+            "import json, os, sys\n"
+            "record = Path(sys.argv[1])\n"
+            "print(record)\n"
+            "PY\n"
+            ')"\n'
+            "gh issue view 1\n"
+            "```\n"
+        )
+        self.assertEqual(discovered_plugin_commands(snippet), {"python3", "gh"})
+
+    def test_heredoc_stripping_leaves_ordinary_bash_blocks_alone(self):
+        snippet = "```bash\ngit status\nfind . | head -n1\n```\n"
+        self.assertEqual(discovered_plugin_commands(snippet), {"git", "find", "head"})
 
     def test_markdown_home_path_extraction_handles_shell_expansion_and_prose(self):
         snippet = (
@@ -584,6 +628,42 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path in entry["files"]:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(entry["token"], content, relative_path)
+
+
+    def test_issue_review_discovery_record_grounds_every_reader(self):
+        # Same coupling as the drainer's record, for the canonical reviewer:
+        # tools/install_issue_review.py writes it and five consumers across
+        # three languages read it, none of which can see each other's
+        # constants. The manifest names every side that spells the path, and
+        # the writer is absent on purpose -- it imports the location from
+        # tools/kanban_config.py instead of restating it.
+        by_id = {row["id"]: row for row in self.manifest}
+        self.assertIn("issue-review-discovery-record", by_id)
+        entry = by_id["issue-review-discovery-record"]
+        self.assertEqual(entry["kind"], "personal-path")
+        self.assertEqual(entry["owner"], "kanban")
+        self.assertEqual(entry["status"], "supported")
+        self.assertEqual(
+            entry["files"],
+            [
+                "src/Kanban/Review.hs",
+                "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+                "claude-plugin/plugins/kanban/scripts/review_pr.py",
+                "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+                "claude-plugin/plugins/kanban/commands/issue-review.md",
+                "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+                "claude-plugin/plugins/kanban/commands/solve.md",
+            ],
+        )
+        for relative_path in entry["files"]:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(entry["token"], content, relative_path)
+        # The single tracked spelling of the install directory the record's
+        # own path is derived from, and the only executable allowed to hold
+        # it (issue #155's single-source acceptance).
+        install_dir = by_id["approve-issues-backend"]
+        self.assertEqual(install_dir["files"], ["tools/kanban_config.py"])
+        self.assertTrue(entry["token"].startswith(install_dir["token"] + "/"))
 
 
 if __name__ == "__main__":

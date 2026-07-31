@@ -69,7 +69,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Kanban.CommandCapture (decodeCommandText, readProcessBytes)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction)
-import Kanban.Review (canonicalIssueReviewerPath)
+import Kanban.Review (selectCanonicalIssueReviewer)
 import Kanban.Solve (SolverBrand (..))
 import System.Directory (doesFileExist, doesPathExist, findExecutable, pathIsSymbolicLink)
 import System.Exit (ExitCode (..))
@@ -128,11 +128,16 @@ data GitHubObservation
 -- 'ReviewBackendConflicting' is the case @tools\/install_issue_review.py@
 -- refuses to resolve on its own: something that is not a usable backend
 -- already occupies the install path, so setup will not overwrite it and the
--- user has to clear it first.
+-- user has to clear it first. 'ReviewBackendUnresolved' is the earlier
+-- failure of not knowing which path to look at, because the installer's
+-- discovery record is there but unusable; it carries
+-- 'Kanban.Review.selectCanonicalIssueReviewer''s own diagnostic rather than
+-- restating it.
 data ReviewBackendObservation
   = ReviewBackendReadyAt FilePath
   | ReviewBackendMissing FilePath
   | ReviewBackendConflicting FilePath Text
+  | ReviewBackendUnresolved Text
   | ReviewBackendInterpreterMissing
   deriving stock (Eq, Show)
 
@@ -577,6 +582,11 @@ reviewBackendCheck environment = PreflightCheck "canonical review backend" statu
           ReviewBackendUnavailable
           ("no canonical issue reviewer at " <> Text.pack path)
           ("Run " <> setupCommand "issue-review" <> ".")
+      ReviewBackendUnresolved detail ->
+        PreflightBlocked
+          ReviewBackendUnavailable
+          detail
+          ("Run " <> setupCommand "issue-review" <> " to rewrite the install record.")
       ReviewBackendConflicting path detail ->
         PreflightBlocked
           ConflictingInstallation
@@ -791,22 +801,29 @@ probeGitHub workingDirectory = do
           | otherwise -> GitHubNotAuthenticated (probeFailureDetail "gh auth status" code output)
 
 -- | Stat the Kanban-managed backend install location the same way
--- 'Kanban.Review.resolveCanonicalIssueReviewer' resolves it, but tell a
--- never-installed path apart from one already occupied by something else.
+-- 'Kanban.Review.resolveCanonicalIssueReviewer' selects it — the same
+-- override, then installer-written record, then compatibility default — but
+-- tell a never-installed path apart from one already occupied by something
+-- else. The selection deliberately stops short of asking whether the backend
+-- is there: that is the distinction this probe exists to draw.
 probeReviewBackend :: IO ReviewBackendObservation
 probeReviewBackend = do
   interpreter <- findExecutable "python3"
   case interpreter of
     Nothing -> pure ReviewBackendInterpreterMissing
     Just _ -> do
-      scriptPath <- canonicalIssueReviewerPath
-      -- The backend cannot run without its config module: approve_issues.py
-      -- imports kanban_config at module scope, and the issue-review setup
-      -- component installs both. A half-installed pair fails at import
-      -- time, so both links are part of "installed" here.
-      let companionPath = takeDirectory scriptPath </> "kanban_config.py"
-      observations <- mapM probeInstalledAsset [scriptPath, companionPath]
-      pure (foldr worseObservation (ReviewBackendReadyAt scriptPath) observations)
+      selected <- selectCanonicalIssueReviewer
+      case selected of
+        Left message -> pure (ReviewBackendUnresolved message)
+        Right (_, scriptPath) -> do
+          -- The backend cannot run without its config module:
+          -- approve_issues.py imports kanban_config at module scope, and the
+          -- issue-review setup component installs both. A half-installed
+          -- pair fails at import time, so both links are part of
+          -- "installed" here.
+          let companionPath = takeDirectory scriptPath </> "kanban_config.py"
+          observations <- mapM probeInstalledAsset [scriptPath, companionPath]
+          pure (foldr worseObservation (ReviewBackendReadyAt scriptPath) observations)
 
 -- | Classify one installed backend file. Only a symlink resolving to a file
 -- that carries that asset's own identity marker counts as installed: that

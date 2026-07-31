@@ -289,7 +289,19 @@ Initial review and rereview synchronously invoke the vendored
 `tools/install_issue_review.py`; see
 [the agent-workflow contract](agent-workflow-contract.md)) as the canonical
 `issue-review:v2` fingerprint publisher so the existing solve gate accepts
-Kanban-reviewed issues. Interactive revision remains inside Kanban.
+Kanban-reviewed issues. Kanban does not reconstruct where that backend was
+installed: it reads the absolute path out of the record the installer writes
+at `~/Library/Application Support/kanban/issue-review/config.json`, whose own
+location `--install-dir` cannot move, so an installation made anywhere is
+found by a dashboard launched with no special environment. A non-empty
+`KANBAN_ISSUE_REVIEW_INSTALL_DIR` still wins, and a record carrying no
+recorded path — an installation predating the record — falls back to the
+directory holding it. Each way that lookup can fail — an override or recorded
+backend that is not there, a record that will not parse, a recorded path that
+is not absolute — is reported as its own diagnostic naming the document
+consulted and the repair for that case, never as the bare installer command
+the user may already have run. Preflight, both packaged PR coordinators, and
+the packaged issue-review and solve workflows resolve identically. Interactive revision remains inside Kanban.
 Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.
@@ -1315,7 +1327,9 @@ The first direct, one-off review slice is implemented.
 - Render hideable session overlays, status markers, approvals, feedback, and
   turn interruption without terminal emulation.
 - Route canonical reviewer families through the synchronous v2 publisher while
-  never starting its background daemon.
+  never starting its background daemon, resolving that publisher through the
+  installer-written discovery record rather than a default each consumer
+  spells out for itself.
 - Advance issue review, author-brand revision, and opposite-brand rereview as
   three explicit stages using `reviewed:changes` and `reviewed:revised`
   handoffs. This issue-level handoff is unrelated to PR revision, which does

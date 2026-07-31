@@ -140,6 +140,7 @@ import Kanban.Review
     CommandBounds (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    IssueReviewerSource (..),
     ReviewApproval (..),
     ReviewChoice (..),
     ReviewEvent (..),
@@ -159,6 +160,9 @@ import Kanban.Review
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
     drainToolRegistry,
+    issueReviewerRecordPath,
+    resolveCanonicalIssueReviewerAt,
+    selectCanonicalIssueReviewerAt,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     githubIssueViewArguments,
@@ -507,7 +511,7 @@ import Spec.Support.Render
     renderDetailsAt,
     renderWidgetLines
   )
-import System.Directory (XdgDirectory (XdgCache), canonicalizePath, createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getXdgDirectory)
+import System.Directory (XdgDirectory (XdgCache), canonicalizePath, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getXdgDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
@@ -1101,12 +1105,25 @@ suite = do
       arguments `shouldContain` ["--rereview", "844"]
       arguments `shouldContain` ["--config", "/tmp/custom.toml"]
 
+    it "composes the backend path from an install directory rather than an embedded separator" $ do
+      canonicalIssueReviewerPath "/opt/kanban-review" `shouldBe` "/opt/kanban-review/approve_issues.py"
+      -- A trailing separator on the install directory must not double up.
+      canonicalIssueReviewerPath "/opt/kanban-review/" `shouldBe` "/opt/kanban-review/approve_issues.py"
+
+    it "looks for the install record where the installer fixes it, not where --install-dir moved" $ do
+      recordPath <- issueReviewerRecordPath
+      Data.Text.pack recordPath
+        `shouldMention` "/Library/Application Support/kanban/issue-review/config.json"
+      Data.Text.pack recordPath `shouldNotMention` "/work/approve-issues.py"
+
+    -- The environment-driven entry point, end to end: with the override set
+    -- it never reads the real record, so this stays hermetic while still
+    -- covering the wiring the parameterised cases below bypass.
     it "resolves the bundled canonical issue reviewer from its Kanban-managed install directory" $ do
       temporaryRoot <- createTemporaryDirectory
       let installDir = temporaryRoot </> "issue-review"
-          scriptPath = installDir </> "approve_issues.py"
+          scriptPath = canonicalIssueReviewerPath installDir
       withEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" installDir $ do
-        canonicalIssueReviewerPath `shouldReturn` scriptPath
         missing <- resolveCanonicalIssueReviewer
         case missing of
           Left message -> do
@@ -1116,12 +1133,6 @@ suite = do
         createDirectoryIfMissing True installDir
         writeFile scriptPath "#!/usr/bin/env python3\n"
         resolveCanonicalIssueReviewer `shouldReturn` Right scriptPath
-
-    it "resolves the bundled canonical issue reviewer without KANBAN_ISSUE_REVIEW_INSTALL_DIR requiring ~/work" $
-      withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" $ do
-        scriptPath <- canonicalIssueReviewerPath
-        scriptPath `shouldSatisfy` (not . isInfixOf "/work/approve-issues.py")
-        scriptPath `shouldSatisfy` isInfixOf "kanban/issue-review/approve_issues.py"
 
     it "validates standalone prompts for the authenticated Claude client tool" $ do
       decodeClaudeToolPrompt (object ["prompt" .= ("Review issue #844" :: Text)])
@@ -5591,6 +5602,172 @@ suite = do
               map (.usageWindowLabel) snapshot.usageWindows `shouldBe` ["5 hour"]
             _ -> expectationFailure "expected an independent Codex failure and Claude success"
 
+  describe "canonical issue reviewer discovery" $ do
+    -- Every case here is a temporary directory and a fixture record: no
+    -- install, no terminal, no network, no GitHub account. The record path
+    -- is a parameter precisely so the real one is never read or written.
+    let recordDocument backend = ByteString.pack ("{\"backend_path\":\"" <> backend <> "\"}")
+        installBackendAt directory = do
+          createDirectoryIfMissing True directory
+          writeFile (directory </> "approve_issues.py") "#!/usr/bin/env python3\n"
+          pure (directory </> "approve_issues.py")
+        failureFor = either id (\path -> "unexpectedly resolved " <> Data.Text.pack path)
+
+    it "prefers KANBAN_ISSUE_REVIEW_INSTALL_DIR over a record naming somewhere else" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        recorded <- installBackendAt (root </> "recorded")
+        selected <- installBackendAt (root </> "selected")
+        ByteString.writeFile recordPath (recordDocument recorded)
+        resolveCanonicalIssueReviewerAt (Just (root </> "selected")) recordPath
+          `shouldReturn` Right selected
+
+    -- A blank override is how an unset variable often reaches a process
+    -- through a wrapper script; treating it as a selection would resolve
+    -- "/approve_issues.py".
+    it "ignores a blank override rather than selecting the filesystem root" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        recorded <- installBackendAt (root </> "recorded")
+        ByteString.writeFile recordPath (recordDocument recorded)
+        resolveCanonicalIssueReviewerAt (Just "   ") recordPath `shouldReturn` Right recorded
+
+    it "resolves the backend the record names, wherever the installer put it" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        recorded <- installBackendAt (root </> "somewhere-else")
+        ByteString.writeFile recordPath (recordDocument recorded)
+        resolveCanonicalIssueReviewerAt Nothing recordPath `shouldReturn` Right recorded
+
+    it "falls back to the record's own directory when no record was written" $
+      withTemporaryCacheRoot $ \root -> do
+        installed <- installBackendAt root
+        resolveCanonicalIssueReviewerAt Nothing (root </> "config.json")
+          `shouldReturn` Right installed
+
+    -- What an install predating the discovery field actually looks like: the
+    -- config.json the installer has always written for --config, well-formed
+    -- and simply without the new key. That is an upgrade, not a fault.
+    it "falls back for a legacy document carrying only a config reference" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        installed <- installBackendAt root
+        ByteString.writeFile recordPath "{\"config_path\":\"/Users/example/.config/kanban/config.toml\"}"
+        resolveCanonicalIssueReviewerAt Nothing recordPath `shouldReturn` Right installed
+
+    it "reports a missing override without falling through to a recorded install" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        recorded <- installBackendAt (root </> "recorded")
+        ByteString.writeFile recordPath (recordDocument recorded)
+        outcome <- resolveCanonicalIssueReviewerAt (Just (root </> "empty")) recordPath
+        failureFor outcome `shouldMention` "was not found at"
+        failureFor outcome `shouldMention` "KANBAN_ISSUE_REVIEW_INSTALL_DIR selected"
+        failureFor outcome `shouldNotMention` Data.Text.pack recorded
+
+    it "reports a stale record when the backend it names is gone" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        _ <- installBackendAt root
+        ByteString.writeFile recordPath (recordDocument (root </> "moved" </> "approve_issues.py"))
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "was not found at"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldMention` "moved or was removed"
+
+    -- The old diagnostic named only the default path and recommended the
+    -- installer command; someone who had just run it successfully got no
+    -- new information. Every branch now names the document consulted.
+    it "names the record consulted when nothing is installed at the fallback" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "was not found at"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldMention` "No install directory is recorded at"
+
+    it "distinguishes an unreadable record from an absent one" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        _ <- installBackendAt root
+        ByteString.writeFile recordPath "{\"backend_path\": "
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "is unreadable"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldNotMention` "Error in $"
+        -- A record it cannot read must not quietly resolve the installation
+        -- sitting beside it: that is the case where the two could disagree.
+        failureFor outcome `shouldNotMention` "was not found at"
+
+    it "rejects a recorded backend path that names nothing resolvable" $
+      withTemporaryCacheRoot $ \root -> do
+        -- An install sits beside the record in every case, so a resolver that
+        -- fell through to the compatibility default would succeed here rather
+        -- than fail: that is the fail-open this pins shut.
+        _ <- installBackendAt root
+        let recordPath = root </> "config.json"
+            rejects document = do
+              ByteString.writeFile recordPath document
+              outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+              failureFor outcome `shouldMention` "is unreadable"
+              failureFor outcome `shouldNotMention` "was not found at"
+        rejects "[\"/opt/approve_issues.py\"]"
+        rejects "{\"backend_path\":42}"
+        rejects (recordDocument "opt/kanban-review/approve_issues.py")
+        -- An explicit null is a value the installer never writes, so it is a
+        -- record corrupted into naming nothing -- not the absent field that
+        -- means "installed before the record existed".
+        rejects "{\"backend_path\":null}"
+
+    it "treats a record link whose target is gone as unreadable, not absent" $
+      withTemporaryCacheRoot $ \root -> do
+        -- doesPathExist follows the link, so the dangling one it cannot
+        -- follow reads as "nothing here" unless the link itself is stat-ed.
+        -- The installer refuses to write through a link at this path, so a
+        -- reader that ran the fallback instead would disagree with it.
+        installed <- installBackendAt root
+        let recordPath = root </> "config.json"
+        createFileLink (root </> "gone.json") recordPath
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "is unreadable"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldNotMention` Data.Text.pack installed
+
+    it "treats a record path occupied by a directory as unreadable, not absent" $
+      withTemporaryCacheRoot $ \root -> do
+        -- Python's read raises rather than reporting "missing", so a
+        -- doesFileExist test here would fall through to the default backend
+        -- while every other consumer refused.
+        installed <- installBackendAt root
+        let recordPath = root </> "config.json"
+        createDirectoryIfMissing True recordPath
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "is unreadable"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldNotMention` Data.Text.pack installed
+
+    -- The environment entry point for the no-override path, kept hermetic by
+    -- redirecting HOME: it must reach the installer's record rather than the
+    -- pre-migration ~/work launcher the vendoring migration removed.
+    it "consults the installer's record, not ~/work, when no override is set" $
+      withTemporaryCacheRoot $ \root ->
+        withEnvironmentValue "HOME" root $
+          withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" $ do
+            recordPath <- issueReviewerRecordPath
+            recordPath `shouldBe` root </> "Library/Application Support/kanban/issue-review/config.json"
+            outcome <- resolveCanonicalIssueReviewer
+            failureFor outcome `shouldMention` "was not found at"
+            failureFor outcome `shouldMention` Data.Text.pack recordPath
+            failureFor outcome `shouldNotMention` "/work/approve-issues.py"
+
+    it "selects without asking whether the backend is there, so preflight can classify it" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+            absent = root </> "gone" </> "approve_issues.py"
+        ByteString.writeFile recordPath (recordDocument absent)
+        selectCanonicalIssueReviewerAt Nothing recordPath
+          `shouldReturn` Right (ReviewerFromRecord recordPath, absent)
+
   describe "PR drainer LaunchAgent discovery" $ do
     let entryFor label plist =
           "{\"launchd_label\":\""
@@ -7293,6 +7470,30 @@ suite = do
           environment <- gatherPreflightEnvironment root
           environment.environmentReviewBackend `shouldSatisfy` isMissingBackend
           blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ReviewBackendUnavailable]
+      -- Preflight parity with Kanban.Review: a --install-dir installation is
+      -- discovered through the installer's record with no environment
+      -- override at all. Without this, a custom install would review fine
+      -- from the board and still be reported as not installed.
+      it "reports a backend the installer recorded elsewhere as ready" $
+        withPreflightMachine fullyProvisionedFakes BackendRecordedElsewhere $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          case environment.environmentReviewBackend of
+            ReviewBackendReadyAt path ->
+              Data.Text.pack path `shouldMention` "/issue-review/approve_issues.py"
+            other -> expectationFailure ("expected a ready backend, got " <> show other)
+          blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
+      -- Not knowing which path to look at is an earlier failure than finding
+      -- nothing there, and it has a different repair.
+      it "reports an unreadable install record rather than an uninstalled backend" $
+        withPreflightMachine fullyProvisionedFakes BackendRecordUnreadable $ \root _ -> do
+          environment <- gatherPreflightEnvironment root
+          case environment.environmentReviewBackend of
+            ReviewBackendUnresolved detail -> do
+              detail `shouldMention` "is unreadable"
+              detail `shouldMention` "/issue-review/config.json"
+            other -> expectationFailure ("expected an unresolved backend, got " <> show other)
+          blockedProblems environment (ActionIssueReview IssueOriginCodex)
+            `shouldBe` [ReviewBackendUnavailable]
       it "reports an unauthenticated GitHub CLI" $
         withPreflightMachine [readyCodexFake, readyClaudeFake, signedOutGitHubFake, python3Fake] BackendInstalled $
           \root _ -> do

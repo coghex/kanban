@@ -5,6 +5,8 @@ module Kanban.Review
     CommandBounds (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
+    IssueReviewerRecord (..),
+    IssueReviewerSource (..),
     ReviewAnswer (..),
     ReviewApproval (..),
     ReviewChoice (..),
@@ -41,6 +43,9 @@ module Kanban.Review
     githubLabelCreateArguments,
     handleWireMessage,
     interruptReview,
+    issueReviewerNotFoundMessage,
+    issueReviewerRecordFromBytes,
+    issueReviewerRecordPath,
     killReviewTools,
     killThreadToolProcesses,
     newRecordingReviewClientForTesting,
@@ -51,11 +56,14 @@ module Kanban.Review
     renderCanonicalIssueReviewResult,
     reserveToolSlot,
     resolveCanonicalIssueReviewer,
+    resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
     runAuthenticatedClaude,
     runCanonicalCommand,
     runCanonicalIssueReview,
     runGitHubIssueTool,
+    selectCanonicalIssueReviewer,
+    selectCanonicalIssueReviewerAt,
     sendReviewMessage,
     startReviewClient,
     stopReviewClient,
@@ -73,11 +81,13 @@ import Data.Aeson
     Result (..),
     Value (..),
     eitherDecode,
+    eitherDecodeStrict,
     encode,
     fromJSON,
     object,
     withObject,
     (.:),
+    (.:!),
     (.:?),
     (.!=),
     (.=),
@@ -109,10 +119,12 @@ import Kanban.CommandCapture
   )
 import Kanban.Domain (Repository (..), WorkflowConfig (..), defaultWorkflowConfig)
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
+import Kanban.Text (withoutJsonPath)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
-import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Directory (doesFileExist, doesPathExist, findExecutable, getHomeDirectory, pathIsSymbolicLink)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (BufferMode (..), Handle, hClose, hFlush, hIsEOF, hSetBuffering)
 import System.Process
   ( CreateProcess (..),
@@ -530,36 +542,199 @@ reviewStageForLabels config labels
     foldedLabels = map Text.toCaseFold labels
     hasLabel name = Text.toCaseFold name `elem` foldedLabels
 
--- | The Kanban-managed install location for the vendored canonical
--- issue-review backend (@tools\/approve_issues.py@), independent of which
--- repository is under review — the same stable directory
--- @tools\/install_issue_review.py@ populates in the same manner as the PR
--- drainer installer. Overridable with @KANBAN_ISSUE_REVIEW_INSTALL_DIR@ for
--- an alternate install or a test fixture.
-canonicalIssueReviewerPath :: IO FilePath
-canonicalIssueReviewerPath = do
-  override <- lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
-  case override of
-    Just installDir | not (null installDir) -> pure (installDir <> "/approve_issues.py")
-    _ -> do
-      home <- getHomeDirectory
-      pure (home <> "/Library/Application Support/kanban/issue-review/approve_issues.py")
+-- | The vendored canonical issue-review backend inside a given install
+-- directory. The only path this module composes, and it composes it with
+-- 'System.FilePath' rather than an embedded separator — the directory
+-- itself is never reconstructed here, it arrives from the environment or
+-- from the installer's own record.
+canonicalIssueReviewerPath :: FilePath -> FilePath
+canonicalIssueReviewerPath installDir = installDir </> "approve_issues.py"
 
--- | Resolve the bundled canonical issue reviewer, failing with a
--- remediation-oriented diagnostic when it has not been installed yet.
+-- | What @tools\/install_issue_review.py@ recorded about the backend it
+-- installed. Only the backend's location crosses the boundary: what the
+-- reviewer is and how it is invoked belong to
+-- 'canonicalIssueReviewArguments' and are never read from here.
+newtype IssueReviewerRecord = IssueReviewerRecord
+  { -- | The installed @approve_issues.py@, absolute. 'Nothing' is a
+    -- document written before this field existed — the installer has always
+    -- written a @config.json@ for @--config@, so a well-formed record with
+    -- no discovery field means "installed by an older version", not
+    -- "broken", and takes the compatibility fallback.
+    issueReviewerRecordBackend :: Maybe FilePath
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON IssueReviewerRecord where
+  parseJSON = withObject "issue-review install record" $ \value ->
+    -- @.:!@, not @.:?@: only an /absent/ field means "written before this
+    -- field existed". An explicit @null@ is a value this installer never
+    -- writes, so it is a record edited or corrupted into naming nothing —
+    -- fail-closed, exactly as a wrong-typed value is, and exactly as the
+    -- Python consumers read it. @.:?@ collapses those two cases into the
+    -- compatibility fallback and would silently run a different install.
+    IssueReviewerRecord <$> value .:! "backend_path"
+
+-- | The fixed document @tools\/install_issue_review.py@ records the
+-- installed backend in. Deliberately not derived from
+-- @KANBAN_ISSUE_REVIEW_INSTALL_DIR@: an install made with @--install-dir@
+-- still has to be discoverable by a dashboard that never saw that option, so
+-- the record's own path is the one thing that cannot move. Spelled as a
+-- single literal, exactly as 'Kanban.Drainer.drainerRecordPath' is, because
+-- that spelling is what @docs\/agent-workflow-contract.md@'s manifest
+-- reconciles this side of the boundary against.
+issueReviewerRecordPath :: IO FilePath
+issueReviewerRecordPath = do
+  home <- getHomeDirectory
+  pure (home <> "/Library/Application Support/kanban/issue-review/config.json")
+
+-- | Reads the record, separating a document that cannot be used from one
+-- that simply predates the discovery field. A non-absolute recorded path
+-- would be resolved against whatever directory Kanban happened to be run
+-- from, so it names nothing and is rejected here rather than handed on.
+issueReviewerRecordFromBytes :: ByteString.ByteString -> Either Text IssueReviewerRecord
+issueReviewerRecordFromBytes bytes = case eitherDecodeStrict bytes of
+  Left message -> Left (withoutJsonPath (Text.pack message))
+  Right record -> case record.issueReviewerRecordBackend of
+    Just backend
+      | not (isAbsolute backend) ->
+          Left ("its recorded backend path is not absolute: " <> Text.pack backend)
+    _ -> Right record
+
+-- | Which of the three sources named the reviewer. Carried so a diagnostic
+-- can say what was actually consulted: naming the default install path to
+-- someone who installed elsewhere is what made the old message recommend the
+-- command they had just run successfully.
+data IssueReviewerSource
+  = -- | @KANBAN_ISSUE_REVIEW_INSTALL_DIR@ selected this install directory.
+    ReviewerFromEnvironment FilePath
+  | -- | The record at this path named the backend.
+    ReviewerFromRecord FilePath
+  | -- | The record at this path exists but predates the discovery field, or
+    -- is absent entirely, so the directory holding it is the install.
+    ReviewerFromDefault FilePath
+  deriving stock (Eq, Show)
+
+-- | Select where the canonical reviewer should be, without yet asking
+-- whether it is there. Preflight needs the selection alone: it tells a
+-- never-installed path apart from one occupied by something else, and a
+-- resolution that failed on absence would collapse that distinction.
+--
+-- Precedence is @KANBAN_ISSUE_REVIEW_INSTALL_DIR@, then the recorded
+-- backend, then the directory the record itself lives in. An override that
+-- is set selects, and a record that names a backend selects, whether or not
+-- what they name exists — falling through to a lower-precedence location
+-- would silently review with an installation the user did not choose.
+selectCanonicalIssueReviewerAt ::
+  Maybe String -> FilePath -> IO (Either Text (IssueReviewerSource, FilePath))
+selectCanonicalIssueReviewerAt override recordPath = case override of
+  Just installDir
+    | not (null (trimmed installDir)) ->
+        pure (Right (ReviewerFromEnvironment installDir, canonicalIssueReviewerPath installDir))
+  _ -> do
+    -- Absence is decided by whether anything occupies the path, not by
+    -- whether something readable does. A directory, or a symbolic link
+    -- whose target is gone, is a record that cannot be read rather than one
+    -- that was never written; treating either as absent would fall through
+    -- to the default backend and silently run an installation the record
+    -- does not name. 'doesPathExist' follows links, so a dangling one needs
+    -- the @lstat@ that 'pathIsSymbolicLink' does — and it throws when
+    -- nothing is there at all, which is the genuinely absent case. The
+    -- installer refuses to write through a link here for the same reason.
+    -- Anything present is read, and a read that fails becomes the
+    -- unreadable-record diagnostic below.
+    recorded <- recordPathOccupied recordPath
+    if not recorded
+      then pure (Right compatibilityFallback)
+      else do
+        contents <- try @IOException (ByteString.readFile recordPath)
+        case fmap issueReviewerRecordFromBytes contents of
+          Left _ -> pure (Left (unreadableRecord "it could not be read"))
+          Right (Left message) -> pure (Left (unreadableRecord message))
+          Right (Right record) -> pure . Right $ case record.issueReviewerRecordBackend of
+            Nothing -> compatibilityFallback
+            Just backend -> (ReviewerFromRecord recordPath, backend)
+  where
+    trimmed = Text.unpack . Text.strip . Text.pack
+
+    compatibilityFallback =
+      ( ReviewerFromDefault recordPath,
+        canonicalIssueReviewerPath (takeDirectory recordPath)
+      )
+
+    unreadableRecord detail =
+      "The canonical issue reviewer's install record at "
+        <> Text.pack recordPath
+        <> " is unreadable ("
+        <> detail
+        <> "). Rewrite it by running `python3 tools/install_issue_review.py` from the "
+        <> "Kanban checkout, adding --install-dir if the backend lives elsewhere."
+
+-- | Whether anything at all occupies the record's path, including an entry
+-- that cannot be followed to a file. Deliberately not @doesFileExist@ or
+-- @doesPathExist@ alone: both answer "is there something readable here",
+-- and the question this has to answer is "was a record ever written here",
+-- whose only fail-closed reading of a directory or a dangling link is yes.
+recordPathOccupied :: FilePath -> IO Bool
+recordPathOccupied path = do
+  present <- doesPathExist path
+  if present
+    then pure True
+    else either (const False) id <$> try @IOException (pathIsSymbolicLink path)
+
+-- | 'selectCanonicalIssueReviewerAt' against the real environment.
+selectCanonicalIssueReviewer :: IO (Either Text (IssueReviewerSource, FilePath))
+selectCanonicalIssueReviewer = do
+  override <- lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
+  recordPath <- issueReviewerRecordPath
+  selectCanonicalIssueReviewerAt override recordPath
+
+-- | Why the selected reviewer is not where it was selected from. Each source
+-- gets its own repair, because the useful next step differs: an override
+-- names a directory nothing installed into, a record names an install that
+-- has since moved or been removed, and only the compatibility fallback is
+-- repaired by the bare installer command.
+issueReviewerNotFoundMessage :: IssueReviewerSource -> FilePath -> Text
+issueReviewerNotFoundMessage source scriptPath =
+  "Canonical issue reviewer was not found at " <> Text.pack scriptPath <> ". " <> repair
+  where
+    repair = case source of
+      ReviewerFromEnvironment installDir ->
+        "KANBAN_ISSUE_REVIEW_INSTALL_DIR selected "
+          <> Text.pack installDir
+          <> "; install there with `python3 tools/install_issue_review.py --install-dir "
+          <> Text.pack installDir
+          <> "`, or unset that variable to use the recorded installation."
+      ReviewerFromRecord recordPath ->
+        "The install record at "
+          <> Text.pack recordPath
+          <> " still names it, so the installation moved or was removed; re-run "
+          <> "`python3 tools/install_issue_review.py` from the Kanban checkout with the "
+          <> "--install-dir you want, which also refreshes that record."
+      ReviewerFromDefault recordPath ->
+        "No install directory is recorded at "
+          <> Text.pack recordPath
+          <> ", so this default was used. Run `python3 tools/install_issue_review.py` "
+          <> "from the Kanban checkout to install and record it."
+
+-- | Resolve the bundled canonical issue reviewer, failing with a diagnostic
+-- that names what was actually consulted.
+resolveCanonicalIssueReviewerAt :: Maybe String -> FilePath -> IO (Either Text FilePath)
+resolveCanonicalIssueReviewerAt override recordPath = do
+  selected <- selectCanonicalIssueReviewerAt override recordPath
+  case selected of
+    Left message -> pure (Left message)
+    Right (source, scriptPath) -> do
+      scriptExists <- doesFileExist scriptPath
+      pure $
+        if scriptExists
+          then Right scriptPath
+          else Left (issueReviewerNotFoundMessage source scriptPath)
+
 resolveCanonicalIssueReviewer :: IO (Either Text FilePath)
 resolveCanonicalIssueReviewer = do
-  scriptPath <- canonicalIssueReviewerPath
-  scriptExists <- doesFileExist scriptPath
-  pure $
-    if scriptExists
-      then Right scriptPath
-      else
-        Left
-          ( "Canonical issue reviewer was not found at "
-              <> Text.pack scriptPath
-              <> ". Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
-          )
+  override <- lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
+  recordPath <- issueReviewerRecordPath
+  resolveCanonicalIssueReviewerAt override recordPath
 
 runCanonicalIssueReview :: Maybe FilePath -> Repository -> Int -> ReviewStage -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)
 runCanonicalIssueReview configPath repository issueNumber stage processStarted

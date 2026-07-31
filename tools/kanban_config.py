@@ -6,6 +6,12 @@ Both sides must agree on the same file; see that module for the semantics
 this loader replicates (default path, missing-file defaults, malformed/
 invalid-value errors, unknown-key warnings, global-only keys, repository
 override merge/array-replacement rules).
+
+This module is also the one place the issue-review backend's own install
+location is written down. It is the only tracked module installed alongside
+`approve_issues.py`, so it is the only one that both the installer and the
+installed backend can import -- which is what keeps that location from being
+restated once per component. See issue_review_record_path() below.
 """
 
 from __future__ import annotations
@@ -25,6 +31,44 @@ KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-review/kanban_config.py"
 
 class KanbanConfigError(Exception):
     pass
+
+
+# The Kanban-managed install location for the canonical issue-review backend
+# (docs/agent-workflow-contract.md §5), spelled here once. `approve_issues.py`,
+# `install_issue_review.py` and `setup_workflows.py` all import it rather than
+# rebuilding it, so `--install-dir` cannot move one component's idea of the
+# default without moving every component's.
+ISSUE_REVIEW_INSTALL_DIR_ENV = "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
+
+
+def default_issue_review_install_dir() -> Path:
+    # Resolved per call rather than frozen at import, exactly as
+    # default_config_path() below is: freezing it would bind whatever $HOME
+    # held when the module first loaded, which a test that redirects $HOME --
+    # or any process that changes it -- would then silently escape.
+    return Path(f"{Path.home()}/Library/Application Support/kanban/issue-review")
+
+
+def issue_review_record_path() -> Path:
+    """Where the installer records which backend it actually installed, so
+    Kanban discovers an `--install-dir` installation it never saw the option
+    for. Fixed rather than install-dir-relative on purpose: a dashboard that
+    inherits no environment still has to find it, so the record's own path is
+    the one thing that cannot move. Read by src/Kanban/Review.hs and by both
+    packaged PR coordinators; written only by
+    tools/install_issue_review.py."""
+    return default_issue_review_install_dir() / "config.json"
+
+
+def issue_review_install_dir() -> Path:
+    """The install directory an issue-review component should treat as its
+    own. The environment override wins, exactly as it does for every consumer
+    that resolves the backend; the default is the directory the discovery
+    record lives in."""
+    override = os.environ.get(ISSUE_REVIEW_INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return default_issue_review_install_dir()
 
 
 APPROVAL_MODES = {"label", "review", "either"}

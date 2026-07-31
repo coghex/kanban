@@ -63,12 +63,11 @@ REVIEW_TIMEOUT_SECONDS = 60 * 60
 # opts in explicitly. Nothing here may require ~/work or
 # ~/.codex/skills/approve-issues, which a fresh checkout does not have.
 HOME = Path.home()
-INSTALL_DIR = Path(
-    os.environ.get(
-        "KANBAN_ISSUE_REVIEW_INSTALL_DIR",
-        str(HOME / "Library" / "Application Support" / "kanban" / "issue-review"),
-    )
-).expanduser()
+# Imported rather than rebuilt: kanban_config is the only tracked module
+# installed beside this backend, so it is where the install location is
+# written down once (see issue_review_record_path there). A second spelling
+# here is exactly the drift issue #155 removed.
+INSTALL_DIR = kanban_config.issue_review_install_dir()
 DEFAULT_LOG_DIR = HOME / "Library" / "Logs" / "kanban" / "issue-review"
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"

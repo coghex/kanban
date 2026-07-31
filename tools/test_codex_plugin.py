@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import py_compile
 import re
 import subprocess
@@ -375,18 +376,31 @@ class NoPersonalPathTests(unittest.TestCase):
 
 class IssueReviewBackendResolutionTests(unittest.TestCase):
     """The coordinator's approver_path() must resolve the canonical
-    issue-review backend the same way Kanban.Review.canonicalIssueReviewerPath
-    does, never a personal ~/work/approve-issues.py default."""
+    issue-review backend with the same precedence
+    Kanban.Review.resolveCanonicalIssueReviewer uses -- environment override,
+    then the installer's discovery record, then the directory that record
+    lives in -- and never a personal ~/work/approve-issues.py default."""
 
     def test_review_pr_matches_the_haskell_canonical_resolution(self):
+        # Both sides read one document rather than each rebuilding a default,
+        # so what has to match is the record's location and the field in it.
         review_hs_source = REVIEW_HS.read_text(encoding="utf-8")
         self.assertIn('lookupEnv "KANBAN_ISSUE_REVIEW_INSTALL_DIR"', review_hs_source)
-        self.assertIn("Library/Application Support/kanban/issue-review/approve_issues.py", review_hs_source)
+        self.assertIn("Library/Application Support/kanban/issue-review/config.json", review_hs_source)
+        self.assertIn('"backend_path"', review_hs_source)
+        # The default install directory is Python's to own now; Haskell
+        # derives it from the record's own path instead of respelling it.
+        self.assertNotIn(
+            "Library/Application Support/kanban/issue-review/approve_issues.py",
+            review_hs_source,
+        )
 
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")', coordinator_source)
-        for segment in ('"Library"', '"Application Support"', '"kanban"', '"issue-review"'):
-            self.assertIn(segment, coordinator_source, f"approver_path() must build the canonical {segment} segment")
+        self.assertIn(
+            "Library/Application Support/kanban/issue-review/config.json", coordinator_source
+        )
+        self.assertIn('"backend_path"', coordinator_source)
         self.assertIn("approve_issues.py", coordinator_source)
         self.assertNotIn('"work" / "approve-issues.py"', coordinator_source)
         self.assertIn("python3 tools/install_issue_review.py", coordinator_source)
@@ -398,7 +412,8 @@ class IssueReviewBackendResolutionTests(unittest.TestCase):
         # tools/approve_issues.py itself.
         solve_source = (SKILLS_ROOT / "solve" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR", solve_source)
-        self.assertIn("Library/Application Support/kanban/issue-review/approve_issues.py", solve_source)
+        self.assertIn("Library/Application Support/kanban/issue-review/config.json", solve_source)
+        self.assertIn("backend_path", solve_source)
         self.assertIn("python3 tools/install_issue_review.py", solve_source)
 
 
@@ -1115,6 +1130,136 @@ class SharedCoordinatorReferenceTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             found = [line for line in proc.stdout.splitlines() if line]
             self.assertEqual(found, [str(installed)])
+
+
+class ApproverPathResolutionTests(unittest.TestCase):
+    """The coordinator's own resolution behaviour, not just its source text:
+    the same override/record/fallback precedence Kanban.Review uses, so a
+    custom installation cannot pass the dashboard's gate and fail this one
+    (issue #155)."""
+
+    def setUp(self):
+        self.module = load_review_pr_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.record_path = (
+            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+        )
+        self.record_path.parent.mkdir(parents=True)
+        # $HOME redirected so the fixed record path lands inside this
+        # temporary machine; the developer's own record is never read.
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("KANBAN_ISSUE_REVIEW_INSTALL_DIR", None)
+
+    def install_backend(self, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        backend = directory / "approve_issues.py"
+        backend.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        return backend
+
+    def write_record(self, document):
+        self.record_path.write_text(document, encoding="utf-8")
+
+    def test_resolves_the_backend_the_record_names(self):
+        backend = self.install_backend(self.root / "opt" / "kanban-review")
+        self.write_record(json.dumps({"backend_path": str(backend)}))
+        self.assertEqual(self.module.approver_path(), backend)
+
+    def test_falls_back_to_the_records_own_directory_when_no_record_exists(self):
+        backend = self.install_backend(self.record_path.parent)
+        self.assertEqual(self.module.approver_path(), backend)
+
+    def test_falls_back_for_a_legacy_document_with_only_a_config_reference(self):
+        backend = self.install_backend(self.record_path.parent)
+        self.write_record(json.dumps({"config_path": "/Users/example/kanban.toml"}))
+        self.assertEqual(self.module.approver_path(), backend)
+
+    def test_the_environment_override_wins_over_the_record(self):
+        self.install_backend(self.root / "recorded")
+        selected = self.install_backend(self.root / "selected")
+        self.write_record(
+            json.dumps({"backend_path": str(self.root / "recorded" / "approve_issues.py")})
+        )
+        with mock.patch.dict(
+            os.environ, {"KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(self.root / "selected")}
+        ):
+            self.assertEqual(self.module.approver_path(), selected)
+
+    def test_a_missing_override_does_not_fall_through_to_the_record(self):
+        recorded = self.install_backend(self.root / "recorded")
+        self.write_record(json.dumps({"backend_path": str(recorded)}))
+        with mock.patch.dict(
+            os.environ, {"KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(self.root / "empty")}
+        ):
+            with self.assertRaises(self.module.WorkflowError) as raised:
+                self.module.approver_path()
+        self.assertIn("KANBAN_ISSUE_REVIEW_INSTALL_DIR selected", str(raised.exception))
+        self.assertNotIn(str(recorded), str(raised.exception))
+
+    def test_a_stale_record_names_the_record_it_came_from(self):
+        self.install_backend(self.record_path.parent)
+        self.write_record(
+            json.dumps({"backend_path": str(self.root / "gone" / "approve_issues.py")})
+        )
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        message = str(raised.exception)
+        self.assertIn("was not found at", message)
+        self.assertIn(str(self.record_path), message)
+
+    def test_an_unreadable_record_is_not_treated_as_absent(self):
+        self.install_backend(self.record_path.parent)
+        self.write_record('{"backend_path": ')
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        self.assertIn("is unreadable", str(raised.exception))
+
+    def test_a_recorded_path_that_is_not_an_absolute_string_is_rejected(self):
+        # An install sits at the fallback directory in every case, so a
+        # resolver that fell through would succeed here rather than fail.
+        self.install_backend(self.record_path.parent)
+        for document in (
+            '["/opt/approve_issues.py"]',
+            '{"backend_path": 42}',
+            '{"backend_path": "opt/approve_issues.py"}',
+            # An explicit null is a value the installer never writes, so it is
+            # a record corrupted into naming nothing -- not the absent field
+            # that means "installed before the record existed".
+            '{"backend_path": null}',
+        ):
+            with self.subTest(document=document):
+                self.write_record(document)
+                with self.assertRaises(self.module.WorkflowError) as raised:
+                    self.module.approver_path()
+                self.assertIn("is unreadable", str(raised.exception))
+
+    def test_a_record_link_whose_target_is_gone_is_unreadable_not_absent(self):
+        # read_text reports a dangling link as FileNotFoundError, which is
+        # indistinguishable from "never written" unless the link itself is
+        # stat-ed. The installer refuses to write through a link at this
+        # path, so a reader that ran the fallback would disagree with it.
+        backend = self.install_backend(self.record_path.parent)
+        self.record_path.symlink_to(self.root / "gone.json")
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        message = str(raised.exception)
+        self.assertIn("is unreadable", message)
+        self.assertIn(str(self.record_path), message)
+        self.assertNotIn(str(backend), message)
+
+    def test_a_record_path_occupied_by_a_directory_is_unreadable_not_absent(self):
+        backend = self.install_backend(self.record_path.parent)
+        self.record_path.mkdir()
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        message = str(raised.exception)
+        self.assertIn("is unreadable", message)
+        self.assertIn(str(self.record_path), message)
+        self.assertNotIn(str(backend), message)
 
 
 if __name__ == "__main__":
