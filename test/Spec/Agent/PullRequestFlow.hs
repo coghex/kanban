@@ -37,7 +37,7 @@ import Kanban.Solve
 import Kanban.StreamReader (handleReadLine)
 import Kanban.UI.AutoSolve (autoSolveRevisionPrompt)
 import Kanban.UI.Session (pullRequestSessionReusable)
-import Kanban.UI.Types (ChatTranscript (..), PullRequestReviewSession (..))
+import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), PullRequestDetail (..))
 import Kanban.UI.Worker (recoveredPullRequestSession)
 import Kanban.Worker
   ( PullRequestWorkerTask (..),
@@ -170,11 +170,11 @@ spec = do
     it "reattaches a persisted repair worker as a repair session on the PR's own brand" $ do
       let task = PullRequestWorkerTask 900 PullRequestClaude PullRequestRepair
           descriptor = repairWorkerDescriptor task
-          session = recoveredPullRequestSession descriptor approvedFixture task
-      session.pullRequestSessionAction `shouldBe` PullRequestRepair
-      session.pullRequestSessionOrigin `shouldBe` PullRequestClaude
-      session.pullRequestSessionBrand `shouldBe` ClaudeSolver
-      session.pullRequestSessionTranscript.fullTranscript `shouldSatisfy` Data.Text.isInfixOf "reattached persistent PR repair worker"
+          session = recoveredPullRequestSession 0 descriptor approvedFixture task
+      session.sessionDetail.pullRequestSessionAction `shouldBe` PullRequestRepair
+      session.sessionDetail.pullRequestSessionOrigin `shouldBe` PullRequestClaude
+      session.sessionDetail.pullRequestSessionBrand `shouldBe` ClaudeSolver
+      session.sessionTranscript.fullTranscript `shouldSatisfy` Data.Text.isInfixOf "reattached persistent PR repair worker"
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
       let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")

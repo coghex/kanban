@@ -1,9 +1,6 @@
 module Kanban.UI.Review
   ( ReviewCancelAction (..),
     ReviewDigitAction (..),
-    ReviewTickArmOutcome (..),
-    ReviewTickFireOutcome (..),
-    appendReviewInput,
     applyCanonicalIssueReview,
     applyReviewAnimationTick,
     applyReviewBackendStarted,
@@ -16,10 +13,6 @@ module Kanban.UI.Review
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
     chooseReviewOption,
-    cycleReviewSession,
-    decideReviewTickArm,
-    decideReviewTickFire,
-    removeReviewInputCharacter,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
@@ -32,10 +25,9 @@ where
 
 import Brick
 import Brick.BChan (writeBChan)
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Monad (unless, void )
 import Control.Monad.IO.Class (liftIO)
-import Data.List (findIndex, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -83,9 +75,11 @@ import Kanban.Settings
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.Transcript
 import Kanban.UI.Session
+import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
 import Kanban.UI.Solve
 import Kanban.UI.PullRequest
@@ -122,9 +116,9 @@ resolveReviewDigitAction pending choiceIndex = case pending of
 chooseReviewOption :: Int -> Int -> EventM Name AppState ()
 chooseReviewOption issueNumber choiceIndex = do
   state <- get
-  let pending = Map.lookup issueNumber state.appReviewSessions >>= (.reviewSessionPending)
+  let pending = Map.lookup issueNumber state.appReviewSessions >>= (.sessionDetail.reviewSessionPending)
   case resolveReviewDigitAction pending choiceIndex of
-    ReviewDigitAppend -> modifyReviewSession issueNumber (appendReviewInput (toEnum (fromEnum '1' + choiceIndex)))
+    ReviewDigitAppend -> modifyReviewSession issueNumber (insertSessionInput (toEnum (fromEnum '1' + choiceIndex)))
     ReviewDigitSelectChoice requestId choice -> submitQuestionAnswer issueNumber requestId (ReviewAnswer [choice.reviewChoiceId] Nothing) choice.reviewChoiceLabel
     ReviewDigitApprovalOnce requestId -> submitApprovalAnswer issueNumber requestId True False "Allowed this action once"
     ReviewDigitApprovalSession requestId -> submitApprovalAnswer issueNumber requestId True True "Allowed similar actions for this review session"
@@ -137,11 +131,11 @@ submitReviewInput issueNumber = do
   case Map.lookup issueNumber state.appReviewSessions of
     Nothing -> setNotice "Review session is no longer available"
     Just session
-      | Text.null (Text.strip session.reviewSessionInput) -> setNotice "Type a message or select one of the numbered choices"
-      | otherwise -> case session.reviewSessionPending of
+      | Text.null (Text.strip session.sessionInput) -> setNotice "Type a message or select one of the numbered choices"
+      | otherwise -> case session.sessionDetail.reviewSessionPending of
           Just (PendingReviewQuestion requestId question)
             | question.reviewQuestionKind == QuestionText || question.reviewQuestionAllowOther ->
-                let answerText = Text.strip session.reviewSessionInput
+                let answerText = Text.strip session.sessionInput
                  in submitQuestionAnswer issueNumber requestId (ReviewAnswer [] (Just answerText)) answerText
             | otherwise -> setNotice "This question requires one of the numbered choices"
           Just (PendingReviewApproval _ _) -> setNotice "Use 1, 2, or 3 to answer the approval request"
@@ -158,12 +152,11 @@ submitQuestionAnswer issueNumber requestId answer displayAnswer = do
         Right () ->
           appendToReviewSession issueNumber
             ( \session ->
-                session
-                  { reviewSessionPhase = ReviewRunning,
-                    reviewSessionActivity = "thinking",
-                    reviewSessionPending = Nothing,
-                    reviewSessionInput = "",
-                    reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\nYou: " <> displayAnswer <> "\n")
+                (clearPendingInteraction session)
+                  { sessionPhase = ReviewRunning,
+                    sessionActivity = "thinking",
+                    sessionInput = "",
+                    sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> displayAnswer <> "\n")
                   }
             )
           >> armReviewTick issueNumber
@@ -180,11 +173,10 @@ submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer = d
         Right () ->
           appendToReviewSession issueNumber
             ( \session ->
-                session
-                  { reviewSessionPhase = ReviewRunning,
-                    reviewSessionActivity = "thinking",
-                    reviewSessionPending = Nothing,
-                    reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> displayAnswer <> "\n")
+                (clearPendingInteraction session)
+                  { sessionPhase = ReviewRunning,
+                    sessionActivity = "thinking",
+                    sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> displayAnswer <> "\n")
                   }
             )
           >> armReviewTick issueNumber
@@ -193,22 +185,21 @@ submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer = d
 sendReviewFeedback :: Int -> ReviewSession -> EventM Name AppState ()
 sendReviewFeedback issueNumber session = do
   state <- get
-  case (state.appReviewBackend, session.reviewSessionThreadId) of
+  case (state.appReviewBackend, session.sessionDetail.reviewSessionThreadId) of
     (ReviewBackendReady client, Just threadId) -> do
-      let message = Text.strip session.reviewSessionInput
-      result <- liftIO (sendReviewMessage client threadId session.reviewSessionTurnId message)
+      let message = Text.strip session.sessionInput
+      result <- liftIO (sendReviewMessage client threadId session.sessionDetail.reviewSessionTurnId message)
       case result of
         Left errorMessage -> setNotice errorMessage
         Right () ->
           appendToReviewSession issueNumber
             ( \current ->
-                let (restored, stillUndelivered) = takeNextUndelivered current.reviewSessionUndelivered
-                 in current
-                      { reviewSessionInput = restored,
-                        reviewSessionUndelivered = stillUndelivered,
-                        reviewSessionPhase = ReviewRunning,
-                        reviewSessionActivity = "thinking",
-                        reviewSessionTranscript = appendReviewTranscript current.reviewSessionTranscript ("\nYou: " <> message <> "\n")
+                let (restored, stillUndelivered) = takeNextUndelivered current.sessionDetail.reviewSessionUndelivered
+                 in (withUndelivered stillUndelivered current)
+                      { sessionInput = restored,
+                        sessionPhase = ReviewRunning,
+                        sessionActivity = "thinking",
+                        sessionTranscript = appendTranscript current.sessionTranscript ("\nYou: " <> message <> "\n")
                       }
             )
     _ -> setNotice "The review session has not connected yet"
@@ -230,17 +221,25 @@ takeNextUndelivered (next : remaining) = (next, remaining)
 -- entry that would otherwise claim the message was delivered (issue #17).
 applyUndeliveredSteer :: Text -> ReviewSession -> ReviewSession
 applyUndeliveredSteer message session =
-  session
-    { reviewSessionInput = nextInput,
-      reviewSessionUndelivered = stillUndelivered,
-      reviewSessionTranscript =
-        appendReviewTranscript session.reviewSessionTranscript ("\n" <> undeliveredTranscriptNote message <> "\n")
+  (withUndelivered stillUndelivered session)
+    { sessionInput = nextInput,
+      sessionTranscript =
+        appendTranscript session.sessionTranscript ("\n" <> undeliveredTranscriptNote message <> "\n")
     }
   where
-    queued = session.reviewSessionUndelivered <> [message]
+    queued = session.sessionDetail.reviewSessionUndelivered <> [message]
     (nextInput, stillUndelivered)
-      | Text.null (Text.strip session.reviewSessionInput) = takeNextUndelivered queued
-      | otherwise = (session.reviewSessionInput, queued)
+      | Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
+      | otherwise = (session.sessionInput, queued)
+
+clearPendingInteraction :: ReviewSession -> ReviewSession
+clearPendingInteraction = withPendingInteraction Nothing
+
+withPendingInteraction :: Maybe PendingReviewInteraction -> ReviewSession -> ReviewSession
+withPendingInteraction pending = withSessionDetail (\detail -> detail {reviewSessionPending = pending})
+
+withUndelivered :: [Text] -> ReviewSession -> ReviewSession
+withUndelivered undelivered = withSessionDetail (\detail -> detail {reviewSessionUndelivered = undelivered})
 
 undeliveredTranscriptNote :: Text -> Text
 undeliveredTranscriptNote message = "[not delivered] " <> message
@@ -279,7 +278,7 @@ cancelReviewSession issueNumber = do
             ReviewBackendReady _ -> True
             _ -> False
           hasCanonicalProcess = Map.member issueNumber state.appCanonicalReviewProcesses
-      case resolveReviewCancelAction backendReady session.reviewSessionThreadId session.reviewSessionTurnId session.reviewSessionStage session.reviewSessionPhase hasCanonicalProcess of
+      case resolveReviewCancelAction backendReady session.sessionDetail.reviewSessionThreadId session.sessionDetail.reviewSessionTurnId session.sessionDetail.reviewSessionStage session.sessionPhase hasCanonicalProcess of
         ReviewCancelInterruptTurn threadId turnId -> case state.appReviewBackend of
           ReviewBackendReady client -> do
             void . liftIO . forkIO $ killReviewTools client threadId
@@ -308,26 +307,13 @@ cancelCanonicalReviewProcess issueNumber (Just process) = do
   appendToReviewSession issueNumber
     ( \session ->
         session
-          { reviewSessionPhase = ReviewInterrupted,
-            reviewSessionActivity = "interrupted",
-            reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[interrupted by user]\n"
+          { sessionPhase = ReviewInterrupted,
+            sessionActivity = "interrupted",
+            sessionTranscript = appendTranscript session.sessionTranscript "\n[interrupted by user]\n"
           }
     )
   void . liftIO . forkIO $ interruptThenKillManagedProcess process
   setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
-
-cycleReviewSession :: Int -> EventM Name AppState ()
-cycleReviewSession currentIssue = do
-  state <- get
-  let issueNumbers = map fst (sortOn fst (Map.toList state.appReviewSessions))
-      currentIndex = fromMaybe 0 (findIndex (== currentIssue) issueNumbers)
-      nextIssue = safeIndex ((currentIndex + 1) `mod` max 1 (length issueNumbers)) issueNumbers
-  case nextIssue of
-    Nothing -> pure ()
-    Just issueNumber -> do
-      modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
-      presentTranscriptTail
-      armVisibleReviewTicks
 
 appendReviewOutput :: ReviewOutputKind -> Text -> ChatTranscript -> ChatTranscript
 appendReviewOutput outputKind addition transcript =
@@ -383,12 +369,12 @@ startIssueReview issue = do
   let requestedStage = issueReviewStage state.appConfig.resolvedWorkflow issue
   case Map.lookup issue.issueNumber state.appReviewSessions of
     Just session
-      | reviewSessionReusable session.reviewSessionPhase session.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
+      | reviewSessionReusable session.sessionPhase session.sessionDetail.reviewSessionStage requestedStage (Map.member issue.issueNumber state.appCanonicalReviewProcesses) -> do
           modify (\current -> current {appOverlay = Just (ReviewOverlay issue.issueNumber), appNotice = Nothing})
           presentTranscriptTail
           armVisibleReviewTicks
     _ -> do
-      let priorGeneration = maybe 0 (.reviewSessionTickGeneration) (Map.lookup issue.issueNumber state.appReviewSessions)
+      let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
           session = newReviewSession issue requestedStage priorGeneration
       modify
         ( \current ->
@@ -412,34 +398,29 @@ startIssueReview issue = do
 issueReviewStage :: WorkflowConfig -> Issue -> ReviewStage
 issueReviewStage config issue = reviewStageForLabels config (map (.labelName) issue.issueLabels)
 
--- | 'priorGeneration' must be 0 for an issue with no previous session, or
--- the replaced session's 'reviewSessionTickGeneration' when 'startIssueReview'
--- discards a non-reusable one (e.g. its stage no longer matches current
--- labels). A tick queued by that old session can still be delivered before
--- this replacement ever arms its own chain, and by the time it arrives
--- this session is already visible and 'ReviewStarting' -- eligible -- so
--- the generation must already be past whatever that old tick carries
--- *at construction time*, not only from this session's own eventual first
--- arm (issue #30 round-3 review). Bumping past 'priorGeneration' here
--- achieves that regardless of when the first arm happens.
+-- | A fresh review session. 'priorGeneration' must be 0 for an issue with no
+-- previous session, or the replaced session's 'sessionTickGeneration' when
+-- 'startIssueReview' discards a non-reusable one (e.g. its stage no longer
+-- matches current labels); 'newAgentSession' carries the construction-time
+-- bump past it that keeps a tick the old session already queued from
+-- colliding with this one before it has armed a chain of its own (issue #30
+-- round-3 review, now shared by every kind).
 newReviewSession :: Issue -> ReviewStage -> Int -> ReviewSession
 newReviewSession issue stage priorGeneration =
-  ReviewSession
-    { reviewSessionIssue = issue,
-      reviewSessionStage = stage,
-      reviewSessionThreadId = Nothing,
-      reviewSessionTurnId = Nothing,
-      reviewSessionPhase = ReviewStarting,
-      reviewSessionActivity = if stage == IssueRevision then "starting coordinator" else "running canonical gate",
-      reviewSessionTranscript = plainTranscript (if stage == IssueRevision then "" else "Running canonical issue-review:v2 gate…\n"),
-      reviewSessionPending = Nothing,
-      reviewSessionInput = "",
-      reviewSessionUndelivered = [],
-      reviewSessionSpinnerFrame = 0,
-      reviewSessionTickGeneration = priorGeneration + 1,
-      reviewSessionTickArmed = False,
-      reviewSessionFollowing = True
-    }
+  newAgentSession
+    priorGeneration
+    ReviewStarting
+    (if stage == IssueRevision then "starting coordinator" else "running canonical gate")
+    Nothing
+    (plainTranscript (if stage == IssueRevision then "" else "Running canonical issue-review:v2 gate…\n"))
+    ReviewDetail
+      { reviewSessionIssue = issue,
+        reviewSessionStage = stage,
+        reviewSessionThreadId = Nothing,
+        reviewSessionTurnId = Nothing,
+        reviewSessionPending = Nothing,
+        reviewSessionUndelivered = []
+      }
 
 launchCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
 launchCanonicalIssueReview issue stage = do
@@ -465,15 +446,15 @@ applyCanonicalIssueReview :: Int -> ReviewStage -> Either Text CanonicalIssueRev
 applyCanonicalIssueReview issueNumber stage result = do
   modify (\current -> current {appCanonicalReviewProcesses = Map.delete issueNumber current.appCanonicalReviewProcesses})
   state <- get
-  let superseded = maybe False (canonicalReviewCompletionSuperseded . (.reviewSessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
+  let superseded = maybe False (canonicalReviewCompletionSuperseded . (.sessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
   unless superseded $ do
     appendToReviewSession issueNumber $ \session -> case result of
-      Left message -> session {reviewSessionPhase = ReviewFailed, reviewSessionActivity = canonicalReviewActivity message, reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> sanitizeText message <> "\n")}
+      Left message -> session {sessionPhase = ReviewFailed, sessionActivity = canonicalReviewActivity message, sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText message <> "\n")}
       Right canonicalResult ->
         session
-          { reviewSessionPhase = if canonicalResult.canonicalReviewApproved then ReviewFinished else ReviewNeedsChanges,
-            reviewSessionActivity = if canonicalResult.canonicalReviewApproved then "approved" else "changes requested",
-            reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> renderCanonicalIssueReviewResult stage canonicalResult)
+          { sessionPhase = if canonicalResult.canonicalReviewApproved then ReviewFinished else ReviewNeedsChanges,
+            sessionActivity = if canonicalResult.canonicalReviewApproved then "approved" else "changes requested",
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> renderCanonicalIssueReviewResult stage canonicalResult)
           }
     startBoardRefresh
     setNotice (case result of Left message -> canonicalReviewNotice message; Right _ -> stageActivity stage <> " completed with issue-review:v2 state")
@@ -563,18 +544,18 @@ applyReviewBackendStarted result = case result of
     sessions <- Map.elems . (.appReviewSessions) <$> get
     mapM_
       ( \session ->
-          if session.reviewSessionStage == IssueRevision && session.reviewSessionPhase == ReviewStarting && session.reviewSessionThreadId == Nothing
-            then launchIssueReview client session.reviewSessionIssue
+          if session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase == ReviewStarting && session.sessionDetail.reviewSessionThreadId == Nothing
+            then launchIssueReview client session.sessionDetail.reviewSessionIssue
             else pure ()
       )
       sessions
   where
     failStartingSession message session
-      | session.reviewSessionStage == IssueRevision && session.reviewSessionPhase == ReviewStarting =
+      | session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase == ReviewStarting =
           session
-            { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = canonicalReviewActivity message,
-              reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
+            { sessionPhase = ReviewFailed,
+              sessionActivity = canonicalReviewActivity message,
+              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
             }
       | otherwise = session
 
@@ -583,21 +564,20 @@ applyReviewEvent reviewEvent = case reviewEvent of
   ReviewThreadCreated issueNumber threadId ->
     appendToReviewSession issueNumber
       ( \session ->
-          session
-            { reviewSessionThreadId = Just threadId,
-              reviewSessionActivity = "session ready",
-              reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "Codex session created.\n"
+          (withSessionDetail (\detail -> detail {reviewSessionThreadId = Just threadId}) session)
+            { sessionActivity = "session ready",
+              sessionTranscript = appendTranscript session.sessionTranscript "Codex session created.\n"
             }
       )
   ReviewTurnStarted threadId turnId -> do
     modifyReviewSessionByThread threadId
       ( \session ->
-          session
-            { reviewSessionTurnId = Just turnId,
-              reviewSessionPhase = ReviewRunning,
-              reviewSessionActivity = "thinking",
-              reviewSessionPending = Nothing,
-              reviewSessionFollowing = followAfterTurnStarted session.reviewSessionFollowing session.reviewSessionTurnId turnId
+          ( clearPendingInteraction
+              (withSessionDetail (\detail -> detail {reviewSessionTurnId = Just turnId}) session)
+          )
+            { sessionPhase = ReviewRunning,
+              sessionActivity = "thinking",
+              sessionFollowing = followAfterTurnStarted session.sessionFollowing session.sessionDetail.reviewSessionTurnId turnId
             }
       )
     state <- get
@@ -611,37 +591,35 @@ applyReviewEvent reviewEvent = case reviewEvent of
         modifyReviewSessionByThread threadId
           ( \session ->
               session
-                { reviewSessionTranscript =
-                    appendReviewOutput outputKind (reviewOutputPrefix outputKind <> sanitizeText delta) session.reviewSessionTranscript,
-                  reviewSessionActivity = reviewOutputActivity outputKind
+                { sessionTranscript =
+                    appendReviewOutput outputKind (reviewOutputPrefix outputKind <> sanitizeText delta) session.sessionTranscript,
+                  sessionActivity = reviewOutputActivity outputKind
                 }
           )
         tailReviewThread threadId
   ReviewQuestionRequested threadId requestId question ->
     modifyReviewSessionByThread threadId
       ( \session ->
-          session
-            { reviewSessionPhase = ReviewWaiting,
-              reviewSessionActivity = "waiting for answer",
-              reviewSessionPending = Just (PendingReviewQuestion requestId question)
+          (withPendingInteraction (Just (PendingReviewQuestion requestId question)) session)
+            { sessionPhase = ReviewWaiting,
+              sessionActivity = "waiting for answer"
             }
       )
   ReviewApprovalRequested threadId requestId approval ->
     modifyReviewSessionByThread threadId
       ( \session ->
-          session
-            { reviewSessionPhase = ReviewWaiting,
-              reviewSessionActivity = "waiting for approval",
-              reviewSessionPending = Just (PendingReviewApproval requestId approval)
+          (withPendingInteraction (Just (PendingReviewApproval requestId approval)) session)
+            { sessionPhase = ReviewWaiting,
+              sessionActivity = "waiting for approval"
             }
       )
   ReviewClaudeStarted threadId -> do
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { reviewSessionTranscript =
-                appendReviewTranscript session.reviewSessionTranscript "\n[sonnet] Starting authenticated Sonnet 5 high…\n",
-              reviewSessionActivity = "running Claude reviewer"
+            { sessionTranscript =
+                appendTranscript session.sessionTranscript "\n[sonnet] Starting authenticated Sonnet 5 high…\n",
+              sessionActivity = "running Claude reviewer"
             }
       )
     tailReviewThread threadId
@@ -649,9 +627,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { reviewSessionTranscript =
-                appendReviewTranscript session.reviewSessionTranscript ("[opus] " <> completionMessage result <> "\n"),
-              reviewSessionActivity = "processing reviewer result"
+            { sessionTranscript =
+                appendTranscript session.sessionTranscript ("[opus] " <> completionMessage result <> "\n"),
+              sessionActivity = "processing reviewer result"
             }
       )
     tailReviewThread threadId
@@ -659,9 +637,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { reviewSessionTranscript =
-                appendReviewTranscript session.reviewSessionTranscript ("\n[github] " <> sanitizeText summary <> "\n"),
-              reviewSessionActivity = "updating GitHub"
+            { sessionTranscript =
+                appendTranscript session.sessionTranscript ("\n[github] " <> sanitizeText summary <> "\n"),
+              sessionActivity = "updating GitHub"
             }
       )
     tailReviewThread threadId
@@ -669,25 +647,32 @@ applyReviewEvent reviewEvent = case reviewEvent of
     modifyReviewSessionByThread threadId
       ( \session ->
           session
-            { reviewSessionTranscript =
-                appendReviewTranscript session.reviewSessionTranscript ("[github] " <> githubCompletionMessage result <> "\n"),
-              reviewSessionActivity = "processing GitHub result"
+            { sessionTranscript =
+                appendTranscript session.sessionTranscript ("[github] " <> githubCompletionMessage result <> "\n"),
+              sessionActivity = "processing GitHub result"
             }
       )
     tailReviewThread threadId
   ReviewTurnCompleted threadId outcome message result -> do
     modifyReviewSessionByThread threadId
       ( \session ->
-          let completedStage = maybe session.reviewSessionStage (reviewResultStage . snd) result
-           in session
-                { reviewSessionStage = completedStage,
-                  reviewSessionTurnId = Nothing,
-                  reviewSessionPhase = outcomePhase completedStage outcome (snd <$> result),
-                  reviewSessionActivity = reviewOutcomeActivity completedStage outcome (snd <$> result),
-                  reviewSessionPending = Nothing,
-                  reviewSessionTranscript =
-                    maybe (formatReviewTranscript session.reviewSessionTranscript result)
-                      (appendReviewTranscript session.reviewSessionTranscript . ("\n" <>))
+          let completedStage = maybe session.sessionDetail.reviewSessionStage (reviewResultStage . snd) result
+              completed =
+                withSessionDetail
+                  ( \detail ->
+                      detail
+                        { reviewSessionStage = completedStage,
+                          reviewSessionTurnId = Nothing,
+                          reviewSessionPending = Nothing
+                        }
+                  )
+                  session
+           in completed
+                { sessionPhase = outcomePhase completedStage outcome (snd <$> result),
+                  sessionActivity = reviewOutcomeActivity completedStage outcome (snd <$> result),
+                  sessionTranscript =
+                    maybe (formatReviewTranscript session.sessionTranscript result)
+                      (appendTranscript session.sessionTranscript . ("\n" <>))
                       message
                 }
       )
@@ -703,9 +688,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
     appendToReviewSession issueNumber
       ( \session ->
           session
-            { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = canonicalReviewActivity message,
-              reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
+            { sessionPhase = ReviewFailed,
+              sessionActivity = canonicalReviewActivity message,
+              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
             }
       )
     setNotice (agentFailureNotice "Issue revision" message)
@@ -747,7 +732,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
     githubCompletionMessage (Left message) = "GitHub operation failed: " <> sanitizeText message
     formatReviewTranscript transcript Nothing = transcript
     formatReviewTranscript transcript (Just (rawResult, result)) =
-      appendReviewTranscript
+      appendTranscript
         (stripTranscriptSuffix (sanitizeText rawResult) transcript)
         ("\n\n" <> renderReviewResult result)
     stripTranscriptSuffix suffix transcript =
@@ -757,134 +742,32 @@ applyReviewEvent reviewEvent = case reviewEvent of
           fullTranscript = fromMaybe transcript.fullTranscript (Text.stripSuffix suffix transcript.fullTranscript)
         }
     markDisconnected message session
-      | session.reviewSessionStage == IssueRevision && session.reviewSessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
+      | session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting] =
           session
-            { reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = "disconnected",
-              reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript ("\n" <> message)
+            { sessionPhase = ReviewFailed,
+              sessionActivity = "disconnected",
+              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
             }
       | otherwise = session
 
--- | Whether a session in this phase, with the review overlay in this
--- visibility, should be animating at all. A canonical stage holds
--- 'ReviewStarting' for the whole life of its process, so this one phase
--- set covers both a running canonical process and an in-progress
--- app-server turn.
-reviewTickEligible :: ReviewPhase -> Bool -> Bool
-reviewTickEligible phase overlayVisible = overlayVisible && phase `elem` [ReviewStarting, ReviewRunning]
-
--- | Result of asking whether a trigger -- an answered question/approval,
--- a 'ReviewTurnStarted' notification, a canonical process starting, or the
--- review overlay reopening -- should arm a new tick chain.
-data ReviewTickArmOutcome
-  = ArmReviewTick Int
-  | ReviewTickAlreadyArmed
-  | ReviewTickNotEligible
-  deriving stock (Eq, Show)
-
--- | issue #30: every trigger used to call the tick scheduler
--- unconditionally, so a fast answer/approval and the backend's matching
--- 'ReviewTurnStarted' notification each armed their own independent tick
--- chain for the same turn. This coalesces repeated triggers: a chain
--- already armed for the current generation absorbs the request instead of
--- spawning a second one, so at most one chain is ever live per session.
-decideReviewTickArm :: ReviewPhase -> Bool -> Bool -> Int -> ReviewTickArmOutcome
-decideReviewTickArm phase overlayVisible armed currentGeneration
-  | not (reviewTickEligible phase overlayVisible) = ReviewTickNotEligible
-  | armed = ReviewTickAlreadyArmed
-  | otherwise = ArmReviewTick (currentGeneration + 1)
-
--- | Result of a fired 'ReviewAnimationTick' checked against its session's
--- current generation/phase/visibility.
-data ReviewTickFireOutcome
-  = ReviewTickStale
-  | ReviewTickReschedule
-  | ReviewTickExpire
-  deriving stock (Eq, Show)
-
--- | issue #30: a tick only advances the frame and reschedules itself when
--- it still carries its session's current generation -- a tick from a
--- superseded chain (one the session has since moved past) is dropped
--- silently instead of rearming alongside whatever chain replaced it. This
--- is the fix for the verified fast-resume race: a tick scheduled before a
--- question/approval can arrive after a fast answer restores the running
--- phase, and generation-matching alone would let it rearm alongside the
--- chain the answer itself coalesced onto -- so a match reschedules the
--- *same* chain rather than proving a second one is safe to keep.
-decideReviewTickFire :: Int -> Int -> ReviewPhase -> Bool -> ReviewTickFireOutcome
-decideReviewTickFire sessionGeneration tickGeneration phase overlayVisible
-  | sessionGeneration /= tickGeneration = ReviewTickStale
-  | reviewTickEligible phase overlayVisible = ReviewTickReschedule
-  | otherwise = ReviewTickExpire
-
--- | The single entry point every trigger calls to (re)start review
--- animation for an issue's session. Coalesces via 'decideReviewTickArm' so
--- repeated triggers for the same running turn never arm more than one
--- chain.
-armReviewTick :: Int -> EventM Name AppState ()
-armReviewTick issueNumber = do
-  state <- get
-  let overlayVisible = reviewOverlayVisible state.appOverlay
-  case Map.lookup issueNumber state.appReviewSessions of
-    Nothing -> pure ()
-    Just session -> case decideReviewTickArm session.reviewSessionPhase overlayVisible session.reviewSessionTickArmed session.reviewSessionTickGeneration of
-      ArmReviewTick generation -> do
-        modifyReviewSession issueNumber (\current -> current {reviewSessionTickGeneration = generation, reviewSessionTickArmed = True})
-        scheduleReviewTick issueNumber generation
-      ReviewTickAlreadyArmed -> pure ()
-      ReviewTickNotEligible -> pure ()
-
--- | Which sessions are eligible to animate right now but not currently
--- armed -- e.g. because their chain expired while the review overlay was
--- hidden, or was never armed for a session that only just became visible
--- by having a different tab focused. 'armVisibleReviewTicks' arms exactly
--- these.
+-- | Which review sessions 'armVisibleReviewTicks' finds and re-arms:
+-- eligible to animate right now but not currently ticking, e.g. because
+-- their chain expired while the review overlay was hidden, or was never
+-- armed for a session that only just became visible behind another tab.
 reviewSessionsNeedingArm :: Bool -> Map Int ReviewSession -> [Int]
-reviewSessionsNeedingArm overlayVisible sessions =
-  [ issueNumber
-    | (issueNumber, session) <- Map.toList sessions,
-      reviewTickEligible session.reviewSessionPhase overlayVisible,
-      not session.reviewSessionTickArmed
-  ]
+reviewSessionsNeedingArm overlayVisible =
+  sessionsNeedingArm (\_ session -> reviewTickEligible overlayVisible session.sessionPhase)
 
--- | Re-arms every review session that is eligible to animate but not
--- currently ticking. A session's chain can expire (unarm) while the
--- review overlay is closed; simply reopening the overlay -- on any tab,
--- via any of the several paths that can do so -- must resume every
--- still-running session's spinner, not only the one being focused, so
--- this sweeps 'armReviewTick' across all of them rather than requiring
--- every overlay-opening call site to know which sessions might need it.
+-- | The review overlay's own name for the shared sweep. Reopening the
+-- overlay -- on any tab, via any of the several paths that can do so --
+-- must resume every still-running session's spinner, not only the one being
+-- focused.
 armVisibleReviewTicks :: EventM Name AppState ()
-armVisibleReviewTicks = do
-  state <- get
-  mapM_ armReviewTick (reviewSessionsNeedingArm (reviewOverlayVisible state.appOverlay) state.appReviewSessions)
+armVisibleReviewTicks = armEligibleSessionTicks reviewSessionOps
+
+armReviewTick :: Int -> EventM Name AppState ()
+armReviewTick = armSessionTick reviewSessionOps
 
 applyReviewAnimationTick :: Int -> Int -> EventM Name AppState ()
-applyReviewAnimationTick issueNumber generation = do
-  state <- get
-  let overlayVisible = reviewOverlayVisible state.appOverlay
-  case Map.lookup issueNumber state.appReviewSessions of
-    Nothing -> pure ()
-    Just session -> case decideReviewTickFire session.reviewSessionTickGeneration generation session.reviewSessionPhase overlayVisible of
-      ReviewTickStale -> pure ()
-      ReviewTickReschedule -> do
-        modifyReviewSession issueNumber (\current -> current {reviewSessionSpinnerFrame = current.reviewSessionSpinnerFrame + 1})
-        scheduleReviewTick issueNumber generation
-      ReviewTickExpire -> modifyReviewSession issueNumber (\current -> current {reviewSessionTickArmed = False})
+applyReviewAnimationTick = applySessionTick reviewSessionOps
 
-scheduleReviewTick :: Int -> Int -> EventM Name AppState ()
-scheduleReviewTick issueNumber generation = do
-  eventChannel <- (.appEventChannel) <$> get
-  void
-    . liftIO
-    . forkIO
-    $ do
-      threadDelay reviewAnimationIntervalMicros
-      writeBChan eventChannel (ReviewAnimationTick issueNumber generation)
-
-appendReviewInput :: Char -> ReviewSession -> ReviewSession
-appendReviewInput character session =
-  session {reviewSessionInput = Text.take reviewInputLimit (session.reviewSessionInput <> Text.singleton character)}
-
-removeReviewInputCharacter :: ReviewSession -> ReviewSession
-removeReviewInputCharacter session = session {reviewSessionInput = Text.dropEnd 1 session.reviewSessionInput}

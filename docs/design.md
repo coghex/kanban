@@ -232,6 +232,7 @@ Initial bindings:
 | `s` | Open settings, including chat-output verbosity |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
+| `Tab` | In an open solve, PR, or review overlay, show the next in-memory session of that kind |
 | `Ctrl-C` | Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r` |
 | `q` | Quit and restore the terminal |
 
@@ -386,6 +387,28 @@ and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
 follow-up turn, and Ctrl-C interrupts the active turn. Only running turns chain
 short spinner ticks; completed, hidden, and idle sessions schedule no redraws.
 Quitting terminates the owned app-server process.
+
+Solve, PR, and review overlays are three presentations of one session record.
+Everything not specific to the kind of agent behind them — status derivation,
+transcript growth and its follow state, the input line and its bound, the
+animation tick chain, and the base key table — has a single implementation;
+only what a phase is called and looks like, what submitting or interrupting
+does, and when a spinner is worth running differ. Consequently all three carry
+the tab strip over their own in-memory sessions and answer `Tab`, which moves
+to the next session by ascending number with wraparound, preserving each
+session's draft and scroll position, and does nothing at all when that kind
+holds a single session.
+
+Every kind's animation ticks carry a generation. Repeated triggers for one
+running turn coalesce onto the chain already in flight rather than starting a
+second, a tick from a superseded chain is dropped rather than rearming, a
+session replacing an earlier one for the same number cannot collide with a tick
+that one queued, and a chain expires and unarms as soon as its session stops
+being worth animating. Which sessions those are is the one condition that
+differs: a review spinner runs only while the review overlay is on screen,
+since its ticks are the only thing driving review redraws, while solve and PR
+spinners also drive the board's own card badges and activity timers and so keep
+running with no overlay open.
 
 Feedback sent into a running turn is steered into it against the turn it was
 aimed at, so the app-server rejects it when that turn has moved on. A rejection

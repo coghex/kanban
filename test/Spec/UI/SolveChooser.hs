@@ -5,7 +5,8 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Session (reusableSolveSession)
-import Kanban.UI.Types (ChatTranscript (..), SolvePhase (..), SolveSession (..))
+import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), SolveDetail (..), SolvePhase (..), SolveSession)
 import Spec.Support.Fixtures (baseIssue, epoch)
 import Test.Hspec
 
@@ -19,23 +20,24 @@ spec = do
     -- 'openExistingSolveOverlay' -- select 'SolveOverlay', present the
     -- transcript, return -- instead of the 'Map.insert' plus
     -- 'launchSolveInvocation' that would replace the session.
-    let sessionFor workflow phase =
-          SolveSession
-            { solveSessionIssue = baseIssue 40 [],
-              solveSessionWorkflow = workflow,
-              solveSessionBrand = CodexSolver,
-              solveSessionId = Just "recovered-worker-session",
-              solveSessionPhase = phase,
-              solveSessionActivity = "reattaching persistent worker",
-              solveSessionActivityStartedAt = epoch,
-              solveSessionLogPath = Just "/tmp/recovered.jsonl",
-              solveSessionTranscript = ChatTranscript "recovered" "" "",
-              solveSessionInput = "",
-              solveSessionSpinnerFrame = 0,
-              solveSessionAutoProgress = Nothing,
-              solveSessionResumeProvenance = ResumeAnswer,
-              solveSessionFollowing = True
-            }
+    let sessionFor :: SolveWorkflow -> SolvePhase -> SolveSession
+        sessionFor workflow phase =
+          ( newAgentSession
+              0
+              phase
+              "reattaching persistent worker"
+              (Just epoch)
+              (ChatTranscript "recovered" "" "")
+              SolveDetail
+                { solveSessionIssue = baseIssue 40 [],
+                  solveSessionWorkflow = workflow,
+                  solveSessionBrand = CodexSolver,
+                  solveSessionId = Just "recovered-worker-session",
+                  solveSessionAutoProgress = Nothing,
+                  solveSessionResumeProvenance = ResumeAnswer
+                }
+          )
+            {sessionLogPath = Just "/tmp/recovered.jsonl"}
         sessionsWith session = Map.fromList [(40, session)]
 
     it "reuses a session that persistent-worker discovery attached after the chooser opened" $ do

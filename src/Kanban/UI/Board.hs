@@ -5,8 +5,12 @@ module Kanban.UI.Board
     drawBase,
     drawCardFrame,
     drawLiveActivity,
+    pullRequestPhaseGlyph,
+    pullRequestPhaseGlyphFor,
     reviewPhaseGlyph,
     reviewPhaseGlyphFor,
+    solvePhaseGlyph,
+    solvePhaseGlyphFor,
   )
 where
 
@@ -41,6 +45,7 @@ import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Workflow (entryItem, isApproved, isProblem, orderCardLabels )
 import Kanban.UI.Types
+import Kanban.UI.SessionCore
 import Kanban.UI.Util
 import Kanban.UI.Theme
 import Kanban.UI.Selection
@@ -454,92 +459,68 @@ solveBadge state (IssueItem issue) = case Map.lookup issue.issueNumber state.app
   Nothing -> emptyWidget
   Just session -> withAttr (solveSessionAttribute session) (txt (solvePhaseGlyph state session))
 
+-- | What each 'SolvePhase' looks like as a badge. Solve and PR sessions
+-- disagree about one arm only -- a finished solve has nothing left to do
+-- while a finished PR review is ready -- so that arm is the parameter and
+-- the rest of the table exists once.
+solvePhaseGlyphs :: PhaseGlyph -> SolvePhase -> PhaseGlyph
+solvePhaseGlyphs finished = \case
+  SolveStarting -> PhaseSpinner
+  SolveRunning -> PhaseSpinner
+  SolveInterrupting -> PhaseGlyphs "◆ " "! "
+  SolveAttention -> PhaseGlyphs "◆ " "! "
+  SolveFinished -> finished
+  SolveFailedPhase -> PhaseGlyphs "× " "x "
+  SolveKilledPhase -> PhaseGlyphs "× " "x "
+  SolveOrphanedPhase -> PhaseGlyphs "⚠ " "x "
+
+reviewPhaseGlyphs :: ReviewPhase -> PhaseGlyph
+reviewPhaseGlyphs = \case
+  ReviewStarting -> PhaseSpinner
+  ReviewRunning -> PhaseSpinner
+  ReviewWaiting -> PhaseGlyphs "? " "? "
+  ReviewFinished -> PhaseGlyphs "✓ " "+ "
+  ReviewNeedsChanges -> PhaseGlyphs "! " "! "
+  ReviewFailed -> PhaseGlyphs "× " "! "
+  ReviewRevised -> PhaseGlyphs "◆ " "^ "
+  ReviewInterrupted -> PhaseGlyphs "· " "- "
+
+solvePhaseGlyphFor :: Bool -> SolveSession -> Text
+solvePhaseGlyphFor useAscii = renderPhaseGlyph useAscii (solvePhaseGlyphs (PhaseGlyphs "◇ " "+ "))
+
+pullRequestPhaseGlyphFor :: Bool -> PullRequestReviewSession -> Text
+pullRequestPhaseGlyphFor useAscii = renderPhaseGlyph useAscii (solvePhaseGlyphs (PhaseGlyphs "✓ " "+ "))
+
+reviewPhaseGlyphFor :: Bool -> ReviewSession -> Text
+reviewPhaseGlyphFor useAscii = renderPhaseGlyph useAscii reviewPhaseGlyphs
+
 solvePhaseGlyph :: AppState -> SolveSession -> Text
-solvePhaseGlyph state session
-  | state.appOptions.optionAscii = case session.solveSessionPhase of
-      SolveStarting -> "* "
-      SolveRunning -> "* "
-      SolveInterrupting -> "! "
-      SolveAttention -> "! "
-      SolveFinished -> "+ "
-      SolveFailedPhase -> "x "
-      SolveKilledPhase -> "x "
-      SolveOrphanedPhase -> "x "
-  | otherwise = case session.solveSessionPhase of
-      SolveStarting -> spinnerGlyph session.solveSessionSpinnerFrame <> " "
-      SolveRunning -> spinnerGlyph session.solveSessionSpinnerFrame <> " "
-      SolveInterrupting -> "◆ "
-      SolveAttention -> "◆ "
-      SolveFinished -> "◇ "
-      SolveFailedPhase -> "× "
-      SolveKilledPhase -> "× "
-      SolveOrphanedPhase -> "⚠ "
+solvePhaseGlyph state = solvePhaseGlyphFor state.appOptions.optionAscii
 
-reviewBadge :: AppState -> BoardItem -> Widget Name
-reviewBadge state (PullRequestItem pullRequest) = case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
-  Nothing -> emptyWidget
-  Just session -> withAttr (pullRequestSessionAttribute session) (txt (pullRequestSessionGlyph state session))
-reviewBadge state (IssueItem issue) = case Map.lookup issue.issueNumber state.appReviewSessions of
-  Nothing -> emptyWidget
-  Just session -> withAttr (reviewPhaseAttribute session.reviewSessionPhase) (txt (reviewPhaseGlyph state session))
-
-pullRequestSessionGlyph :: AppState -> PullRequestReviewSession -> Text
-pullRequestSessionGlyph state session
-  | state.appOptions.optionAscii = case session.pullRequestSessionPhase of
-      SolveStarting -> "* "
-      SolveRunning -> "* "
-      SolveInterrupting -> "! "
-      SolveAttention -> "! "
-      SolveFinished -> "+ "
-      SolveFailedPhase -> "x "
-      SolveKilledPhase -> "x "
-      SolveOrphanedPhase -> "x "
-  | otherwise = case session.pullRequestSessionPhase of
-      SolveStarting -> spinnerGlyph session.pullRequestSessionSpinnerFrame <> " "
-      SolveRunning -> spinnerGlyph session.pullRequestSessionSpinnerFrame <> " "
-      SolveInterrupting -> "◆ "
-      SolveAttention -> "◆ "
-      SolveFinished -> "✓ "
-      SolveFailedPhase -> "× "
-      SolveKilledPhase -> "× "
-      SolveOrphanedPhase -> "⚠ "
+pullRequestPhaseGlyph :: AppState -> PullRequestReviewSession -> Text
+pullRequestPhaseGlyph state = pullRequestPhaseGlyphFor state.appOptions.optionAscii
 
 reviewPhaseGlyph :: AppState -> ReviewSession -> Text
 reviewPhaseGlyph state = reviewPhaseGlyphFor state.appOptions.optionAscii
 
-reviewPhaseGlyphFor :: Bool -> ReviewSession -> Text
-reviewPhaseGlyphFor useAscii session
-  | useAscii = case session.reviewSessionPhase of
-      ReviewStarting -> "* "
-      ReviewRunning -> "* "
-      ReviewWaiting -> "? "
-      ReviewFinished -> "+ "
-      ReviewNeedsChanges -> "! "
-      ReviewFailed -> "! "
-      ReviewRevised -> "^ "
-      ReviewInterrupted -> "- "
-  | otherwise = case session.reviewSessionPhase of
-      ReviewStarting -> spinnerGlyph session.reviewSessionSpinnerFrame <> " "
-      ReviewRunning -> spinnerGlyph session.reviewSessionSpinnerFrame <> " "
-      ReviewWaiting -> "? "
-      ReviewFinished -> "✓ "
-      ReviewNeedsChanges -> "! "
-      ReviewFailed -> "× "
-      ReviewRevised -> "◆ "
-      ReviewInterrupted -> "· "
+reviewBadge :: AppState -> BoardItem -> Widget Name
+reviewBadge state (PullRequestItem pullRequest) = case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
+  Nothing -> emptyWidget
+  Just session -> withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseGlyph state session))
+reviewBadge state (IssueItem issue) = case Map.lookup issue.issueNumber state.appReviewSessions of
+  Nothing -> emptyWidget
+  Just session -> withAttr (reviewPhaseAttribute session.sessionPhase) (txt (reviewPhaseGlyph state session))
 
-spinnerGlyph :: Int -> Text
-spinnerGlyph frame = spinnerFrames !! (frame `mod` length spinnerFrames)
-  where
-    spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-drawLiveActivity :: AppState -> Bool -> Int -> UTCTime -> Text -> Widget Name
+-- | The animated activity line a live solve or PR overlay shows. A session
+-- kind with no activity clock ('sessionActivityStartedAt' absent) simply
+-- shows no elapsed time, rather than this inventing one for it.
+drawLiveActivity :: AppState -> Bool -> Int -> Maybe UTCTime -> Text -> Widget Name
 drawLiveActivity state isLive frame startedAt activity
   | not isLive = emptyWidget
   | otherwise =
       withAttr reviewingAttr
         . txtWrap
-        $ activityGlyph <> " " <> activity <> " · " <> formatElapsed state.appNow startedAt
+        $ activityGlyph <> " " <> timedActivity state.appNow True startedAt activity
   where
     activityGlyph
       | state.appOptions.optionAscii = "*"

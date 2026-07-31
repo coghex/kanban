@@ -26,7 +26,6 @@ module Kanban.UI.Util
     pullRequestActionText,
     pullRequestAgentLabel,
     relativeAge,
-    reviewAnimationIntervalMicros,
     rightOrNothing,
     safeIndex,
     safeLast,
@@ -160,10 +159,13 @@ pullRequestAgentLabel action brand | authoredOnOwnBrand action = solverLabel bra
 pullRequestAgentLabel _ CodexSolver = "codex · " <> codexReviewerModel
 pullRequestAgentLabel _ ClaudeSolver = "claude · " <> claudeReviewerModel
 
-timedActivity :: UTCTime -> Bool -> UTCTime -> Text -> Text
-timedActivity now isLive startedAt activity
+-- | An activity line with its elapsed time, for a live session that keeps an
+-- activity clock at all. A kind that records no start time shows the bare
+-- activity, which is what it showed before the clock became a shared field.
+timedActivity :: UTCTime -> Bool -> Maybe UTCTime -> Text -> Text
+timedActivity now isLive (Just startedAt) activity
   | isLive = activity <> " · " <> formatElapsed now startedAt
-  | otherwise = activity
+timedActivity _ _ _ activity = activity
 
 itemHeading :: BoardItem -> Text
 itemHeading (IssueItem issue) = "#" <> showText issue.issueNumber <> "  " <> sanitizeText issue.issueTitle
@@ -290,9 +292,6 @@ agentFailureNotice :: Text -> Text -> Text
 agentFailureNotice subject message = case preflightDiagnosticDetail message of
   Just remediation -> subject <> " cannot start — " <> sanitizeText remediation
   Nothing -> subject <> " failed: " <> sanitizeText message
-
-reviewAnimationIntervalMicros :: Int
-reviewAnimationIntervalMicros = 100 * 1000
 
 isDeadlineOutcome :: SolveOutcome -> Bool
 isDeadlineOutcome (SolveFailed message) = message == workerDeadlineReason

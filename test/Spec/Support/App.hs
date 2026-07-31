@@ -26,17 +26,22 @@ import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
+import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Types
-  ( AppState (..),
+  ( AgentSession (..),
+    AppState (..),
     ChatTranscript (..),
     IncidentSelection (..),
     ProcessSelection (..),
-    PullRequestReviewSession (..),
+    PullRequestDetail (..),
+    PullRequestReviewSession,
     ReviewBackend (..),
+    ReviewDetail (..),
     ReviewPhase (..),
-    ReviewSession (..),
+    ReviewSession,
+    SolveDetail (..),
     SolvePhase (..),
-    SolveSession (..),
+    SolveSession,
   )
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 
@@ -113,61 +118,46 @@ withReviewSession issue phase state =
 
 testSolveSession :: Issue -> SolvePhase -> SolveSession
 testSolveSession issue phase =
-  SolveSession
-    { solveSessionIssue = issue,
-      solveSessionWorkflow = SolveOnly,
-      solveSessionBrand = ClaudeSolver,
-      solveSessionId = Nothing,
-      solveSessionPhase = phase,
-      solveSessionActivity = "solve activity",
-      solveSessionActivityStartedAt = epoch,
-      solveSessionLogPath = Nothing,
-      solveSessionTranscript = emptyTranscript,
-      solveSessionInput = "",
-      solveSessionSpinnerFrame = 0,
-      solveSessionAutoProgress = Nothing,
-      solveSessionResumeProvenance = ResumeAnswer,
-      solveSessionFollowing = True
-    }
+  (newAgentSession 0 phase "solve activity" (Just epoch) emptyTranscript detail) {sessionTickGeneration = 0}
+  where
+    detail =
+      SolveDetail
+        { solveSessionIssue = issue,
+          solveSessionWorkflow = SolveOnly,
+          solveSessionBrand = ClaudeSolver,
+          solveSessionId = Nothing,
+          solveSessionAutoProgress = Nothing,
+          solveSessionResumeProvenance = ResumeAnswer
+        }
 
 testPullRequestSession :: PullRequest -> SolvePhase -> PullRequestReviewSession
 testPullRequestSession pullRequest phase =
-  PullRequestReviewSession
-    { pullRequestSessionPullRequest = pullRequest,
-      pullRequestSessionOrigin = PullRequestClaude,
-      pullRequestSessionAction = PullRequestReview,
-      pullRequestSessionLaunchedForUpdatedAt = epoch,
-      pullRequestSessionBrand = CodexSolver,
-      pullRequestSessionId = Nothing,
-      pullRequestSessionPhase = phase,
-      pullRequestSessionActivity = "pr activity",
-      pullRequestSessionActivityStartedAt = epoch,
-      pullRequestSessionLogPath = Nothing,
-      pullRequestSessionTranscript = emptyTranscript,
-      pullRequestSessionInput = "",
-      pullRequestSessionSpinnerFrame = 0,
-      pullRequestSessionResumeProvenance = ResumeAnswer,
-      pullRequestSessionFollowing = True
-    }
+  (newAgentSession 0 phase "pr activity" (Just epoch) emptyTranscript detail) {sessionTickGeneration = 0}
+  where
+    detail =
+      PullRequestDetail
+        { pullRequestSessionPullRequest = pullRequest,
+          pullRequestSessionOrigin = PullRequestClaude,
+          pullRequestSessionAction = PullRequestReview,
+          pullRequestSessionLaunchedForUpdatedAt = epoch,
+          pullRequestSessionBrand = CodexSolver,
+          pullRequestSessionId = Nothing,
+          pullRequestSessionResumeProvenance = ResumeAnswer
+        }
 
 testReviewSession :: Issue -> ReviewPhase -> ReviewSession
 testReviewSession issue phase =
-  ReviewSession
-    { reviewSessionIssue = issue,
-      reviewSessionStage = InitialReview,
-      reviewSessionThreadId = Nothing,
-      reviewSessionTurnId = Nothing,
-      reviewSessionPhase = phase,
-      reviewSessionActivity = "review activity",
-      reviewSessionTranscript = emptyTranscript,
-      reviewSessionPending = Nothing,
-      reviewSessionInput = "",
-      reviewSessionUndelivered = [],
-      reviewSessionSpinnerFrame = 0,
-      reviewSessionTickGeneration = 0,
-      reviewSessionTickArmed = False,
-      reviewSessionFollowing = True
-    }
+  (newAgentSession 0 phase "review activity" Nothing emptyTranscript detail) {sessionTickGeneration = 0}
+  where
+    detail =
+      ReviewDetail
+        { reviewSessionIssue = issue,
+          reviewSessionStage = InitialReview,
+          reviewSessionThreadId = Nothing,
+          reviewSessionTurnId = Nothing,
+          reviewSessionPending = Nothing,
+          reviewSessionUndelivered = []
+        }
 
 emptyTranscript :: ChatTranscript
 emptyTranscript = ChatTranscript "" "" ""

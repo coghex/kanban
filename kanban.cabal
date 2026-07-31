@@ -86,6 +86,8 @@ library
     Kanban.UI.Review
     Kanban.UI.Selection
     Kanban.UI.Session
+    Kanban.UI.SessionCore
+    Kanban.UI.SessionEvents
     Kanban.UI.Solve
     Kanban.UI.State
     Kanban.UI.Theme
@@ -173,6 +175,7 @@ test-suite kanban-test
     Spec.UI.Incidents
     Spec.UI.Layout
     Spec.UI.ReviewSession
+    Spec.UI.SessionCore
     Spec.UI.SolveChooser
     Spec.UI.Text
   ghc-options: -threaded -with-rtsopts=-N1

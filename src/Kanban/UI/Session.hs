@@ -7,8 +7,6 @@ module Kanban.UI.Session
     incidentSourceLabel,
     liveReviewSessions,
     locateBoardWork,
-    pullRequestReviewActive,
-    pullRequestSessionAlreadyResolved,
     pullRequestSessionReusable,
     pullRequestWorkerFor,
     resolveIncidentActivation,
@@ -27,8 +25,10 @@ module Kanban.UI.Session
     reviewTurnInterruptible,
     selectedReviewIssue,
     selectedReviewItem,
+    sessionAlreadyResolved,
     solveIncidentPhase,
-    solveSessionAlreadyResolved,
+    solvePhaseActive,
+    solveProcessStatus,
     solveWorkerFor,
   )
 where
@@ -93,9 +93,9 @@ reviewSessionLive backendReady hasCanonicalProcess session =
   where
     hasInterruptibleTurn =
       backendReady
-        && isJust session.reviewSessionThreadId
-        && isJust session.reviewSessionTurnId
-        && reviewTurnInterruptible session.reviewSessionStage session.reviewSessionPhase
+        && isJust session.sessionDetail.reviewSessionThreadId
+        && isJust session.sessionDetail.reviewSessionTurnId
+        && reviewTurnInterruptible session.sessionDetail.reviewSessionStage session.sessionPhase
 
 -- | The stage/phase half of "has an interruptible turn", shared with
 -- 'killReviewAgent' so the liveness gate and the kill it dispatches to
@@ -122,13 +122,13 @@ reviewAgentSessionEntry :: Bool -> Bool -> Int -> ReviewSession -> AgentSessionE
 reviewAgentSessionEntry backendReady hasCanonicalProcess issueNumber session =
   AgentSessionEntry
     { agentSessionRef = ReviewAgent issueNumber,
-      agentSessionLabel = "issue " <> Text.toLower (reviewStageLabel session.reviewSessionStage) <> " #" <> showText issueNumber,
-      agentSessionProvider = reviewProvider session.reviewSessionStage,
-      agentSessionStatus = reviewProcessStatus session.reviewSessionPhase,
-      agentSessionActivity = session.reviewSessionActivity,
-      agentSessionId = shortSessionId <$> session.reviewSessionThreadId,
+      agentSessionLabel = "issue " <> Text.toLower (reviewStageLabel session.sessionDetail.reviewSessionStage) <> " #" <> showText issueNumber,
+      agentSessionProvider = reviewProvider session.sessionDetail.reviewSessionStage,
+      agentSessionStatus = reviewProcessStatus session.sessionPhase,
+      agentSessionActivity = session.sessionActivity,
+      agentSessionId = shortSessionId <$> session.sessionDetail.reviewSessionThreadId,
       agentSessionLive = reviewSessionLive backendReady hasCanonicalProcess session,
-      agentSessionProblem = session.reviewSessionPhase == ReviewFailed
+      agentSessionProblem = session.sessionPhase == ReviewFailed
     }
 
 agentSessionEntries :: AppState -> [AgentSessionEntry]
@@ -138,13 +138,13 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
     solveEntries =
       [ AgentSessionEntry
           { agentSessionRef = SolveAgent issueNumber,
-            agentSessionLabel = Text.toLower (workflowTitle session.solveSessionWorkflow) <> " #" <> showText issueNumber,
-            agentSessionProvider = solverLabel session.solveSessionBrand,
-            agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.solveSessionPhase),
-            agentSessionActivity = timedActivity state.appNow isLive session.solveSessionActivityStartedAt session.solveSessionActivity,
-            agentSessionId = shortSessionId <$> session.solveSessionId,
+            agentSessionLabel = Text.toLower (workflowTitle session.sessionDetail.solveSessionWorkflow) <> " #" <> showText issueNumber,
+            agentSessionProvider = solverLabel session.sessionDetail.solveSessionBrand,
+            agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.sessionPhase),
+            agentSessionActivity = timedActivity state.appNow isLive session.sessionActivityStartedAt session.sessionActivity,
+            agentSessionId = shortSessionId <$> session.sessionDetail.solveSessionId,
             agentSessionLive = isLive,
-            agentSessionProblem = session.solveSessionPhase `elem` [SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+            agentSessionProblem = session.sessionPhase `elem` [SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
           }
         | (issueNumber, session) <- Map.toList state.appSolveSessions
         , let worker = solveWorkerFor state issueNumber
@@ -153,13 +153,13 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
     pullRequestEntries =
       [ AgentSessionEntry
           { agentSessionRef = PullRequestAgent number,
-            agentSessionLabel = "pr " <> pullRequestActionText session.pullRequestSessionAction <> " #" <> showText number,
-            agentSessionProvider = pullRequestAgentLabel session.pullRequestSessionAction session.pullRequestSessionBrand,
-            agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.pullRequestSessionPhase),
-            agentSessionActivity = timedActivity state.appNow isLive session.pullRequestSessionActivityStartedAt session.pullRequestSessionActivity,
-            agentSessionId = shortSessionId <$> session.pullRequestSessionId,
+            agentSessionLabel = "pr " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " #" <> showText number,
+            agentSessionProvider = pullRequestAgentLabel session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand,
+            agentSessionStatus = persistentProcessStatus state.appNow worker (solveProcessStatus session.sessionPhase),
+            agentSessionActivity = timedActivity state.appNow isLive session.sessionActivityStartedAt session.sessionActivity,
+            agentSessionId = shortSessionId <$> session.sessionDetail.pullRequestSessionId,
             agentSessionLive = isLive,
-            agentSessionProblem = session.pullRequestSessionPhase `elem` [SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
+            agentSessionProblem = session.sessionPhase `elem` [SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
           }
         | (number, session) <- Map.toList state.appPullRequestReviewSessions
         , let worker = pullRequestWorkerFor state number
@@ -274,31 +274,31 @@ incidentEntries state = drainerEntries <> solveEntries <> pullRequestEntries <> 
       [ sessionIncidentEntry
           (SolveAgent issueNumber)
           (IssueId issueNumber)
-          (workSubject "issue" issueNumber session.solveSessionIssue.issueTitle)
-          (solveProcessStatus session.solveSessionPhase)
-          session.solveSessionActivity
+          (workSubject "issue" issueNumber session.sessionDetail.solveSessionIssue.issueTitle)
+          (solveProcessStatus session.sessionPhase)
+          session.sessionActivity
         | (issueNumber, session) <- Map.toList state.appSolveSessions,
-          solveIncidentPhase session.solveSessionPhase
+          solveIncidentPhase session.sessionPhase
       ]
     pullRequestEntries =
       [ sessionIncidentEntry
           (PullRequestAgent number)
           (PullRequestId number)
-          (workSubject "PR" number session.pullRequestSessionPullRequest.pullRequestTitle)
-          (solveProcessStatus session.pullRequestSessionPhase)
-          session.pullRequestSessionActivity
+          (workSubject "PR" number session.sessionDetail.pullRequestSessionPullRequest.pullRequestTitle)
+          (solveProcessStatus session.sessionPhase)
+          session.sessionActivity
         | (number, session) <- Map.toList state.appPullRequestReviewSessions,
-          solveIncidentPhase session.pullRequestSessionPhase
+          solveIncidentPhase session.sessionPhase
       ]
     reviewEntries =
       [ sessionIncidentEntry
           (ReviewAgent issueNumber)
           (IssueId issueNumber)
-          (workSubject "issue" issueNumber session.reviewSessionIssue.issueTitle)
-          (reviewProcessStatus session.reviewSessionPhase)
-          session.reviewSessionActivity
+          (workSubject "issue" issueNumber session.sessionDetail.reviewSessionIssue.issueTitle)
+          (reviewProcessStatus session.sessionPhase)
+          session.sessionActivity
         | (issueNumber, session) <- Map.toList state.appReviewSessions,
-          reviewIncidentPhase session.reviewSessionPhase
+          reviewIncidentPhase session.sessionPhase
       ]
     sessionIncidentEntry reference work subject status activity =
       IncidentEntry
@@ -550,12 +550,15 @@ liveReviewSessions backendReady canonicalProcesses sessions =
 reusableSolveSession :: SolveWorkflow -> Int -> Map Int SolveSession -> Maybe SolveSession
 reusableSolveSession workflow issueNumber sessions = do
   session <- Map.lookup issueNumber sessions
-  if solveSessionActive session || session.solveSessionWorkflow == workflow
+  if solvePhaseActive session.sessionPhase || session.sessionDetail.solveSessionWorkflow == workflow
     then Just session
     else Nothing
 
-solveSessionActive :: SolveSession -> Bool
-solveSessionActive session = session.solveSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
+-- | Whether a solve-phase session still has work in hand. Solve and PR
+-- sessions share 'SolvePhase' and always answered this identically, in two
+-- byte-identical functions; the phase is the whole input, so one is enough.
+solvePhaseActive :: SolvePhase -> Bool
+solvePhaseActive phase = phase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
 
 -- | A provider that only registers (via 'WorkerProviderStarted') after the
 -- watchdog has already committed a deadline outcome — orphaning or
@@ -578,20 +581,17 @@ isResolvedSolvePhase phase = phase `elem` [SolveFinished, SolveFailedPhase, Solv
 -- deadline/orphan activity text with generic "thinking"/"diagnostic output"
 -- copy, hiding the very state this revision exists to surface. A missing
 -- session (never seen before) is never considered resolved, matching the
--- prior unconditional behavior for a session's first event.
-solveSessionAlreadyResolved :: Int -> Map Int SolveSession -> Bool
-solveSessionAlreadyResolved issueNumber sessions = maybe False (isResolvedSolvePhase . (.solveSessionPhase)) (Map.lookup issueNumber sessions)
-
--- | The pull-request analogue of 'solveSessionAlreadyResolved'; see its
--- documentation.
-pullRequestSessionAlreadyResolved :: Int -> Map Int PullRequestReviewSession -> Bool
-pullRequestSessionAlreadyResolved number sessions = maybe False (isResolvedSolvePhase . (.pullRequestSessionPhase)) (Map.lookup number sessions)
+-- prior unconditional behavior for a session's first event. Solve and PR
+-- sessions ask this of the same phase type and answered it in two
+-- byte-identical functions, so one polymorphic definition serves both.
+sessionAlreadyResolved :: Int -> Map Int (AgentSession SolvePhase detail) -> Bool
+sessionAlreadyResolved key sessions = maybe False (isResolvedSolvePhase . (.sessionPhase)) (Map.lookup key sessions)
 
 reviewPhaseActive :: ReviewPhase -> Bool
 reviewPhaseActive phase = phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
 
 reviewSessionActive :: ReviewSession -> Bool
-reviewSessionActive session = reviewPhaseActive session.reviewSessionPhase
+reviewSessionActive session = reviewPhaseActive session.sessionPhase
 
 -- | Whether pressing 'r' should just reopen an existing review session
 -- rather than launch a fresh label-derived stage. A live turn is always
@@ -612,9 +612,6 @@ reviewSessionReusable phase sessionStage requestedStage hasLiveCanonicalProcess
   | sessionStage == requestedStage = True
   | otherwise = False
 
-pullRequestReviewActive :: PullRequestReviewSession -> Bool
-pullRequestReviewActive session = session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning, SolveAttention, SolveOrphanedPhase]
-
 -- | Whether pressing r should reuse a tracked session's overlay rather than
 -- launch a fresh action. An active session is always reused. A finished
 -- session is only reused when the recomputed action still matches AND the
@@ -629,7 +626,7 @@ pullRequestSessionReusable forceFresh active sessionAction currentAction launche
 -- it, including a thread-less canonical stage -- is currently on screen.
 -- Ticks are the only thing driving periodic redraws for review animation,
 -- so gating them on this keeps a closed or backgrounded review from
--- redrawing at all (docs/design.md:333-340).
+-- redrawing at all (docs/design.md section 7).
 reviewOverlayVisible :: Maybe Overlay -> Bool
 reviewOverlayVisible (Just (ReviewOverlay _)) = True
 reviewOverlayVisible _ = False

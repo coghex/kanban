@@ -45,6 +45,7 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.AutoSolve
 import Kanban.UI.Transcript
@@ -119,11 +120,11 @@ applySolveOrphans issueNumber outcome processes = do
           { appSolveProcesses = Map.delete issueNumber state.appSolveProcesses,
             appSolveSessions =
               Map.adjust
-                ( setSolveActivity now message
+                ( setSessionActivity now message
                     . ( \session ->
                           session
-                            { solveSessionPhase = SolveOrphanedPhase,
-                              solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\n[orphaned] " <> message <> "\n")
+                            { sessionPhase = SolveOrphanedPhase,
+                              sessionTranscript = appendTranscript session.sessionTranscript ("\n[orphaned] " <> message <> "\n")
                             }
                       )
                 )
@@ -145,11 +146,11 @@ applyPullRequestOrphans number outcome processes = do
           { appPullRequestProcesses = Map.delete number state.appPullRequestProcesses,
             appPullRequestReviewSessions =
               Map.adjust
-                ( setPullRequestActivity now message
+                ( setSessionActivity now message
                     . ( \session ->
                           session
-                            { pullRequestSessionPhase = SolveOrphanedPhase,
-                              pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\n[orphaned] " <> message <> "\n")
+                            { sessionPhase = SolveOrphanedPhase,
+                              sessionTranscript = appendTranscript session.sessionTranscript ("\n[orphaned] " <> message <> "\n")
                             }
                       )
                 )
@@ -158,7 +159,7 @@ applyPullRequestOrphans number outcome processes = do
           }
     )
   tailTranscript (PullRequestTranscript number)
-  modifyAutoSolveForPullRequest number (\session -> session {solveSessionActivity = "PR agent left orphaned subprocesses; press p"})
+  modifyAutoSolveForPullRequest number (\session -> session {sessionActivity = "PR agent left orphaned subprocesses; press p"})
   setNotice ("PR workflow #" <> showText number <> " is orphaned; press p to inspect it or x to kill it")
 
 -- | The orphan-pending activity text for a still-unverified outcome: a
@@ -226,7 +227,7 @@ ensureWorkerSession descriptor = do
                     { appPullRequestReviewSessions =
                         Map.insert
                           task.pullRequestWorkerNumber
-                          (recoveredPullRequestSession descriptor pullRequest task)
+                          (recoveredPullRequestSession (priorTickGeneration task.pullRequestWorkerNumber state.appPullRequestReviewSessions) descriptor pullRequest task)
                           current.appPullRequestReviewSessions
                     }
               )
@@ -234,55 +235,55 @@ ensureWorkerSession descriptor = do
 
 recoveredSolveSession :: AppState -> WorkerDescriptor -> Issue -> SolveWorkerTask -> SolveSession
 recoveredSolveSession state descriptor issue task =
-  SolveSession
-    { solveSessionIssue = issue,
-      solveSessionWorkflow = task.solveWorkerWorkflow,
-      solveSessionBrand = task.solveWorkerBrand,
-      solveSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
-      solveSessionPhase = SolveStarting,
-      solveSessionActivity = "reattaching persistent worker",
-      solveSessionActivityStartedAt = descriptor.workerDescriptorSpec.workerCreatedAt,
-      solveSessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath,
-      solveSessionTranscript =
-        plainTranscript
+  ( newAgentSession
+      (priorTickGeneration task.solveWorkerIssueNumber state.appSolveSessions)
+      SolveStarting
+      "reattaching persistent worker"
+      (Just descriptor.workerDescriptorSpec.workerCreatedAt)
+      ( plainTranscript
           ( "reattached persistent "
               <> Text.toLower (workflowTitle task.solveWorkerWorkflow)
               <> " worker\nsolver: "
               <> solverLabel task.solveWorkerBrand
               <> "\n\n"
-          ),
-      solveSessionInput = "",
-      solveSessionSpinnerFrame = 0,
-      solveSessionAutoProgress =
-        recoveredAutoSolveProgress
-          task.solveWorkerWorkflow
-          descriptor.workerDescriptorSpec.workerParent
-          (boardPullRequestNumbers state.appBoard)
-          descriptor.workerDescriptorSpec.workerCreatedAt,
-      solveSessionResumeProvenance = ResumeAnswer,
-      solveSessionFollowing = True
-    }
-
-recoveredPullRequestSession :: WorkerDescriptor -> PullRequest -> PullRequestWorkerTask -> PullRequestReviewSession
-recoveredPullRequestSession descriptor pullRequest task =
-  let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
-   in PullRequestReviewSession
-        { pullRequestSessionPullRequest = pullRequest,
-          pullRequestSessionOrigin = task.pullRequestWorkerOrigin,
-          pullRequestSessionAction = task.pullRequestWorkerAction,
-          pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
-          pullRequestSessionBrand = brand,
-          pullRequestSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
-          pullRequestSessionPhase = SolveStarting,
-          pullRequestSessionActivity = "reattaching persistent worker",
-          pullRequestSessionActivityStartedAt = descriptor.workerDescriptorSpec.workerCreatedAt,
-          pullRequestSessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath,
-          pullRequestSessionTranscript = plainTranscript ("reattached persistent PR " <> pullRequestActionText task.pullRequestWorkerAction <> " worker\nagent: " <> pullRequestAgentLabel task.pullRequestWorkerAction brand <> "\n\n"),
-          pullRequestSessionInput = "",
-          pullRequestSessionSpinnerFrame = 0,
-          pullRequestSessionResumeProvenance = ResumeAnswer,
-          pullRequestSessionFollowing = True
+          )
+      )
+      SolveDetail
+        { solveSessionIssue = issue,
+          solveSessionWorkflow = task.solveWorkerWorkflow,
+          solveSessionBrand = task.solveWorkerBrand,
+          solveSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
+          solveSessionAutoProgress =
+            recoveredAutoSolveProgress
+              task.solveWorkerWorkflow
+              descriptor.workerDescriptorSpec.workerParent
+              (boardPullRequestNumbers state.appBoard)
+              descriptor.workerDescriptorSpec.workerCreatedAt,
+          solveSessionResumeProvenance = ResumeAnswer
         }
+  )
+    {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
+
+recoveredPullRequestSession :: Int -> WorkerDescriptor -> PullRequest -> PullRequestWorkerTask -> PullRequestReviewSession
+recoveredPullRequestSession priorGeneration descriptor pullRequest task =
+  let brand = agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction
+   in ( newAgentSession
+          priorGeneration
+          SolveStarting
+          "reattaching persistent worker"
+          (Just descriptor.workerDescriptorSpec.workerCreatedAt)
+          (plainTranscript ("reattached persistent PR " <> pullRequestActionText task.pullRequestWorkerAction <> " worker\nagent: " <> pullRequestAgentLabel task.pullRequestWorkerAction brand <> "\n\n"))
+          PullRequestDetail
+            { pullRequestSessionPullRequest = pullRequest,
+              pullRequestSessionOrigin = task.pullRequestWorkerOrigin,
+              pullRequestSessionAction = task.pullRequestWorkerAction,
+              pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
+              pullRequestSessionBrand = brand,
+              pullRequestSessionId = descriptor.workerDescriptorSpec.workerExistingSession,
+              pullRequestSessionResumeProvenance = ResumeAnswer
+            }
+      )
+        {sessionLogPath = descriptor.workerDescriptorSpec.workerExistingLogPath}
 
 ensureRecoveredAutoSolve :: WorkerDescriptor -> PullRequestWorkerTask -> EventM Name AppState ()
 ensureRecoveredAutoSolve descriptor task = case descriptor.workerDescriptorSpec.workerParent of
@@ -302,11 +303,16 @@ ensureRecoveredAutoSolve descriptor task = case descriptor.workerDescriptorSpec.
                     autoSolveStartedAt = parent.workerParentStartedAt
                   }
               session =
-                (recoveredSolveSession state descriptor issue (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand))
-                  { solveSessionPhase = SolveRunning,
-                    solveSessionActivity = "PR agent is running",
-                    solveSessionId = parent.workerParentSolverSession,
-                    solveSessionLogPath = parent.workerParentSolverLogPath,
-                    solveSessionAutoProgress = Just progress
-                  }
+                withSessionDetail
+                  ( \detail ->
+                      detail
+                        { solveSessionId = parent.workerParentSolverSession,
+                          solveSessionAutoProgress = Just progress
+                        }
+                  )
+                  (recoveredSolveSession state descriptor issue (SolveWorkerTask parent.workerParentIssueNumber AutoSolve parent.workerParentSolverBrand))
+                    { sessionPhase = SolveRunning,
+                      sessionActivity = "PR agent is running",
+                      sessionLogPath = parent.workerParentSolverLogPath
+                    }
           modify (\current -> current {appSolveSessions = Map.insert parent.workerParentIssueNumber session current.appSolveSessions})

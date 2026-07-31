@@ -30,12 +30,15 @@ import Kanban.Review
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.UI.Events (killSelectionNotice)
 import Kanban.UI.Review (canonicalReviewActivity, canonicalReviewNotice)
-import Kanban.UI.Session (pullRequestSessionAlreadyResolved, solveSessionAlreadyResolved)
+import Kanban.UI.Session (sessionAlreadyResolved)
+import Kanban.UI.SessionCore (newAgentSession)
 import Kanban.UI.Types
   ( ChatTranscript (..),
-    PullRequestReviewSession (..),
+    PullRequestDetail (..),
+    PullRequestReviewSession,
+    SolveDetail (..),
     SolvePhase (..),
-    SolveSession (..),
+    SolveSession,
   )
 import Kanban.UI.Util (failureActivity)
 import Kanban.UI.Worker (orphanMessage)
@@ -448,60 +451,58 @@ spec = do
       -- 'applyWorkerProtocolEvent' cannot be exercised directly in a unit
       -- test (it runs in brick's 'EventM', which exposes no way to run an
       -- action against a plain state outside a live Vty event loop); this
-      -- instead directly covers 'solveSessionAlreadyResolved' and
-      -- 'pullRequestSessionAlreadyResolved', the pure predicates that
-      -- decide whether a trailing 'WorkerAgentOutput'/'WorkerDiagnostic'
+      -- instead directly covers 'sessionAlreadyResolved', the pure
+      -- predicate solve and PR sessions now share, which
+      -- decides whether a trailing 'WorkerAgentOutput'/'WorkerDiagnostic'
       -- event -- which 'streamOutput'/'streamDiagnostics' can still emit
       -- after the watchdog has already committed 'WorkerOrphansDetected' or
       -- 'WorkerFinished' -- gets applied at all.
-      let solveSessionWith phase =
-            SolveSession
-              { solveSessionIssue = baseIssue 787 [],
-                solveSessionWorkflow = SolveOnly,
-                solveSessionBrand = CodexSolver,
-                solveSessionId = Nothing,
-                solveSessionPhase = phase,
-                solveSessionActivity = "thinking",
-                solveSessionActivityStartedAt = epoch,
-                solveSessionLogPath = Nothing,
-                solveSessionTranscript = ChatTranscript "" "" "",
-                solveSessionInput = "",
-                solveSessionSpinnerFrame = 0,
-                solveSessionAutoProgress = Nothing,
-                solveSessionResumeProvenance = ResumeAnswer,
-                solveSessionFollowing = True
-              }
+      let solveSessionWith :: SolvePhase -> SolveSession
+          solveSessionWith phase =
+            newAgentSession
+              0
+              phase
+              "thinking"
+              (Just epoch)
+              (ChatTranscript "" "" "")
+              SolveDetail
+                { solveSessionIssue = baseIssue 787 [],
+                  solveSessionWorkflow = SolveOnly,
+                  solveSessionBrand = CodexSolver,
+                  solveSessionId = Nothing,
+                  solveSessionAutoProgress = Nothing,
+                  solveSessionResumeProvenance = ResumeAnswer
+                }
           solveSessionsWith phase = Map.fromList [(787, solveSessionWith phase)]
       mapM_
-        (\phase -> solveSessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` True)
+        (\phase -> sessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` True)
         [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
       mapM_
-        (\phase -> solveSessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` False)
+        (\phase -> sessionAlreadyResolved 787 (solveSessionsWith phase) `shouldBe` False)
         [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
-      solveSessionAlreadyResolved 999 (solveSessionsWith SolveFinished) `shouldBe` False
-      let pullRequestSessionWith phase =
-            PullRequestReviewSession
-              { pullRequestSessionPullRequest = basePullRequest 826 [] False [],
-                pullRequestSessionOrigin = PullRequestCodex,
-                pullRequestSessionAction = PullRequestReview,
-                pullRequestSessionLaunchedForUpdatedAt = epoch,
-                pullRequestSessionBrand = CodexSolver,
-                pullRequestSessionId = Nothing,
-                pullRequestSessionPhase = phase,
-                pullRequestSessionActivity = "thinking",
-                pullRequestSessionActivityStartedAt = epoch,
-                pullRequestSessionLogPath = Nothing,
-                pullRequestSessionTranscript = ChatTranscript "" "" "",
-                pullRequestSessionInput = "",
-                pullRequestSessionSpinnerFrame = 0,
-                pullRequestSessionResumeProvenance = ResumeAnswer,
-                pullRequestSessionFollowing = True
-              }
+      sessionAlreadyResolved 999 (solveSessionsWith SolveFinished) `shouldBe` False
+      let pullRequestSessionWith :: SolvePhase -> PullRequestReviewSession
+          pullRequestSessionWith phase =
+            newAgentSession
+              0
+              phase
+              "thinking"
+              (Just epoch)
+              (ChatTranscript "" "" "")
+              PullRequestDetail
+                { pullRequestSessionPullRequest = basePullRequest 826 [] False [],
+                  pullRequestSessionOrigin = PullRequestCodex,
+                  pullRequestSessionAction = PullRequestReview,
+                  pullRequestSessionLaunchedForUpdatedAt = epoch,
+                  pullRequestSessionBrand = CodexSolver,
+                  pullRequestSessionId = Nothing,
+                  pullRequestSessionResumeProvenance = ResumeAnswer
+                }
           pullRequestSessionsWith phase = Map.fromList [(826, pullRequestSessionWith phase)]
       mapM_
-        (\phase -> pullRequestSessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` True)
+        (\phase -> sessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` True)
         [SolveFinished, SolveFailedPhase, SolveKilledPhase, SolveOrphanedPhase]
       mapM_
-        (\phase -> pullRequestSessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` False)
+        (\phase -> sessionAlreadyResolved 826 (pullRequestSessionsWith phase) `shouldBe` False)
         [SolveStarting, SolveRunning, SolveInterrupting, SolveAttention]
-      pullRequestSessionAlreadyResolved 999 (pullRequestSessionsWith SolveFinished) `shouldBe` False
+      sessionAlreadyResolved 999 (pullRequestSessionsWith SolveFinished) `shouldBe` False

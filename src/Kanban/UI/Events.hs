@@ -14,7 +14,6 @@ import Brick
 import Control.Concurrent (forkIO )
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Char (isPrint)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -43,10 +42,12 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.Transcript
 import Kanban.UI.Selection
 import Kanban.UI.Session
+import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
 import Kanban.UI.Solve
 import Kanban.UI.PullRequest
@@ -68,18 +69,18 @@ handleEvent event = do
     (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
     (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
     (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent
-    (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applyReviewAnimationTick issueNumber generation
+    (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applySessionTick reviewSessionOps issueNumber generation
     (_, AppEvent (SolveProtocolEvent solveEvent)) -> applySolveEvent solveEvent
-    (_, AppEvent (SolveAnimationTick issueNumber)) -> applySolveAnimationTick issueNumber
+    (_, AppEvent (SolveAnimationTick issueNumber generation)) -> applySessionTick solveSessionOps issueNumber generation
     (_, AppEvent SolveBoardRefreshRequested) -> startBoardRefresh
     (_, AppEvent (PullRequestProtocolEvent flowEvent)) -> applyPullRequestFlowEvent flowEvent
-    (_, AppEvent (PullRequestAnimationTick number)) -> applyPullRequestAnimationTick number
+    (_, AppEvent (PullRequestAnimationTick number generation)) -> applySessionTick pullRequestSessionOps number generation
     (_, AppEvent (WorkerRegistered descriptor)) -> registerWorker descriptor
     (_, AppEvent (WorkerProtocolEvent descriptor workerEvent)) -> applyWorkerProtocolEvent descriptor workerEvent
     (_, AppEvent (WorkerDiscoveryFinished descriptors)) -> mapM_ attachDiscoveredWorker descriptors
     (_, AppEvent (CanonicalIssueReviewProcessStarted issueNumber process)) -> do
       modify (\current -> current {appCanonicalReviewProcesses = Map.insert issueNumber process current.appCanonicalReviewProcesses})
-      modifyReviewSession issueNumber (\session -> session {reviewSessionActivity = "reviewing issue"})
+      modifyReviewSession issueNumber (\session -> session {sessionActivity = "reviewing issue"})
       armReviewTick issueNumber
     (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
@@ -107,21 +108,22 @@ handleEvent event = do
     (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (ReviewOverlay issueNumber), mouseEvent)
       | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
-    (Just (ReviewOverlay issueNumber), reviewInputEvent) -> handleReviewOverlayEvent issueNumber reviewInputEvent
+    (Just (ReviewOverlay issueNumber), reviewInputEvent) ->
+      handleSessionOverlayEvent reviewSessionOps reviewInputHooks issueNumber reviewInputEvent
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> startIssueSolve issue workflow CodexSolver
     (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> startIssueSolve issue workflow ClaudeSolver
     (Just (SolveChooser _ _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
     (Just (SolveChooser _ _), _) -> pure ()
     (Just (SolveOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just (SolveOverlay issueNumber), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptSolveSession issueNumber
     (Just (SolveOverlay issueNumber), mouseEvent)
       | Just action <- overlayMouseAction SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
-    (Just (SolveOverlay issueNumber), solveInputEvent) -> handleSolveOverlayEvent issueNumber solveInputEvent
+    (Just (SolveOverlay issueNumber), solveInputEvent) ->
+      handleSessionOverlayEvent solveSessionOps solveInputHooks issueNumber solveInputEvent
     (Just (PullRequestReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
-    (Just (PullRequestReviewOverlay number), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptPullRequestSession number
     (Just (PullRequestReviewOverlay number), mouseEvent)
       | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
-    (Just (PullRequestReviewOverlay number), inputEvent) -> handlePullRequestOverlayEvent number inputEvent
+    (Just (PullRequestReviewOverlay number), inputEvent) ->
+      handleSessionOverlayEvent pullRequestSessionOps pullRequestInputHooks number inputEvent
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startItemReview item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openItemSolveChooser SolveOnly item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openItemSolveChooser AutoSolve item
@@ -445,7 +447,7 @@ killSelectedAgentSession = do
           SolveAgent issueNumber -> killSolveAgent issueNumber
           PullRequestAgent number -> case Map.lookup number state.appPullRequestReviewSessions of
             Nothing -> setNotice "PR session is no longer available"
-            Just session -> killItemWorkingProcess (PullRequestItem session.pullRequestSessionPullRequest)
+            Just session -> killItemWorkingProcess (PullRequestItem session.sessionDetail.pullRequestSessionPullRequest)
           ReviewAgent issueNumber -> killReviewAgent issueNumber
           WorkerAgent identifier -> case Map.lookup identifier state.appWorkers of
             Nothing -> setNotice "Persistent worker is no longer available"
@@ -469,9 +471,9 @@ killSolveAgent issueNumber = do
       appendToSolveSession issueNumber
         ( \session ->
             session
-              { solveSessionPhase = SolveKilledPhase,
-                solveSessionActivity = "killing process tree",
-                solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[killed by user]\n"
+              { sessionPhase = SolveKilledPhase,
+                sessionActivity = "killing process tree",
+                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
               }
         )
       void . liftIO . forkIO $ case worker of
@@ -488,9 +490,9 @@ killReviewAgent issueNumber = do
         client <- case state.appReviewBackend of
           ReviewBackendReady value -> Just value
           _ -> Nothing
-        threadId <- session.reviewSessionThreadId
-        turnId <- session.reviewSessionTurnId
-        if reviewTurnInterruptible session.reviewSessionStage session.reviewSessionPhase
+        threadId <- session.sessionDetail.reviewSessionThreadId
+        turnId <- session.sessionDetail.reviewSessionTurnId
+        if reviewTurnInterruptible session.sessionDetail.reviewSessionStage session.sessionPhase
           then Just (client, threadId, turnId)
           else Nothing
   case (canonicalProcess, activeTurn) of
@@ -499,9 +501,9 @@ killReviewAgent issueNumber = do
       appendToReviewSession issueNumber
         ( \session ->
             session
-              { reviewSessionPhase = ReviewFailed,
-                reviewSessionActivity = "killing process tree",
-                reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[killed by user]\n"
+              { sessionPhase = ReviewFailed,
+                sessionActivity = "killing process tree",
+                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
               }
         )
       mapM_ (\process -> void . liftIO . forkIO $ killManagedProcess process) canonicalProcess
@@ -535,9 +537,9 @@ killItemWorkingProcess (PullRequestItem pullRequest) = do
       appendToPullRequestSession number
         ( \session ->
             session
-              { pullRequestSessionPhase = SolveKilledPhase,
-                pullRequestSessionActivity = "killing process tree",
-                pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[killed by user]\n"
+              { sessionPhase = SolveKilledPhase,
+                sessionActivity = "killing process tree",
+                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
               }
         )
       void . liftIO . forkIO $ case worker of
@@ -561,9 +563,9 @@ killItemWorkingProcess (IssueItem issue) = do
           appendToSolveSession issueNumber
             ( \session ->
                 session
-                  { solveSessionPhase = SolveKilledPhase,
-                    solveSessionActivity = "killing process tree",
-                    solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[killed by user]\n"
+                  { sessionPhase = SolveKilledPhase,
+                    sessionActivity = "killing process tree",
+                    sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
                   }
             )
           void . liftIO . forkIO $ case worker of
@@ -575,9 +577,9 @@ killItemWorkingProcess (IssueItem issue) = do
           appendToReviewSession issueNumber
             ( \session ->
                 session
-                  { reviewSessionPhase = ReviewFailed,
-                    reviewSessionActivity = "killing process tree",
-                    reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[killed by user]\n"
+                  { sessionPhase = ReviewFailed,
+                    sessionActivity = "killing process tree",
+                    sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
                   }
             )
           void . liftIO . forkIO $ killManagedProcess process
@@ -593,48 +595,38 @@ killItemWorkingProcess (IssueItem issue) = do
     activeReviewTurn state session
       | reviewSessionActive session,
         ReviewBackendReady client <- state.appReviewBackend,
-        Just threadId <- session.reviewSessionThreadId,
-        Just turnId <- session.reviewSessionTurnId = Just (client, threadId, turnId)
+        Just threadId <- session.sessionDetail.reviewSessionThreadId,
+        Just turnId <- session.sessionDetail.reviewSessionTurnId = Just (client, threadId, turnId)
       | otherwise = Nothing
 
 scrollDetails :: Int -> EventM Name AppState ()
 scrollDetails = vScrollBy (viewportScroll DetailsViewport)
 
-handleSolveOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
-handleSolveOverlayEvent issueNumber event = case event of
-  VtyEvent vtyEvent
-    | Just amount <- transcriptScrollKey False vtyEvent -> scrollTranscript (SolveTranscript issueNumber) amount
-  VtyEvent (Vty.EvKey Vty.KBS []) -> modifySolveSession issueNumber (\session -> session {solveSessionInput = Text.dropEnd 1 session.solveSessionInput})
-  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitSolveInput issueNumber
-  VtyEvent (Vty.EvKey (Vty.KChar character) [])
-    | isPrint character ->
-        modifySolveSession issueNumber
-          (\session -> session {solveSessionInput = Text.take reviewInputLimit (session.solveSessionInput <> Text.singleton character)})
-  _ -> pure ()
+-- | The kind-specific half of each overlay's key table: what Enter submits,
+-- what Ctrl-C interrupts, and -- for the review overlay alone -- what a
+-- numbered choice answers. Everything else the three overlays do with a key
+-- press is 'handleSessionOverlayEvent'.
+solveInputHooks :: SessionInputHooks
+solveInputHooks =
+  noSessionInputHooks
+    { sessionHookSubmit = submitSolveInput,
+      sessionHookInterrupt = interruptSolveSession
+    }
 
-handleReviewOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
-handleReviewOverlayEvent issueNumber event = case event of
-  VtyEvent (Vty.EvKey (Vty.KChar '\t') []) -> cycleReviewSession issueNumber
-  VtyEvent vtyEvent
-    | Just amount <- transcriptScrollKey True vtyEvent -> scrollTranscript (ReviewTranscript issueNumber) amount
-  VtyEvent (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) -> cancelReviewSession issueNumber
-  VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) -> cancelReviewSession issueNumber
-  VtyEvent (Vty.EvKey Vty.KBS []) -> modifyReviewSession issueNumber removeReviewInputCharacter
-  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitReviewInput issueNumber
-  VtyEvent (Vty.EvKey (Vty.KChar character) [])
-    | character >= '1' && character <= '9' -> chooseReviewOption issueNumber (fromEnum character - fromEnum '1')
-    | isPrint character -> modifyReviewSession issueNumber (appendReviewInput character)
-  _ -> pure ()
+pullRequestInputHooks :: SessionInputHooks
+pullRequestInputHooks =
+  noSessionInputHooks
+    { sessionHookSubmit = submitPullRequestInput,
+      sessionHookInterrupt = interruptPullRequestSession
+    }
 
-handlePullRequestOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
-handlePullRequestOverlayEvent number event = case event of
-  VtyEvent vtyEvent
-    | Just amount <- transcriptScrollKey False vtyEvent -> scrollTranscript (PullRequestTranscript number) amount
-  VtyEvent (Vty.EvKey Vty.KBS []) -> modifyPullRequestSession number (\session -> session {pullRequestSessionInput = Text.dropEnd 1 session.pullRequestSessionInput})
-  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitPullRequestInput number
-  VtyEvent (Vty.EvKey (Vty.KChar character) [])
-    | isPrint character -> modifyPullRequestSession number (\session -> session {pullRequestSessionInput = Text.take reviewInputLimit (session.pullRequestSessionInput <> Text.singleton character)})
-  _ -> pure ()
+reviewInputHooks :: SessionInputHooks
+reviewInputHooks =
+  SessionInputHooks
+    { sessionHookSubmit = submitReviewInput,
+      sessionHookInterrupt = cancelReviewSession,
+      sessionHookChoice = chooseReviewOption
+    }
 
 scrollColumn :: BoardColumn -> Int -> EventM Name AppState ()
 scrollColumn column amount = do
@@ -694,5 +686,5 @@ runningProcessOverlay state (IssueItem issue)
         || maybe False reviewSessionActive (Map.lookup issueNumber state.appReviewSessions)
     boundAutoSolvePullRequest = do
       session <- Map.lookup issueNumber state.appSolveSessions
-      progress <- session.solveSessionAutoProgress
+      progress <- session.sessionDetail.solveSessionAutoProgress
       progress.autoSolvePullRequest

@@ -25,11 +25,7 @@ import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
   ( ReviewCancelAction (..),
     ReviewDigitAction (..),
-    ReviewTickArmOutcome (..),
-    ReviewTickFireOutcome (..),
     canonicalReviewCompletionSuperseded,
-    decideReviewTickArm,
-    decideReviewTickFire,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
@@ -43,6 +39,15 @@ import Kanban.UI.Session
     reviewSessionReusable,
     reviewTurnInterruptible,
   )
+import Kanban.UI.SessionCore
+  ( SessionTickArm (..),
+    SessionTickFire (..),
+    decideSessionTickArm,
+    decideSessionTickFire,
+    newAgentSession,
+    transcriptScrollKey,
+  )
+import Kanban.UI.SessionEvents (reviewTickEligible)
 import Kanban.UI.Theme (reviewPhaseAttribute, revisedAttr)
 import Kanban.UI.Transcript
   ( TranscriptGeometry (..),
@@ -50,11 +55,11 @@ import Kanban.UI.Transcript
     displayedTranscript,
     followAfterScroll,
     followAfterTurnStarted,
-    transcriptScrollKey,
     transcriptShouldTail,
   )
 import Kanban.UI.Types
-  ( AgentSessionEntry (..),
+  ( AgentSession (..),
+    AgentSessionEntry (..),
     AgentSessionRef (..),
     ChatTranscript (..),
     Name (..),
@@ -62,8 +67,10 @@ import Kanban.UI.Types
     PendingReviewInteraction (..),
     ProcessClickOutcome (..),
     ProcessSelection (..),
+    ReviewDetail (..),
     ReviewPhase (..),
-    ReviewSession (..),
+    ReviewSession,
+    withSessionDetail,
   )
 import Kanban.Worker (WorkerId (..))
 import Spec.Support.Fixtures (baseIssue)
@@ -163,22 +170,20 @@ spec = do
     -- the whole input matrix is covered without an 'EventM' harness.
     let reviewedIssue = 151
         sessionFor (_, _, stage, phase, threadId, turnId) =
-          ReviewSession
-            { reviewSessionIssue = baseIssue reviewedIssue [],
-              reviewSessionStage = stage,
-              reviewSessionThreadId = threadId,
-              reviewSessionTurnId = turnId,
-              reviewSessionPhase = phase,
-              reviewSessionActivity = "",
-              reviewSessionTranscript = ChatTranscript "" "" "",
-              reviewSessionPending = Nothing,
-              reviewSessionInput = "",
-              reviewSessionUndelivered = [],
-              reviewSessionSpinnerFrame = 0,
-              reviewSessionTickGeneration = 1,
-              reviewSessionTickArmed = False,
-              reviewSessionFollowing = True
-            }
+          newAgentSession
+            0
+            phase
+            ""
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue reviewedIssue [],
+                reviewSessionStage = stage,
+                reviewSessionThreadId = threadId,
+                reviewSessionTurnId = turnId,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = []
+              }
         canonicalProcesses hasProcess = if hasProcess then Set.singleton reviewedIssue else Set.empty
         allPhases =
           [ ReviewStarting,
@@ -331,47 +336,47 @@ spec = do
     -- 'ReviewTurnStarted' notification each used to call the tick
     -- scheduler unconditionally, arming two independent 10 Hz chains for
     -- the same turn; canonical (thread-less) sessions had no tick path at
-    -- all. 'decideReviewTickArm'/'decideReviewTickFire' are the pure
+    -- all. 'decideSessionTickArm'/'decideSessionTickFire' are the pure
     -- decision core extracted from 'armReviewTick'/
     -- 'applyReviewAnimationTick' so every transition is covered without an
     -- 'EventM' harness.
     it "arms a fresh chain only when eligible and not already armed" $ do
-      decideReviewTickArm ReviewRunning True False 0 `shouldBe` ArmReviewTick 1
-      decideReviewTickArm ReviewStarting True False 5 `shouldBe` ArmReviewTick 6
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) False 0 `shouldBe` ArmSessionTick 1
+      decideSessionTickArm (reviewTickEligible True ReviewStarting) False 5 `shouldBe` ArmSessionTick 6
 
     it "coalesces a repeated trigger onto the chain already in flight" $
-      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) True 1 `shouldBe` SessionTickAlreadyArmed
 
     it "does not arm a chain outside the eligible phases, even if visible" $
       mapM_
-        (\phase -> decideReviewTickArm phase True False 0 `shouldBe` ReviewTickNotEligible)
+        (\phase -> decideSessionTickArm (reviewTickEligible True phase) False 0 `shouldBe` SessionTickNotEligible)
         [ReviewWaiting, ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised, ReviewInterrupted]
 
     it "does not arm a chain while the review overlay is hidden" $
-      decideReviewTickArm ReviewRunning False False 0 `shouldBe` ReviewTickNotEligible
+      decideSessionTickArm (reviewTickEligible False ReviewRunning) False 0 `shouldBe` SessionTickNotEligible
 
     it "drops a tick carrying a stale generation instead of rescheduling" $
-      decideReviewTickFire 2 1 ReviewRunning True `shouldBe` ReviewTickStale
+      decideSessionTickFire 2 1 (reviewTickEligible True ReviewRunning) `shouldBe` SessionTickStale
 
     it "reschedules a tick that matches the current generation while still eligible" $
-      decideReviewTickFire 1 1 ReviewRunning True `shouldBe` ReviewTickReschedule
+      decideSessionTickFire 1 1 (reviewTickEligible True ReviewRunning) `shouldBe` SessionTickReschedule
 
     it "expires a matching tick once the phase transitions to terminal, unarming the session" $
       mapM_
-        (\phase -> decideReviewTickFire 1 1 phase True `shouldBe` ReviewTickExpire)
+        (\phase -> decideSessionTickFire 1 1 (reviewTickEligible True phase) `shouldBe` SessionTickExpire)
         [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised, ReviewInterrupted, ReviewWaiting]
 
     it "expires a matching tick once the review overlay is hidden" $
-      decideReviewTickFire 1 1 ReviewRunning False `shouldBe` ReviewTickExpire
+      decideSessionTickFire 1 1 (reviewTickEligible False ReviewRunning) `shouldBe` SessionTickExpire
 
     it "answer-then-turn-started keeps exactly one live generation" $ do
       -- A chain is already armed (generation 1) from the turn that produced
       -- the question. The user answers before that tick fires: the answer
       -- path's arm request coalesces rather than minting generation 2.
-      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) True 1 `shouldBe` SessionTickAlreadyArmed
       -- The backend's ReviewTurnStarted for the same turn arrives next and
       -- also coalesces onto the same still-armed chain.
-      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) True 1 `shouldBe` SessionTickAlreadyArmed
 
     it "resolves the verified fast-resume race onto a single chain" $ do
       -- Generation 1 is armed while ReviewRunning, with its tick already
@@ -380,34 +385,34 @@ spec = do
       -- The user answers before that tick fires: phase returns to
       -- ReviewRunning and the answer's arm request coalesces, since
       -- generation 1 is still armed.
-      decideReviewTickArm ReviewRunning True True 1 `shouldBe` ReviewTickAlreadyArmed
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) True 1 `shouldBe` SessionTickAlreadyArmed
       -- The original in-flight tick for generation 1 then fires: it
       -- matches the still-current generation and the phase is running
       -- again, so it reschedules that same chain rather than a second one
       -- having been spawned alongside it.
-      decideReviewTickFire 1 1 ReviewRunning True `shouldBe` ReviewTickReschedule
+      decideSessionTickFire 1 1 (reviewTickEligible True ReviewRunning) `shouldBe` SessionTickReschedule
 
     it "arms exactly one chain across a canonical session's lifecycle" $ do
       -- CanonicalIssueReviewProcessStarted arms the first chain while the
       -- session sits in ReviewStarting for the whole run (canonical stages
       -- have no thread/turn, so this is their only tick trigger).
-      decideReviewTickArm ReviewStarting True False 0 `shouldBe` ArmReviewTick 1
+      decideSessionTickArm (reviewTickEligible True ReviewStarting) False 0 `shouldBe` ArmSessionTick 1
       -- Further ticks against generation 1 reschedule the same chain for
       -- as long as the process keeps running.
-      decideReviewTickFire 1 1 ReviewStarting True `shouldBe` ReviewTickReschedule
+      decideSessionTickFire 1 1 (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickReschedule
       -- The process finishes; the session's phase leaves ReviewStarting.
       -- The next tick for generation 1 expires rather than rescheduling.
-      decideReviewTickFire 1 1 ReviewFinished True `shouldBe` ReviewTickExpire
+      decideSessionTickFire 1 1 (reviewTickEligible True ReviewFinished) `shouldBe` SessionTickExpire
       -- No further chain arms once the session is terminal.
-      decideReviewTickArm ReviewFinished True False 1 `shouldBe` ReviewTickNotEligible
+      decideSessionTickArm (reviewTickEligible True ReviewFinished) False 1 `shouldBe` SessionTickNotEligible
 
     it "expires while hidden and arms exactly one fresh chain on reopen" $ do
       -- The overlay closes while a turn is still running: the in-flight
       -- tick for generation 1 expires (unarms) rather than rescheduling.
-      decideReviewTickFire 1 1 ReviewRunning False `shouldBe` ReviewTickExpire
+      decideSessionTickFire 1 1 (reviewTickEligible False ReviewRunning) `shouldBe` SessionTickExpire
       -- Reopening the overlay re-checks eligibility with armed now False,
       -- arming exactly one fresh chain (generation 2) for the session.
-      decideReviewTickArm ReviewRunning True False 1 `shouldBe` ArmReviewTick 2
+      decideSessionTickArm (reviewTickEligible True ReviewRunning) False 1 `shouldBe` ArmSessionTick 2
 
     -- issue #30 follow-up (round 1 review): reopening the review overlay,
     -- or Tab-cycling within it, must resume every still-running session's
@@ -415,23 +420,24 @@ spec = do
     -- a different session's chain can have expired while the overlay was
     -- closed. 'reviewSessionsNeedingArm' is what 'armVisibleReviewTicks'
     -- sweeps across all sessions to find and re-arm exactly those.
-    let tickSession phase armed =
-          ReviewSession
-            { reviewSessionIssue = baseIssue 1 [],
-              reviewSessionStage = InitialReview,
-              reviewSessionThreadId = Nothing,
-              reviewSessionTurnId = Nothing,
-              reviewSessionPhase = phase,
-              reviewSessionActivity = "",
-              reviewSessionTranscript = ChatTranscript "" "" "",
-              reviewSessionPending = Nothing,
-              reviewSessionInput = "",
-              reviewSessionUndelivered = [],
-              reviewSessionSpinnerFrame = 0,
-              reviewSessionTickGeneration = 1,
-              reviewSessionTickArmed = armed,
-              reviewSessionFollowing = True
-            }
+    let tickSession :: ReviewPhase -> Bool -> ReviewSession
+        tickSession phase armed =
+          ( newAgentSession
+              0
+              phase
+              ""
+              Nothing
+              (ChatTranscript "" "" "")
+              ReviewDetail
+                { reviewSessionIssue = baseIssue 1 [],
+                  reviewSessionStage = InitialReview,
+                  reviewSessionThreadId = Nothing,
+                  reviewSessionTurnId = Nothing,
+                  reviewSessionPending = Nothing,
+                  reviewSessionUndelivered = []
+                }
+          )
+            {sessionTickArmed = armed}
 
     it "finds a still-running session left unarmed behind another tab" $ do
       let sessions = Map.fromList [(1, tickSession ReviewRunning False), (2, tickSession ReviewRunning True)]
@@ -453,11 +459,11 @@ spec = do
       let staleTickGeneration = 1
       -- A from-scratch replacement session resets to generation 0, so it
       -- does not yet collide with the stale tick while unarmed...
-      decideReviewTickFire 0 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      decideSessionTickFire 0 staleTickGeneration (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickStale
       -- ...but once that session's own first arm mints generation 1, the
       -- stale tick matches it exactly and incorrectly reschedules.
-      decideReviewTickArm ReviewStarting True False 0 `shouldBe` ArmReviewTick 1
-      decideReviewTickFire 1 staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+      decideSessionTickArm (reviewTickEligible True ReviewStarting) False 0 `shouldBe` ArmSessionTick 1
+      decideSessionTickFire 1 staleTickGeneration (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickReschedule
 
     it "carrying the prior generation forward without bumping it still collides before the replacement's first arm" $ do
       -- Seeding the replacement at exactly the old session's last
@@ -466,18 +472,18 @@ spec = do
       -- first arm still matches it exactly.
       let staleTickGeneration = 1
           seededButNotYetArmed = staleTickGeneration
-      decideReviewTickFire seededButNotYetArmed staleTickGeneration ReviewStarting True `shouldBe` ReviewTickReschedule
+      decideSessionTickFire seededButNotYetArmed staleTickGeneration (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickReschedule
 
     it "bumps the generation at replacement time so a queued stale tick is dropped even before the replacement's first arm" $ do
       let staleTickGeneration = 1 -- the old session's last-armed generation
           replacementGeneration = staleTickGeneration + 1 -- newReviewSession's construction-time generation
       -- The stale tick is dropped immediately, before the replacement
       -- session has armed any chain of its own.
-      decideReviewTickFire replacementGeneration staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      decideSessionTickFire replacementGeneration staleTickGeneration (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickStale
       -- Its own eventual first arm mints a generation still further past
       -- the stale tick's, so the collision cannot resurface later either.
-      decideReviewTickArm ReviewStarting True False replacementGeneration `shouldBe` ArmReviewTick (replacementGeneration + 1)
-      decideReviewTickFire (replacementGeneration + 1) staleTickGeneration ReviewStarting True `shouldBe` ReviewTickStale
+      decideSessionTickArm (reviewTickEligible True ReviewStarting) False replacementGeneration `shouldBe` ArmSessionTick (replacementGeneration + 1)
+      decideSessionTickFire (replacementGeneration + 1) staleTickGeneration (reviewTickEligible True ReviewStarting) `shouldBe` SessionTickStale
 
   describe "issue-revision refresh reconciliation" $ do
     -- issue #72: a completed issue-revision that posted its amendment and
@@ -486,25 +492,24 @@ spec = do
     -- reviewed:approve and reviewed:changes. A failed issue-revision session
     -- refreshed against a reviewed:revised issue must now surface as the
     -- purple "awaiting rereview" state instead.
-    let failedRevisionSession issue =
-          ReviewSession
-            { reviewSessionIssue = issue,
-              reviewSessionStage = IssueRevision,
-              reviewSessionThreadId = Nothing,
-              reviewSessionTurnId = Nothing,
-              reviewSessionPhase = ReviewFailed,
-              reviewSessionActivity = "failed",
-              reviewSessionTranscript = ChatTranscript "" "" "",
-              reviewSessionPending = Nothing,
-              reviewSessionInput = "",
-              reviewSessionUndelivered = [],
-              reviewSessionSpinnerFrame = 0,
-              reviewSessionTickGeneration = 0,
-              reviewSessionTickArmed = False,
-              reviewSessionFollowing = True
-            }
+    let failedRevisionSession :: Issue -> ReviewSession
+        failedRevisionSession issue =
+          newAgentSession
+            0
+            ReviewFailed
+            "failed"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = issue,
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Nothing,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = []
+              }
         reconciledPhaseFor issue session =
-          (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).reviewSessionPhase
+          (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).sessionPhase
 
     it "reconciles a failed issue-revision session to the revised state once the issue carries reviewed:revised" $ do
       let issue = (baseIssue 59 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
@@ -514,7 +519,7 @@ spec = do
     it "presents the revised state with the purple attribute and awaiting-rereview text, not the failure presentation" $ do
       let phase = ReviewRevised
           failedSession = failedRevisionSession (baseIssue 59 [])
-          revisedSession = failedSession {reviewSessionPhase = phase}
+          revisedSession = failedSession {sessionPhase = phase}
       reviewPhaseAttribute phase `shouldBe` revisedAttr
       reviewPhaseAttribute phase `shouldNotBe` reviewPhaseAttribute ReviewFailed
       Data.Text.unpack (reviewPhaseLabel revisedSession) `shouldNotContain` "failed"
@@ -526,7 +531,7 @@ spec = do
           session = failedRevisionSession issue
       reconciledPhaseFor issue session `shouldBe` ReviewFailed
       reviewPhaseAttribute ReviewFailed `shouldBe` reviewPhaseAttribute (reconciledPhaseFor issue session)
-      Data.Text.unpack (reviewPhaseLabel session {reviewSessionPhase = reconciledPhaseFor issue session}) `shouldContain` "failed"
+      Data.Text.unpack (reviewPhaseLabel session {sessionPhase = reconciledPhaseFor issue session}) `shouldContain` "failed"
 
     it "matches a mixed-case reviewed:revised label the same as the canonical casing" $ do
       let issue = (baseIssue 59 []) {issueLabels = [Label "ReViEwEd:ReViSeD" "8250DF"]}
@@ -535,7 +540,7 @@ spec = do
 
     it "does not let a stray reviewed:revised label mask a failed rereview session" $ do
       let issue = (baseIssue 59 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
-          session = (failedRevisionSession issue) {reviewSessionStage = IssueRereview}
+          session = withSessionDetail (\detail -> detail {reviewSessionStage = IssueRereview}) (failedRevisionSession issue)
       reconciledPhaseFor issue session `shouldBe` ReviewFailed
 
     it "keeps reviewed:approve as top precedence over a coincident reviewed:revised label" $ do

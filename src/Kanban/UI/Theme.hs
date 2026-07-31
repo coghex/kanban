@@ -34,6 +34,7 @@ module Kanban.UI.Theme
     selectedAttr,
     selectedTitleAttr,
     shellBorderStyle,
+    solvePhaseAttribute,
     solveSessionAttribute,
     statusTextAttr,
     themeFor,
@@ -120,27 +121,33 @@ statusTextAttr config (PullRequestItem pullRequest) = case pullRequestStatus con
   StatusNeutral -> dimAttr
 statusTextAttr _ _ = dimAttr
 
-solveSessionAttribute :: SolveSession -> AttrName
-solveSessionAttribute session = case session.solveSessionPhase of
+-- | The one 'SolvePhase' colour table solve and PR sessions share. They
+-- disagree about exactly two arms, which are therefore its parameters: what
+-- a /finished/ workflow reads as, and what a running one does. Everything
+-- else was duplicated between two tables that could only drift.
+solvePhaseAttribute :: AttrName -> AttrName -> SolvePhase -> AttrName
+solvePhaseAttribute finished running = \case
   SolveAttention -> attentionAttr
   SolveInterrupting -> pendingAttr
   SolveFailedPhase -> problemAttr
   SolveKilledPhase -> problemAttr
   SolveOrphanedPhase -> problemAttr
-  SolveFinished -> neutralAttr
-  _
-    | session.solveSessionWorkflow == AutoSolve -> activeAttr
-    | otherwise -> neutralAttr
+  SolveFinished -> finished
+  _ -> running
 
+-- | A finished solve is neutral -- there is nothing more to do in it -- and
+-- an active autosolve keeps its blue accent.
+solveSessionAttribute :: SolveSession -> AttrName
+solveSessionAttribute session = solvePhaseAttribute neutralAttr running session.sessionPhase
+  where
+    running
+      | session.sessionDetail.solveSessionWorkflow == AutoSolve = activeAttr
+      | otherwise = neutralAttr
+
+-- | A finished PR review is ready, and a running one wears the reviewing
+-- colour rather than the neutral one.
 pullRequestSessionAttribute :: PullRequestReviewSession -> AttrName
-pullRequestSessionAttribute session = case session.pullRequestSessionPhase of
-  SolveAttention -> attentionAttr
-  SolveInterrupting -> pendingAttr
-  SolveFailedPhase -> problemAttr
-  SolveKilledPhase -> problemAttr
-  SolveOrphanedPhase -> problemAttr
-  SolveFinished -> readyAttr
-  _ -> reviewingAttr
+pullRequestSessionAttribute session = solvePhaseAttribute readyAttr reviewingAttr session.sessionPhase
 
 reviewPhaseAttribute :: ReviewPhase -> AttrName
 reviewPhaseAttribute phase = case phase of
