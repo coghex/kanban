@@ -343,6 +343,29 @@ spec = do
       activated.appSelectedColumn `shouldBe` stale.appSelectedColumn
       activated.appOverlay `shouldBe` stale.appOverlay
 
+    it "activates the row it highlighted after a refresh filled an empty panel" $ do
+      -- Opened over an empty list, the selection names nothing. A drainer
+      -- poll then lands the first incident while the panel is open, and the
+      -- panel draws that row highlighted — so Enter has to act on it rather
+      -- than report the stale "nothing selected" the open left behind.
+      state <- reportingState []
+      let opened = applyIncidentsAction OpenIncidentsPanel state
+      opened.appIncidentSelection `shouldBe` IncidentSelection Nothing 0
+      panelLines opened `shouldSatisfy` any (Data.Text.isInfixOf "Nothing needs attention.")
+
+      let refreshed = opened {appDrainerIncidents = Just [conflictIncident 42]}
+      -- What the panel highlights, which is what activation must agree with.
+      resolveIncidentSelection (incidentEntries refreshed) refreshed.appIncidentSelection
+        `shouldBe` IncidentSelection (Just (DrainerIncidentRef "incident-conflict-42")) 0
+      let activated = applyIncidentsAction ActivateSelectedIncident refreshed
+      activated.appNotice `shouldBe` Nothing
+      activated.appSelectedColumn `shouldBe` Reviewing
+      Map.lookup Reviewing activated.appSelectedRows `shouldBe` Just 0
+
+      -- Still nothing to act on when the refresh brought nothing.
+      (applyIncidentsAction ActivateSelectedIncident opened).appNotice
+        `shouldBe` Just "No incident is selected"
+
     it "resolves a click by the identity rendered into the row" $ do
       let selection = IncidentSelection (Just (namedRef "a")) 0
       resolveIncidentClick threeEntries selection (namedRef "b")

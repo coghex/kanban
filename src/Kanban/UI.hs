@@ -2962,7 +2962,7 @@ applyIncidentsAction action state = case action of
   CloseIncidentsPanel -> state {appOverlay = Nothing, appNotice = Nothing}
   MoveIncidentSelection amount -> state {appIncidentSelection = movedSelection amount}
   ScrollIncidentsPanel amount -> state {appIncidentSelection = movedSelection amount}
-  ActivateSelectedIncident -> activate state.appIncidentSelection.incidentSelectionRef
+  ActivateSelectedIncident -> activate (activationTarget state.appIncidentSelection)
   ClickIncidentRow clickedRef -> case resolveIncidentClick entries state.appIncidentSelection clickedRef of
     IncidentClickIgnored -> state
     IncidentClickOpen -> activate (Just clickedRef)
@@ -2970,6 +2970,19 @@ applyIncidentsAction action state = case action of
   IgnoreIncidentsEvent -> state
   where
     entries = incidentEntries state
+
+    -- Which identity a key press aims at, which is not always the one
+    -- stored. A selection that already names a row keeps that name even
+    -- after the row disappears: that is what stops a refresh from handing
+    -- the key press to whatever moved into its place. A selection that
+    -- names nothing has no such claim to protect — it is what a panel
+    -- opened over an empty list leaves behind — and a poll that lands the
+    -- first row while the panel is open makes 'drawIncidents' resolve and
+    -- highlight it. Resolving here too is what keeps Enter acting on the
+    -- row the user can see highlighted.
+    activationTarget selection = case selection.incidentSelectionRef of
+      Just reference -> Just reference
+      Nothing -> (resolveIncidentSelection entries selection).incidentSelectionRef
 
     movedSelection amount =
       let resolved = resolveIncidentSelection entries state.appIncidentSelection
