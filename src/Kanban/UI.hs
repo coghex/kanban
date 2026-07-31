@@ -48,6 +48,11 @@ module Kanban.UI
     githubRefreshTimeoutMicros,
     itemHasAmberWarning,
     killSelectionNotice,
+    labelApprovalAttr,
+    labelAttribute,
+    labelDefaultAttr,
+    labelProblemAttr,
+    labelUiAttr,
     liveReviewSessions,
     mergeExplanation,
     mergeText,
@@ -222,7 +227,7 @@ import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.UsageCommand (runUsageCommand)
-import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, orderCardLabels, pullRequestStatus)
+import Kanban.Workflow (CardStatus (..), deriveBoard, entryItem, isApproved, isProblem, orderCardLabels, pullRequestStatus, rereviewLabel)
 import Kanban.Worker
   ( ProcessIdentity,
     PullRequestWorkerTask (..),
@@ -5708,17 +5713,24 @@ columnHeadingAttr Done = doneAttr
 -- sorting (via 'Kanban.Workflow.pullRequestStatus') only; the label chip
 -- itself always renders the changes-requested/blocked label as a problem,
 -- matching unchanged issue-card treatment.
+--
+-- Precedence runs approval, the reserved rereview label, changes-requested
+-- and blocked, then the two display-only configured collections, then the
+-- default. The protocol names come first so no styling configuration can
+-- disguise a workflow state, and problem styling precedes UI styling so a
+-- name listed in both collections resolves deterministically.
 labelAttribute :: WorkflowConfig -> Text -> AttrName
 labelAttribute config name
   | folded == Text.toCaseFold config.approvalLabel = labelApprovalAttr
-  | folded == "reviewed:revised" = pendingAttr
+  | folded == Text.toCaseFold rereviewLabel = pendingAttr
   | folded == Text.toCaseFold config.changesRequestedLabel || folded `Set.member` foldedBlockedLabels = labelProblemAttr
-  | folded == "bug" = labelProblemAttr
-  | folded `elem` ["ui", "input"] = labelUiAttr
+  | folded `Set.member` foldedCaseless config.problemStyleLabels = labelProblemAttr
+  | folded `Set.member` foldedCaseless config.uiStyleLabels = labelUiAttr
   | otherwise = labelDefaultAttr
   where
     folded = Text.toCaseFold name
-    foldedBlockedLabels = Set.map Text.toCaseFold config.blockedLabels
+    foldedBlockedLabels = foldedCaseless config.blockedLabels
+    foldedCaseless = Set.map Text.toCaseFold
 
 titleAttr, headingAttr, providerAttr, footerAttr, noticeAttr, dimAttr :: AttrName
 neutralAttr, selectedAttr, approvedAttr, approvedInteriorAttr, pendingAttr, attentionAttr, readyAttr, problemAttr :: AttrName

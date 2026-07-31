@@ -9,7 +9,7 @@ import Brick.BChan (newBChan, readBChan)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (throwIO, throwTo)
 import Control.Monad (foldM, void)
-import Data.Aeson (Value (..), eitherDecode, object, (.=))
+import Data.Aeson (Value (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Char (isControl)
@@ -263,6 +263,11 @@ import Kanban.UI
     followAfterScroll,
     followAfterTurnStarted,
     killSelectionNotice,
+    labelApprovalAttr,
+    labelAttribute,
+    labelDefaultAttr,
+    labelProblemAttr,
+    labelUiAttr,
     liveReviewSessions,
     orphanMessage,
     overlayMouseAction,
@@ -323,7 +328,8 @@ import Kanban.Workflow
     entryItem,
     isProblem,
     orderCardLabels,
-    pullRequestStatus
+    pullRequestStatus,
+    rereviewLabel
   )
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import Spec.Support.Board
@@ -6660,6 +6666,98 @@ suite = do
           rendered = renderDetailsAt 40 (fixtureBoard []) (IssueItem issue)
       rendered `shouldSatisfy` any (Data.Text.isInfixOf combiningTitle)
 
+  describe "label chip color" $ do
+    it "leaves an unconfigured repository's own label vocabulary at the default attribute" $ do
+      -- The names Kanban used to compile in. With nothing configured they are
+      -- ordinary labels, which is the whole point of the configuration.
+      map (labelAttribute defaultWorkflowConfig) ["bug", "ui", "input"]
+        `shouldBe` replicate 3 labelDefaultAttr
+
+    it "gives a configured name its configured attribute in either styling collection" $ do
+      let config =
+            defaultWorkflowConfig
+              { problemStyleLabels = Set.fromList ["defect"],
+                uiStyleLabels = Set.fromList ["interface"]
+              }
+      labelAttribute config "defect" `shouldBe` labelProblemAttr
+      labelAttribute config "interface" `shouldBe` labelUiAttr
+      labelAttribute config "unlisted" `shouldBe` labelDefaultAttr
+
+    it "matches a configured styling name case-insensitively, as every other label comparison does" $ do
+      let config =
+            defaultWorkflowConfig
+              { problemStyleLabels = Set.fromList ["Defect"],
+                uiStyleLabels = Set.fromList ["INTERFACE"]
+              }
+      labelAttribute config "DEFECT" `shouldBe` labelProblemAttr
+      labelAttribute config "defect" `shouldBe` labelProblemAttr
+      labelAttribute config "interface" `shouldBe` labelUiAttr
+
+    it "keeps approval, changes-requested, blocked, and the reserved rereview label unchanged" $ do
+      labelAttribute defaultWorkflowConfig defaultWorkflowConfig.approvalLabel `shouldBe` labelApprovalAttr
+      labelAttribute defaultWorkflowConfig defaultWorkflowConfig.changesRequestedLabel `shouldBe` labelProblemAttr
+      labelAttribute defaultWorkflowConfig "blocked" `shouldBe` labelProblemAttr
+      labelAttribute defaultWorkflowConfig rereviewLabel `shouldBe` pendingAttr
+      labelAttribute defaultWorkflowConfig "REVIEWED:REVISED" `shouldBe` pendingAttr
+      let renamed =
+            defaultWorkflowConfig
+              { approvalLabel = "lgtm",
+                changesRequestedLabel = "needs-work",
+                blockedLabels = Set.fromList ["on-hold"]
+              }
+      labelAttribute renamed "LGTM" `shouldBe` labelApprovalAttr
+      labelAttribute renamed "Needs-Work" `shouldBe` labelProblemAttr
+      labelAttribute renamed "on-hold" `shouldBe` labelProblemAttr
+      labelAttribute renamed "blocked" `shouldBe` labelDefaultAttr
+
+    it "resolves the documented precedence, so styling configuration cannot disguise a workflow state" $ do
+      -- Every protocol name also listed for styling keeps its protocol color,
+      -- and a name in both styling collections resolves to problem.
+      let config =
+            defaultWorkflowConfig
+              { problemStyleLabels =
+                  Set.fromList
+                    [ defaultWorkflowConfig.approvalLabel,
+                      rereviewLabel,
+                      "both"
+                    ],
+                uiStyleLabels =
+                  Set.fromList
+                    [ defaultWorkflowConfig.approvalLabel,
+                      defaultWorkflowConfig.changesRequestedLabel,
+                      rereviewLabel,
+                      "blocked",
+                      "both"
+                    ]
+              }
+      labelAttribute config defaultWorkflowConfig.approvalLabel `shouldBe` labelApprovalAttr
+      labelAttribute config rereviewLabel `shouldBe` pendingAttr
+      labelAttribute config defaultWorkflowConfig.changesRequestedLabel `shouldBe` labelProblemAttr
+      labelAttribute config "blocked" `shouldBe` labelProblemAttr
+      labelAttribute config "both" `shouldBe` labelProblemAttr
+
+    -- A worker spec persists a whole WorkflowConfig, and Kanban.Worker's
+    -- manual instance delegates the nested object to this one, so a spec
+    -- written before the styling collections existed decodes only if they
+    -- default rather than being required.
+    it "decodes a durable workflow configuration written before the styling collections existed" $ do
+      let legacy =
+            object
+              [ "approvalLabel" .= ("lgtm" :: Text),
+                "changesRequestedLabel" .= ("needs-work" :: Text),
+                "blockedLabels" .= Set.fromList ["blocked" :: Text],
+                "trackerLabels" .= Set.fromList ["epic" :: Text],
+                "additionalTrackerSectionHeadings" .= ([] :: [Text]),
+                "approvalMode" .= ApprovalByLabel,
+                "blockingSeverity" .= SeverityRed
+              ]
+      eitherDecode (encode legacy)
+        `shouldBe` Right
+          defaultWorkflowConfig
+            { approvalLabel = "lgtm",
+              changesRequestedLabel = "needs-work"
+            }
+
   describe "configuration loading" $ do
     it "yields the stable defaults when no configuration file exists" $
       withTemporaryCacheRoot $ \configRoot ->
@@ -6703,7 +6801,9 @@ suite = do
             trackerLabels = Set.fromList ["epic", "tracker"],
             additionalTrackerSectionHeadings = ["Milestones"],
             approvalMode = ApprovalByEither,
-            blockingSeverity = SeverityAmber
+            blockingSeverity = SeverityAmber,
+            problemStyleLabels = Set.fromList ["defect"],
+            uiStyleLabels = Set.fromList ["interface", "input"]
           }
       config.rawLimits `shouldBe` LimitsConfig 500 200 5
       config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
@@ -6743,6 +6843,33 @@ suite = do
           (config, _) = unsafeConfig (decodeConfigText toml)
           resolved = resolveConfig "acme/widgets" config
       resolved.resolvedWorkflow.blockedLabels `shouldBe` Set.fromList ["custom-block"]
+
+    it "defaults both label-styling collections to empty, so an absent key styles nothing" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText "[workflow]\napproval_label = \"lgtm\"\n")
+          resolved = resolveConfig "acme/widgets" config
+      warnings `shouldBe` []
+      resolved.resolvedWorkflow.problemStyleLabels `shouldBe` Set.empty
+      resolved.resolvedWorkflow.uiStyleLabels `shouldBe` Set.empty
+
+    it "applies the usual override semantics to the label-styling collections" $ do
+      let toml =
+            "[workflow]\n"
+              <> "problem_style_labels = [\"defect\"]\n"
+              <> "ui_style_labels = [\"interface\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "ui_style_labels = [\"widget-ui\"]\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+          resolved = resolveConfig "acme/widgets" config
+      -- The omitted array inherits the global value; the specified one
+      -- replaces it in full rather than extending it.
+      resolved.resolvedWorkflow.problemStyleLabels `shouldBe` Set.fromList ["defect"]
+      resolved.resolvedWorkflow.uiStyleLabels `shouldBe` Set.fromList ["widget-ui"]
+
+    it "rejects an empty label-styling entry the same way every other label list does" $ do
+      decodeConfigText "[workflow]\nproblem_style_labels = [\"\"]\n"
+        `shouldSatisfy` errorContains ["workflow", "problem_style_labels"]
+      decodeConfigText "[workflow]\nui_style_labels = \"interface\"\n"
+        `shouldSatisfy` errorContains ["workflow", "ui_style_labels"]
 
     it "fails on syntactically malformed TOML" $
       decodeConfigText "this is not [valid toml" `shouldSatisfy` isLeftText

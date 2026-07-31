@@ -130,7 +130,9 @@ data WorkflowOverride = WorkflowOverride
     overrideTrackerLabels :: Maybe (Set Text),
     overrideAdditionalTrackerSectionHeadings :: Maybe [Text],
     overrideApprovalMode :: Maybe ApprovalMode,
-    overrideBlockingSeverity :: Maybe BlockingSeverity
+    overrideBlockingSeverity :: Maybe BlockingSeverity,
+    overrideProblemStyleLabels :: Maybe (Set Text),
+    overrideUiStyleLabels :: Maybe (Set Text)
   }
   deriving stock (Eq, Show)
 
@@ -143,7 +145,9 @@ emptyWorkflowOverride =
       overrideTrackerLabels = Nothing,
       overrideAdditionalTrackerSectionHeadings = Nothing,
       overrideApprovalMode = Nothing,
-      overrideBlockingSeverity = Nothing
+      overrideBlockingSeverity = Nothing,
+      overrideProblemStyleLabels = Nothing,
+      overrideUiStyleLabels = Nothing
     }
 
 data LimitsOverride = LimitsOverride
@@ -258,7 +262,9 @@ applyWorkflowOverride base override =
       additionalTrackerSectionHeadings =
         fromMaybe base.additionalTrackerSectionHeadings override.overrideAdditionalTrackerSectionHeadings,
       approvalMode = fromMaybe base.approvalMode override.overrideApprovalMode,
-      blockingSeverity = fromMaybe base.blockingSeverity override.overrideBlockingSeverity
+      blockingSeverity = fromMaybe base.blockingSeverity override.overrideBlockingSeverity,
+      problemStyleLabels = fromMaybe base.problemStyleLabels override.overrideProblemStyleLabels,
+      uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels
     }
 
 applyLimitsOverride :: LimitsConfig -> LimitsOverride -> LimitsConfig
@@ -392,6 +398,8 @@ workflowOverrideParser = do
   headingsValue <- optKeyOf "additional_tracker_section_headings" parseNonEmptyTextList
   approvalModeValue <- optKeyOf "approval_mode" parseApprovalMode
   blockingSeverityValue <- optKeyOf "blocking_severity" parseBlockingSeverity
+  problemStyleLabelsValue <- optKeyOf "problem_style_labels" parseLabelSet
+  uiStyleLabelsValue <- optKeyOf "ui_style_labels" parseLabelSet
   pure
     WorkflowOverride
       { overrideApprovalLabel = approvalLabelValue,
@@ -400,7 +408,9 @@ workflowOverrideParser = do
         overrideTrackerLabels = trackerLabelsValue,
         overrideAdditionalTrackerSectionHeadings = headingsValue,
         overrideApprovalMode = approvalModeValue,
-        overrideBlockingSeverity = blockingSeverityValue
+        overrideBlockingSeverity = blockingSeverityValue,
+        overrideProblemStyleLabels = problemStyleLabelsValue,
+        overrideUiStyleLabels = uiStyleLabelsValue
       }
 
 limitsOverrideParser :: ParseTable Position LimitsOverride

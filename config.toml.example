@@ -20,6 +20,14 @@ tracker_labels = ["epic"]
 additional_tracker_section_headings = []
 approval_mode = "label"        # "label", "review", or "either"
 blocking_severity = "red"      # "red" or "amber"
+# Display only: label names tinted like a problem, and like a UI concern, in
+# the card and details label chips. Matched case-insensitively; neither
+# affects status, readiness, or ordering. Both default to empty, so an
+# unlisted label renders as an ordinary chip. A name in both lists is tinted
+# as a problem. E.g. problem_style_labels = ["bug"], ui_style_labels = ["ui",
+# "input"] restores the tints Kanban used to hardcode.
+problem_style_labels = []
+ui_style_labels = []
 
 [limits]
 max_open_issues = 250
@@ -58,6 +66,8 @@ claude_seconds = 45
 # additional_tracker_section_headings = []
 # approval_mode = "label"
 # blocking_severity = "red"
+# problem_style_labels = []
+# ui_style_labels = []
 
 [repositories."owner/name".limits]
 # max_open_issues = 250

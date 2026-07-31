@@ -540,6 +540,22 @@ Fields:
 - Mergeability and aggregate CI summary.
 - Up to three wrapped excerpt lines.
 
+### Label chip color
+
+Card and details chips share one rule, applied in this order: the configured
+approval label, the reserved `reviewed:revised` label, the configured
+changes-requested and blocked labels, the configured problem-styled names, the
+configured UI-styled names, then the ordinary default. Every comparison is
+case-insensitive. The protocol names come first so no styling configuration
+can disguise a workflow state, and problem styling precedes UI styling so a
+name listed in both resolves the same way every time.
+
+The last two collections are presentational only — nothing reads them for
+status, readiness, or ordering — and both default to empty. No repository's
+own label vocabulary is built in: a repository that wants its defect or UI
+labels tinted says so in `config.toml`, and one that says nothing gets
+ordinary chips rather than an invisible built-in set of names.
+
 ### Excerpts
 
 Use GitHub's plain-text body representation where available. Select the first
@@ -1063,6 +1079,7 @@ Configurable repository semantics include:
 - Changes-requested label, default `reviewed:changes`.
 - Blocked labels, default including `blocked`.
 - Tracker labels, default including `epic`.
+- Problem-styled and UI-styled label-chip names, both default empty.
 - Additional tracker-section headings.
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.
