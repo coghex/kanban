@@ -2,9 +2,11 @@
 
 Kanban's board is fully usable with nothing installed beyond `git` and a
 signed-in `gh`. Its optional AI actions — canonical issue review and
-revision (`r`), solve (`S`), auto-solve (`A`), and the PR review/revise
-flows (`r` on a pull request) — additionally need workflow assets this
-repository tracks but does not install for you.
+revision (`r`), solve (`S`), auto-solve (`A`), and the PR review, rereview,
+revise, and repair flows (`r` on a pull request) — additionally need workflow
+assets this repository tracks but does not install for you. Each is its own
+preflight action with its own dependency set, so `--doctor` reports repair
+separately, per pull-request origin.
 
 Two commands cover that whole surface:
 
@@ -178,7 +180,7 @@ that cannot reach a definite conclusion never blocks an action: a
 diagnostic that guessed wrong would break a working setup.
 
 The tracked bundles are the supported source of the `solve`/`pr-review`/
-`pr-rereview`/`pr-revise` workflows. If you previously relied on your own
+`pr-rereview`/`pr-revise`/`repair` workflows. If you previously relied on your own
 unpackaged copies of those commands, preflight will report the bundle as
 absent — install it once with `setup_workflows.py`, which neither removes
 nor overrides anything else you have.

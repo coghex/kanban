@@ -97,7 +97,7 @@ Every mouse action has a keyboard equivalent.
 These actions require a working Codex or Claude installation and login, plus
 the Kanban-owned workflow assets those actions call into (the canonical
 issue-review backend and the named `solve`/`pr-review`/`pr-rereview`/
-`pr-revise` commands). Provider installation alone does not make them ready;
+`pr-revise`/`repair` commands). Provider installation alone does not make them ready;
 install the components you want with `python3 tools/setup_workflows.py`, and
 see [workflow setup and preflight](workflow-setup.md) for the fresh-clone
 path and [the agent-workflow contract](agent-workflow-contract.md) for what
