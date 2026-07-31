@@ -109,9 +109,29 @@ test-suite kanban-test
   hs-source-dirs: test
   main-is: Spec.hs
   other-modules:
+    Spec.Agent.Capture
+    Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Deadline
     Spec.Agent.ManagedProcess.Lifecycle
+    Spec.Agent.Preflight
+    Spec.Agent.Protocol
+    Spec.Agent.PullRequestFlow
+    Spec.Agent.Solve
+    Spec.Agent.Supervision
+    Spec.Agent.Transcript
+    Spec.Agent.Usage
+    Spec.Board.Tracker
+    Spec.Board.Workflow
+    Spec.Config.Consumers
+    Spec.Config.Loading
+    Spec.Config.Settings
+    Spec.Drainer
+    Spec.GitHub.BoardRefresh
+    Spec.GitHub.Decoding
+    Spec.GitHub.PullRequestStatus
+    Spec.Repository.Identity
+    Spec.Repository.State
     Spec.Support.Board
     Spec.Support.ClaudeProbe
     Spec.Support.Env
@@ -122,6 +142,11 @@ test-suite kanban-test
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render
+    Spec.UI.Cards
+    Spec.UI.Layout
+    Spec.UI.ReviewSession
+    Spec.UI.SolveChooser
+    Spec.UI.Text
   ghc-options: -threaded -with-rtsopts=-N1
   build-depends:
     aeson,
