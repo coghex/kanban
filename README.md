@@ -70,6 +70,7 @@ Kanban reads the repository's GitHub remote and uses your existing GitHub CLI lo
 | `S` | Work on the selected issue |
 | `A` | Work on, review, and revise the selected issue |
 | `p` | Show running and completed jobs |
+| `i` | Show everything needing attention, and go to it |
 | `?` | Show all controls |
 | `q` | Quit |
 
