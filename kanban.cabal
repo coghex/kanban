@@ -132,6 +132,7 @@ test-suite kanban-test
     Spec.GitHub.PullRequestStatus
     Spec.Repository.Identity
     Spec.Repository.State
+    Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe
     Spec.Support.Env
@@ -143,6 +144,7 @@ test-suite kanban-test
     Spec.Support.Process
     Spec.Support.Render
     Spec.UI.Cards
+    Spec.UI.Incidents
     Spec.UI.Layout
     Spec.UI.ReviewSession
     Spec.UI.SolveChooser

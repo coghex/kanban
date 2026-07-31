@@ -25,6 +25,7 @@ import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
 import qualified Spec.UI.Cards as Cards
+import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Layout as Layout
 import qualified Spec.UI.ReviewSession as ReviewSession
 import qualified Spec.UI.SolveChooser as SolveChooser
@@ -68,4 +69,5 @@ suite = do
   Cards.spec
   ConfigLoading.spec
   Layout.spec
+  Incidents.spec
   Preflight.spec
