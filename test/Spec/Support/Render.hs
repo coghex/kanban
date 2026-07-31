@@ -1,6 +1,10 @@
--- | Rendering a widget to lines, and the card and details projections built on it.
+-- | Rendering a widget to cells, and the line, card and details projections
+-- built on it.
 module Spec.Support.Render
-  ( renderDetails,
+  ( FrameCell (..),
+    renderFrameCells,
+    frameRowText,
+    renderDetails,
     renderDetailsAt,
     detailsHeadings,
     detailsRows,
@@ -21,6 +25,7 @@ import qualified Data.Text
 import qualified Data.Text.Lazy as LazyText
 import Data.Time (addUTCTime, utc)
 import qualified Data.Vector as Vector
+import qualified Graphics.Vty.Attributes as Vty
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp (..))
 import Kanban.CLI (Options (..))
@@ -90,16 +95,41 @@ renderCard options selected entry width =
           cardSolveSessions = Map.empty
         }
 
+-- | One cell of a rendered frame: the character drawn there and the Vty
+-- attribute it was drawn with. Text alone cannot answer a color question --
+-- the §10 split border is a color contract on glyphs that are identical
+-- either way -- so the attribute travels with the character rather than
+-- being dropped at the span boundary.
+data FrameCell = FrameCell
+  { frameCellCharacter :: Char,
+    frameCellAttribute :: Vty.Attr
+  }
+  deriving stock (Eq, Show)
+
+-- | Render @layers@ (topmost first, as 'Kanban.UI.drawApplication' returns
+-- them) into exactly the rows and cells a terminal of @region@ would show.
+--
+-- The rows are always the region's full height and are never trimmed here:
+-- a golden frame has to record what the whole viewport held, including the
+-- part a caller might otherwise mistake for absent content.
+renderFrameCells :: AttrMap -> (Int, Int) -> [Widget Name] -> [[FrameCell]]
+renderFrameCells theme region layers =
+  map rowCells (Vector.toList (displayOpsForPic picture region))
+  where
+    picture = renderWidget (Just theme) layers region
+    rowCells = concatMap spanCells . Vector.toList
+    spanCells (TextSpan attribute _ _ value) =
+      [FrameCell character attribute | character <- LazyText.unpack value]
+    spanCells (Skip columns) = replicate columns blank
+    spanCells (RowEnd columns) = replicate columns blank
+    blank = FrameCell ' ' Vty.defAttr
+
+frameRowText :: [FrameCell] -> Text
+frameRowText = Data.Text.pack . map frameCellCharacter
+
 renderWidgetLines :: AttrMap -> Int -> Widget Name -> [Text]
 renderWidgetLines theme width widget =
-  dropWhileEnd Data.Text.null (map rowText (Vector.toList (displayOpsForPic picture region)))
-  where
-    region = (width, 80)
-    picture = renderWidget (Just theme) [widget] region
-    rowText = Data.Text.stripEnd . foldMap spanText . Vector.toList
-    spanText (TextSpan _ _ _ value) = LazyText.toStrict value
-    spanText (Skip columns) = Data.Text.replicate columns " "
-    spanText (RowEnd columns) = Data.Text.replicate columns " "
+  dropWhileEnd Data.Text.null (map (Data.Text.stripEnd . frameRowText) (renderFrameCells theme (width, 80) [widget]))
 
 -- | The interior of a card frame: every row between the top and bottom
 -- borders, with the side borders stripped.

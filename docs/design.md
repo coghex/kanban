@@ -1184,6 +1184,23 @@ minimum, and narrow single-column — and compares each frame with a checked-in
 snapshot. Layout and border regressions become reviewable diffs instead of
 manual checks.
 
+Every frame is drawn through the whole-application composition the dashboard
+itself hands Brick, so nothing is reconstructed for the test, and every input a
+frame can vary over — the fixture snapshot's timestamps, the redraw instant and
+time zone, freshness, the notice line, drainer status, and the session, process
+and worker maps — is pinned. Beyond the three sizes, the matrix covers the box
+and open border renderers, ASCII mode, a selected card, the details overlay,
+and the help overlay. Characters are the baseline; one frame additionally
+records a per-cell attribute grid, because §10's split selected border is a
+color contract on glyphs that are identical either way.
+
+The frames live in `test/golden/` and are compared, never rewritten, by an
+ordinary `cabal test` run. Regeneration is an explicit switch:
+
+```console
+KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
+```
+
 ### Fixture tests
 
 - GitHub GraphQL responses, including pagination and null mergeability.
