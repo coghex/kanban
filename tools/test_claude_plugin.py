@@ -828,6 +828,20 @@ class ApproverPathResolutionTests(unittest.TestCase):
                     self.module.approver_path()
                 self.assertIn("is unreadable", str(raised.exception))
 
+    def test_a_record_link_whose_target_is_gone_is_unreadable_not_absent(self):
+        # read_text reports a dangling link as FileNotFoundError, which is
+        # indistinguishable from "never written" unless the link itself is
+        # stat-ed. The installer refuses to write through a link at this
+        # path, so a reader that ran the fallback would disagree with it.
+        backend = self.install_backend(self.record_path.parent)
+        self.record_path.symlink_to(self.root / "gone.json")
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        message = str(raised.exception)
+        self.assertIn("is unreadable", message)
+        self.assertIn(str(self.record_path), message)
+        self.assertNotIn(str(backend), message)
+
     def test_a_record_path_occupied_by_a_directory_is_unreadable_not_absent(self):
         backend = self.install_backend(self.record_path.parent)
         self.record_path.mkdir()

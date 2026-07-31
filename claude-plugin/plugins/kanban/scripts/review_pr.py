@@ -390,14 +390,20 @@ def approver_path() -> Path:
             "that variable to use the recorded installation.",
         )
     record = issue_review_record_path()
-    try:
-        document = json.loads(record.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    # Absence is decided by whether anything occupies the path, not by
+    # whether something readable does: `os.path.lexists` sees a symbolic link
+    # whose target is gone, which `read_text` reports as FileNotFoundError
+    # and which falling back would treat as "never installed". The installer
+    # refuses to write through a link here for the same reason.
+    if not os.path.lexists(record):
         document = {}
-    except OSError as error:
-        raise unreadable_record(record, "it could not be read") from error
-    except json.JSONDecodeError as error:
-        raise unreadable_record(record, str(error)) from error
+    else:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise unreadable_record(record, "it could not be read") from error
+        except json.JSONDecodeError as error:
+            raise unreadable_record(record, str(error)) from error
     if not isinstance(document, dict):
         raise unreadable_record(record, "it is not a JSON object")
     if "backend_path" not in document:

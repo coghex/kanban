@@ -511,7 +511,7 @@ import Spec.Support.Render
     renderDetailsAt,
     renderWidgetLines
   )
-import System.Directory (XdgDirectory (XdgCache), canonicalizePath, createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getXdgDirectory)
+import System.Directory (XdgDirectory (XdgCache), canonicalizePath, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getXdgDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
@@ -5718,6 +5718,20 @@ suite = do
         -- record corrupted into naming nothing -- not the absent field that
         -- means "installed before the record existed".
         rejects "{\"backend_path\":null}"
+
+    it "treats a record link whose target is gone as unreadable, not absent" $
+      withTemporaryCacheRoot $ \root -> do
+        -- doesPathExist follows the link, so the dangling one it cannot
+        -- follow reads as "nothing here" unless the link itself is stat-ed.
+        -- The installer refuses to write through a link at this path, so a
+        -- reader that ran the fallback instead would disagree with it.
+        installed <- installBackendAt root
+        let recordPath = root </> "config.json"
+        createFileLink (root </> "gone.json") recordPath
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "is unreadable"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldNotMention` Data.Text.pack installed
 
     it "treats a record path occupied by a directory as unreadable, not absent" $
       withTemporaryCacheRoot $ \root -> do

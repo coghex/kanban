@@ -121,7 +121,7 @@ import Kanban.Domain (Repository (..), WorkflowConfig (..), defaultWorkflowConfi
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.Text (withoutJsonPath)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
-import System.Directory (doesFileExist, doesPathExist, findExecutable, getHomeDirectory)
+import System.Directory (doesFileExist, doesPathExist, findExecutable, getHomeDirectory, pathIsSymbolicLink)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
@@ -631,13 +631,18 @@ selectCanonicalIssueReviewerAt override recordPath = case override of
     | not (null (trimmed installDir)) ->
         pure (Right (ReviewerFromEnvironment installDir, canonicalIssueReviewerPath installDir))
   _ -> do
-    -- 'doesPathExist', not 'doesFileExist': a record path occupied by a
-    -- directory is a record that cannot be read, not one that was never
-    -- written. Treating it as absent would fall through to the default
-    -- backend while the Python consumers — whose read raises rather than
-    -- returning "missing" — refuse. Anything present is read, and a read
-    -- that fails becomes the unreadable-record diagnostic below.
-    recorded <- doesPathExist recordPath
+    -- Absence is decided by whether anything occupies the path, not by
+    -- whether something readable does. A directory, or a symbolic link
+    -- whose target is gone, is a record that cannot be read rather than one
+    -- that was never written; treating either as absent would fall through
+    -- to the default backend and silently run an installation the record
+    -- does not name. 'doesPathExist' follows links, so a dangling one needs
+    -- the @lstat@ that 'pathIsSymbolicLink' does — and it throws when
+    -- nothing is there at all, which is the genuinely absent case. The
+    -- installer refuses to write through a link here for the same reason.
+    -- Anything present is read, and a read that fails becomes the
+    -- unreadable-record diagnostic below.
+    recorded <- recordPathOccupied recordPath
     if not recorded
       then pure (Right compatibilityFallback)
       else do
@@ -663,6 +668,18 @@ selectCanonicalIssueReviewerAt override recordPath = case override of
         <> detail
         <> "). Rewrite it by running `python3 tools/install_issue_review.py` from the "
         <> "Kanban checkout, adding --install-dir if the backend lives elsewhere."
+
+-- | Whether anything at all occupies the record's path, including an entry
+-- that cannot be followed to a file. Deliberately not @doesFileExist@ or
+-- @doesPathExist@ alone: both answer "is there something readable here",
+-- and the question this has to answer is "was a record ever written here",
+-- whose only fail-closed reading of a directory or a dangling link is yes.
+recordPathOccupied :: FilePath -> IO Bool
+recordPathOccupied path = do
+  present <- doesPathExist path
+  if present
+    then pure True
+    else either (const False) id <$> try @IOException (pathIsSymbolicLink path)
 
 -- | 'selectCanonicalIssueReviewerAt' against the real environment.
 selectCanonicalIssueReviewer :: IO (Either Text (IssueReviewerSource, FilePath))

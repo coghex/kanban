@@ -233,12 +233,13 @@ override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
 if override and override.strip():
     resolved = Path(override).expanduser() / "approve_issues.py"
 else:
-    try:
-        document = json.loads(record.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    if not os.path.lexists(record):
         document = {}
-    except (OSError, json.JSONDecodeError) as error:
-        raise SystemExit(f"The install record at {record} is unreadable ({error}).")
+    else:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"The install record at {record} is unreadable ({error}).")
     if not isinstance(document, dict):
         raise SystemExit(f"The install record at {record} is not a JSON object.")
     if "backend_path" not in document:
