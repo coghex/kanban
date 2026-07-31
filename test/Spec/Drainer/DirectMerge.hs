@@ -35,8 +35,10 @@ import Kanban.Drainer
   )
 import Kanban.UI
   ( BoardRefreshDispatch (..),
-    directMergeResultAfterRefresh,
-    noticeWithDirectMergeResult,
+    DirectMergeReport (..),
+    directMergeNoticeFor,
+    directMergeReportAfterRefresh,
+    outstandingDirectMergeReport,
     releaseQueuedBoardRefresh,
     requiredBoardRefreshDispatch,
   )
@@ -427,21 +429,48 @@ examples = do
     -- the screen. This is the whole reason a merged-and-unfinished outcome is
     -- ever readable.
     it "keeps a landed merge's result in front of the refresh it required" $ do
-      let landed = Just "PR #42 merged, but the run did not finish cleanly (post_merge_cleanup_failed): the linked issue is still open."
-      noticeWithDirectMergeResult landed "Refreshing GitHub…"
-        `shouldMention` "post_merge_cleanup_failed"
-      noticeWithDirectMergeResult landed "Refreshing GitHub…" `shouldMention` "Refreshing GitHub"
-      noticeWithDirectMergeResult landed "GitHub refresh is already running"
-        `shouldMention` "the linked issue is still open"
+      let landed = "PR #42 merged, but the run did not finish cleanly (post_merge_cleanup_failed): the linked issue is still open."
+          report = DirectMergeReport landed landed
+          (shown, carried) = directMergeNoticeFor (Just report) "Refreshing GitHub…"
+      shown `shouldMention` "post_merge_cleanup_failed"
+      shown `shouldMention` "Refreshing GitHub"
+      -- What it carries forward is this very notice, so the next question
+      -- about whether it is still displayed has something exact to compare.
+      fmap (.directMergeReportShown) carried `shouldBe` Just shown
+      -- Two hops: the refresh starting, then publishing. The result stays in
+      -- front of both rather than being consumed by the first.
+      let (afterPublish, _) = directMergeNoticeFor carried "board updated"
+      afterPublish `shouldMention` "post_merge_cleanup_failed"
+      afterPublish `shouldMention` "board updated"
       -- Nothing outstanding leaves every other notice exactly as it was.
-      noticeWithDirectMergeResult Nothing "Refreshing GitHub…" `shouldBe` "Refreshing GitHub…"
+      fst (directMergeNoticeFor Nothing "Refreshing GitHub…") `shouldBe` "Refreshing GitHub…"
+
+    -- Two dozen places clear or replace the notice — both Esc handlers, every
+    -- overlay that opens, every selection move — and each means the user has
+    -- stopped looking at this result. None of them names the result, so the
+    -- question asked is "is what I wrote still on screen", which no future
+    -- site has to know about either.
+    it "stops carrying a result whose notice is gone, however it went" $ do
+      let landed = "PR #42 merged."
+          report = DirectMergeReport landed landed
+      -- Still displayed, so still outstanding.
+      outstandingDirectMergeReport (Just landed) (Just report) `shouldBe` Just report
+      -- Dismissed with Esc, from the board or from the details overlay `m`
+      -- was pressed in, or cleared by opening an overlay or moving the card.
+      outstandingDirectMergeReport Nothing (Just report) `shouldBe` Nothing
+      -- Replaced by some other action's notice.
+      outstandingDirectMergeReport (Just "Review started") (Just report) `shouldBe` Nothing
+      -- A composed notice is still this result's own, so it keeps going.
+      let (composed, carried) = directMergeNoticeFor (Just report) "Refreshing GitHub…"
+      outstandingDirectMergeReport (Just composed) carried `shouldBe` carried
+      outstandingDirectMergeReport (Just composed) (Just report) `shouldBe` Nothing
 
     it "drops that result only once the refresh it required has run" $ do
-      let landed = Just "PR #42 merged."
+      let carried = Just (DirectMergeReport "PR #42 merged." "PR #42 merged.")
       -- The fetch that merely happened to be in flight publishes first; the
-      -- required one has not started, so the result has to survive it.
-      directMergeResultAfterRefresh True landed `shouldBe` landed
-      directMergeResultAfterRefresh False landed `shouldBe` Nothing
+      -- refresh the merge required has not started, so the result survives it.
+      directMergeReportAfterRefresh True carried `shouldBe` carried
+      directMergeReportAfterRefresh False carried `shouldBe` Nothing
 
 -- | A status shaped as the controller's decoder builds one, so an example
 -- never has to restate the field order.

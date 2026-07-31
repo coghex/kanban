@@ -1170,8 +1170,11 @@ a countdown.
   nowhere else — so the refresh the same result requires must not be what
   removes it from the screen. It is carried in front of the refresh's own
   notices and dropped once the required refresh has actually published, not
-  once whichever fetch happened to be in flight did. Dismissing the notice
-  dismisses it.
+  once whichever fetch happened to be in flight did. It is carried only while
+  what is on screen is still the notice it last wrote, so every way a notice
+  ends — either `Esc`, an overlay opening, a moved selection, another action
+  reporting — also ends the result behind it, and a dismissed merge report can
+  never be recreated by the refresh it required.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links under
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes

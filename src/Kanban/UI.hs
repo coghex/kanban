@@ -9,6 +9,7 @@ module Kanban.UI
     CardEnv (..),
     ChatTranscript (..),
     DetailsEnv (..),
+    DirectMergeReport (..),
     DrainerSourceState (..),
     IncidentActivation (..),
     IncidentClickOutcome (..),
@@ -50,7 +51,8 @@ module Kanban.UI
     codexRefreshTimeoutMicros,
     decideReviewTickArm,
     decideReviewTickFire,
-    directMergeResultAfterRefresh,
+    directMergeNoticeFor,
+    directMergeReportAfterRefresh,
     displayedTranscript,
     drainerSourceState,
     drawApplication,
@@ -78,10 +80,10 @@ module Kanban.UI
     mergeExplanation,
     mergeText,
     neutralAttr,
-    noticeWithDirectMergeResult,
     normalizeCollapsedRow,
     normalizeSelectedRowsAfterToggle,
     orphanMessage,
+    outstandingDirectMergeReport,
     overlayMouseAction,
     pendingAttr,
     problemAttr,
@@ -639,11 +641,11 @@ data AppState = AppState
     -- apart from 'appDrainerStatus', which reports the launchd service and
     -- has nothing to say about a run this dashboard started instead of it.
     appDirectMergePending :: Maybe Int,
-    -- | The notice a direct merge that actually landed produced, held until
-    -- the board refresh it requires has run. That notice is the only report
-    -- an irreversible action gets, and the refresh it triggers would
-    -- otherwise overwrite it before it could be read.
-    appDirectMergeResult :: Maybe Text,
+    -- | A direct merge that actually landed, held until the board refresh it
+    -- requires has run. That result is the only report an irreversible action
+    -- gets, and the refresh it triggers would otherwise overwrite it before
+    -- it could be read.
+    appDirectMergeResult :: Maybe DirectMergeReport,
     -- | A board refresh that has to observe something already committed, and
     -- could not start because a fetch was already in flight. That fetch may
     -- have read GitHub before the change landed, so it does not satisfy the
@@ -2824,7 +2826,7 @@ handleEvent event = do
     (Just _, _) -> pure ()
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
     (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
-    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing, appDirectMergeResult = Nothing})
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
     (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveCard (-1)
@@ -5638,24 +5640,51 @@ applyDirectMerge number result = do
             -- itself and nothing overwrites it, and clearing here is also what
             -- retires the previous merge's result.
             appDirectMergeResult =
-              if effect.directMergeRefreshesBoard then Just effect.directMergeNotice else Nothing
+              if effect.directMergeRefreshesBoard
+                then Just (DirectMergeReport effect.directMergeNotice effect.directMergeNotice)
+                else Nothing
           }
     )
   when effect.directMergeRefreshesBoard requireBoardRefresh
 
--- | A notice shown while a direct-merge result is still outstanding, with
--- that result kept in front of it.
-noticeWithDirectMergeResult :: Maybe Text -> Text -> Text
-noticeWithDirectMergeResult Nothing notice = notice
-noticeWithDirectMergeResult (Just result) notice = result <> " · " <> notice
+-- | A landed merge's result, together with the notice it was last shown as.
+--
+-- The second field is what keeps the result from outliving its own report.
+-- Some two dozen places clear or replace 'appNotice' -- both Esc handlers,
+-- every overlay that opens, every selection move -- and each of them means
+-- the user has stopped looking at this result. None of them can be asked to
+-- remember that a second field exists, and a list of sites that must is a
+-- list that will be incomplete again the next time one is added. Comparing
+-- against what was actually put on screen needs no such list.
+data DirectMergeReport = DirectMergeReport
+  { directMergeReportResult :: Text,
+    directMergeReportShown :: Text
+  }
+  deriving stock (Eq, Show)
 
--- | Whether an outstanding direct-merge result survives a refresh that has
--- just published. It is dropped once the refresh it required has actually
--- run, and kept while that refresh is still only queued -- otherwise the
--- fetch that merely happened to be in flight would carry the result away
--- before the one the merge required had even started.
-directMergeResultAfterRefresh :: Bool -> Maybe Text -> Maybe Text
-directMergeResultAfterRefresh queued result = if queued then result else Nothing
+-- | The report to carry past a refresh that has just published. Dropped once
+-- the refresh the merge required has actually run, and kept while that
+-- refresh is still only queued -- otherwise the fetch that merely happened to
+-- be in flight would carry the result away before the required one had even
+-- started.
+directMergeReportAfterRefresh :: Bool -> Maybe DirectMergeReport -> Maybe DirectMergeReport
+directMergeReportAfterRefresh queued carried = if queued then carried else Nothing
+
+-- | The report still worth carrying, given what is on screen now: 'Nothing'
+-- once anything has replaced or cleared the notice this last wrote.
+outstandingDirectMergeReport :: Maybe Text -> Maybe DirectMergeReport -> Maybe DirectMergeReport
+outstandingDirectMergeReport displayed report = do
+  candidate <- report
+  if displayed == Just candidate.directMergeReportShown then Just candidate else Nothing
+
+-- | A notice with an outstanding result kept in front of it, and the report
+-- to carry forward -- which records this very notice, so the next question
+-- about whether it is still displayed has something exact to compare with.
+directMergeNoticeFor :: Maybe DirectMergeReport -> Text -> (Text, Maybe DirectMergeReport)
+directMergeNoticeFor Nothing notice = (notice, Nothing)
+directMergeNoticeFor (Just report) notice =
+  let composed = report.directMergeReportResult <> " · " <> notice
+   in (composed, Just report {directMergeReportShown = composed})
 
 startAllRefreshes :: EventM Name AppState ()
 startAllRefreshes = do
@@ -5703,19 +5732,25 @@ startQueuedBoardRefresh = do
     modify (\current -> current {appBoardRefreshQueued = False})
     startBoardRefresh
 
+-- | Set a notice, keeping an outstanding direct-merge result in front of it
+-- and carrying that result forward only while it is still the one displayed.
+announceOverDirectMergeResult :: Text -> EventM Name AppState ()
+announceOverDirectMergeResult notice =
+  modify
+    ( \state ->
+        let outstanding = outstandingDirectMergeReport state.appNotice state.appDirectMergeResult
+            (composed, carried) = directMergeNoticeFor outstanding notice
+         in state {appNotice = Just composed, appDirectMergeResult = carried}
+    )
+
 startBoardRefresh :: EventM Name AppState ()
 startBoardRefresh = do
   state <- get
   case state.appBoardFreshness of
-    Loading -> setNotice (noticeWithDirectMergeResult state.appDirectMergeResult "GitHub refresh is already running")
+    Loading -> announceOverDirectMergeResult "GitHub refresh is already running"
     _ -> do
-      modify
-        ( \current ->
-            current
-              { appBoardFreshness = Loading,
-                appNotice = Just (noticeWithDirectMergeResult current.appDirectMergeResult "Refreshing GitHub…")
-              }
-        )
+      announceOverDirectMergeResult "Refreshing GitHub…"
+      modify (\current -> current {appBoardFreshness = Loading})
       void
         . liftIO
         . forkIO
@@ -5861,11 +5896,12 @@ applyBoardRefresh outcome = do
   -- only place the user is ever told about.
   modify
     ( \state ->
-        state
-          { appNotice = noticeWithDirectMergeResult before.appDirectMergeResult <$> state.appNotice,
-            appDirectMergeResult =
-              directMergeResultAfterRefresh before.appBoardRefreshQueued before.appDirectMergeResult
-          }
+        let outstanding = outstandingDirectMergeReport before.appNotice before.appDirectMergeResult
+            (composed, carried) = directMergeNoticeFor outstanding (fromMaybe "" state.appNotice)
+         in state
+              { appNotice = if isJust outstanding then Just composed else state.appNotice,
+                appDirectMergeResult = directMergeReportAfterRefresh before.appBoardRefreshQueued carried
+              }
     )
   startPendingWorkerMonitors
   case outcome of
