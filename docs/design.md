@@ -1144,6 +1144,15 @@ a countdown.
   stopped part-way through a git operation, and a state that could not be
   established at all — including one no status was ever obtained for — all
   refuse without invoking anything.
+- A result is believed only once it is established to be the promised
+  document for the pull request that was asked about: the `drain-prs-single-pr`
+  schema, a version this Kanban reads, that pull-request number, a known
+  outcome, and an outcome that does not contradict the merge flag or a dry run.
+  Anything else — including a document carrying the outcome fields under
+  another schema or version — is refused with a remediation naming the
+  installer, because the resolver runs whatever is installed at the selected
+  path and a merge is both reported to the user and acted on by refetching the
+  board.
 - The run is asynchronous and unbounded, since its work is irreversible partway
   through and a deadline that killed it would abandon a merge already committed
   on GitHub. Its result updates only that action's notice and pending state,

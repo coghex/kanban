@@ -247,18 +247,28 @@ examples = do
         `shouldMentionArgument` "/Users/example/kanban.toml"
 
   describe "reporting what one single-PR run did" $ do
-    let resultDocument outcome merged reason message =
-          "{\"schema\":\"drain-prs-single-pr\",\"version\":1,\"pull_request\":42,\"outcome\":\""
+    let documentWith schema version number dryRun outcome merged reason message =
+          "{\"schema\":\""
+            <> schema
+            <> "\",\"version\":"
+            <> show version
+            <> ",\"pull_request\":"
+            <> show (number :: Int)
+            <> ",\"outcome\":\""
             <> outcome
             <> "\",\"merged\":"
-            <> (if merged then "true" else "false")
+            <> jsonBool merged
             <> ",\"would_merge\":false,\"reason\":\""
             <> reason
             <> "\",\"message\":\""
             <> message
-            <> "\",\"dry_run\":false}"
+            <> "\",\"dry_run\":"
+            <> jsonBool dryRun
+            <> "}"
+        jsonBool value = if value then "true" else "false"
+        resultDocument = documentWith "drain-prs-single-pr" (1 :: Int) 42 False
         effectFor exitCode document =
-          directMergeEffect 42 (decodeDirectMergeResult exitCode document "")
+          directMergeEffect 42 (decodeDirectMergeResult 42 exitCode document "")
 
     it "refreshes the board and says so when the pull request merged" $ do
       let effect = effectFor ExitSuccess (resultDocument "merged" True "merged" "PR #42 merged.")
@@ -303,7 +313,7 @@ examples = do
       let effect =
             directMergeEffect
               42
-              (decodeDirectMergeResult (ExitFailure 2) "" "starting up\ndrain_prs.py error: unrecognized arguments\n")
+              (decodeDirectMergeResult 42 (ExitFailure 2) "" "starting up\ndrain_prs.py error: unrecognized arguments\n")
       effect.directMergeRefreshesBoard `shouldBe` False
       effect.directMergeNotice `shouldMention` "wrote no result"
       effect.directMergeNotice `shouldMention` "unrecognized arguments"
@@ -312,6 +322,65 @@ examples = do
       let effect = effectFor ExitSuccess "{\"outcome\":\"merged\"}"
       effect.directMergeRefreshesBoard `shouldBe` False
       effect.directMergeNotice `shouldMention` "could not be read"
+
+    -- The resolver runs whatever is installed at the selected path, so an
+    -- answer from something that is not this contract's drainer is reachable
+    -- rather than hypothetical. Every one of these carries the four outcome
+    -- fields and would have been believed — and each claims a merge, which is
+    -- reported to the user and refetches the board — so each has to be
+    -- refused rather than partially trusted.
+    it "refuses a merge reported by a document that is not the promised one" $ do
+      let refused document = do
+            let effect = effectFor ExitSuccess document
+            effect.directMergeRefreshesBoard `shouldBe` False
+            effect.directMergeNotice `shouldMention` "not the one this action asked for"
+            effect.directMergeNotice `shouldMention` "tools/install_drainer.py"
+            pure effect.directMergeNotice
+
+      -- Another tool's document that happens to carry the same field names.
+      wrongSchema <- refused (documentWith "some-other-tool" (1 :: Int) 42 False "merged" True "merged" "done.")
+      wrongSchema `shouldMention` "some-other-tool"
+
+      -- Both directions: an older installed drainer, and a newer one whose
+      -- fields this side has never seen defined.
+      old <- refused (documentWith "drain-prs-single-pr" (0 :: Int) 42 False "merged" True "merged" "done.")
+      old `shouldMention` "schema version 0"
+      new <- refused (documentWith "drain-prs-single-pr" (2 :: Int) 42 False "merged" True "merged" "done.")
+      new `shouldMention` "schema version 2"
+
+      -- A result for a different pull request entirely, which would otherwise
+      -- report PR #42 as merged on the strength of PR #43's answer.
+      other <- refused (documentWith "drain-prs-single-pr" (1 :: Int) 43 False "merged" True "merged" "done.")
+      other `shouldMention` "PR #43"
+
+      -- An outcome whose meaning this side does not know.
+      unknown <- refused (documentWith "drain-prs-single-pr" (1 :: Int) 42 False "partially_merged" True "merged" "done.")
+      unknown `shouldMention` "partially_merged"
+
+      -- Self-contradictory documents, each of which resolves to a confident
+      -- claim about a merge in one direction or the other.
+      _ <- refused (documentWith "drain-prs-single-pr" (1 :: Int) 42 False "merged" False "merged" "done.")
+      _ <- refused (documentWith "drain-prs-single-pr" (1 :: Int) 42 False "no_action" True "checks_pending" "waiting.")
+      -- A dry run mutates nothing, so one cannot have merged anything.
+      _ <- refused (documentWith "drain-prs-single-pr" (1 :: Int) 42 True "merged" True "merged" "done.")
+      pure ()
+
+    -- The identity fields are what the check is made of, so a document that
+    -- omits one has not answered this action's question at all — and each of
+    -- these still claims a merge through the fields it does carry.
+    it "refuses a document that omits a field the check is made of" $
+      mapM_
+        ( \document -> do
+            let effect = effectFor ExitSuccess document
+            effect.directMergeRefreshesBoard `shouldBe` False
+            effect.directMergeNotice `shouldMention` "could not be read"
+        )
+        [ "{\"version\":1,\"pull_request\":42,\"outcome\":\"merged\",\"merged\":true,\"reason\":\"merged\",\"message\":\"done.\",\"dry_run\":false}",
+          "{\"schema\":\"drain-prs-single-pr\",\"pull_request\":42,\"outcome\":\"merged\",\"merged\":true,\"reason\":\"merged\",\"message\":\"done.\",\"dry_run\":false}",
+          "{\"schema\":\"drain-prs-single-pr\",\"version\":1,\"outcome\":\"merged\",\"merged\":true,\"reason\":\"merged\",\"message\":\"done.\",\"dry_run\":false}",
+          "{\"schema\":\"drain-prs-single-pr\",\"version\":1,\"pull_request\":42,\"outcome\":\"merged\",\"reason\":\"merged\",\"message\":\"done.\",\"dry_run\":false}",
+          "{\"schema\":\"drain-prs-single-pr\",\"version\":1,\"pull_request\":42,\"outcome\":\"merged\",\"merged\":true,\"reason\":\"merged\",\"message\":\"done.\"}"
+        ]
 
     it "reports a run that could not be started at all" $ do
       let effect = directMergeEffect 42 (Left "python3 was not found on PATH")

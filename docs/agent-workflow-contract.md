@@ -212,7 +212,12 @@ everything else.
   with a different installation than the one configured and say nothing. A
   missing installation is reported with a remediation naming
   `tools/install_drainer.py` and the directory actually consulted, never as a
-  failed merge.
+  failed merge. The result that run writes is accepted only after it is
+  established to be this contract's document for the pull request that was
+  asked about — schema, a version Kanban reads, the selected number, a known
+  outcome, and no contradiction between the outcome, the merge flag, and the
+  dry-run flag — since resolving a path means whatever is installed there
+  answers, and a claimed merge is both shown to the user and acted on.
 - **Inputs:** repository path and repository identity; the repository's drainer
   LaunchAgent plist under `~/Library/LaunchAgents`, which is a Kanban-owned
   convention (see §5), not a personal path. There is one such plist per

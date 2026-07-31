@@ -978,10 +978,10 @@ eligiblePullRequest config (Just (PullRequestItem pullRequest))
             <> " is not in Done, so it is not an approved pull request ready to merge"
         )
 
--- | The one JSON document a @--pr@ run writes to stdout. Only the fields this
--- side acts on are read; the schema and version are the drainer's own, and a
--- document that does not carry these is reported as unreadable rather than
--- partially believed.
+-- | What one @--pr@ run reported, once 'acceptedDirectMergeResult' has
+-- established that the document really was this action's own. Only the fields
+-- acted on survive that check; the schema, version and pull-request number
+-- are what the check is made of and are not carried onward.
 data DirectMergeOutcome = DirectMergeOutcome
   { -- | @merged@, @no_action@, or @error@.
     directMergeOutcomeKind :: Text,
@@ -996,26 +996,121 @@ data DirectMergeOutcome = DirectMergeOutcome
   }
   deriving stock (Eq, Show)
 
-instance FromJSON DirectMergeOutcome where
+-- | The document exactly as written, before anything establishes that it is
+-- the one this action asked for. Every field the contract promises is
+-- required, including the three that identify the document: a run that
+-- reports an outcome without saying which schema, which version, or which
+-- pull request it is about has not answered this action's question.
+data RawDirectMergeResult = RawDirectMergeResult
+  { rawResultSchema :: Text,
+    rawResultVersion :: Int,
+    rawResultPullRequest :: Int,
+    rawResultOutcome :: Text,
+    rawResultMerged :: Bool,
+    rawResultReason :: Text,
+    rawResultMessage :: Text,
+    rawResultDryRun :: Bool
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON RawDirectMergeResult where
   parseJSON = withObject "PR drainer single-PR result" $ \value ->
-    DirectMergeOutcome
-      <$> value .: "outcome"
+    RawDirectMergeResult
+      <$> value .: "schema"
+      <*> value .: "version"
+      <*> value .: "pull_request"
+      <*> value .: "outcome"
       <*> value .: "merged"
       <*> value .: "reason"
       <*> value .: "message"
+      <*> value .: "dry_run"
+
+-- | The document this side knows how to read, and the outcome that means the
+-- pull request landed. Spelled once here and used by both the check below and
+-- the rendering above, so the two cannot drift apart.
+directMergeSchema :: Text
+directMergeSchema = "drain-prs-single-pr"
+
+directMergeSchemaVersion :: Int
+directMergeSchemaVersion = 1
+
+mergedOutcome :: Text
+mergedOutcome = "merged"
 
 -- | Reads what one @--pr@ run reported. Empty stdout is a start-up failure
 -- rather than a no-merge result — a usage error exits without writing the
 -- document at all — so it is reported with whatever the run last said on
 -- stderr instead of being decoded into silence.
-decodeDirectMergeResult :: ExitCode -> String -> String -> Either Text DirectMergeOutcome
-decodeDirectMergeResult exitCode output errors = case eitherDecode (LazyByteString.pack output) of
-  Right outcome -> Right outcome
-  Left message
-    | Text.null (Text.strip (Text.pack output)) ->
-        Left ("the PR drainer wrote no result and " <> exitDescription exitCode <> lastDiagnostic errors)
-    | otherwise ->
-        Left ("the PR drainer's result could not be read: " <> withoutJsonPath (Text.pack message))
+decodeDirectMergeResult :: Int -> ExitCode -> String -> String -> Either Text DirectMergeOutcome
+decodeDirectMergeResult number exitCode output errors =
+  case eitherDecode (LazyByteString.pack output) of
+    Right raw -> acceptedDirectMergeResult number raw
+    Left message
+      | Text.null (Text.strip (Text.pack output)) ->
+          Left ("the PR drainer wrote no result and " <> exitDescription exitCode <> lastDiagnostic errors)
+      | otherwise ->
+          Left ("the PR drainer's result could not be read: " <> withoutJsonPath (Text.pack message))
+
+-- | Establish that the document is the promised one, for the pull request
+-- this run actually asked about, before any of it is believed.
+--
+-- Parsing the four outcome fields alone would let any JSON carrying them be
+-- reported as a merge — and a merge is reported to the user and refetches the
+-- board, so believing the wrong document is not a cosmetic error. The
+-- resolver deliberately runs whatever is installed at the selected path, so
+-- "some other script answered" is a reachable state rather than a
+-- hypothetical one, and every way the answer can fail to be this action's own
+-- is refused here rather than partially trusted.
+acceptedDirectMergeResult :: Int -> RawDirectMergeResult -> Either Text DirectMergeOutcome
+acceptedDirectMergeResult number raw
+  | raw.rawResultSchema /= directMergeSchema =
+      refuse ("it is a " <> raw.rawResultSchema <> " document rather than " <> directMergeSchema)
+  -- Older and newer are both refused: this side knows what one version means,
+  -- and a version it has never seen may have redefined the very fields the
+  -- merge is reported through.
+  | raw.rawResultVersion /= directMergeSchemaVersion =
+      refuse
+        ( "it is schema version "
+            <> showNumber raw.rawResultVersion
+            <> ", and this Kanban reads version "
+            <> showNumber directMergeSchemaVersion
+        )
+  | raw.rawResultPullRequest /= number =
+      refuse
+        ( "it reports PR #"
+            <> showNumber raw.rawResultPullRequest
+            <> " rather than the PR #"
+            <> showNumber number
+            <> " this run asked about"
+        )
+  | raw.rawResultOutcome `notElem` [mergedOutcome, "no_action", "error"] =
+      refuse ("it reports an outcome this Kanban does not know: " <> raw.rawResultOutcome)
+  -- The remaining three are documents that contradict themselves. Each would
+  -- otherwise resolve to a confident statement about a merge, in one
+  -- direction or the other.
+  | raw.rawResultOutcome == mergedOutcome, not raw.rawResultMerged =
+      refuse "it reports a merged outcome while reporting that nothing merged"
+  | raw.rawResultOutcome == "no_action", raw.rawResultMerged =
+      refuse "it reports a merge under an outcome that means nothing was merged"
+  | raw.rawResultDryRun, raw.rawResultMerged =
+      refuse "it reports a merge from a dry run, which mutates nothing"
+  | otherwise =
+      Right
+        ( DirectMergeOutcome
+            raw.rawResultOutcome
+            raw.rawResultMerged
+            raw.rawResultReason
+            raw.rawResultMessage
+        )
+  where
+    refuse detail =
+      Left
+        ( "the PR drainer's result is not the one this action asked for ("
+            <> detail
+            <> "), so nothing is being reported as merged; check which drainer is "
+            <> "installed at the resolved path, and "
+            <> reinstallHint
+        )
 
 exitDescription :: ExitCode -> Text
 exitDescription ExitSuccess = "exited successfully"
@@ -1065,7 +1160,7 @@ runDirectMerge scriptPath repository configPath number = do
         Left (InvocationFailed message) -> Left ("the PR drainer could not be run: " <> message)
         -- Unreachable for an unbounded run, which has no deadline to miss.
         Left _ -> Left "the PR drainer's invocation ended without an exit status"
-        Right (exitCode, output, errors) -> decodeDirectMergeResult exitCode output errors
+        Right (exitCode, output, errors) -> decodeDirectMergeResult number exitCode output errors
 
 -- | What a finished direct merge changes on the board.
 data DirectMergeEffect = DirectMergeEffect
@@ -1090,7 +1185,7 @@ directMergeEffect number (Right outcome) =
   DirectMergeEffect (sanitizeText headline) outcome.directMergeMerged
   where
     headline
-      | outcome.directMergeMerged, outcome.directMergeOutcomeKind == "merged" =
+      | outcome.directMergeMerged, outcome.directMergeOutcomeKind == mergedOutcome =
           "PR #" <> showNumber number <> " merged: " <> outcome.directMergeMessage
       | outcome.directMergeMerged =
           "PR #"
