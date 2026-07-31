@@ -7,6 +7,45 @@ argument-hint: "[issue number]"
 
 Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows.
 
+## Resolving The Canonical Backend
+
+Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in:
+
+```bash
+RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
+BACKEND="$(python3 - "$RECORD" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+record = Path(sys.argv[1])
+override = os.environ.get("KANBAN_ISSUE_REVIEW_INSTALL_DIR")
+if override and override.strip():
+    resolved = Path(override).expanduser() / "approve_issues.py"
+else:
+    try:
+        document = json.loads(record.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        document = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"The install record at {record} is unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"The install record at {record} is not a JSON object.")
+    recorded = document.get("backend_path")
+    if recorded is None:
+        resolved = record.parent / "approve_issues.py"
+    elif isinstance(recorded, str) and Path(recorded).is_absolute():
+        resolved = Path(recorded)
+    else:
+        raise SystemExit(f"The install record at {record} names a backend_path that is not absolute: {recorded!r}.")
+if not resolved.is_file():
+    raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {record}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
+print(resolved)
+PY
+)"
+```
+
+If that command fails or leaves `$BACKEND` empty, stop and report exactly the message it printed: it names the record that was consulted and the repair for that specific failure, which is not always the bare installer command.
+
 ## Select And Claim
 
 1. If an issue number was supplied in `$ARGUMENTS`, take that one. Otherwise select the oldest open, unassigned implementation issue carrying the approval label:
@@ -15,14 +54,11 @@ Take one issue through a tested pull request. Stop after opening the PR; review 
    gh issue list --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"
    ```
 
-2. Before claiming, require the canonical cross-agent gate. Kanban can solve issues in any repository it is pointed at, so this backend is not necessarily tracked inside the repository under review; resolve the Kanban-managed install location the same way `Kanban.Review.canonicalIssueReviewerPath` does (`KANBAN_ISSUE_REVIEW_INSTALL_DIR` when set, otherwise `~/Library/Application Support/kanban/issue-review/approve_issues.py`) rather than a path relative to the repository being solved or any other personal path:
+2. Before claiming, require the canonical cross-agent gate, resolving `$BACKEND` exactly as "Resolving The Canonical Backend" above specifies:
 
    ```bash
-   BACKEND="${KANBAN_ISSUE_REVIEW_INSTALL_DIR:-$HOME/Library/Application Support/kanban/issue-review}/approve_issues.py"
    python3 "$BACKEND" --path "$(git rev-parse --show-toplevel)" --check <issue> --legacy-policy dual --json
    ```
-
-   If `$BACKEND` does not exist, stop and report: "Canonical issue reviewer was not found at $BACKEND. Run `python3 tools/install_issue_review.py` from the Kanban checkout to install it."
 
    Continue only on exit 0 with `"approved": true`. A green label alone is insufficient: this check also binds the current title/body/labels/comments to a versioned opposite-agent review marker and rejects stale or manually applied approval. On any other result, do not claim and stop with exactly one line: `KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry.` Do not run `--review` or `--rereview` against this backend from a solve session; that publishing action belongs to Kanban's own `r` workflow.
 3. Claim it before doing any work:

@@ -128,11 +128,12 @@ everything else.
     through `gh`, never a raw HTTP client.
   - Kanban's own synchronous invocation (`runCanonicalIssueReview` in
     `src/Kanban/Review.hs`) is a **publishing** action, run when the user
-    presses `r`. It resolves the backend with `resolveCanonicalIssueReviewer`
-    (`canonicalIssueReviewerPath`), which never hard-codes
-    `~/work/approve-issues.py`: it is the Kanban-managed install location
-    `~/Library/Application Support/kanban/issue-review/approve_issues.py`,
-    overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR` (see §3), then runs
+    presses `r`. It resolves the backend with `resolveCanonicalIssueReviewer`,
+    which never hard-codes `~/work/approve-issues.py` and never reconstructs
+    the installer's default: a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
+    wins, then the backend path the installer recorded, then — only when the
+    record names none — the directory that record lives in (see §3 and §5).
+    It then runs
     `python3 <resolved path> --path <repository root> --review|--rereview
     <issue> --legacy-policy dual --json`. It writes the `issue-review:v2`
     comment and verdict labels; Kanban's own code never runs `--check`.
@@ -429,9 +430,10 @@ commands need.
   crash/incident notification (`KANBAN_ISSUE_REVIEW_NTFY_URL`) is a
   documented non-fatal no-op when unset, matching §5.
 - **`tools/install_issue_review.py`** installs a stable Kanban-managed link
-  to that tracked backend at
-  `~/Library/Application Support/kanban/issue-review/approve_issues.py`
-  (overridable with `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), in the same
+  to that tracked backend under its install directory (default
+  `~/Library/Application Support/kanban/issue-review`, selectable with
+  `--install-dir` or `KANBAN_ISSUE_REVIEW_INSTALL_DIR`), records that link's
+  absolute path in the discovery record described in §5, in the same
   dry-run-capable, idempotent, never-overwrite-an-ordinary-file manner as
   `tools/install_drainer.py` (§5). Ownership is established by identity, not
   location: each tracked asset carries a `kanban-managed-asset:issue-review/
@@ -506,7 +508,8 @@ git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanba
 python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
-approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review/approve_issues.py | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md | kanban | supported | no
+approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
@@ -571,12 +574,31 @@ the Codex plugin being installed.
   pre-per-repository installer wrote is deliberately not read as a fallback,
   because doing so would let a later installation silently change the
   configuration an earlier repository's drainer restarts with.
-  `tools/install_issue_review.py` follows the same install-directory
-  convention for the canonical issue-review backend under
-  `~/Library/Application Support/kanban/issue-review`, read by
-  `src/Kanban/Review.hs`'s `resolveCanonicalIssueReviewer` — but through a
-  default each side spells out independently rather than through a record,
-  which is the defect issue #155 is filed to repair.
+  `tools/install_issue_review.py` follows the same convention for the
+  canonical issue-review backend, and resolves the same way. Its install
+  directory defaults to `~/Library/Application Support/kanban/issue-review`,
+  spelled once in `tools/kanban_config.py` — the only tracked module
+  installed beside the backend, so the only one both the installer and the
+  installed backend can import. Every successful install, from either
+  `tools/install_issue_review.py` or `tools/setup_workflows.py --component
+  issue-review --apply`, writes the linked backend's absolute path as
+  `backend_path` into
+  `~/Library/Application Support/kanban/issue-review/config.json`, after the
+  links it names have been created and never during a dry run. That
+  document's location is fixed even when `--install-dir` moves the
+  installation, and it is merged rather than overwritten so the `config_path`
+  reference the installer has always persisted there survives beside it.
+  Resolution precedence, identical in `src/Kanban/Review.hs`,
+  `src/Kanban/Preflight.hs`, both packaged `review_pr.py` coordinators, and
+  the packaged Codex/Claude `issue-review` and `solve` workflows: a non-empty
+  `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
+  only when that field is absent, which is exactly how an installation
+  predating the record reads — the directory holding the record. A selected
+  override or recorded backend that is missing fails there rather than
+  falling through to a lower-precedence location, since reviewing with an
+  installation the user did not choose is worse than not reviewing; a record
+  that will not parse, or whose `backend_path` is wrong-typed or relative,
+  is its own failure naming that document.
 - **User-scoped installation is explicit and opt-in.** Nothing in Kanban's
   build (`cabal build all`) or normal startup path installs the drainer's
   LaunchAgent or the issue-review backend's stable link; the latter is only

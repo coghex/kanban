@@ -150,6 +150,12 @@ GATE_CONDITIONED_INSTRUCTIONS = (
 # compatibility launcher none of them may reference.
 BACKEND_ENV_OVERRIDE = "KANBAN_ISSUE_REVIEW_INSTALL_DIR"
 BACKEND_DEFAULT_PATH = "Library/Application Support/kanban/issue-review"
+# The installer-written discovery record every packaged issue-review surface
+# resolves the backend through (issue #155), and the field it reads out of it.
+# Naming the record is what lets a workflow find an install made with
+# --install-dir; reconstructing the default could not.
+BACKEND_RECORD_PATH = BACKEND_DEFAULT_PATH + "/config.json"
+BACKEND_RECORD_FIELD = "backend_path"
 FORBIDDEN_BACKEND_PATHS = ("~/work/approve-issues", "$HOME/work/")
 
 DECLARED_ASSET_ROW_RE = re.compile(
@@ -519,6 +525,12 @@ class PortableBackendTests(unittest.TestCase):
             self.assertIn(BACKEND_DEFAULT_PATH, text, path)
             self.assertIn("approve_issues.py", text, path)
             self.assertIn("python3 tools/install_issue_review.py", text, path)
+
+    def test_issue_review_assets_resolve_through_the_installer_record(self):
+        for path in ISSUE_REVIEW_BACKEND_ASSETS:
+            text = (REPO_ROOT / path).read_text(encoding="utf-8")
+            self.assertIn(BACKEND_RECORD_PATH, text, path)
+            self.assertIn(BACKEND_RECORD_FIELD, text, path)
 
     def test_autoissue_assets_defer_to_the_documented_backend_contract(self):
         for path in AUTOISSUE_ASSETS:

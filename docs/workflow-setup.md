@@ -50,7 +50,7 @@ four with `--all`.
 
 | Component | What it installs | Needed for |
 | --- | --- | --- |
-| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/` | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
+| `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/`, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
 | `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise` |
 | `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
@@ -62,9 +62,27 @@ installed backend, so setup refuses it until the backend is present or
 selected in the same run.
 
 `issue-review` and `legacy-launcher` install into a per-user location by
-design: `src/Kanban/Review.hs` resolves exactly that path, and there is no
-project-scoped alternative. Both follow the same never-replace-an-ordinary-file
-policy as the PR-drainer installer.
+design, and there is no project-scoped alternative. Both follow the same
+never-replace-an-ordinary-file policy as the PR-drainer installer.
+
+Nothing that consults the backend reconstructs that location. Installing
+writes the linked backend's absolute path into
+`~/Library/Application Support/kanban/issue-review/config.json` — a document
+whose own path `--install-dir` cannot move — and `src/Kanban/Review.hs`,
+`src/Kanban/Preflight.hs`, both packaged `review_pr.py` coordinators, and the
+packaged `issue-review` and `solve` workflows all read it, with the same
+precedence: a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR` first, then the
+recorded path, then — only when the record carries no `backend_path`, which
+is how an installation predating the record reads — the directory the record
+lives in. So an install made with `--install-dir` is found by a dashboard
+launched with no special environment, an older installation keeps working
+until you next re-run setup, and the environment override still wins for
+anyone already relying on it. Re-running setup or
+`tools/install_issue_review.py` repairs a missing or stale record in place,
+with no uninstall first; a dry run reports what it would record and writes
+nothing. See
+[agent-workflow-contract §5](agent-workflow-contract.md#5-portable-install-policy),
+which documents the PR drainer's identical record.
 
 ## Scopes
 

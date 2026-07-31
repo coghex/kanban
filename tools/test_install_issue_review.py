@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -301,6 +302,18 @@ class InstallerPolicyTests(unittest.TestCase):
         )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
+        # The discovery record's location is fixed under $HOME by design, so
+        # a test that installs must redirect $HOME or it writes into the
+        # developer's own installation. kanban_config resolves it per call
+        # precisely so this works.
+        self.home = self.root / "home"
+        self.home.mkdir()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.record_path = (
+            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+        )
 
     def test_dry_run_makes_no_files(self):
         result = install_issue_review.install(
@@ -459,6 +472,18 @@ class CLIOutputTests(unittest.TestCase):
         )
         self.install_dir = self.root / "installed"
         self.legacy_path = self.root / "legacy" / "approve-issues.py"
+        # The discovery record's location is fixed under $HOME by design, so
+        # a test that installs must redirect $HOME or it writes into the
+        # developer's own installation. kanban_config resolves it per call
+        # precisely so this works.
+        self.home = self.root / "home"
+        self.home.mkdir()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.record_path = (
+            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+        )
 
     def run_cli(self, *extra_args):
         argv = [
@@ -503,6 +528,199 @@ class CLIOutputTests(unittest.TestCase):
         self.assertIn("Kanban-managed launcher", output)
         self.assertIn(": created", output)
         self.assertIn("Legacy launcher", output)
+
+
+class DiscoveryRecordTests(unittest.TestCase):
+    """Installing publishes where the backend actually went, so a dashboard
+    that never inherits KANBAN_ISSUE_REVIEW_INSTALL_DIR can find an install
+    made anywhere -- issue #155, mirroring the PR drainer's record."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.record_path = (
+            self.home / "Library" / "Application Support" / "kanban" / "issue-review" / "config.json"
+        )
+        self.repo = self.root / "repo"
+        tools = self.repo / "tools"
+        tools.mkdir(parents=True)
+        for name in ("approve_issues.py", "kanban_config.py"):
+            (tools / name).write_text(managed_asset_text(name, "x\n"), encoding="utf-8")
+        self.legacy_path = self.root / "legacy" / "approve-issues.py"
+
+    def install(self, install_dir, *, config_path=None, dry_run=False):
+        return install_issue_review.install(
+            self.repo,
+            install_dir,
+            self.legacy_path,
+            migrate_legacy_launcher_flag=False,
+            config_path=config_path,
+            dry_run=dry_run,
+        )
+
+    def record(self):
+        return json.loads(self.record_path.read_text(encoding="utf-8"))
+
+    def expected_backend(self, install_dir):
+        """`install()` resolves the install directory before linking, so the
+        record holds the canonical path -- on macOS `/private/var/...` for a
+        temporary directory reached as `/var/...`."""
+        return str(install_dir.resolve() / "approve_issues.py")
+
+    def test_record_lives_where_install_dir_cannot_move_it(self):
+        self.assertEqual(install_issue_review.discovery_record_path(), self.record_path)
+        # The default install directory is the record's own directory, which
+        # is what makes the compatibility fallback derivable from it alone.
+        self.assertEqual(
+            install_issue_review.default_install_dir(), self.record_path.parent
+        )
+
+    def test_installing_to_a_custom_directory_records_that_backend(self):
+        custom = self.root / "opt" / "kanban-review"
+        result = self.install(custom)
+        self.assertEqual(self.record()["backend_path"], self.expected_backend(custom))
+        self.assertEqual(result["record"]["path"], str(self.record_path))
+        # Recorded absolute, so no consumer has to know a base directory.
+        self.assertTrue(Path(self.record()["backend_path"]).is_absolute())
+
+    def test_installing_to_the_default_directory_records_it_too(self):
+        self.install(self.record_path.parent)
+        self.assertEqual(
+            self.record()["backend_path"], self.expected_backend(self.record_path.parent)
+        )
+
+    def test_moving_a_custom_installation_repoints_the_record(self):
+        self.install(self.root / "first")
+        self.install(self.root / "second")
+        self.assertEqual(
+            self.record()["backend_path"], self.expected_backend(self.root / "second")
+        )
+
+    def test_dry_run_reports_the_planned_record_without_writing_it(self):
+        custom = self.root / "opt" / "kanban-review"
+        result = self.install(custom, dry_run=True)
+        self.assertEqual(result["record"]["result"], "created")
+        self.assertEqual(result["record"]["backend_path"], self.expected_backend(custom))
+        self.assertFalse(self.record_path.exists())
+
+    def test_dry_run_reports_an_update_for_a_record_naming_somewhere_else(self):
+        self.install(self.root / "first")
+        result = self.install(self.root / "second", dry_run=True)
+        self.assertEqual(result["record"]["result"], "updated")
+        self.assertEqual(
+            self.record()["backend_path"], self.expected_backend(self.root / "first")
+        )
+
+    def test_dry_run_reports_unchanged_once_the_record_already_agrees(self):
+        custom = self.root / "opt" / "kanban-review"
+        self.install(custom)
+        self.assertEqual(self.install(custom, dry_run=True)["record"]["result"], "unchanged")
+
+    def test_a_legacy_document_carrying_only_a_config_reference_is_upgraded(self):
+        # Exactly what write_config_reference wrote before the discovery
+        # field existed. Reinstalling adds the field and keeps the reference.
+        self.record_path.parent.mkdir(parents=True)
+        self.record_path.write_text(
+            json.dumps({"config_path": "/Users/example/.config/kanban/config.toml"}),
+            encoding="utf-8",
+        )
+        self.install(self.record_path.parent)
+        self.assertEqual(
+            self.record()["config_path"], "/Users/example/.config/kanban/config.toml"
+        )
+        self.assertIn("backend_path", self.record())
+
+    def test_recording_never_drops_an_unrelated_key(self):
+        self.record_path.parent.mkdir(parents=True)
+        self.record_path.write_text(json.dumps({"ntfy_url": "https://n.example/t"}), encoding="utf-8")
+        self.install(self.root / "opt")
+        self.assertEqual(self.record()["ntfy_url"], "https://n.example/t")
+
+    def test_a_config_reference_for_a_custom_install_reaches_the_record(self):
+        # approve_issues.py reads the record's directory when no override is
+        # set, so a --config given for a custom install would otherwise be
+        # stored only where nothing without that override ever looks.
+        custom = self.root / "opt" / "kanban-review"
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(custom, config_path=str(config))
+        self.assertEqual(self.record()["config_path"], str(config.resolve()))
+        self.assertEqual(
+            json.loads((custom / "config.json").read_text(encoding="utf-8"))["config_path"],
+            str(config.resolve()),
+        )
+
+    def test_reinstalling_carries_a_legacy_custom_config_reference_forward(self):
+        # A pre-record custom installation kept its config_path beside its
+        # own links. Reinstalling without repeating --config must not lose
+        # the configured workflow labels that reference resolves.
+        custom = self.root / "opt" / "kanban-review"
+        custom.mkdir(parents=True)
+        (custom / "config.json").write_text(
+            json.dumps({"config_path": "/Users/example/kanban.toml"}), encoding="utf-8"
+        )
+        self.install(custom)
+        self.assertEqual(self.record()["config_path"], "/Users/example/kanban.toml")
+
+    def test_config_reference_merge_does_not_clobber_the_record(self):
+        # The --config reference and the record are the same document when
+        # the backend is installed to its default directory.
+        default_dir = self.record_path.parent
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(default_dir, config_path=str(config))
+        document = self.record()
+        self.assertEqual(document["config_path"], str(config.resolve()))
+        self.assertEqual(document["backend_path"], self.expected_backend(default_dir))
+
+    def test_a_failed_install_records_nothing(self):
+        (self.repo / "tools" / "approve_issues.py").unlink()
+        with self.assertRaises(install_issue_review.InstallError):
+            self.install(self.root / "opt")
+        self.assertFalse(self.record_path.exists())
+
+
+class SingleSourceInstallPathTests(unittest.TestCase):
+    """Issue #155's single-source requirement, checked the way the
+    agent-workflow contract's manifest checks are: by grepping the tracked
+    executables rather than by trusting a comment."""
+
+    DEFAULT_PATH = "Library/Application Support/kanban/issue-review"
+    TOOLS = Path(__file__).resolve().parent
+    REPO_ROOT = TOOLS.parent
+
+    def test_only_kanban_config_spells_the_default_install_directory(self):
+        offenders = []
+        for relative_path in (
+            "tools/approve_issues.py",
+            "tools/install_issue_review.py",
+            "tools/setup_workflows.py",
+            "src/Kanban/Review.hs",
+            "src/Kanban/Preflight.hs",
+        ):
+            content = (self.REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            # The record path contains the directory as a prefix; it is the
+            # fixed rendezvous each side is allowed to name, not a
+            # reconstruction of the installer's default.
+            without_record = content.replace(self.DEFAULT_PATH + "/config.json", "")
+            if self.DEFAULT_PATH in without_record:
+                offenders.append(relative_path)
+        self.assertEqual(
+            offenders,
+            [],
+            "these rebuild the default install directory instead of importing it "
+            "from tools/kanban_config.py, or reading it out of the discovery record",
+        )
+
+    def test_kanban_config_is_where_it_is_spelled(self):
+        content = (self.REPO_ROOT / "tools" / "kanban_config.py").read_text(encoding="utf-8")
+        self.assertIn(self.DEFAULT_PATH, content)
 
 
 if __name__ == "__main__":

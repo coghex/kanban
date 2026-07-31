@@ -1,6 +1,7 @@
 module Kanban.Text
   ( excerpt,
     sanitizeText,
+    withoutJsonPath,
   )
 where
 
@@ -14,6 +15,19 @@ sanitizeText = normalize NFC . Text.filter safeCharacter . stripEscapeSequences 
 
 excerpt :: Text -> Text
 excerpt = collapseWhitespace . firstParagraph . sanitizeText
+
+-- | Drops the JSONPath Aeson prefixes a parse failure with (@Error in $: @),
+-- which is noise inside a sentence already naming the one document it is
+-- about, and costs sidebar width the remediation needs. Shared by the two
+-- installer-written discovery records — the PR drainer's and the canonical
+-- issue reviewer's — so their diagnostics read the same way.
+withoutJsonPath :: Text -> Text
+withoutJsonPath message = case Text.stripPrefix "Error in " message of
+  Just located
+    | (_, remainder) <- Text.breakOn ": " located,
+      not (Text.null remainder) ->
+        Text.drop 2 remainder
+  _ -> message
 
 normalizeLineControls :: Text -> Text
 normalizeLineControls = Text.map replaceTab . normalizeCarriageReturns
