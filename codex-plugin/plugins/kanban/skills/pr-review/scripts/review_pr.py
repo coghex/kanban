@@ -381,21 +381,23 @@ def approver_path() -> Path:
         raise unreadable_record(record, str(error)) from error
     if not isinstance(document, dict):
         raise unreadable_record(record, "it is not a JSON object")
-    recorded = document.get("backend_path")
-    if recorded is None:
+    if "backend_path" not in document:
         # A well-formed document with no discovery field is an installation
         # made before the record existed -- the installer has always written
         # config.json for --config -- so it upgrades in place rather than
-        # failing.
+        # failing. Membership, not `.get(...) is None`: an explicit null is a
+        # value this installer never writes, so it is a record corrupted into
+        # naming nothing and must fail closed like any other unusable value.
         return installed_backend(
             record.parent / "approve_issues.py",
             f"No install directory is recorded at {record}, so this default was used. "
             "Run `python3 tools/install_issue_review.py` from the Kanban checkout to "
             "install and record it.",
         )
+    recorded = document["backend_path"]
     if not isinstance(recorded, str) or not Path(recorded).is_absolute():
         raise unreadable_record(
-            record, f"its recorded backend path is not absolute: {recorded!r}"
+            record, f"it does not name an absolute backend path: {recorded!r}"
         )
     return installed_backend(
         Path(recorded),

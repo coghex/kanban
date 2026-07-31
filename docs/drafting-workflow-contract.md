@@ -241,13 +241,13 @@ else:
         raise SystemExit(f"The install record at {record} is unreadable ({error}).")
     if not isinstance(document, dict):
         raise SystemExit(f"The install record at {record} is not a JSON object.")
-    recorded = document.get("backend_path")
-    if recorded is None:
+    if "backend_path" not in document:
         resolved = record.parent / "approve_issues.py"
-    elif isinstance(recorded, str) and Path(recorded).is_absolute():
-        resolved = Path(recorded)
     else:
-        raise SystemExit(f"The install record at {record} names a backend_path that is not absolute: {recorded!r}.")
+        recorded = document["backend_path"]
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(f"The install record at {record} does not name an absolute backend_path: {recorded!r}.")
+        resolved = Path(recorded)
 if not resolved.is_file():
     raise SystemExit(f"Canonical issue reviewer was not found at {resolved} (consulted {record}). Run `python3 tools/install_issue_review.py` from the Kanban checkout, adding --install-dir if it belongs elsewhere.")
 print(resolved)

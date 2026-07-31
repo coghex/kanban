@@ -5701,14 +5701,36 @@ suite = do
 
     it "rejects a recorded backend path that names nothing resolvable" $
       withTemporaryCacheRoot $ \root -> do
+        -- An install sits beside the record in every case, so a resolver that
+        -- fell through to the compatibility default would succeed here rather
+        -- than fail: that is the fail-open this pins shut.
+        _ <- installBackendAt root
         let recordPath = root </> "config.json"
             rejects document = do
               ByteString.writeFile recordPath document
               outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
               failureFor outcome `shouldMention` "is unreadable"
+              failureFor outcome `shouldNotMention` "was not found at"
         rejects "[\"/opt/approve_issues.py\"]"
         rejects "{\"backend_path\":42}"
         rejects (recordDocument "opt/kanban-review/approve_issues.py")
+        -- An explicit null is a value the installer never writes, so it is a
+        -- record corrupted into naming nothing -- not the absent field that
+        -- means "installed before the record existed".
+        rejects "{\"backend_path\":null}"
+
+    it "treats a record path occupied by a directory as unreadable, not absent" $
+      withTemporaryCacheRoot $ \root -> do
+        -- Python's read raises rather than reporting "missing", so a
+        -- doesFileExist test here would fall through to the default backend
+        -- while every other consumer refused.
+        installed <- installBackendAt root
+        let recordPath = root </> "config.json"
+        createDirectoryIfMissing True recordPath
+        outcome <- resolveCanonicalIssueReviewerAt Nothing recordPath
+        failureFor outcome `shouldMention` "is unreadable"
+        failureFor outcome `shouldMention` Data.Text.pack recordPath
+        failureFor outcome `shouldNotMention` Data.Text.pack installed
 
     -- The environment entry point for the no-override path, kept hermetic by
     -- redirecting HOME: it must reach the installer's record rather than the

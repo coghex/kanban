@@ -87,6 +87,7 @@ import Data.Aeson
     object,
     withObject,
     (.:),
+    (.:!),
     (.:?),
     (.!=),
     (.=),
@@ -120,7 +121,7 @@ import Kanban.Domain (Repository (..), WorkflowConfig (..), defaultWorkflowConfi
 import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.Text (withoutJsonPath)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
-import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Directory (doesFileExist, doesPathExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute, takeDirectory, (</>))
@@ -565,7 +566,13 @@ newtype IssueReviewerRecord = IssueReviewerRecord
 
 instance FromJSON IssueReviewerRecord where
   parseJSON = withObject "issue-review install record" $ \value ->
-    IssueReviewerRecord <$> value .:? "backend_path"
+    -- @.:!@, not @.:?@: only an /absent/ field means "written before this
+    -- field existed". An explicit @null@ is a value this installer never
+    -- writes, so it is a record edited or corrupted into naming nothing —
+    -- fail-closed, exactly as a wrong-typed value is, and exactly as the
+    -- Python consumers read it. @.:?@ collapses those two cases into the
+    -- compatibility fallback and would silently run a different install.
+    IssueReviewerRecord <$> value .:! "backend_path"
 
 -- | The fixed document @tools\/install_issue_review.py@ records the
 -- installed backend in. Deliberately not derived from
@@ -624,7 +631,13 @@ selectCanonicalIssueReviewerAt override recordPath = case override of
     | not (null (trimmed installDir)) ->
         pure (Right (ReviewerFromEnvironment installDir, canonicalIssueReviewerPath installDir))
   _ -> do
-    recorded <- doesFileExist recordPath
+    -- 'doesPathExist', not 'doesFileExist': a record path occupied by a
+    -- directory is a record that cannot be read, not one that was never
+    -- written. Treating it as absent would fall through to the default
+    -- backend while the Python consumers — whose read raises rather than
+    -- returning "missing" — refuse. Anything present is read, and a read
+    -- that fails becomes the unreadable-record diagnostic below.
+    recorded <- doesPathExist recordPath
     if not recorded
       then pure (Right compatibilityFallback)
       else do

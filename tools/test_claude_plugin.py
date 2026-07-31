@@ -810,17 +810,33 @@ class ApproverPathResolutionTests(unittest.TestCase):
         self.assertIn("is unreadable", str(raised.exception))
 
     def test_a_recorded_path_that_is_not_an_absolute_string_is_rejected(self):
+        # An install sits at the fallback directory in every case, so a
+        # resolver that fell through would succeed here rather than fail.
         self.install_backend(self.record_path.parent)
         for document in (
             '["/opt/approve_issues.py"]',
             '{"backend_path": 42}',
             '{"backend_path": "opt/approve_issues.py"}',
+            # An explicit null is a value the installer never writes, so it is
+            # a record corrupted into naming nothing -- not the absent field
+            # that means "installed before the record existed".
+            '{"backend_path": null}',
         ):
             with self.subTest(document=document):
                 self.write_record(document)
                 with self.assertRaises(self.module.WorkflowError) as raised:
                     self.module.approver_path()
                 self.assertIn("is unreadable", str(raised.exception))
+
+    def test_a_record_path_occupied_by_a_directory_is_unreadable_not_absent(self):
+        backend = self.install_backend(self.record_path.parent)
+        self.record_path.mkdir()
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.module.approver_path()
+        message = str(raised.exception)
+        self.assertIn("is unreadable", message)
+        self.assertIn(str(self.record_path), message)
+        self.assertNotIn(str(backend), message)
 
 
 if __name__ == "__main__":
