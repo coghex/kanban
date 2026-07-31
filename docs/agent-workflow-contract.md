@@ -170,9 +170,14 @@ everything else.
 
 - **Owning source:** `tools/drain_prs_service.py` (incident storage and
   lifecycle, plus the service loop) and `tools/install_drainer.py`
-  (installer), surfaced read-only in-app by `src/Kanban/Drainer.hs`. The
+  (installer), surfaced in-app by `src/Kanban/Drainer.hs`. The
   drainer (`tools/drain_prs.py`) records and resolves its own per-pull
-  -request conflict incidents through that same storage.
+  -request conflict incidents through that same storage. Kanban's in-app
+  surface is read-only for everything the *service* owns — status, incidents,
+  logs — and adds exactly two mutations: starting or stopping the LaunchAgent
+  through the controller, and running `tools/drain_prs.py --pr` once for one
+  selected pull request. It owns neither merge policy nor cleanup; every gate,
+  the merge, and the post-merge obligations stay with `tools/drain_prs.py`.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
   `kill`) manages the LaunchAgent. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
@@ -185,6 +190,21 @@ everything else.
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
   request, and is covered by `tools/test_single_pr_drain.py`.
+  `src/Kanban/Drainer.hs` spawns that entry point directly, as
+  `python3 <install dir>/drain_prs.py --path <root> --repo OWNER/NAME --pr
+  <number> [--config <path>]`, for the board's `m` key. The script is resolved
+  from the Kanban-managed install directory — `KANBAN_DRAINER_INSTALL_DIR`,
+  then the directory the discovered LaunchAgent runs its controller from, then
+  the directory holding the discovery record — rather than from the repository
+  checkout, so an install made with `--install-dir` stays usable by a dashboard
+  that inherits none of the installer's environment. A source that is present
+  but names no resolvable directory — a relative override, or a LaunchAgent
+  that does not run its controller from an absolute path — fails there rather
+  than falling through to the next source, since falling through would merge
+  with a different installation than the one configured and say nothing. A
+  missing installation is reported with a remediation naming
+  `tools/install_drainer.py` and the directory actually consulted, never as a
+  failed merge.
 - **Inputs:** repository path and repository identity; the repository's drainer
   LaunchAgent plist under `~/Library/LaunchAgents`, which is a Kanban-owned
   convention (see §5), not a personal path. There is one such plist per
@@ -204,6 +224,12 @@ everything else.
   same `--repo` for its own `run` invocation, so a shared `remote_name` changed
   after installation stops that job rather than re-pointing it: it drains
   nothing and logs the refusal until `tools/install_drainer.py` is re-run.
+  A `--pr` run takes the same three inputs — the dashboard's resolved checkout
+  as `--path`, its identity as `--repo OWNER/NAME`, and the active absolute
+  `--config` when one is set — plus the pull-request number. It resolves the
+  checkout's own remote and refuses any other identity before reading the pull
+  request, for the same reason the controller does: a pull-request number does
+  not survive a disagreement about which repository is meant.
 - **Outputs:** merged PRs, a drain-state JSON file, and optional incident
   notifications. A `--pr` run additionally writes exactly one versioned JSON
   result document to stdout — the pull request, its outcome (`merged`,
@@ -215,7 +241,16 @@ everything else.
 - **Failure semantics:** an unresolved incident surfaces in Kanban's
   sidebar as `DrainerWarning`/`DrainerError` with the incident summary
   (`src/Kanban/Drainer.hs`); the service defines its own retry/backoff and
-  incident rules independently of Kanban. Every incident is attributed to the
+  incident rules independently of Kanban. A `--pr` run Kanban started reports
+  only into that action's own notice, never into the sidebar's drainer status,
+  which describes the service this ran instead of. Its declined-reason text is
+  presented as the run wrote it rather than replaced by a generic message, and
+  a run whose merge landed before it failed is reported as merged *and* as
+  unfinished, because the post-merge obligations follow an irreversible merge.
+  Kanban invokes it only when the service is known stopped with no open
+  incident, and only one such run may be in flight per dashboard; the drainer's
+  own per-repository run lock is the cross-process guard behind that, reported
+  as the `run_locked` reason. Every incident is attributed to the
   normalized canonical repository rather than to the checkout that raised it,
   so any clone of that repository lists, acknowledges, and clears it — only
   *running* a drainer is exclusive per identity. Incidents come in three
@@ -268,8 +303,9 @@ everything else.
   two clones of one repository resolve to one job identity, and the second
   install or start is refused on that basis, which the lock cannot see.
 - **Mandatory/optional:** fully optional. The board's `d` key starts or
-  stops it, and nothing in Kanban's build or normal startup path installs
-  or runs it.
+  stops it and its `m` key runs one `--pr` merge, and nothing in Kanban's
+  build or normal startup path installs or runs it. With nothing installed,
+  both keys report the installer rather than failing opaquely.
 
 ### 2.5 Workflow setup and the preflight/doctor path
 
@@ -505,16 +541,25 @@ claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
+python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
+drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 ```
+
+`drainer-install-dir` is the directory the installer links the drainer, the
+controller and the configuration parser into, and the default Kanban resolves
+`drain_prs.py` inside for the board's `m` key. It is listed separately from
+`drainer-discovery-record` because the two move independently: `--install-dir`
+relocates this directory, while the record's own path is fixed precisely so a
+dashboard that inherited no environment can still find an install that moved.
+Both sides therefore spell the default, and neither derives it from the other.
 
 `drainer-launchagent-label`'s token is the shared prefix, which is all a single
 token can be: an installed job's label appends the repository's own slug to it

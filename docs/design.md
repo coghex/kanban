@@ -28,7 +28,9 @@ The dashboard combines:
   assignees, linked work, mergeability, and CI state.
 - Epic/tracker grouping based on ordered issue checklists such as `A1`, `A2`,
   `B1`, `C1`, and `C2`.
-- Local status and start/stop control for the launchd-managed PR drainer.
+- Local status and start/stop control for the launchd-managed PR drainer, plus
+  a direct merge of one approved pull request through that drainer's own
+  single-pull-request path.
 - Hideable issue-review sessions backed by the canonical v2 reviewer, with
   interactive specification revision backed by Codex app-server.
 - Hideable, resumable issue-solve sessions backed by the selected canonical
@@ -40,7 +42,9 @@ the existing solve workflow, which may claim an issue and create a worktree,
 branch, and PR. Autosolve invokes the same ordinary solve workflow, then Kanban
 owns the bounded review/revision/rereview state machine and its label handoffs.
 Ordinary navigation and updates never mutate GitHub.
-Starting or stopping the configured PR drainer is the other explicit mutation.
+Starting or stopping the configured PR drainer, and merging one approved
+pull request through that drainer's own single-pull-request path, are the
+other explicit mutations.
 
 ## 2. Goals
 
@@ -74,7 +78,10 @@ Starting or stopping the configured PR drainer is the other explicit mutation.
 - Drag-and-drop workflow mutation.
 - Direct board editing and drag/drop mutation. Review and solve workflows may
   perform their explicitly documented GitHub mutations.
-- Merging pull requests.
+- Implementing a merge. Kanban decides only whether to invoke the PR drainer's
+  own single-pull-request path (`tools/drain_prs.py --pr`), which owns every
+  gate, the merge itself, and the post-merge cleanup; Kanban holds no second
+  copy of any of that, and merges nothing that path would refuse.
 - A permanent archive of merged or closed work.
 - Multi-repository aggregation in one running board. Each invocation represents
   one repository selected by its path.
@@ -219,6 +226,7 @@ Initial bindings:
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
 | `u` | Update GitHub board data and both usage providers |
 | `d` or click | Start or stop the launchd-managed PR drainer |
+| `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
 | `s` | Open settings, including chat-output verbosity |
 | `?` | Open a help overlay listing all bindings |
@@ -634,7 +642,9 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 - Creation and update timestamps.
 - GitHub URL.
 
-The overlay is read-only.
+The overlay presents this content without editing any of it. The board actions
+that act on the selected card — `r`, `S`, `A`, `x`, and `m` — dispatch from it
+as well, against the item it is showing.
 
 ## 12. Epic and tracker grouping
 
@@ -998,6 +1008,53 @@ a countdown.
   flight — this dashboard's own, or a `starting` state reported by the status
   poll — makes `d` and the drainer button report the transition rather than
   command a second one.
+- `m`, on the board and on the details overlay alike, merges the selected
+  approved pull request by running the drainer's own single-pull-request path
+  (`tools/drain_prs.py --pr`) once. Kanban contains no second implementation of
+  the merge, its gates, or its cleanup: the invoked path re-reads every gate
+  immediately before merging, matches the head against the approved head,
+  performs the admin merge and its post-merge audit, and closes the linked
+  issue, removes the worktree, deletes the head branch, and fast-forwards the
+  default branch. The invocation carries the dashboard's own resolved checkout,
+  its repository identity as `--repo OWNER/NAME`, the selected pull-request
+  number, and the active absolute `--config` when one is set; the drainer
+  compares that identity against the checkout's remote and refuses a mismatch,
+  so neither a `kanban --repo` nor a `kanban --config` override can merge
+  another repository's pull request.
+- That script is resolved from the Kanban-managed drainer install directory:
+  `KANBAN_DRAINER_INSTALL_DIR` first, then the directory the discovered
+  LaunchAgent runs its controller from — which is what keeps an install made
+  with `--install-dir` usable by a dashboard that inherited no environment from
+  the installer — and otherwise the directory holding the discovery record. A
+  source that is present but resolves to no directory, such as a relative
+  override or a plist that does not name its controller absolutely, fails there
+  rather than falling through to the next: falling through would merge with an
+  installation other than the configured one and report nothing unusual. A
+  missing installation reports a remediation naming
+  `tools/install_drainer.py` and the directory that was actually consulted.
+- The decision `m` makes is total in the selection and the last reported
+  drainer state, and is taken in a fixed order. A selection that is not an
+  approved pull request in Done — `classifyPullRequest`'s own verdict, not a
+  second reading of the same labels — is refused first, naming what was
+  selected. A direct merge this dashboard already started is refused next,
+  naming the pull request still running, so a repeated key press starts no
+  second process. An unresolved incident then outranks every service state and
+  is refused with its summary. Only a service *known* to be stopped may launch:
+  running, starting, stopping, a drainer running outside launchd, a checkout
+  stopped part-way through a git operation, and a state that could not be
+  established at all — including one no status was ever obtained for — all
+  refuse without invoking anything.
+- The run is asynchronous and unbounded, since its work is irreversible partway
+  through and a deadline that killed it would abandon a merge already committed
+  on GitHub. Its result updates only that action's notice and pending state,
+  never the drainer status area, which reflects the service this ran instead
+  of. The reason the run reported is presented as it wrote it, after the
+  external-text sanitization in section 11, rather than replaced by a generic
+  message; a merge that landed and then failed its audit or left cleanup
+  outstanding is reported as merged *and* as unfinished. Any result that says
+  the pull request merged requires a GitHub refresh that begins after that
+  result: when a fetch is already in flight the request is queued rather than
+  dropped, because that fetch may have read GitHub before the merge landed.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links under
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
@@ -1312,6 +1369,11 @@ repository, whose label is derived from that repository's normalized identity.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.
+- Merge one selected Done card with `m`, from the board or the details
+  overlay, by running that drainer's own single-pull-request path — resolved
+  from the Kanban-managed install directory — and refuse without invoking
+  anything for an ineligible card, a merge already in flight, an unresolved
+  incident, or any service state that is not a settled stop.
 
 ### Milestone 7 — Embedded issue reviews
 

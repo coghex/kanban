@@ -1,11 +1,20 @@
 module Kanban.Drainer
-  ( DrainerController (..),
+  ( DirectMergeDecision (..),
+    DirectMergeEffect (..),
+    DirectMergeOutcome (..),
+    DrainerActivity (..),
+    DrainerController (..),
     DrainerRecord (..),
+    DrainerScriptSource (..),
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
     controllerFromProgramArguments,
+    decodeDirectMergeResult,
     decodeDrainerStatus,
+    directMergeArguments,
+    directMergeDecision,
+    directMergeEffect,
     discoverDrainerController,
     drainerIsRunning,
     drainerRecordFromBytes,
@@ -14,8 +23,13 @@ module Kanban.Drainer
     normalizedRepositoryIdentity,
     queryDrainerStatus,
     resolveDrainerPlist,
+    resolveSinglePullRequestDrainer,
+    resolveSinglePullRequestDrainerAt,
+    runDirectMerge,
     runDrainerCommand,
+    selectSinglePullRequestDrainer,
     setDrainerRunning,
+    singlePullRequestDrainerPath,
     statusFromControllerExit,
     -- | Exported for the discovery-wording tests, which cannot reach this
     -- branch through 'discoverDrainerController': it needs a plist that
@@ -36,16 +50,25 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.Domain (Repository (..))
+import Kanban.Domain
+  ( BoardColumn (..),
+    BoardItem (..),
+    Issue (..),
+    PullRequest (..),
+    Repository (..),
+    WorkflowConfig,
+  )
 import Kanban.Process
   ( ProcessIdentity (..),
     defaultProcessSnapshot,
     killVerifiedGroup,
   )
-import Kanban.Text (withoutJsonPath)
-import System.Directory (doesFileExist, getHomeDirectory)
+import Kanban.Text (sanitizeText, withoutJsonPath)
+import Kanban.Workflow (classifyPullRequest)
+import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (isAbsolute)
+import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (hClose, hGetContents')
 import System.Info (os)
 import System.Posix.Process (getProcessGroupIDOf, setProcessGroupIDOf)
@@ -75,9 +98,44 @@ data DrainerState
   | DrainerError
   deriving stock (Eq, Show)
 
+-- | What the controller reported about the service itself, separated from the
+-- prose 'drainerDetail' renders it as. The sidebar wants one string; a
+-- decision wants the distinctions that string flattens — "running under
+-- launchd" against "running outside it", "off" against "no status at all" —
+-- and re-deriving them by reading the prose back would make display wording
+-- load-bearing.
+data DrainerActivity
+  = -- | Settled off, with nothing in the checkout blocking a start.
+    DrainerServiceStopped
+  | -- | The runner and its drainer child are both alive under launchd.
+    DrainerServiceRunning
+  | -- | A runner is up without its drainer child, so launchd is mid-start.
+    DrainerServiceStarting
+  | -- | A stop is still in flight. Only ever set locally: the controller
+    -- reports no such state, because a stop it has returned from is settled.
+    DrainerServiceStopping
+  | -- | A drainer process holds this repository's run lock without launchd
+    -- having started it.
+    DrainerServiceExternal
+  | -- | The checkout is stopped part-way through a git operation, which the
+    -- drainer cannot act through.
+    DrainerServiceBlocked
+  | -- | No usable status: the controller could not be discovered or run, its
+    -- document did not decode, or it named a state this does not recognize.
+    -- Every one of those is "unknown", never "off".
+    DrainerServiceUnknown
+  deriving stock (Eq, Show)
+
 data DrainerStatus = DrainerStatus
   { drainerState :: DrainerState,
-    drainerDetail :: Text
+    drainerDetail :: Text,
+    -- | The controller's own state, undecorated.
+    drainerActivity :: DrainerActivity,
+    -- | The unresolved incident the controller reported, as its summary.
+    -- 'Nothing' means there is no open incident — the distinction
+    -- 'directMergeDecision' turns on — so an incident that carries no summary
+    -- is @Just ""@ rather than 'Nothing'.
+    drainerIncident :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -267,7 +325,7 @@ discoverDrainerController repository = do
   case resolved of
     Left message -> pure (Left message)
     Right plist -> do
-      result <- runProcess discoveryTimeoutSeconds "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
+      result <- runProcess (Just discoveryTimeoutSeconds) "/usr/bin/plutil" ["-extract", "ProgramArguments", "json", "-o", "-", plist]
       pure $ do
         output <- case result of
           Left failure -> Left (unreadablePlist plist (invocationFailureMessage discoveryTimeoutSeconds "reading the launchd job" False failure))
@@ -334,11 +392,13 @@ decodeDrainerStatus bytes = do
     Right value -> Right value
   pure (statusFromRaw rawStatus)
 
+-- | Whether a drainer is draining this repository right now, by whatever
+-- route. Read off 'drainerActivity' rather than off the rendered detail,
+-- which is what previously made "on outside launchd" and "on · unresolved
+-- incident" depend on both beginning with the word @on@.
 drainerIsRunning :: DrainerStatus -> Bool
-drainerIsRunning status = case status.drainerState of
-  DrainerOn -> True
-  DrainerWarning -> "on" `Text.isPrefixOf` status.drainerDetail
-  _ -> False
+drainerIsRunning status =
+  status.drainerActivity `elem` [DrainerServiceRunning, DrainerServiceExternal]
 
 -- | A start is only ever issued from a settled off state. @busy@ is a
 -- transition this dashboard started and is still waiting on; a reported
@@ -360,7 +420,7 @@ runDrainerCommand :: Int -> DrainerController -> String -> IO (Either Text Drain
 runDrainerCommand seconds controller command = do
   result <-
     runProcess
-      seconds
+      (Just seconds)
       controller.controllerExecutable
       (controller.controllerArguments <> ["--json", command])
   pure $ case result of
@@ -412,7 +472,13 @@ isTransition command = command == "start" || command == "stop"
 -- controller ignoring TERM, or one that has left a @launchctl@ behind, could
 -- outlive the timeout that reported it dead and still be running when the
 -- next ten-second poll starts another one.
-runProcess :: Int -> FilePath -> [String] -> IO (Either InvocationFailure (ExitCode, String, String))
+-- | 'Nothing' seconds runs the invocation to completion however long it
+-- takes. Exactly one caller wants that — the single-pull-request merge, whose
+-- work is irreversible partway through, so abandoning it on a deadline would
+-- be worse than waiting. Every other invocation here is a status read or a
+-- launchd transition, which has a budget precisely because nothing is lost by
+-- cutting it short.
+runProcess :: Maybe Int -> FilePath -> [String] -> IO (Either InvocationFailure (ExitCode, String, String))
 runProcess seconds executable arguments = do
   spawned <- try @IOException (createProcess groupedProcess)
   case spawned of
@@ -420,7 +486,7 @@ runProcess seconds executable arguments = do
     Right handles -> do
       -- Taken before the invocation can finish, so it is still answerable.
       owned <- confirmOwnedGroup (processHandleOf handles)
-      completed <- try @IOException (timeout (seconds * 1000 * 1000) (collect handles))
+      completed <- try @IOException (withBudget (collect handles))
       case completed of
         Left exception -> do
           void (abandonController owned)
@@ -437,6 +503,12 @@ runProcess seconds executable arguments = do
               void (try @IOException (waitForProcess (processHandleOf handles)))
               pure (Left InvocationTimedOut)
   where
+    -- An unbounded run cannot time out, so 'collect' is simply awaited and
+    -- the abandonment branches below stay unreachable for it.
+    withBudget action = case seconds of
+      Nothing -> Just <$> action
+      Just budget -> timeout (budget * 1000 * 1000) action
+
     groupedProcess =
       (proc executable arguments)
         { std_in = CreatePipe,
@@ -591,19 +663,26 @@ stripManagedArguments = removeBoundArguments . stripRunArgument
     removeBoundArguments (argument : rest) = argument : removeBoundArguments rest
     removeBoundArguments [] = []
 
+-- | The incident is carried on every state, not only the two whose detail
+-- interleaves it: the controller reports @open_incident@ independently of
+-- @state@, and a decision that has to let an incident outrank the state
+-- cannot see one that was dropped for having nowhere to render.
 statusFromRaw :: RawStatus -> DrainerStatus
-statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
-  ("running", Nothing) -> DrainerStatus DrainerOn "on"
-  ("running", Just incident) -> DrainerStatus DrainerWarning ("on · unresolved incident" <> incidentDetail incident)
-  ("starting", _) -> DrainerStatus DrainerStarting "starting…"
-  ("external", _) -> DrainerStatus DrainerWarning "on outside launchd"
-  ("mid_operation", _) -> DrainerStatus DrainerError (operationDetail rawStatus.rawOperation)
-  ("stopped", Nothing) -> DrainerStatus DrainerOff "off"
-  ("stopped", Just incident) -> DrainerStatus DrainerError ("stopped · unresolved incident" <> incidentDetail incident)
-  (other, _) -> DrainerStatus DrainerError ("unknown state: " <> other)
-
-incidentDetail :: RawIncident -> Text
-incidentDetail incident = maybe "" (" · " <>) incident.rawIncidentSummary
+statusFromRaw rawStatus = case (rawStatus.rawState, incident) of
+  ("running", Nothing) -> reported DrainerOn DrainerServiceRunning "on"
+  ("running", Just _) -> reported DrainerWarning DrainerServiceRunning ("on · unresolved incident" <> incidentDetail)
+  ("starting", _) -> reported DrainerStarting DrainerServiceStarting "starting…"
+  ("external", _) -> reported DrainerWarning DrainerServiceExternal "on outside launchd"
+  ("mid_operation", _) -> reported DrainerError DrainerServiceBlocked (operationDetail rawStatus.rawOperation)
+  ("stopped", Nothing) -> reported DrainerOff DrainerServiceStopped "off"
+  ("stopped", Just _) -> reported DrainerError DrainerServiceStopped ("stopped · unresolved incident" <> incidentDetail)
+  (other, _) -> reported DrainerError DrainerServiceUnknown ("unknown state: " <> other)
+  where
+    incident = fmap (fromMaybe "" . rawIncidentSummary) rawStatus.rawIncident
+    incidentDetail = case incident of
+      Just summary | not (Text.null summary) -> " · " <> summary
+      _ -> ""
+    reported state activity detail = DrainerStatus state detail activity incident
 
 -- | Uncommitted work is no longer a reason the drainer will not start — its
 -- fast-forward stashes and restores it — so the one repository condition left
@@ -615,3 +694,345 @@ operationDetail :: Maybe Text -> Text
 operationDetail operation = case operation of
   Just name | not (Text.null name) -> name <> " in progress; finish or abort it"
   _ -> "unfinished git operation; finish or abort it"
+
+-- * Merging one pull request directly
+
+-- | The drainer's single-pull-request entry point inside a given install
+-- directory. The only path this module composes for it, built with
+-- 'System.FilePath' rather than an embedded separator; the directory itself
+-- is never reconstructed here, it arrives from the environment, from the
+-- discovered controller, or from the record's own location.
+singlePullRequestDrainerPath :: FilePath -> FilePath
+singlePullRequestDrainerPath installDir = installDir </> "drain_prs.py"
+
+-- | Which of the three sources named the install directory. Carried so a
+-- diagnostic can say what was actually consulted: a user who installed with
+-- @--install-dir@ must not be told to re-run the bare installer command they
+-- deliberately did not use.
+data DrainerScriptSource
+  = -- | @KANBAN_DRAINER_INSTALL_DIR@ selected this install directory.
+    DrainerScriptFromEnvironment FilePath
+  | -- | The discovered LaunchAgent runs its controller from this directory,
+    -- so the drainer installed beside it is the one that job would run.
+    DrainerScriptFromController FilePath
+  | -- | Neither was available, so the directory holding the discovery record
+    -- is the install.
+    DrainerScriptFromDefault FilePath
+  deriving stock (Eq, Show)
+
+-- | Select where the installed drainer should be, without yet asking whether
+-- it is there, or say why no location could be named at all.
+--
+-- Precedence is @KANBAN_DRAINER_INSTALL_DIR@, then the discovered
+-- controller's own directory, then the directory the discovery record lives
+-- in. The middle source is what keeps an install made with @--install-dir@
+-- usable: 'tools/install_drainer.py' supplies that variable to the controller
+-- installation it runs and writes it into the LaunchAgent's environment, and
+-- a separately launched dashboard inherits neither. The plist, which the
+-- record already leads to, names the installed controller — and the installer
+-- links both scripts into one directory — so the drainer is its sibling.
+--
+-- A source that is present but names no resolvable directory fails here
+-- rather than falling through to the next one. Falling through would run a
+-- different installation than the one that was actually configured, which is
+-- the one outcome worse than refusing: the merge would succeed, against the
+-- wrong copy of the drainer, and say nothing.
+selectSinglePullRequestDrainer ::
+  Maybe String -> Maybe DrainerController -> FilePath -> Either Text (DrainerScriptSource, FilePath)
+selectSinglePullRequestDrainer override controller recordPath = case selectedOverride of
+  Just installDir
+    -- A relative directory is resolved against whatever directory Kanban
+    -- happened to be started from, so it names nothing dependable — and
+    -- running the `drain_prs.py` that happens to sit there is exactly the
+    -- accident this must not have.
+    | not (isAbsolute installDir) ->
+        Left
+          ( "KANBAN_DRAINER_INSTALL_DIR is set to "
+              <> Text.pack installDir
+              <> ", which is not an absolute path and so names no install directory; "
+              <> "set it to the directory `python3 tools/install_drainer.py --install-dir` "
+              <> "installed into, or unset it to use the recorded installation"
+          )
+    | otherwise -> Right (selected DrainerScriptFromEnvironment installDir)
+  Nothing -> case controller of
+    Nothing -> Right (selected DrainerScriptFromDefault (takeDirectory recordPath))
+    Just discovered -> case controllerInstallDir discovered of
+      Just installDir -> Right (selected DrainerScriptFromController installDir)
+      Nothing ->
+        Left
+          ( "the installed LaunchAgent does not run the PR drainer's controller from an "
+              <> "absolute path, so the installation it belongs to cannot be located; "
+              <> reinstallHint
+          )
+  where
+    -- A blank override is how an unset variable often reaches a process
+    -- through a wrapper script; treating it as a selection would resolve
+    -- "/drain_prs.py".
+    selectedOverride = case override of
+      Just installDir | not (null (trimmed installDir)) -> Just installDir
+      _ -> Nothing
+    selected source installDir = (source installDir, singlePullRequestDrainerPath installDir)
+    trimmed = Text.unpack . Text.strip . Text.pack
+
+-- | The directory the discovered controller runs from.
+-- 'controllerFromProgramArguments' has already stripped the arguments this
+-- side supplies and guaranteed at least one remains, so the first is the
+-- installed @drain_prs_service.py@ itself.
+controllerInstallDir :: DrainerController -> Maybe FilePath
+controllerInstallDir controller = case controller.controllerArguments of
+  script : _ | isAbsolute script -> Just (takeDirectory script)
+  _ -> Nothing
+
+-- | Why the selected drainer is not where it was selected from. Each source
+-- gets its own repair, and every one of them names the installer.
+singlePullRequestDrainerNotFound :: DrainerScriptSource -> FilePath -> Text
+singlePullRequestDrainerNotFound source scriptPath =
+  "the PR drainer is not installed at " <> Text.pack scriptPath <> "; " <> repair
+  where
+    repair = case source of
+      DrainerScriptFromEnvironment installDir ->
+        "KANBAN_DRAINER_INSTALL_DIR selected "
+          <> Text.pack installDir
+          <> ", so install there with `python3 tools/install_drainer.py --install-dir "
+          <> Text.pack installDir
+          <> "`, or unset that variable to use the recorded installation"
+      DrainerScriptFromController installDir ->
+        "the installed LaunchAgent still runs its controller from "
+          <> Text.pack installDir
+          <> ", so that installation is incomplete; "
+          <> reinstallHint
+      DrainerScriptFromDefault _ -> reinstallHint
+
+-- | 'selectSinglePullRequestDrainer' plus the existence check, parameterised
+-- by the override, the discovered controller, and the record path so every
+-- branch is exercisable against a temporary directory.
+resolveSinglePullRequestDrainerAt ::
+  Maybe String -> Maybe DrainerController -> FilePath -> IO (Either Text FilePath)
+resolveSinglePullRequestDrainerAt override controller recordPath =
+  case selectSinglePullRequestDrainer override controller recordPath of
+    Left message -> pure (Left message)
+    Right (source, scriptPath) -> do
+      -- Absence, a directory occupying the path, and a link whose target is
+      -- gone are all "not installed here" — and all fail closed, because the
+      -- selection above already committed to one directory and nothing falls
+      -- through to another.
+      installed <- doesFileExist scriptPath
+      pure $
+        if installed
+          then Right scriptPath
+          else Left (singlePullRequestDrainerNotFound source scriptPath)
+
+-- | 'resolveSinglePullRequestDrainerAt' against the real environment.
+resolveSinglePullRequestDrainer :: Maybe DrainerController -> IO (Either Text FilePath)
+resolveSinglePullRequestDrainer controller = do
+  override <- lookupEnv "KANBAN_DRAINER_INSTALL_DIR"
+  recordPath <- drainerRecordPath
+  resolveSinglePullRequestDrainerAt override controller recordPath
+
+-- | What pressing @m@ on the selected card should do.
+data DirectMergeDecision
+  = -- | Run the drainer's single-pull-request path for this pull request.
+    RunDirectMerge Int
+  | -- | Invoke nothing, and say this instead.
+    RefuseDirectMerge Text
+  deriving stock (Eq, Show)
+
+-- | The whole decision, as a total function of the selection, whatever direct
+-- merge is already in flight, and the last status the controller reported.
+--
+-- The order is the point. An ineligible selection is answered first, because
+-- what is wrong is the card rather than the service, and reporting the
+-- drainer's state for an issue card would be a true statement about the wrong
+-- thing. An unresolved incident comes next and outranks every service state:
+-- it is the one condition that says merging is unsafe even though the service
+-- is idle. Only a service known to be stopped, with no open incident, may
+-- launch — every other state, including one this cannot classify at all,
+-- refuses, so a status that could not be read never merges anything.
+directMergeDecision ::
+  WorkflowConfig ->
+  -- | The pull request a direct merge this dashboard started is still
+  -- running, if there is one.
+  Maybe Int ->
+  DrainerStatus ->
+  Maybe BoardItem ->
+  DirectMergeDecision
+directMergeDecision config pending status selection = case eligiblePullRequest config selection of
+  Left refusal -> RefuseDirectMerge refusal
+  Right number -> case pending of
+    Just running ->
+      RefuseDirectMerge
+        ("PR #" <> showNumber running <> " is already being merged; wait for that run to finish")
+    Nothing
+      | Just summary <- status.drainerIncident -> RefuseDirectMerge (incidentRefusal summary)
+      | otherwise -> case status.drainerActivity of
+          DrainerServiceStopped -> RunDirectMerge number
+          DrainerServiceRunning ->
+            RefuseDirectMerge "the PR drainer is running and merges approved pull requests itself; stop it with d to merge one directly"
+          DrainerServiceStarting ->
+            RefuseDirectMerge "the PR drainer is starting; wait for it to settle, then stop it with d to merge one directly"
+          DrainerServiceStopping ->
+            RefuseDirectMerge "the PR drainer is stopping; wait for it to settle"
+          DrainerServiceExternal ->
+            RefuseDirectMerge "a PR drainer is already running outside launchd and holds this repository"
+          DrainerServiceBlocked ->
+            RefuseDirectMerge ("this checkout cannot be merged into yet: " <> status.drainerDetail)
+          DrainerServiceUnknown ->
+            RefuseDirectMerge ("the PR drainer's state could not be established, so nothing was merged: " <> status.drainerDetail)
+  where
+    incidentRefusal summary
+      | Text.null summary = "the PR drainer has an unresolved incident; resolve it before merging"
+      | otherwise = "the PR drainer has an unresolved incident: " <> summary
+
+-- | The selected card as a pull request this action may act on, or why it is
+-- not one. Eligibility is 'classifyPullRequest' itself rather than a second
+-- reading of the same labels, so a card @m@ accepts is exactly a card the
+-- board drew in Done.
+eligiblePullRequest :: WorkflowConfig -> Maybe BoardItem -> Either Text Int
+eligiblePullRequest _ Nothing =
+  Left "no card is selected; select an approved pull request in Done to merge it"
+eligiblePullRequest _ (Just (IssueItem issue)) =
+  Left
+    ( "#"
+        <> showNumber issue.issueNumber
+        <> " is an issue; m merges an approved pull request from Done"
+    )
+eligiblePullRequest config (Just (PullRequestItem pullRequest))
+  | classifyPullRequest config pullRequest == Done = Right pullRequest.pullRequestNumber
+  | otherwise =
+      Left
+        ( "PR #"
+            <> showNumber pullRequest.pullRequestNumber
+            <> " is not in Done, so it is not an approved pull request ready to merge"
+        )
+
+-- | The one JSON document a @--pr@ run writes to stdout. Only the fields this
+-- side acts on are read; the schema and version are the drainer's own, and a
+-- document that does not carry these is reported as unreadable rather than
+-- partially believed.
+data DirectMergeOutcome = DirectMergeOutcome
+  { -- | @merged@, @no_action@, or @error@.
+    directMergeOutcomeKind :: Text,
+    -- | Whether the pull request actually merged. True even for an @error@
+    -- whose merge landed before the failure — the post-merge audit and the
+    -- outstanding-cleanup reasons are exactly that case.
+    directMergeMerged :: Bool,
+    -- | The stable reason from the drainer's fixed vocabulary.
+    directMergeReason :: Text,
+    -- | The human-readable reason, which a caller may present verbatim.
+    directMergeMessage :: Text
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON DirectMergeOutcome where
+  parseJSON = withObject "PR drainer single-PR result" $ \value ->
+    DirectMergeOutcome
+      <$> value .: "outcome"
+      <*> value .: "merged"
+      <*> value .: "reason"
+      <*> value .: "message"
+
+-- | Reads what one @--pr@ run reported. Empty stdout is a start-up failure
+-- rather than a no-merge result — a usage error exits without writing the
+-- document at all — so it is reported with whatever the run last said on
+-- stderr instead of being decoded into silence.
+decodeDirectMergeResult :: ExitCode -> String -> String -> Either Text DirectMergeOutcome
+decodeDirectMergeResult exitCode output errors = case eitherDecode (LazyByteString.pack output) of
+  Right outcome -> Right outcome
+  Left message
+    | Text.null (Text.strip (Text.pack output)) ->
+        Left ("the PR drainer wrote no result and " <> exitDescription exitCode <> lastDiagnostic errors)
+    | otherwise ->
+        Left ("the PR drainer's result could not be read: " <> withoutJsonPath (Text.pack message))
+
+exitDescription :: ExitCode -> Text
+exitDescription ExitSuccess = "exited successfully"
+exitDescription (ExitFailure code) = "exited " <> Text.pack (show code)
+
+-- | The last thing a run said before it stopped. A single-PR run sends its
+-- whole human log to stderr, so the tail is the diagnosis while the head is
+-- start-up noise no notice has room for.
+lastDiagnostic :: String -> Text
+lastDiagnostic errors =
+  case reverse (filter (not . Text.null) (map Text.strip (Text.lines (Text.pack errors)))) of
+    latest : _ -> ": " <> latest
+    [] -> ""
+
+-- | Explicit @--repo@ and @--path@, so the run always acts on the repository
+-- Kanban resolved — including a @kanban --repo@ override, which may name
+-- something other than the checkout's remote — rather than re-deriving
+-- identity from that remote itself. The drainer compares the two and refuses
+-- a mismatch, so the containment lives on the side that owns the merge.
+-- @--config@ travels for the same reason it does for canonical issue review:
+-- both sides must agree on the workflow labels the gates are written in.
+directMergeArguments :: FilePath -> Repository -> Maybe FilePath -> Int -> [String]
+directMergeArguments scriptPath repository configPath number =
+  [ scriptPath,
+    "--path",
+    repository.repositoryRoot,
+    "--repo",
+    Text.unpack (normalizedRepositoryIdentity repository),
+    "--pr",
+    show number
+  ]
+    <> maybe [] (\path -> ["--config", path]) configPath
+
+-- | Run the drainer's own single-pull-request path once. Deliberately
+-- unbounded: every gate re-read, the merge, and the post-merge cleanup happen
+-- inside this one invocation, and a deadline that killed it partway through
+-- would abandon work that is already irreversible on GitHub.
+runDirectMerge ::
+  FilePath -> Repository -> Maybe FilePath -> Int -> IO (Either Text DirectMergeOutcome)
+runDirectMerge scriptPath repository configPath number = do
+  python <- findExecutable "python3"
+  case python of
+    Nothing -> pure (Left "python3 was not found on PATH")
+    Just pythonPath -> do
+      result <- runProcess Nothing pythonPath (directMergeArguments scriptPath repository configPath number)
+      pure $ case result of
+        Left (InvocationFailed message) -> Left ("the PR drainer could not be run: " <> message)
+        -- Unreachable for an unbounded run, which has no deadline to miss.
+        Left _ -> Left "the PR drainer's invocation ended without an exit status"
+        Right (exitCode, output, errors) -> decodeDirectMergeResult exitCode output errors
+
+-- | What a finished direct merge changes on the board.
+data DirectMergeEffect = DirectMergeEffect
+  { -- | The notice to show. Sanitized here, once, because the drainer's
+    -- message is external text on its way to a Brick widget.
+    directMergeNotice :: Text,
+    -- | Whether GitHub changed and the board must therefore be refetched.
+    -- True for a merge whose post-merge work then failed as well: the merge
+    -- itself is what the board is now stale about.
+    directMergeRefreshesBoard :: Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | Renders one result. The drainer's own message is always carried through
+-- rather than replaced by a generic sentence — it is the only text that says
+-- which gate refused, or which cleanup step is outstanding — and a merge that
+-- landed is never reported as a clean success when the run went on to fail.
+directMergeEffect :: Int -> Either Text DirectMergeOutcome -> DirectMergeEffect
+directMergeEffect number (Left message) =
+  DirectMergeEffect (sanitizeText ("PR #" <> showNumber number <> " was not merged: " <> message)) False
+directMergeEffect number (Right outcome) =
+  DirectMergeEffect (sanitizeText headline) outcome.directMergeMerged
+  where
+    headline
+      | outcome.directMergeMerged, outcome.directMergeOutcomeKind == "merged" =
+          "PR #" <> showNumber number <> " merged: " <> outcome.directMergeMessage
+      | outcome.directMergeMerged =
+          "PR #"
+            <> showNumber number
+            <> " merged, but the run did not finish cleanly ("
+            <> outcome.directMergeReason
+            <> "): "
+            <> outcome.directMergeMessage
+      | otherwise =
+          "PR #"
+            <> showNumber number
+            <> " was not merged ("
+            <> outcome.directMergeReason
+            <> "): "
+            <> outcome.directMergeMessage
+
+showNumber :: Int -> Text
+showNumber = Text.pack . show

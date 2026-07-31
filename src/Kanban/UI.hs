@@ -2,6 +2,7 @@ module Kanban.UI
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
     AppEvent (..),
+    BoardRefreshDispatch (..),
     BoardRefreshOutcome (..),
     CardEnv (..),
     ChatTranscript (..),
@@ -69,6 +70,8 @@ module Kanban.UI
     readyAttr,
     reconcileReviewSessions,
     refreshOverlay,
+    releaseQueuedBoardRefresh,
+    requiredBoardRefreshDispatch,
     resolveReviewCancelAction,
     resolveProcessClick,
     resolveProcessSelection,
@@ -140,13 +143,21 @@ import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (LimitsConfig (..), ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
 import Kanban.Domain
 import Kanban.Drainer
-  ( DrainerController,
+  ( DirectMergeDecision (..),
+    DirectMergeEffect (..),
+    DirectMergeOutcome,
+    DrainerActivity (..),
+    DrainerController,
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
+    directMergeDecision,
+    directMergeEffect,
     discoverDrainerController,
     drainerToggle,
     queryDrainerStatus,
+    resolveSinglePullRequestDrainer,
+    runDirectMerge,
     setDrainerRunning,
   )
 import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), fetchGitHubSnapshot, ghFetchCleanupFailure, newGhFetchGuard, snapshotWarnings)
@@ -474,6 +485,7 @@ data AppEvent
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerStatus)
   | DrainerToggleFinished (Either Text DrainerStatus)
+  | DirectMergeFinished Int (Either Text DirectMergeOutcome)
   | ReviewBackendStarted (Either Text ReviewClient)
   | ReviewProtocolEvent ReviewEvent
   | ReviewAnimationTick Int Int
@@ -510,6 +522,15 @@ data AppState = AppState
     appDrainerController :: Either Text DrainerController,
     appDrainerStatus :: DrainerStatus,
     appDrainerBusy :: Bool,
+    -- | The pull request a direct @m@ merge is running for, if one is. Held
+    -- apart from 'appDrainerStatus', which reports the launchd service and
+    -- has nothing to say about a run this dashboard started instead of it.
+    appDirectMergePending :: Maybe Int,
+    -- | A board refresh that has to observe something already committed, and
+    -- could not start because a fetch was already in flight. That fetch may
+    -- have read GitHub before the change landed, so it does not satisfy the
+    -- request; the request waits and starts once it publishes.
+    appBoardRefreshQueued :: Bool,
     appReviewBackend :: ReviewBackend,
     appReviewSessions :: Map Int ReviewSession,
     appSolveSessions :: Map Int SolveSession,
@@ -570,9 +591,14 @@ runDashboard options config repository = do
             appDrainerController = drainerController,
             appDrainerStatus =
               case drainerController of
-                Right _ -> DrainerStatus DrainerStarting "checking…"
-                Left message -> DrainerStatus DrainerError (sanitizeText message),
+                -- Not 'DrainerServiceStarting': nothing has reported a state
+                -- yet, and an action that may only run against a settled
+                -- "off" must not read "no answer so far" as one.
+                Right _ -> DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing
+                Left message -> drainerErrorStatus message,
             appDrainerBusy = False,
+            appDirectMergePending = Nothing,
+            appBoardRefreshQueued = False,
             appReviewBackend = ReviewBackendStopped,
             appReviewSessions = Map.empty,
             appSolveSessions = Map.empty,
@@ -1372,7 +1398,7 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    $ [ withAttr footerAttr (txt "j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  s settings  ? help  q quit"),
+    $ [ withAttr footerAttr (txt "j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  u update  d drainer  m merge  c sidebar  s settings  ? help  q quit"),
         withAttr dimAttr (txt (boardFreshnessText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
@@ -1457,6 +1483,7 @@ drawHelp =
       txt "A            autosolve selected issue (choose model brand)",
       txt "u            update board and both usage providers",
       txt "d / click    start or stop PR drainer",
+      txt "m            merge the selected approved PR in Done",
       txt "left click   select card; click selected card for details",
       txt "mouse wheel scroll column under pointer",
       txt "right/outside click closes card details",
@@ -2265,6 +2292,7 @@ handleEvent event = do
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
     (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
     (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
+    (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
     (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
     (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent
     (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applyReviewAnimationTick issueNumber generation
@@ -2323,6 +2351,7 @@ handleEvent event = do
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openItemSolveChooser SolveOnly item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openItemSolveChooser AutoSolve item
     (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killItemWorkingProcess item
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeItemDoneCard item
     (Just (DetailsOverlay _), mouseEvent)
       | Just action <- overlayMouseAction DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
@@ -2354,6 +2383,7 @@ handleEvent event = do
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openSelectedSolveChooser AutoSolve
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> startAllRefreshes
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'd') [])) -> toggleDrainer
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeSelectedDoneCard
     (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
@@ -4892,7 +4922,10 @@ toggleDrainer = do
       Left message -> setNotice ("PR drainer control unavailable: " <> sanitizeText message)
       Right controller -> do
         let shouldRun = decision == StartDrainer
-            transition = if shouldRun then DrainerStatus DrainerStarting "starting…" else DrainerStatus DrainerStopping "stopping…"
+            transition =
+              if shouldRun
+                then DrainerStatus DrainerStarting "starting…" DrainerServiceStarting Nothing
+                else DrainerStatus DrainerStopping "stopping…" DrainerServiceStopping Nothing
         modify
           ( \current ->
               current
@@ -4924,8 +4957,73 @@ applyDrainerToggle result = modify $ \state ->
           appNotice = Just notice
         }
 
+-- | A controller that could not be discovered, run, or decoded leaves the
+-- service's actual state unknown — never "off" — so nothing that may only act
+-- against a settled stop can act on this.
 drainerErrorStatus :: Text -> DrainerStatus
-drainerErrorStatus message = DrainerStatus DrainerError (sanitizeText message)
+drainerErrorStatus message =
+  DrainerStatus DrainerError (sanitizeText message) DrainerServiceUnknown Nothing
+
+-- | @m@ on the board, which acts on the selected card.
+mergeSelectedDoneCard :: EventM Name AppState ()
+mergeSelectedDoneCard = get >>= mergeDoneCard . selectedItem
+
+-- | @m@ on the details overlay, which acts on the card that overlay is for.
+mergeItemDoneCard :: BoardItem -> EventM Name AppState ()
+mergeItemDoneCard = mergeDoneCard . Just
+
+-- | Merge one approved pull request by running the PR drainer's own
+-- single-pull-request path. Kanban decides only whether to invoke it: every
+-- gate re-read, the head check, the merge itself, and the branch, worktree
+-- and linked-issue cleanup belong to that path and are not restated here.
+--
+-- The run is forked, so the interface keeps redrawing while it works, and
+-- 'appDirectMergePending' is set before the fork so a second @m@ finds it and
+-- refuses rather than starting a second process against the same repository.
+mergeDoneCard :: Maybe BoardItem -> EventM Name AppState ()
+mergeDoneCard selection = do
+  state <- get
+  case directMergeDecision state.appConfig.resolvedWorkflow state.appDirectMergePending state.appDrainerStatus selection of
+    RefuseDirectMerge refusal -> setNotice (sanitizeText ("Not merging: " <> refusal))
+    RunDirectMerge number -> do
+      resolved <- liftIO (resolveSinglePullRequestDrainer (rightOrNothing state.appDrainerController))
+      case resolved of
+        Left message ->
+          setNotice (sanitizeText ("Cannot merge PR #" <> showText number <> ": " <> message))
+        Right scriptPath -> do
+          modify
+            ( \current ->
+                current
+                  { appDirectMergePending = Just number,
+                    appNotice = Just ("Merging PR #" <> showText number <> " through the PR drainer…")
+                  }
+            )
+          void
+            . liftIO
+            . forkIO
+            $ runDirectMerge scriptPath state.appRepository state.appOptions.optionConfig number
+              >>= writeBChan state.appEventChannel . DirectMergeFinished number
+
+rightOrNothing :: Either failure value -> Maybe value
+rightOrNothing = either (const Nothing) Just
+
+-- | Publish what one direct merge did. It touches the action's own notice and
+-- pending flag and nothing else: 'appDrainerStatus' describes the launchd
+-- service, which this ran instead of and did not change, and letting a merge
+-- result write there would leave the sidebar reporting an action rather than
+-- a service.
+applyDirectMerge :: Int -> Either Text DirectMergeOutcome -> EventM Name AppState ()
+applyDirectMerge number result = do
+  let effect = directMergeEffect number result
+  modify
+    ( \state ->
+        state
+          { appDirectMergePending =
+              if state.appDirectMergePending == Just number then Nothing else state.appDirectMergePending,
+            appNotice = Just effect.directMergeNotice
+          }
+    )
+  when effect.directMergeRefreshesBoard requireBoardRefresh
 
 startAllRefreshes :: EventM Name AppState ()
 startAllRefreshes = do
@@ -4936,6 +5034,42 @@ startUsageRefreshes :: EventM Name AppState ()
 startUsageRefreshes = do
   startCodexRefresh
   startClaudeRefresh
+
+-- | Whether a refresh that must observe an already-committed change can start
+-- now. A fetch already in flight does not satisfy one: it may have read
+-- GitHub before the change landed, so believing it would leave the board
+-- permanently behind a merge that really happened.
+data BoardRefreshDispatch = StartRefreshNow | QueueRefreshUntilIdle
+  deriving stock (Eq, Show)
+
+requiredBoardRefreshDispatch :: Freshness -> BoardRefreshDispatch
+requiredBoardRefreshDispatch Loading = QueueRefreshUntilIdle
+requiredBoardRefreshDispatch _ = StartRefreshNow
+
+-- | Whether a queued required refresh may start now that a fetch has
+-- published its outcome. A board still 'Loading' afterwards is one a failed
+-- refresh left unable to fetch at all, so the request stays queued rather
+-- than being spent on a call that would only be turned away.
+releaseQueuedBoardRefresh :: Bool -> Freshness -> Bool
+releaseQueuedBoardRefresh queued freshness = queued && freshness /= Loading
+
+-- | Refresh the board because something this dashboard did has already
+-- changed GitHub. Unlike 'startBoardRefresh' this never simply reports that a
+-- refresh is running: the request survives as 'appBoardRefreshQueued' and
+-- starts when the in-flight fetch publishes.
+requireBoardRefresh :: EventM Name AppState ()
+requireBoardRefresh = do
+  state <- get
+  case requiredBoardRefreshDispatch state.appBoardFreshness of
+    StartRefreshNow -> startBoardRefresh
+    QueueRefreshUntilIdle -> modify (\current -> current {appBoardRefreshQueued = True})
+
+startQueuedBoardRefresh :: EventM Name AppState ()
+startQueuedBoardRefresh = do
+  state <- get
+  when (releaseQueuedBoardRefresh state.appBoardRefreshQueued state.appBoardFreshness) $ do
+    modify (\current -> current {appBoardRefreshQueued = False})
+    startBoardRefresh
 
 startBoardRefresh :: EventM Name AppState ()
 startBoardRefresh = do
@@ -5092,6 +5226,7 @@ applyBoardRefresh outcome = do
   case outcome of
     BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
     _ -> pure ()
+  startQueuedBoardRefresh
 
 -- | What the board reports when a refresh's @gh@ process group could not be
 -- confirmed gone. It names the cause and then what will happen next, which
