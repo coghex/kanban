@@ -10,7 +10,7 @@ import Data.Text (Text)
 import qualified Data.Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
-import Kanban.Drainer (DrainerIncident (..), DrainerState (..), DrainerStatus (..))
+import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI
   ( AgentSessionRef (..),
     AppState (..),
@@ -62,20 +62,20 @@ spec :: Spec
 spec = do
   describe "incident panel sources" $ do
     it "tells a verified-empty drainer apart from one that has not answered" $ do
-      drainerSourceState (DrainerStatus DrainerOn "on") (Just []) `shouldBe` DrainerSourceReported []
+      drainerSourceState (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing) (Just []) `shouldBe` DrainerSourceReported []
       -- The first poll has not landed yet.
-      drainerSourceState (DrainerStatus DrainerStarting "checking…") Nothing
+      drainerSourceState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing) Nothing
         `shouldBe` DrainerSourceChecking
       -- A start or stop this dashboard issued is still in flight.
-      drainerSourceState (DrainerStatus DrainerStopping "stopping…") Nothing
+      drainerSourceState (DrainerStatus DrainerStopping "stopping…" DrainerServiceStopping Nothing) Nothing
         `shouldBe` DrainerSourceChecking
       -- A query failure, a decode failure, and the controller discovery that
       -- precedes both all land here as a DrainerError status with no set.
-      drainerSourceState (DrainerStatus DrainerError "the PR drainer is not installed") Nothing
+      drainerSourceState (DrainerStatus DrainerError "the PR drainer is not installed" DrainerServiceUnknown Nothing) Nothing
         `shouldBe` DrainerSourceUnavailable "the PR drainer is not installed"
       -- A running drainer whose response carried no incident set at all is
       -- still an unanswered source, not an empty one.
-      drainerSourceState (DrainerStatus DrainerOn "on") Nothing
+      drainerSourceState (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing) Nothing
         `shouldBe` DrainerSourceUnavailable "on"
 
     it "lists every open drainer incident, not only the newest" $ do
@@ -87,8 +87,8 @@ spec = do
                    ]
 
     it "keeps session rows while the drainer source is being checked or is unavailable" $ do
-      checking <- solveSessionOn <$> unansweredState (DrainerStatus DrainerStarting "checking…")
-      unavailable <- solveSessionOn <$> unansweredState (DrainerStatus DrainerError "not installed")
+      checking <- solveSessionOn <$> unansweredState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing)
+      unavailable <- solveSessionOn <$> unansweredState (DrainerStatus DrainerError "not installed" DrainerServiceUnknown Nothing)
       map (.incidentEntryRef) (incidentEntries checking)
         `shouldBe` [SessionIncidentRef (SolveAgent 10)]
       map (.incidentEntryRef) (incidentEntries unavailable)
@@ -431,12 +431,12 @@ spec = do
         `shouldSatisfy` any (Data.Text.isInfixOf "Nothing needs attention.")
 
     it "says the drainer source is being checked or unavailable instead" $ do
-      checking <- unansweredState (DrainerStatus DrainerStarting "checking…")
+      checking <- unansweredState (DrainerStatus DrainerStarting "checking…" DrainerServiceUnknown Nothing)
       let checkingLines = panelLines (applyIncidentsAction OpenIncidentsPanel checking)
       checkingLines `shouldSatisfy` any (Data.Text.isInfixOf "checking for open incidents")
       checkingLines `shouldSatisfy` not . any (Data.Text.isInfixOf "Nothing needs attention.")
 
-      unavailable <- unansweredState (DrainerStatus DrainerError "the PR drainer is not installed")
+      unavailable <- unansweredState (DrainerStatus DrainerError "the PR drainer is not installed" DrainerServiceUnknown Nothing)
       let unavailableLines = panelLines (applyIncidentsAction OpenIncidentsPanel unavailable)
       unavailableLines
         `shouldSatisfy` any (Data.Text.isInfixOf "open incidents unavailable · the PR drainer is not installed")
@@ -445,7 +445,7 @@ spec = do
       -- A controller that answered without reporting a set at all is the
       -- same unanswered source, and must not be described as though the
       -- drainer itself were unreachable.
-      legacy <- unansweredState (DrainerStatus DrainerOn "on")
+      legacy <- unansweredState (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing)
       panelLines (applyIncidentsAction OpenIncidentsPanel legacy)
         `shouldSatisfy` any (Data.Text.isInfixOf "PR drainer: open incidents unavailable · on")
 

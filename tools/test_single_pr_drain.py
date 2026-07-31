@@ -775,6 +775,83 @@ class SinglePrErrorTests(SinglePrCliFixture):
         self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
 
 
+class SinglePrRepositoryIdentityTests(SinglePrCliFixture):
+    """`--repo` asserts which repository `--path` is a checkout of.
+
+    A caller resolves the repository through its own configuration -- Kanban's
+    `--repo OWNER/NAME`, or the remote a `--config` names -- so it can be
+    showing a repository this checkout's remote does not name. A pull request
+    number means nothing across that gap, and merging #42 here on the strength
+    of #42 there is exactly what the assertion prevents.
+    """
+
+    def test_the_asserted_identity_matching_the_checkout_changes_nothing(self):
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single("--repo", "acme/widgets")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_MERGED)
+        self.assertEqual(result["reason"], "merged")
+        self.assertTrue(result["merged"])
+
+    def test_a_case_different_spelling_names_the_same_repository(self):
+        # GitHub owner and repository names are case-insensitive, so two
+        # spellings that differ only in case name one repository and must not
+        # be read as a mismatch.
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single("--repo", "ACME/Widgets")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_MERGED)
+        self.assertTrue(result["merged"])
+
+    def test_another_repository_is_refused_before_the_pull_request_is_read(self):
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single("--repo", "other/thing")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assert_result(
+            result,
+            outcome="error",
+            reason="repository_precondition_failed",
+            merged=False,
+            would_merge=False,
+            dry_run=False,
+        )
+        # Both identities, so the message says which side to change.
+        self.assertIn("other/thing", result["message"])
+        self.assertIn("acme/widgets", result["message"])
+        # Nothing was read or merged: the refusal lands before the pull
+        # request is fetched at all.
+        self.assertEqual(self.gh_calls("pr", "view", "42"), [])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_a_value_that_names_no_repository_is_a_precondition_failure(self):
+        self.script_pr_view()
+
+        result, proc = self.run_single("--repo", "not-an-identity")
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "repository_precondition_failed")
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_the_polling_mode_is_held_to_the_same_assertion(self):
+        # The check sits with the repository context rather than with `--pr`,
+        # so a poll cycle cannot drain a repository the caller did not name.
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+
+        proc = self.run_cli("--once", "--repo", "other/thing")
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("other/thing", proc.stderr)
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+
 class SinglePrRunLockTests(SinglePrCliFixture):
     """One lock covers both modes, and whichever starts second names the
     other rather than proceeding."""

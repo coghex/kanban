@@ -193,6 +193,21 @@ through the queue's fair rotation, and no failure cooldown is advanced.
 
 `--pr` and `--once` are mutually exclusive.
 
+Kanban's `m` key drives exactly this entry point for the selected Done card;
+see [the user guide](user-guide.md).
+
+### Naming the repository
+
+`--repo OWNER/NAME` asserts which repository `--path` is a checkout of, and the
+run is refused before any pull request is read if the checkout's remote names
+another one. A caller can resolve its repository through configuration Kanban's
+`--repo` or `--config` overrode, and a pull-request number means nothing across
+that gap — #42 there and #42 here would be different pull requests. The
+assertion applies in both modes, and omitting it leaves the identity to the
+remote as before. Case is not significant: GitHub owner and repository names
+are case-insensitive, so two spellings that differ only in case name one
+repository.
+
 ### Output
 
 Exactly one JSON document is written to stdout, and nothing else; every human

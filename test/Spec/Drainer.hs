@@ -1,5 +1,7 @@
 -- | The launchd-managed pull request drainer: discovering its LaunchAgent,
--- decoding its status, and deciding what a toggle does.
+-- decoding its status, and deciding what a toggle does. The direct
+-- single-pull-request merge behind @m@ is the group's other half, in
+-- "Spec.Drainer.DirectMerge".
 module Spec.Drainer (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
@@ -8,7 +10,8 @@ import Kanban.Domain
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
 import Kanban.Drainer
-  ( DrainerController (..),
+  ( DrainerActivity (..),
+    DrainerController (..),
     DrainerIncident (..),
     DrainerObservation (..),
     DrainerRecord (..),
@@ -28,6 +31,7 @@ import Kanban.Drainer
     unreadablePlist
   )
 import Kanban.Process (identityForPid, readProcessSnapshot)
+import qualified Spec.Drainer.DirectMerge as DirectMerge
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (isLeft, requireLeft, requireRight, shouldMention, shouldNotMention)
 import Spec.Support.Process (fakeController, readRecordedPid)
@@ -256,12 +260,12 @@ spec = do
 
     it "maps a running managed drainer to green/on" $ do
       let result = decodedStatus "{\"state\":\"running\",\"open_incident\":null}"
-      result `shouldBe` Right (DrainerStatus DrainerOn "on")
+      result `shouldBe` Right (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing)
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "makes a running drainer with an unresolved incident a warning" $ do
       let result = decodedStatus "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
-      result `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
+      result `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash" DrainerServiceRunning (Just "prior crash"))
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "surfaces a per-pull-request merge-conflict incident on the board" $ do
@@ -273,12 +277,14 @@ spec = do
           ( DrainerStatus
               DrainerWarning
               "on · unresolved incident · PR #42 has a merge conflict in README; the drainer left it unmerged."
+              DrainerServiceRunning
+              (Just "PR #42 has a merge conflict in README; the drainer left it unmerged.")
           )
       result `shouldSatisfy` either (const False) drainerIsRunning
 
     it "makes a stopped drainer with an unresolved incident an error" $
       decodedStatus "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}"
-        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed" DrainerServiceStopped (Just "model failed"))
 
     it "names the git operation a checkout stopped mid-operation has to finish" $ do
       let render operation =
@@ -287,16 +293,16 @@ spec = do
                   <> operation
                   <> "\",\"open_incident\":null}"
               )
-      render "merge" `shouldBe` Right (DrainerStatus DrainerError "merge in progress; finish or abort it")
-      render "rebase" `shouldBe` Right (DrainerStatus DrainerError "rebase in progress; finish or abort it")
-      render "cherry-pick" `shouldBe` Right (DrainerStatus DrainerError "cherry-pick in progress; finish or abort it")
-      render "bisect" `shouldBe` Right (DrainerStatus DrainerError "bisect in progress; finish or abort it")
+      render "merge" `shouldBe` Right (DrainerStatus DrainerError "merge in progress; finish or abort it" DrainerServiceBlocked Nothing)
+      render "rebase" `shouldBe` Right (DrainerStatus DrainerError "rebase in progress; finish or abort it" DrainerServiceBlocked Nothing)
+      render "cherry-pick" `shouldBe` Right (DrainerStatus DrainerError "cherry-pick in progress; finish or abort it" DrainerServiceBlocked Nothing)
+      render "bisect" `shouldBe` Right (DrainerStatus DrainerError "bisect in progress; finish or abort it" DrainerServiceBlocked Nothing)
 
     it "still says something actionable when the controller names no operation" $ do
       decodedStatus "{\"state\":\"mid_operation\",\"operation\":null,\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
+        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it" DrainerServiceBlocked Nothing)
       decodedStatus "{\"state\":\"mid_operation\",\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it")
+        `shouldBe` Right (DrainerStatus DrainerError "unfinished git operation; finish or abort it" DrainerServiceBlocked Nothing)
 
     it "no longer recognises the uncommitted-changes state the removed gate produced" $
       -- Ordinary uncommitted work is carried across the post-merge
@@ -304,7 +310,7 @@ spec = do
       -- reporting `dirty` is one that has had the blanket gate put back. The
       -- board must not have a rendering waiting for it.
       decodedStatus "{\"state\":\"dirty\",\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerError "unknown state: dirty")
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: dirty" DrainerServiceUnknown Nothing)
 
     it "no longer recognises the cross-repository state the singleton produced" $
       -- Every repository now has its own job, status file, and logs, so
@@ -313,11 +319,11 @@ spec = do
       -- had the singleton put back. The board must not have a rendering
       -- waiting for it.
       decodedStatus "{\"state\":\"foreign\",\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerError "unknown state: foreign")
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: foreign" DrainerServiceUnknown Nothing)
 
     it "renders a state the controller reports but this version does not know as an error" $
       decodedStatus "{\"state\":\"paused\"}"
-        `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused")
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused" DrainerServiceUnknown Nothing)
 
     it "keeps a status document the controller printed while exiting nonzero" $ do
       -- Exiting nonzero while reporting "stopped with an unresolved incident"
@@ -326,14 +332,14 @@ spec = do
       -- to an opaque error blob would discard exactly the detail the nonzero
       -- exit is flagging.
       statusFromExit (ExitFailure 3) "{\"state\":\"stopped\",\"open_incident\":{\"summary\":\"model failed\"}}" ""
-        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+        `shouldBe` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed" DrainerServiceStopped (Just "model failed"))
 
     it "prefers a decodable status over diagnostics the same failing run wrote to stderr" $
       statusFromExit
         (ExitFailure 1)
         "{\"state\":\"running\",\"open_incident\":{\"summary\":\"prior crash\"}}"
         "launchctl: warning\n"
-        `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash")
+        `shouldBe` Right (DrainerStatus DrainerWarning "on · unresolved incident · prior crash" DrainerServiceRunning (Just "prior crash"))
 
     it "falls back to stderr when a failing run's output does not decode" $
       statusFromExit (ExitFailure 2) "not json at all\n" "  controller exploded\n"
@@ -359,7 +365,7 @@ spec = do
               "exit 4"
             ]
         runDrainerStatus 5 controller "status"
-          `shouldReturn` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed")
+          `shouldReturn` Right (DrainerStatus DrainerError "stopped · unresolved incident · model failed" DrainerServiceStopped (Just "model failed"))
 
     it "reports a failing controller's diagnostics when it printed nothing decodable" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -476,20 +482,20 @@ spec = do
       -- dashboard never began, and `drainerIsRunning` calls that "not
       -- running" -- which is precisely how the toggle used to answer a start
       -- already under way with another one.
-      case drainerToggle False (DrainerStatus DrainerStarting "starting…") of
+      case drainerToggle False (DrainerStatus DrainerStarting "starting…" DrainerServiceStarting Nothing) of
         DrainerToggleBusy notice -> notice `shouldBe` "PR drainer is already starting"
         decision -> expectationFailure ("a reported starting drainer produced " <> show decision)
 
     it "issues nothing while this dashboard's own toggle is still in flight" $
-      case drainerToggle True (DrainerStatus DrainerOff "off") of
+      case drainerToggle True (DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing) of
         DrainerToggleBusy notice -> notice `shouldBe` "PR drainer is already starting or stopping"
         decision -> expectationFailure ("a busy toggle produced " <> show decision)
 
     it "starts a settled off drainer and stops a settled running one" $ do
-      drainerToggle False (DrainerStatus DrainerOff "off") `shouldBe` StartDrainer
-      drainerToggle False (DrainerStatus DrainerOn "on") `shouldBe` StopDrainer
-      drainerToggle False (DrainerStatus DrainerWarning "on · unresolved incident") `shouldBe` StopDrainer
-      drainerToggle False (DrainerStatus DrainerError "merge in progress; finish or abort it") `shouldBe` StartDrainer
+      drainerToggle False (DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing) `shouldBe` StartDrainer
+      drainerToggle False (DrainerStatus DrainerOn "on" DrainerServiceRunning Nothing) `shouldBe` StopDrainer
+      drainerToggle False (DrainerStatus DrainerWarning "on · unresolved incident" DrainerServiceRunning (Just "")) `shouldBe` StopDrainer
+      drainerToggle False (DrainerStatus DrainerError "merge in progress; finish or abort it" DrainerServiceBlocked Nothing) `shouldBe` StartDrainer
 
   describe "PR drainer open incident set" $ do
     let incidents = fmap (.observedIncidents) . decodeDrainerStatus
@@ -516,6 +522,8 @@ spec = do
           ( DrainerStatus
               DrainerWarning
               "on · unresolved incident · drain_prs.py exited unexpectedly with code 1"
+              DrainerServiceRunning
+              (Just "drain_prs.py exited unexpectedly with code 1")
           )
       incidents document
         `shouldBe` Right
@@ -581,6 +589,8 @@ spec = do
             ""
         )
         `shouldBe` Right (Just [DrainerIncident "incident-B" "merge-conflict" Nothing (Just 42) Nothing Nothing])
+
+  DirectMerge.examples
   where
     -- The sidebar projection every test above this file's incident group
     -- asserts on, taken out of the whole observation.

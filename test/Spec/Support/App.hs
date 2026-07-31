@@ -21,7 +21,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
-import Kanban.Drainer (DrainerState (..), DrainerStatus (..))
+import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
@@ -65,9 +65,12 @@ testAppState board = do
         appIssuesTruncated = False,
         appPullRequestsTruncated = False,
         appDrainerController = Left "no drainer in tests",
-        appDrainerStatus = DrainerStatus DrainerOff "off",
+        appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
         appDrainerIncidents = Just [],
         appDrainerBusy = False,
+        appDirectMergePending = Nothing,
+        appDirectMergeResult = Nothing,
+        appBoardRefreshQueued = False,
         appReviewBackend = ReviewBackendStopped,
         appReviewSessions = Map.empty,
         appSolveSessions = Map.empty,

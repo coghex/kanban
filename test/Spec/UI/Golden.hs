@@ -36,7 +36,7 @@ import qualified Graphics.Vty.Attributes as Vty
 import Kanban.CLI (BorderPolicy (..), Options (..))
 import Kanban.Card (displayWidth)
 import Kanban.Domain
-import Kanban.Drainer (DrainerState (..), DrainerStatus (..))
+import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI
@@ -289,11 +289,14 @@ restingState channel =
       appIssuesTruncated = False,
       appPullRequestsTruncated = False,
       appDrainerController = Left "no drainer controller in the fixture",
-      appDrainerStatus = DrainerStatus DrainerOff "off",
+      appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
       -- No controller, so no observation stands: the same unanswered source
       -- a failed discovery leaves behind.
       appDrainerIncidents = Nothing,
       appDrainerBusy = False,
+      appDirectMergePending = Nothing,
+      appDirectMergeResult = Nothing,
+      appBoardRefreshQueued = False,
       appReviewBackend = ReviewBackendStopped,
       appReviewSessions = Map.empty,
       appSolveSessions = Map.empty,

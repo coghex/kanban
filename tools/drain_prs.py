@@ -355,6 +355,38 @@ def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
     )
 
 
+def require_requested_identity(ctx: RepoContext, requested: str | None) -> None:
+    """Refuse a caller whose repository is not the one this checkout is of.
+
+    Kanban resolves the board's repository through its own configuration --
+    `--repo OWNER/NAME` outright, or the remote a `--config` names -- and can
+    therefore be showing a repository this checkout's remote does not name. A
+    pull request number means nothing across that gap: #42 on the dashboard
+    and #42 here would be different pull requests, and merging the second on
+    the strength of the first is exactly what this refuses.
+
+    So the two sides have to agree rather than accommodate each other, which
+    is the same containment `drain_prs_service.py` applies to controlling a
+    job. Nothing is checked when no identity is asserted, so an ordinary
+    command line keeps working unchanged.
+    """
+    if requested is None:
+        return
+    try:
+        wanted = kanban_config.normalize_github_repository(requested)
+        actual = kanban_config.normalize_github_repository(ctx.repo_slug)
+    except kanban_config.KanbanConfigError as exc:
+        raise DrainError(str(exc)) from exc
+    if wanted != actual:
+        raise DrainError(
+            f"--repo {requested} names {wanted}, but {ctx.path} is a checkout of "
+            f"{actual}; refusing to act on another repository's pull requests. "
+            "Point --path at a checkout of the repository you named, or restore "
+            "remote_name in the shared Kanban configuration so both sides resolve "
+            "the same one."
+        )
+
+
 def load_gate_config(ctx: RepoContext) -> GateConfig:
     path = ctx.path / CONFIG_FILENAME
     if not path.exists():
@@ -2985,6 +3017,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to the main checkout of the repository to drain.",
     )
     parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="OWNER/NAME",
+        help=(
+            "Assert the repository --path is a checkout of; the run is refused "
+            "if the checkout's remote names another one."
+        ),
+    )
+    parser.add_argument(
         "--interval",
         type=int,
         default=DEFAULT_INTERVAL_SECONDS,
@@ -3063,6 +3104,10 @@ def main() -> None:
                 dry_run=args.dry_run,
             )
             ctx = get_repo_context(root, raw_config.remote_name)
+            # Before any label, gate, or pull request is read: a caller whose
+            # repository this is not must find that out before this run acts
+            # on a number that means something else here.
+            require_requested_identity(ctx, args.repo)
             resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
             APPROVE_LABEL = resolved_config.workflow.approval_label
             CHANGES_LABEL = resolved_config.workflow.changes_requested_label

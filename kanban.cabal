@@ -131,6 +131,7 @@ test-suite kanban-test
     Spec.Config.Loading
     Spec.Config.Settings
     Spec.Drainer
+    Spec.Drainer.DirectMerge
     Spec.GitHub.BoardRefresh
     Spec.GitHub.Decoding
     Spec.GitHub.PullRequestStatus

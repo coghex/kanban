@@ -77,10 +77,27 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `i` | Open the list of everything needing attention |
 | `x` | Stop the selected running job |
 | `d` | Start or stop the optional PR drainer |
+| `m` | Merge the selected approved pull request in Done |
 | `?` | Open built-in help |
 | `q` | Quit |
 
 The footer in the application shows the main controls.
+
+## Merging one pull request
+
+Press `m` on a card in Done to merge that pull request without waiting for the
+PR drainer's next rotation. It works from the board and from an open details
+window, and it hands the work to the drainer itself rather than merging on its
+own: the same checks are re-read immediately beforehand, and the linked issue,
+the worktree, and the branch are cleaned up afterwards.
+
+This needs the drainer to be installed — `python3 tools/install_drainer.py`,
+described in [the PR drainer guide](pr-drainer.md) — but not running. `m` says
+why and does nothing if the drainer is running, is starting or stopping, has an
+unresolved incident, or if the selected card is anything other than an approved
+pull request in Done. If the merge is declined, the message is the drainer's
+own reason, such as a required check that has not finished. The board refreshes
+by itself once a merge lands.
 
 ## Mouse controls
 
