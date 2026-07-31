@@ -4,8 +4,9 @@ Schema is documented in config.toml.example at the repo root and mirrors
 src/Kanban/Config.hs field-for-field (Haskell CamelCase -> Python snake_case).
 Both sides must agree on the same file; see that module for the semantics
 this loader replicates (default path, missing-file defaults, malformed/
-invalid-value errors, unknown-key warnings, global-only keys, repository
-override merge/array-replacement rules).
+invalid-value errors, unknown-key warnings, global-only keys, canonical
+lowercase repository keys and the ASCII-folded lookup that selects them,
+repository override merge/array-replacement rules).
 
 This module is also the one place the issue-review backend's own install
 location is written down. It is the only tracked module installed alongside
@@ -512,12 +513,43 @@ def _parse_usage_table(value: dict, path: str, warnings: list[str]) -> UsageConf
     return UsageConfig(codex_command=codex_command, claude_command=claude_command)
 
 
+# Kanban.Config.isCanonicalKeyCharacter. A repository override key is a
+# configuration identifier, not another spelling of --repo input: exactly one
+# canonical lowercase GitHub owner/name pair. That rejects uppercase,
+# surrounding whitespace, URL and SCP remote syntax, repeated or extra
+# slashes, and a missing segment by character and shape alone; a .git suffix
+# needs its own rejection because every character in it is otherwise legal.
+_CANONICAL_REPOSITORY_SEGMENT = re.compile(r"[a-z0-9._-]+")
+
+# Kanban.Config.asciiLowercase. str.lower() would apply Unicode mappings the
+# Haskell side does not; under this mapping a non-ASCII identity simply
+# matches no canonical key, which is the correct outcome on both sides.
+_ASCII_LOWERCASE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _is_canonical_repository_key(key: str) -> bool:
+    segments = key.split("/")
+    if len(segments) != 2:
+        return False
+    owner, name = segments
+    if not _CANONICAL_REPOSITORY_SEGMENT.fullmatch(owner):
+        return False
+    return bool(_CANONICAL_REPOSITORY_SEGMENT.fullmatch(name)) and not name.endswith(".git")
+
+
 def _parse_repositories_table(
     value: dict, path: str, warnings: list[str]
 ) -> dict[str, RepositoryOverride]:
     repos: dict[str, RepositoryOverride] = {}
     for repo_key, repo_value in value.items():
         child_path = f'{path}."{repo_key}"'
+        if not _is_canonical_repository_key(repo_key):
+            raise KanbanConfigError(
+                f"{child_path} is not a canonical repository key; "
+                'expected lowercase OWNER/NAME such as "coghex/kanban"'
+            )
         if not isinstance(repo_value, dict):
             raise KanbanConfigError(f"{child_path} must be a table")
         repo_table = dict(repo_value)
@@ -653,7 +685,13 @@ def load_raw_config(explicit_path: str | None) -> tuple[RawConfig, list[str]]:
 
 
 def resolve_config(owner_slash_name: str, raw: RawConfig) -> ResolvedConfig:
-    override = raw.repositories.get(owner_slash_name, RepositoryOverride())
+    # Override keys are canonical lowercase, so the lookup is the one place
+    # the identity is folded, exactly as in Kanban.Config.resolveConfig.
+    # Callers keep passing their own repo slug, which still names the
+    # repository for `gh`, REST paths, and remote comparison.
+    override = raw.repositories.get(
+        owner_slash_name.translate(_ASCII_LOWERCASE), RepositoryOverride()
+    )
     return ResolvedConfig(
         cache=raw.cache,
         remote_name=raw.remote_name,
