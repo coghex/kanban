@@ -202,6 +202,12 @@ class ControllerOperationDetectionTests(_OperationFixture):
     """The controller decides whether to start before the drainer process
     exists, so it reads the same repository state independently."""
 
+    def _job(self):
+        # The fixture's remote is a plain local path, so the identity is
+        # supplied rather than resolved: what these tests exercise is the
+        # repository-state preconditions, which are the same for every job.
+        return drain_prs_service.job_for_identity(self.repo, "acme/widgets")
+
     def _stopped_snapshot(self):
         with (
             mock.patch.object(drain_prs_service, "read_json", return_value={}),
@@ -211,7 +217,7 @@ class ControllerOperationDetectionTests(_OperationFixture):
             mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
             mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
         ):
-            return drain_prs_service.status_snapshot(self.repo)
+            return drain_prs_service.status_snapshot(self._job())
 
     def _start(self):
         with (
@@ -227,7 +233,7 @@ class ControllerOperationDetectionTests(_OperationFixture):
                 side_effect=drain_prs_service.ServiceError("reached installation"),
             ),
         ):
-            drain_prs_service.start_service(self.repo)
+            drain_prs_service.start_service(self._job())
 
     def test_a_dirty_checkout_reports_stopped_and_starts(self):
         self.dirty_the_tree()

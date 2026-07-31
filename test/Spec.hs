@@ -54,6 +54,7 @@ import Kanban.Drainer
     drainerRecordFromBytes,
     drainerRecordPath,
     drainerToggle,
+    normalizedRepositoryIdentity,
     resolveDrainerPlist,
     runDrainerCommand,
     statusFromControllerExit,
@@ -5585,40 +5586,82 @@ suite = do
             _ -> expectationFailure "expected an independent Codex failure and Claude success"
 
   describe "PR drainer LaunchAgent discovery" $ do
-    let recordDocument label plist =
+    let entryFor label plist =
+          "{\"launchd_label\":\""
+            <> label
+            <> "\",\"plist_path\":\""
+            <> plist
+            <> "\",\"repository\":\"/tmp/example-project\"}"
+        recordFor identity label plist =
           ByteString.pack
-            ( "{\"launchd_label\":\""
-                <> label
-                <> "\",\"plist_path\":\""
-                <> plist
-                <> "\",\"repository\":\"/tmp/example-project\"}"
+            ( "{\"ntfy_url\":\"https://notify.example.test/topic\",\"repositories\":{\""
+                <> identity
+                <> "\":"
+                <> entryFor label plist
+                <> "}}"
             )
+        recordDocument = recordFor "example/project"
         failureFor = either id (\plist -> "unexpectedly resolved " <> Data.Text.pack plist)
 
     it "reads the label, plist path, and repository the installer recorded" $
       drainerRecordFromBytes
+        "example/project"
         (recordDocument "com.example.drain" "/Users/example/Library/LaunchAgents/com.example.drain.plist")
         `shouldBe` Right
-          ( DrainerRecord
-              "com.example.drain"
-              "/Users/example/Library/LaunchAgents/com.example.drain.plist"
-              "/tmp/example-project"
+          ( Just
+              ( DrainerRecord
+                  "com.example.drain"
+                  "/Users/example/Library/LaunchAgents/com.example.drain.plist"
+                  "/tmp/example-project"
+              )
           )
+
+    it "selects each installed repository's own record out of the shared document" $ do
+      -- The property per-repository jobs rest on: installing a second
+      -- repository adds an entry rather than replacing the first, so both
+      -- stay separately resolvable from the one document.
+      let document =
+            ByteString.pack
+              ( "{\"repositories\":{\"example/project\":"
+                  <> entryFor "com.example.drain.example.project" "/tmp/a.plist"
+                  <> ",\"other/thing\":"
+                  <> entryFor "com.example.drain.other.thing" "/tmp/b.plist"
+                  <> "}}"
+              )
+      fmap (fmap (.drainerRecordLabel)) (drainerRecordFromBytes "example/project" document)
+        `shouldBe` Right (Just "com.example.drain.example.project")
+      fmap (fmap (.drainerRecordPlist)) (drainerRecordFromBytes "other/thing" document)
+        `shouldBe` Right (Just "/tmp/b.plist")
+      -- A repository with no entry is uninstalled, not malformed: it is the
+      -- one failure whose repair is installing rather than reinstalling.
+      drainerRecordFromBytes "third/repo" document `shouldBe` Right Nothing
 
     it "rejects a record that cannot name the installed job" $ do
       -- Each of these parses as JSON, or as an object, without identifying a
       -- launchd job — so each has to be an unreadable record rather than a
       -- lookup that proceeds on a value it cannot use.
-      let rejects document = drainerRecordFromBytes document `shouldSatisfy` isLeft
+      let rejects document =
+            drainerRecordFromBytes "example/project" document `shouldSatisfy` isLeft
+          entry body = ByteString.pack ("{\"repositories\":{\"example/project\":" <> body <> "}}")
       rejects "[\"com.example.drain\"]"
       rejects "\"com.example.drain\""
-      rejects "{\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
-      rejects "{\"launchd_label\":\"com.example.drain\",\"repository\":\"/tmp/r\"}"
-      rejects "{\"launchd_label\":\"com.example.drain\",\"plist_path\":\"/tmp/x.plist\"}"
-      rejects "{\"launchd_label\":42,\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
-      rejects "{\"launchd_label\":\"com.example.drain\",\"plist_path\":[],\"repository\":\"/tmp/r\"}"
+      rejects "{\"repositories\":[]}"
+      rejects (entry "[\"com.example.drain\"]")
+      rejects (entry "{\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}")
+      rejects (entry "{\"launchd_label\":\"com.example.drain\",\"repository\":\"/tmp/r\"}")
+      rejects (entry "{\"launchd_label\":\"com.example.drain\",\"plist_path\":\"/tmp/x.plist\"}")
+      rejects (entry "{\"launchd_label\":42,\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}")
+      rejects (entry "{\"launchd_label\":\"com.example.drain\",\"plist_path\":[],\"repository\":\"/tmp/r\"}")
       rejects (recordDocument "   " "/tmp/x.plist")
       rejects (recordDocument "com.example.drain" "Library/LaunchAgents/x.plist")
+
+    it "selects the record by a case-folded identity, so one repository has one drainer" $ do
+      -- GitHub owner and repository names are case-insensitive, and the
+      -- controller case-folds the identity it derives its label from. A
+      -- dashboard that looked up the raw spelling would report a repository
+      -- spelled `Example/Project` as having no drainer at all.
+      let repository = Repository "/tmp/current-project" "Example" "Project"
+      normalizedRepositoryIdentity repository `shouldBe` "example/project"
 
     it "looks for that record where the installer fixes it, not where --install-dir moved" $ do
       recordPath <- drainerRecordPath
@@ -5626,33 +5669,61 @@ suite = do
         `shouldMention` "/Library/Application Support/kanban/pr-drainer/config.json"
 
     it "names macOS rather than a missing /usr/bin/plutil on another host" $ do
-      outcome <- resolveDrainerPlist "linux" "/nonexistent/pr-drainer/config.json"
+      outcome <-
+        resolveDrainerPlist "linux" "example/project" "/nonexistent/pr-drainer/config.json"
       failureFor outcome `shouldMention` "macOS"
 
     it "says the drainer is not installed when no record was written" $
       withTemporaryCacheRoot $ \root -> do
-        outcome <- resolveDrainerPlist "darwin" (root </> "config.json")
+        outcome <- resolveDrainerPlist "darwin" "example/project" (root </> "config.json")
         failureFor outcome `shouldMention` "not installed"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "names the repository a document with no entry for it is not installed for" $
+      withTemporaryCacheRoot $ \root -> do
+        -- Another repository's drainer being installed says nothing about
+        -- this one, and the message has to name which repository is missing
+        -- or it reads as "the drainer is broken".
+        let recordPath = root </> "config.json"
+        ByteString.writeFile
+          recordPath
+          (recordFor "other/thing" "com.example.drain" "/tmp/b.plist")
+        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        failureFor outcome `shouldMention` "not installed for example/project"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
     it "distinguishes an unreadable record from an absent one" $
       withTemporaryCacheRoot $ \root -> do
         let recordPath = root </> "config.json"
         ByteString.writeFile recordPath (recordDocument "" "/tmp/x.plist")
-        outcome <- resolveDrainerPlist "darwin" recordPath
+        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "unreadable"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
-    it "reports an installation predating the record without Aeson's JSONPath" $
+    it "reports an installation predating the per-repository record" $
       withTemporaryCacheRoot $ \root -> do
-        -- What an install made before the record existed actually looks like:
-        -- the installer's config.json is there, holding only the keys it
-        -- always wrote.
+        -- What a pre-#147 install actually looks like: the singleton's own
+        -- keys at the top level, and no repositories table at all. That is an
+        -- unmigrated installation, which the installer repairs, rather than a
+        -- document this version should try to read a job out of.
         let recordPath = root </> "config.json"
-        ByteString.writeFile recordPath "{\"ntfy_url\":\"https://notify.example.test/topic\"}"
-        outcome <- resolveDrainerPlist "darwin" recordPath
-        failureFor outcome `shouldMention` "launchd_label"
+        ByteString.writeFile
+          recordPath
+          "{\"ntfy_url\":\"https://notify.example.test/topic\",\"launchd_label\":\"com.coghex.drain-prs\",\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/example-project\"}"
+        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        failureFor outcome `shouldMention` "not installed for example/project"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
+        failureFor outcome `shouldNotMention` "Error in $"
+
+    it "reports a malformed entry without Aeson's JSONPath" $
+      withTemporaryCacheRoot $ \root -> do
+        let recordPath = root </> "config.json"
+        ByteString.writeFile
+          recordPath
+          (ByteString.pack "{\"repositories\":{\"example/project\":{\"plist_path\":\"/tmp/x.plist\"}}}")
+        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        failureFor outcome `shouldMention` "unreadable"
+        failureFor outcome `shouldMention` "launchd_label"
         failureFor outcome `shouldNotMention` "Error in $"
 
     it "reports a stale install when the recorded plist is gone" $
@@ -5660,7 +5731,7 @@ suite = do
         let recordPath = root </> "config.json"
             plist = root </> "com.example.drain.plist"
         ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
-        outcome <- resolveDrainerPlist "darwin" recordPath
+        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "LaunchAgent is missing"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
@@ -5684,7 +5755,7 @@ suite = do
             plist = root </> "com.example.drain.plist"
         ByteString.writeFile plist "<plist/>"
         ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
-        resolveDrainerPlist "darwin" recordPath `shouldReturn` Right plist
+        resolveDrainerPlist "darwin" "example/project" recordPath `shouldReturn` Right plist
 
   describe "PR drainer status decoding" $ do
     it "replaces the LaunchAgent's managed repository with the current one" $ do
@@ -5693,7 +5764,12 @@ suite = do
             Right
               ( DrainerController
                   "/usr/bin/python3"
-                  ["/tmp/drain_prs_service.py", "--path", "/tmp/current-project"]
+                  [ "/tmp/drain_prs_service.py",
+                    "--path",
+                    "/tmp/current-project",
+                    "--repo",
+                    "example/project"
+                  ]
               )
       controllerFromProgramArguments
         repository
@@ -5703,6 +5779,28 @@ suite = do
         repository
         ["/usr/bin/python3", "/tmp/drain_prs_service.py", "--path", "/tmp/previous-project", "run"]
         `shouldBe` expected
+      -- Both bound arguments are re-supplied from this dashboard, so a plist
+      -- that already carries one cannot make the command name two checkouts
+      -- or two repositories.
+      controllerFromProgramArguments
+        repository
+        ["/usr/bin/python3", "/tmp/drain_prs_service.py", "--repo", "other/thing", "run"]
+        `shouldBe` expected
+
+    it "asserts the board's repository identity rather than trusting --repo" $ do
+      -- `kanban --repo OWNER/NAME` bypasses remote resolution for the board,
+      -- so the identity reaching the controller may name a repository this
+      -- checkout is not a clone of. Passing it lets the controller — which
+      -- owns the job — refuse, instead of silently selecting or creating a
+      -- drainer for the other repository.
+      let repository = Repository "/tmp/current-project" "Other" "Thing"
+      fmap (.controllerArguments)
+        ( controllerFromProgramArguments
+            repository
+            ["/usr/bin/python3", "/tmp/drain_prs_service.py", "run"]
+        )
+        `shouldBe` Right
+          ["/tmp/drain_prs_service.py", "--path", "/tmp/current-project", "--repo", "other/thing"]
 
     it "maps a running managed drainer to green/on" $ do
       let result = decodeDrainerStatus "{\"state\":\"running\",\"open_incident\":null}"
@@ -5756,9 +5854,14 @@ suite = do
       decodeDrainerStatus "{\"state\":\"dirty\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: dirty")
 
-    it "warns when the singleton drainer belongs to another repository" $
+    it "no longer recognises the cross-repository state the singleton produced" $
+      -- Every repository now has its own job, status file, and logs, so
+      -- another repository's running drainer is invisible here rather than a
+      -- warning — and a controller still reporting `foreign` is one that has
+      -- had the singleton put back. The board must not have a rendering
+      -- waiting for it.
       decodeDrainerStatus "{\"state\":\"foreign\",\"open_incident\":null}"
-        `shouldBe` Right (DrainerStatus DrainerWarning "another repository is running")
+        `shouldBe` Right (DrainerStatus DrainerError "unknown state: foreign")
 
     it "renders a state the controller reports but this version does not know as an error" $
       decodeDrainerStatus "{\"state\":\"paused\"}"

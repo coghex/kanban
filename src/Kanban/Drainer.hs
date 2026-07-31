@@ -11,6 +11,7 @@ module Kanban.Drainer
     drainerRecordFromBytes,
     drainerRecordPath,
     drainerToggle,
+    normalizedRepositoryIdentity,
     queryDrainerStatus,
     resolveDrainerPlist,
     runDrainerCommand,
@@ -26,9 +27,13 @@ where
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
-import Data.Aeson (FromJSON (..), eitherDecode, eitherDecodeStrict, withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.:), (.:?))
+import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (Repository (..))
@@ -120,13 +125,14 @@ instance FromJSON RawStatus where
   parseJSON = withObject "PR drainer status" $ \value ->
     RawStatus <$> value .: "state" <*> value .:? "operation" <*> value .:? "open_incident"
 
--- | What the drainer's installer recorded about the launchd job it wrote.
--- The record carries the job's location, never its content: discovery still
--- reads @ProgramArguments@ out of the plist itself, so a hand-edited plist
--- remains what Kanban reports and controls. Reading the label from here
--- rather than restating it is what keeps this side from having to reimplement
--- the installer's naming — a disagreement there would present as "drainer not
--- found" with both sides looking correct in isolation.
+-- | What the drainer's installer recorded about the launchd job it wrote for
+-- one repository. The record carries the job's location, never its content:
+-- discovery still reads @ProgramArguments@ out of the plist itself, so a
+-- hand-edited plist remains what Kanban reports and controls. Reading the
+-- label from here rather than deriving it is what keeps this side from having
+-- to reimplement the installer's per-repository naming — a disagreement there
+-- would present as "drainer not found" with both sides looking correct in
+-- isolation.
 data DrainerRecord = DrainerRecord
   { -- | The launchd label the plist was written for. Kanban composes no path
     -- from it — the record carries the plist path directly — but a record
@@ -134,10 +140,10 @@ data DrainerRecord = DrainerRecord
     -- rather than accepted and ignored.
     drainerRecordLabel :: Text,
     drainerRecordPlist :: FilePath,
-    -- | Which repository the job was installed for. Metadata only: the
-    -- controller is deliberately rebound to the dashboard's own repository by
-    -- 'controllerFromProgramArguments', and the drainer is a singleton that
-    -- reports a repository mismatch itself as @foreign@.
+    -- | Which checkout the job was installed for. Metadata only: the
+    -- controller is deliberately rebound to the dashboard's own checkout by
+    -- 'controllerFromProgramArguments', and a second checkout of the same
+    -- repository is that repository's own drainer rather than a foreign one.
     drainerRecordRepository :: FilePath
   }
   deriving stock (Eq, Show)
@@ -149,35 +155,66 @@ instance FromJSON DrainerRecord where
       <*> value .: "plist_path"
       <*> value .: "repository"
 
--- | The fixed location the installer writes that record to. Deliberately not
+-- | The installed document, which holds one record per canonical GitHub
+-- repository plus the installer's own shared keys. Entries stay unparsed until
+-- one is selected, so a malformed record for a repository this dashboard is
+-- not about cannot make every other repository's drainer undiscoverable.
+newtype DrainerRecordDocument = DrainerRecordDocument (Map Text Value)
+
+instance FromJSON DrainerRecordDocument where
+  parseJSON = withObject "PR drainer install record" $ \value ->
+    DrainerRecordDocument . fromMaybe Map.empty <$> value .:? "repositories"
+
+-- | The key a repository's record is filed under, and the identity the
+-- controller resolves the same checkout's remote to. GitHub owner and
+-- repository names are case-insensitive, so the key is case-folded: two
+-- spellings that differ only in case name one repository, and must therefore
+-- find one drainer rather than two.
+normalizedRepositoryIdentity :: Repository -> Text
+normalizedRepositoryIdentity repository =
+  Text.toLower repository.repositoryOwner <> "/" <> Text.toLower repository.repositoryName
+
+-- | The fixed location the installer writes that document to. Deliberately not
 -- derived from @KANBAN_DRAINER_INSTALL_DIR@: an install made with
 -- @--install-dir@ still has to be discoverable by a dashboard that never saw
--- that option, so the record's own path is the one thing that cannot move.
+-- that option, so the document's own path is the one thing that cannot move.
 drainerRecordPath :: IO FilePath
 drainerRecordPath = do
   home <- getHomeDirectory
   pure (home <> "/Library/Application Support/kanban/pr-drainer/config.json")
 
--- | Reads the record, rejecting a document that cannot name a launchd job.
--- An empty label or a relative plist path parses as JSON but identifies
--- nothing, and treating that as an unreadable record is what sends the user
--- back to the installer instead of on to a lookup that cannot succeed.
-drainerRecordFromBytes :: ByteString.ByteString -> Either Text DrainerRecord
-drainerRecordFromBytes bytes = case eitherDecodeStrict bytes of
-  Left message -> Left (withoutJsonPath (Text.pack message))
-  Right record
-    | Text.null (Text.strip record.drainerRecordLabel) ->
-        Left "it names no launchd label"
-    | not (isAbsolute record.drainerRecordPlist) ->
-        Left ("its plist path is not absolute: " <> Text.pack record.drainerRecordPlist)
-    | otherwise -> Right record
+-- | Selects this repository's record, rejecting a document that cannot name a
+-- launchd job for it. A missing entry is reported separately from a malformed
+-- one: the first is an uninstalled — or unmigrated — repository, and the
+-- second is a record that parses without identifying anything, since an empty
+-- label or a relative plist path names no job either. Both send the user back
+-- to the installer rather than on to a lookup that cannot succeed.
+drainerRecordFromBytes ::
+  Text -> ByteString.ByteString -> Either Text (Maybe DrainerRecord)
+drainerRecordFromBytes identity bytes = do
+  DrainerRecordDocument records <- case eitherDecodeStrict bytes of
+    Left message -> Left (withoutJsonPath (Text.pack message))
+    Right document -> Right document
+  case Map.lookup identity records of
+    Nothing -> Right Nothing
+    Just value -> Just <$> validated value
+  where
+    validated value = case parseEither parseJSON value of
+      Left message -> Left (withoutJsonPath (Text.pack message))
+      Right record
+        | Text.null (Text.strip record.drainerRecordLabel) ->
+            Left "it names no launchd label"
+        | not (isAbsolute record.drainerRecordPlist) ->
+            Left ("its plist path is not absolute: " <> Text.pack record.drainerRecordPlist)
+        | otherwise -> Right record
 
--- | Resolves the installed plist through that record, naming the remediation
--- for every way the lookup can fail rather than letting an @IOException@
--- render itself as the drainer's status. Parameterised by the host operating
--- system and the record path so each branch is exercisable off a macOS host.
-resolveDrainerPlist :: String -> FilePath -> IO (Either Text FilePath)
-resolveDrainerPlist hostOperatingSystem recordPath
+-- | Resolves this repository's installed plist through that document, naming
+-- the remediation for every way the lookup can fail rather than letting an
+-- @IOException@ render itself as the drainer's status. Parameterised by the
+-- host operating system, the repository identity, and the document path so
+-- each branch is exercisable off a macOS host.
+resolveDrainerPlist :: String -> Text -> FilePath -> IO (Either Text FilePath)
+resolveDrainerPlist hostOperatingSystem identity recordPath
   | hostOperatingSystem /= "darwin" =
       pure (Left "the PR drainer is a launchd job and needs macOS to run")
   | otherwise = do
@@ -186,13 +223,17 @@ resolveDrainerPlist hostOperatingSystem recordPath
         then pure (Left notInstalled)
         else do
           contents <- try @IOException (ByteString.readFile recordPath)
-          case fmap drainerRecordFromBytes contents of
+          case fmap (drainerRecordFromBytes identity) contents of
             Left _ -> pure (Left (unreadableRecord "it could not be read"))
             Right (Left message) -> pure (Left (unreadableRecord message))
-            Right (Right record) -> plistOf record
+            Right (Right Nothing) -> pure (Left notInstalled)
+            Right (Right (Just record)) -> plistOf record
   where
     notInstalled =
-      "the PR drainer is not installed, or predates its install record; " <> reinstallHint
+      "the PR drainer is not installed for "
+        <> identity
+        <> ", or predates its per-repository install record; "
+        <> reinstallHint
 
     plistOf record = do
       installed <- doesFileExist record.drainerRecordPlist
@@ -232,7 +273,7 @@ withoutJsonPath message = case Text.stripPrefix "Error in " message of
 discoverDrainerController :: Repository -> IO (Either Text DrainerController)
 discoverDrainerController repository = do
   recordPath <- drainerRecordPath
-  resolved <- resolveDrainerPlist os recordPath
+  resolved <- resolveDrainerPlist os (normalizedRepositoryIdentity repository) recordPath
   case resolved of
     Left message -> pure (Left message)
     Right plist -> do
@@ -260,6 +301,16 @@ unreadablePlist plist detail =
     <> "; "
     <> reinstallHint
 
+-- | Rebinds the installed job's command to this dashboard's own checkout, and
+-- states which repository that checkout is expected to be a clone of.
+--
+-- The identity travels as @--repo@ rather than being trusted: with
+-- @kanban --repo OWNER\/NAME@ the board's identity comes from the user, not
+-- from the checkout's remote, and honouring it unchecked would let a
+-- dashboard select or create a drainer for a repository its checkout has
+-- nothing to do with. The controller compares it against the remote and
+-- refuses a mismatch, so the containment lives on the side that owns the job
+-- rather than in a check this side could skip.
 controllerFromProgramArguments :: Repository -> [String] -> Either Text DrainerController
 controllerFromProgramArguments repository arguments = case arguments of
   executable : rawControllerArguments
@@ -267,7 +318,13 @@ controllerFromProgramArguments repository arguments = case arguments of
         Right
           ( DrainerController
               executable
-              (controllerArguments <> ["--path", repository.repositoryRoot])
+              ( controllerArguments
+                  <> [ "--path",
+                       repository.repositoryRoot,
+                       "--repo",
+                       Text.unpack (normalizedRepositoryIdentity repository)
+                     ]
+              )
           )
     where
       controllerArguments = stripManagedArguments rawControllerArguments
@@ -534,12 +591,15 @@ stripRunArgument arguments = case reverse arguments of
   "run" : rest -> reverse rest
   _ -> arguments
 
+-- | Drops the arguments this side supplies itself, so a plist carrying them
+-- cannot make the rebuilt command name two checkouts or two repositories.
 stripManagedArguments :: [String] -> [String]
-stripManagedArguments = removePathArgument . stripRunArgument
+stripManagedArguments = removeBoundArguments . stripRunArgument
   where
-    removePathArgument ("--path" : _ : rest) = removePathArgument rest
-    removePathArgument (argument : rest) = argument : removePathArgument rest
-    removePathArgument [] = []
+    removeBoundArguments (argument : _ : rest)
+      | argument `elem` ["--path", "--repo"] = removeBoundArguments rest
+    removeBoundArguments (argument : rest) = argument : removeBoundArguments rest
+    removeBoundArguments [] = []
 
 statusFromRaw :: RawStatus -> DrainerStatus
 statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
@@ -547,7 +607,6 @@ statusFromRaw rawStatus = case (rawStatus.rawState, rawStatus.rawIncident) of
   ("running", Just incident) -> DrainerStatus DrainerWarning ("on · unresolved incident" <> incidentDetail incident)
   ("starting", _) -> DrainerStatus DrainerStarting "starting…"
   ("external", _) -> DrainerStatus DrainerWarning "on outside launchd"
-  ("foreign", _) -> DrainerStatus DrainerWarning "another repository is running"
   ("mid_operation", _) -> DrainerStatus DrainerError (operationDetail rawStatus.rawOperation)
   ("stopped", Nothing) -> DrainerStatus DrainerOff "off"
   ("stopped", Just incident) -> DrainerStatus DrainerError ("stopped · unresolved incident" <> incidentDetail incident)

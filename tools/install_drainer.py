@@ -4,7 +4,14 @@
 
 The installer never starts the drainer. It only installs stable script links and
 loads a stopped LaunchAgent definition for the selected repository. An optional
---config path is persisted and forwarded to the installed drain_prs.py runs.
+--config path is persisted against that repository and forwarded to its
+installed drain_prs.py runs.
+
+One LaunchAgent per canonical GitHub repository. The script links are shared —
+one installed copy of the drainer, the controller, and the configuration parser
+serves every repository — while the job, its runtime state, its logs, and its
+`--config` selection are the repository's own. Installing a second repository
+therefore adds an entry beside the first rather than replacing it.
 
 Installing runs drain_prs_service.py's own install step, which writes the plist
 and records where it put it. Re-running this installer therefore also repairs a
@@ -26,9 +33,9 @@ from typing import Any
 import drain_prs_service
 
 
-# The controller writes the plist, so it owns the label, the plist path, and
-# the launchd target derived from them; this installer reads all three from
-# there rather than restating any of them.
+# The controller writes the plist, so it owns the repository identity, the
+# label derived from it, the plist path, and the launchd target; this installer
+# resolves a job through it rather than restating any of them.
 DEFAULT_INSTALL_DIR = drain_prs_service.DEFAULT_INSTALL_DIR
 
 
@@ -68,8 +75,24 @@ def repository_root(requested: Path) -> Path:
     return root
 
 
-def launchd_job_running() -> bool:
-    proc = run(["launchctl", "print", drain_prs_service.launch_target()], check=False)
+def repository_job(repo: Path) -> drain_prs_service.DrainerJob:
+    """This checkout's drainer job, or an InstallError naming why it has none.
+
+    A checkout whose remote does not resolve to a repository on github.com
+    cannot be given a drainer at all: its identity is what names the job, and
+    inventing one from an unsupported value would install a LaunchAgent Kanban
+    could never find.
+    """
+    try:
+        return drain_prs_service.resolve_job(repo)
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(str(exc)) from exc
+
+
+def launchd_job_running(job: drain_prs_service.DrainerJob) -> bool:
+    proc = run(
+        ["launchctl", "print", drain_prs_service.launch_target(job)], check=False
+    )
     if proc.returncode != 0:
         return False
     output = proc.stdout + proc.stderr
@@ -209,11 +232,22 @@ def write_notification_config(ntfy_url: str) -> Path:
     return merge_installed_config_json({"ntfy_url": ntfy_url})
 
 
-def write_installed_config_path(config_path: str) -> Path:
-    """Persist the kanban config.toml path for drain_prs_service.py's runner
-    to forward to drain_prs.py. Merges into the same shared document used for
-    ntfy_url and the discovery record rather than overwriting it."""
-    return merge_installed_config_json({"config_path": config_path})
+def write_installed_config_path(identity: str, config_path: str) -> Path:
+    """Persist the kanban config.toml path for drain_prs_service.py's runner to
+    forward to *this repository's* drain_prs.py.
+
+    Written into that repository's own discovery record, not the single shared
+    scalar earlier versions used: a later `--config` install for a second
+    repository must not silently change the configuration the first
+    repository's drainer restarts with. Merged rather than overwritten, so it
+    lands beside the label and plist path the controller records.
+    """
+    try:
+        return drain_prs_service.merge_repository_record(
+            identity, {"config_path": config_path}
+        )
+    except drain_prs_service.ServiceError as exc:
+        raise InstallError(str(exc)) from exc
 
 
 def install(
@@ -226,7 +260,8 @@ def install(
 ) -> dict[str, Any]:
     if sys.platform != "darwin":
         raise InstallError("The PR drainer LaunchAgent installer requires macOS.")
-    if launchd_job_running() or repository_drainer_running(repo):
+    job = repository_job(repo)
+    if launchd_job_running(job) or repository_drainer_running(repo):
         raise InstallError(
             "Refusing to install while the PR drainer is running. Stop it first."
         )
@@ -253,11 +288,13 @@ def install(
             "installed": False,
             "dry_run": True,
             "repo": str(repo),
+            "repository": job.identity,
+            "label": job.label,
             "links": {
                 key: {"source": str(sources[key]), "destination": str(destination)}
                 for key, destination in destinations.items()
             },
-            "plist": str(drain_prs_service.PLIST_PATH),
+            "plist": str(job.plist_path),
             "record": str(drain_prs_service.DISCOVERY_RECORD_PATH),
             "config_path": resolved_config_path,
             "started": False,
@@ -274,7 +311,7 @@ def install(
     if ntfy_url:
         notification_config = str(write_notification_config(ntfy_url))
     if resolved_config_path:
-        write_installed_config_path(resolved_config_path)
+        write_installed_config_path(job.identity, resolved_config_path)
     environment = os.environ.copy()
     environment["KANBAN_DRAINER_INSTALL_DIR"] = str(install_dir)
     environment.pop("KANBAN_DRAINER_NTFY_URL", None)
@@ -284,6 +321,13 @@ def install(
             str(destinations["controller"]),
             "--path",
             str(repo),
+            # The identity this installer resolved, asserted against the one the
+            # installed controller resolves for itself. They read the same
+            # remote, so a disagreement means the two copies parse identities
+            # differently — which must fail here rather than install a job under
+            # a label nothing else will look for.
+            "--repo",
+            job.identity,
             "--json",
             "install",
         ],
@@ -298,6 +342,8 @@ def install(
     return {
         "installed": True,
         "repo": str(repo),
+        "repository": job.identity,
+        "label": job.label,
         "install_dir": str(install_dir),
         "links": link_results,
         "config": str(shared_config_path()),
@@ -358,7 +404,8 @@ def main() -> int:
         elif result.get("dry_run"):
             print(f"Dry run passed for {repo}; no files or LaunchAgents were changed.")
         else:
-            print(f"Installed PR drainer for {repo}")
+            print(f"Installed PR drainer for {result['repository']} at {repo}")
+            print(f"LaunchAgent: {result['label']}")
             print(f"Controller: {install_dir / 'drain_prs_service.py'}")
             print("The LaunchAgent is loaded but stopped; start it from Kanban when ready.")
         return 0

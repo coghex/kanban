@@ -4,6 +4,48 @@ The PR drainer watches one repository and merges open pull requests that are app
 
 The drainer is optional. Kanban works without it.
 
+Each canonical GitHub repository gets its own drainer. Install as many as you
+like on one account: they have separate LaunchAgents, runtime state, logs, and
+incidents, and starting or stopping one does not touch another. What a drainer
+is *named* by is the checkout's canonical GitHub `owner/name`, compared without
+regard to case — so `Acme/Widgets` and `acme/widgets` are one drainer, and two
+clones of one repository cannot drain it at the same time. A checkout whose
+remote is not a supported github.com URL cannot have a drainer at all.
+
+That name comes from the remote the **shared** Kanban configuration
+(`~/.config/kanban/config.toml`, or `$XDG_CONFIG_HOME/kanban/config.toml`)
+names — the same remote Kanban itself resolves the board's repository through.
+A dashboard that resolves a *different* repository, because it was started with
+`kanban --repo OWNER/NAME` or with a `--config` naming another remote, is
+talking about another canonical repository: it reports the drainer as not
+installed for that repository, and the controller refuses its requests rather
+than acting on this checkout's job behind its back. Point both at one
+repository by setting `remote_name` in the shared configuration, which moves
+the dashboard and the drainer together.
+
+### Changing `remote_name` after installing
+
+An installed job is pinned to the repository it was installed for: its plist
+records that identity, and its LaunchAgent refuses to drain anything if the
+checkout stops resolving to it. So changing `remote_name` in the shared
+configuration does not silently re-point an existing drainer at whatever
+repository the new remote names — it stops that drainer instead, with a line in
+its own service log saying so.
+
+Re-run the installer to pick the change up:
+
+```console
+python3 tools/install_drainer.py
+```
+
+That installs a job for the repository now configured. The superseded job stays
+loaded but inert; remove it when convenient with
+
+```console
+launchctl bootout gui/$(id -u)/com.coghex.drain-prs.<old-slug>
+rm ~/Library/LaunchAgents/com.coghex.drain-prs.<old-slug>.plist
+```
+
 ## Install
 
 The installer is for macOS and does not require `sudo`.
@@ -22,25 +64,66 @@ python3 tools/install_drainer.py
 
 The installer:
 
-- refuses to run while a drainer is active;
+- refuses to run while this repository's drainer is active;
 - refuses to overwrite ordinary files;
-- creates stable links under `~/Library/Application Support/kanban/pr-drainer/`;
-- installs `~/Library/LaunchAgents/com.coghex.drain-prs.plist`;
-- records that job's label, plist path, and repository in
-  `~/Library/Application Support/kanban/pr-drainer/config.json`, which is how
-  Kanban finds it;
+- creates stable links under `~/Library/Application Support/kanban/pr-drainer/`,
+  shared by every repository;
+- installs `~/Library/LaunchAgents/com.coghex.drain-prs.<owner>.<name>.plist`,
+  named for this repository's normalized identity;
+- records that job's label, plist path, and checkout under this repository's
+  entry in `~/Library/Application Support/kanban/pr-drainer/config.json`, which
+  is how Kanban finds it;
 - loads the job without starting it.
 
+Run it once per repository, from that repository's own main checkout. Installing
+a second repository adds its entry beside the first; it never replaces it.
+
 Rerun the installer after moving the repository checkout. Rerun it as well if
-Kanban reports that the drainer is not installed or that its install record is
-unreadable — an installation predating the record is repaired in place, with no
-uninstall first and no change to the LaunchAgent's identity.
+Kanban reports that the drainer is not installed for this repository or that its
+install record is unreadable — an installation predating the record is repaired
+in place, with no uninstall first and no change to the LaunchAgent's identity.
+
+### Migrating from the single machine-wide drainer
+
+Before per-repository jobs there was one drainer for the whole account, labelled
+`com.coghex.drain-prs`. To migrate, stop it and rerun the installer from each
+repository you want drained:
+
+```console
+python3 tools/install_drainer.py
+```
+
+The first install for a repository the old job served unloads that job and
+renames its plist to `com.coghex.drain-prs.plist.retired`, so the old and new
+jobs can never run together. A legacy job installed for a *different*
+repository is left alone until you migrate that repository the same way.
+
+Two things do not migrate themselves:
+
+- `--config`. It is now stored per repository, so pass it again for each
+  repository that needs one: `python3 tools/install_drainer.py --config
+  /path/to/config.toml`. A repository without one uses the normal shared
+  Kanban configuration. `--ntfy-url` is global and is *not* re-entered.
+
+  Note that a `remote_name` set in that file selects the remote the drainer
+  *works against* — its default-branch check and its merges — but not which
+  repository the job is for. The drainer's identity always comes from the
+  remote the shared Kanban configuration names, which is the remote Kanban
+  itself resolves the board's repository through. To drain a fork's upstream
+  under that upstream's name, set `remote_name` in the shared configuration.
+- The old job's logs and runtime state under
+  `~/Library/Logs/kanban/pr-drainer/` and the install directory's `runtime/`.
+  New jobs write into per-repository subdirectories beside them; the old files
+  can be deleted once you no longer want them.
 
 ## Start and stop
 
-Press `d` in Kanban to start or stop the drainer.
+Press `d` in Kanban to start or stop this repository's drainer.
 
-Only one managed drainer can run for the user at a time. A Kanban window for another repository reports that the drainer belongs to a different project and will not stop or replace it.
+Drainers for different repositories run independently, and each Kanban window
+reports only its own repository's. Two checkouts of *the same* repository share
+one drainer, because they are one repository: whichever starts second is refused,
+and the message names the checkout already running it.
 
 Installation never starts the drainer. Starting it can merge eligible pull requests immediately.
 
@@ -280,19 +363,30 @@ The endpoint is stored in a private configuration file and is not written into t
 
 ## Files and logs
 
-- Installed links and private configuration: `~/Library/Application Support/kanban/pr-drainer/`
-- Install record Kanban resolves the LaunchAgent through, and the private
-  configuration (`ntfy_url`, `config_path`) that shares it:
+Below, `<slug>` is the repository's normalized `owner/name` encoded for a
+filename — `coghex/kanban` becomes `coghex.kanban`. It is the same slug the
+LaunchAgent label ends with, so the log directory, the runtime directory, and
+the plist of one repository all carry the same name.
+
+- Installed links, shared by every repository: `~/Library/Application Support/kanban/pr-drainer/`
+- Install record Kanban resolves each LaunchAgent through, and the global
+  private configuration (`ntfy_url`) that shares it:
   `~/Library/Application Support/kanban/pr-drainer/config.json` — this path is
-  fixed, and `--install-dir` does not move it
-- Logs: `~/Library/Logs/kanban/pr-drainer/`
-- LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.plist`
+  fixed, and `--install-dir` does not move it. Its `repositories` table holds
+  one entry per installed repository, carrying that job's label, plist path,
+  checkout, and `config_path`.
+- Runtime status and incidents: `~/Library/Application Support/kanban/pr-drainer/runtime/<slug>/`
+- Logs: `~/Library/Logs/kanban/pr-drainer/<slug>/`
+- LaunchAgent: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
 - Repository queue state: `.git/drain_prs_state.json`
 - Repository run lock: the `.git` directory, plus `.git/drain_prs.lock` holding
   the holder's PID, beside `.git/drain_prs.lock.owner.json`, which records
-  whether that PID is the polling service or a single-PR run
+  whether that PID is the polling service or a single-PR run. This lock is per
+  *checkout*, and remains a secondary guard: two clones of one repository are
+  excluded from running concurrently by their shared canonical identity, which
+  the lock cannot see.
 
-The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Stopping the drainer intentionally clears any open incidents for that repository; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
+The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears any open incidents for that repository, and no other repository's; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
 
 ## Manual status
 
@@ -303,6 +397,11 @@ CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.p
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
 ```
+
+Every command selects the repository `--path` is a checkout of, including
+`logs`, which shows that repository's own dated log. Add
+`--repo OWNER/NAME` to assert which repository you expect; the controller
+refuses it when the checkout's remote says otherwise.
 
 Do not run `drain_prs.py` directly during normal operation, apart from the
 single-pull-request mode above, which is meant to be invoked on request.

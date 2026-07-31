@@ -1045,8 +1045,8 @@ class MergeConflictIncidentTests(ProcessPrFixture):
     def _drainer(self):
         with (
             mock.patch.dict(os.environ, self.fake.environ_overrides()),
-            mock.patch.object(drain_prs_service, "INCIDENT_DIR", self.incident_dir),
-            mock.patch.object(drain_prs_service, "LOG_DIR", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
             mock.patch.object(drain_prs_service, "NTFY_URL", None),
         ):
             yield
@@ -1417,8 +1417,8 @@ class PostMergeCleanupTests(ProcessPrFixture):
     def _drainer(self):
         with (
             mock.patch.dict(os.environ, self.fake.environ_overrides()),
-            mock.patch.object(drain_prs_service, "INCIDENT_DIR", self.incident_dir),
-            mock.patch.object(drain_prs_service, "LOG_DIR", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
             mock.patch.object(drain_prs_service, "NTFY_URL", None),
         ):
             yield
@@ -1757,7 +1757,8 @@ class PostMergeCleanupTests(ProcessPrFixture):
 
         with self._drainer():
             drain_prs_service.resolve_open_incidents(
-                self.ctx.path, "Drainer stopped intentionally."
+                drain_prs_service.incident_job(self.ctx.path),
+                "Drainer stopped intentionally.",
             )
         self.assertEqual(
             [entry["status"] for entry in self._incidents()], ["resolved"]

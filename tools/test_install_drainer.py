@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,26 +62,49 @@ class InstallerPolicyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.repo = self.root / "repo"
-        tools = self.repo / "tools"
-        tools.mkdir(parents=True)
-        (tools / "drain_prs.py").write_text("drainer\n", encoding="utf-8")
-        (tools / "drain_prs_service.py").write_text(
-            "controller\n", encoding="utf-8"
-        )
-        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        self.repo = self.make_checkout("repo", "git@github.com:acme/widgets.git")
         self.install_dir = self.root / "installed"
-        # The installer's keys and the controller's discovery record share one
-        # document at the controller's fixed path, so redirect that path rather
-        # than writing under the real ~/Library/Application Support/kanban.
+        # The installer's keys and every repository's discovery record share
+        # one document at the controller's fixed path, so redirect that path
+        # rather than writing under the real ~/Library/Application
+        # Support/kanban. The remote name is pinned too: resolving an identity
+        # reads the shared Kanban configuration, and this must not depend on
+        # the developer's own.
         self.shared_config = self.root / "shared" / "config.json"
+        controller = install_drainer.drain_prs_service
+        for name, value in (
+            ("DISCOVERY_RECORD_PATH", self.shared_config),
+            ("CONFIG_PATH", self.shared_config),
+            ("LAUNCH_AGENTS_DIR", self.root / "LaunchAgents"),
+            ("RUNTIME_ROOT", self.root / "runtime"),
+            ("LOG_ROOT", self.root / "logs"),
+        ):
+            patched = mock.patch.object(controller, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        # Only the remote that decides the *identity* is pinned;
+        # configured_remote_name stays real so a repository's own --config
+        # still decides what its drainer runs with.
         patched = mock.patch.object(
-            install_drainer.drain_prs_service,
-            "DISCOVERY_RECORD_PATH",
-            self.shared_config,
+            controller, "discovery_remote_name", return_value="origin"
         )
         patched.start()
         self.addCleanup(patched.stop)
+
+    def make_checkout(self, name, remote_url):
+        """A real checkout with the drainer files and a GitHub remote. No
+        network: `git remote add` only writes the URL into .git/config."""
+        repo = self.root / name
+        tools = repo / "tools"
+        tools.mkdir(parents=True)
+        (tools / "drain_prs.py").write_text("drainer\n", encoding="utf-8")
+        (tools / "drain_prs_service.py").write_text("controller\n", encoding="utf-8")
+        (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", remote_url], check=True
+        )
+        return repo
 
     def test_dry_run_makes_no_files_and_never_starts(self):
         with (
@@ -101,6 +125,48 @@ class InstallerPolicyTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertFalse(result["started"])
         self.assertFalse(self.install_dir.exists())
+        # The job it would install is this repository's own, named from the
+        # canonical identity its remote resolves to.
+        self.assertEqual(result["repository"], "acme/widgets")
+        self.assertTrue(result["label"].startswith("com.coghex.drain-prs."))
+        self.assertEqual(Path(result["plist"]).name, result["label"] + ".plist")
+
+    def test_a_checkout_with_no_supported_github_remote_cannot_be_installed(self):
+        # Its identity is what names the job, so inventing one would install a
+        # LaunchAgent Kanban's own resolver would never look for.
+        local = self.make_checkout("local", str(self.root / "bare.git"))
+        with (
+            mock.patch.object(install_drainer.sys, "platform", "darwin"),
+            mock.patch.object(
+                install_drainer, "repository_drainer_running", return_value=False
+            ),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                install_drainer.install(
+                    local, self.install_dir, ntfy_url=None, dry_run=True
+                )
+        self.assertIn("supported GitHub repository", str(raised.exception))
+
+    def test_each_repository_gets_its_own_job_and_record_entry(self):
+        gadgets = self.make_checkout("gadgets", "git@github.com:acme/gadgets.git")
+        with (
+            mock.patch.object(install_drainer.sys, "platform", "darwin"),
+            mock.patch.object(
+                install_drainer, "launchd_job_running", return_value=False
+            ),
+            mock.patch.object(
+                install_drainer, "repository_drainer_running", return_value=False
+            ),
+        ):
+            first = install_drainer.install(
+                self.repo, self.install_dir, ntfy_url=None, dry_run=True
+            )
+            second = install_drainer.install(
+                gadgets, self.install_dir, ntfy_url=None, dry_run=True
+            )
+        self.assertNotEqual(first["repository"], second["repository"])
+        self.assertNotEqual(first["label"], second["label"])
+        self.assertNotEqual(first["plist"], second["plist"])
 
     def test_refuses_to_install_while_a_service_is_running(self):
         with (
@@ -176,12 +242,13 @@ class InstallerPolicyTests(unittest.TestCase):
         self,
     ):
         install_drainer.write_installed_config_path(
-            "/home/user/.config/kanban/config.toml"
+            "acme/widgets", "/home/user/.config/kanban/config.toml"
         )
         install_drainer.write_notification_config("https://notify.example.test/topic")
         contents = json.loads(self.shared_config.read_text(encoding="utf-8"))
         self.assertEqual(
-            contents["config_path"], "/home/user/.config/kanban/config.toml"
+            contents["repositories"]["acme/widgets"]["config_path"],
+            "/home/user/.config/kanban/config.toml",
         )
         self.assertEqual(
             contents["ntfy_url"], "https://notify.example.test/topic"
@@ -192,26 +259,83 @@ class InstallerPolicyTests(unittest.TestCase):
     ):
         install_drainer.write_notification_config("https://notify.example.test/topic")
         install_drainer.write_installed_config_path(
-            "/home/user/.config/kanban/config.toml"
+            "acme/widgets", "/home/user/.config/kanban/config.toml"
         )
         contents = json.loads(self.shared_config.read_text(encoding="utf-8"))
         self.assertEqual(
             contents["ntfy_url"], "https://notify.example.test/topic"
         )
         self.assertEqual(
-            contents["config_path"], "/home/user/.config/kanban/config.toml"
+            contents["repositories"]["acme/widgets"]["config_path"],
+            "/home/user/.config/kanban/config.toml",
         )
+
+    def test_a_config_naming_another_remote_still_installs_one_consistent_job(self):
+        # The installer resolves the job, stores --config under that identity,
+        # and asserts the identity to the installed controller, which resolves
+        # it again. A --config whose remote_name differs from the shared
+        # configuration's must not move the identity between those two
+        # resolutions, or the assertion fails and the install aborts.
+        config = self.root / "config.toml"
+        config.write_text('remote_name = "upstream"\n', encoding="utf-8")
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:upstream-owner/widgets.git",
+            ],
+            check=True,
+        )
+
+        before = install_drainer.repository_job(self.repo)
+        install_drainer.write_installed_config_path(before.identity, str(config))
+        after = install_drainer.repository_job(self.repo)
+
+        self.assertEqual(before.identity, "acme/widgets")
+        self.assertEqual(after.identity, before.identity)
+        self.assertEqual(after.label, before.label)
+        # And the configuration still selects what that job runs with.
+        self.assertEqual(after.config_path, str(config))
+        self.assertEqual(after.remote_name, "upstream")
+
+    def test_one_repositorys_config_path_never_displaces_anothers(self):
+        # The endpoint stays global; the configuration each drainer restarts
+        # with does not.
+        install_drainer.write_notification_config("https://notify.example.test/topic")
+        install_drainer.write_installed_config_path(
+            "acme/widgets", "/home/user/widgets.toml"
+        )
+        install_drainer.write_installed_config_path(
+            "acme/gadgets", "/home/user/gadgets.toml"
+        )
+        contents = json.loads(self.shared_config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            contents["repositories"]["acme/widgets"]["config_path"],
+            "/home/user/widgets.toml",
+        )
+        self.assertEqual(
+            contents["repositories"]["acme/gadgets"]["config_path"],
+            "/home/user/gadgets.toml",
+        )
+        self.assertEqual(contents["ntfy_url"], "https://notify.example.test/topic")
 
     def test_a_custom_install_dir_keeps_its_keys_in_the_one_shared_document(self):
         # --install-dir must not split the configuration from the record: the
         # record's path is fixed because Kanban cannot inherit
         # KANBAN_DRAINER_INSTALL_DIR, so the keys have to live there too.
         install_drainer.write_notification_config("https://notify.example.test/topic")
-        install_drainer.write_installed_config_path("/home/user/config.toml")
+        install_drainer.write_installed_config_path("acme/widgets", "/home/user/config.toml")
         self.assertFalse((self.install_dir / "config.json").exists())
         contents = json.loads(self.shared_config.read_text(encoding="utf-8"))
         self.assertEqual(contents["ntfy_url"], "https://notify.example.test/topic")
-        self.assertEqual(contents["config_path"], "/home/user/config.toml")
+        self.assertEqual(
+            contents["repositories"]["acme/widgets"]["config_path"],
+            "/home/user/config.toml",
+        )
 
     def test_reinstalling_migrates_a_legacy_install_dir_config(self):
         # What an --install-dir install written before the document's location
