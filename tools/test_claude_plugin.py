@@ -3,9 +3,9 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Guards the packaging promise of issue #77: a clean Claude Code installation
-can add claude-plugin/ as a marketplace and discover exactly the four
+can add claude-plugin/ as a marketplace and discover exactly the five
 workflows Kanban invokes by name (/solve, /pr-review, /pr-rereview,
-/pr-revise), none of which may set its own model/effort/permission-mode/
+/pr-revise, /repair), none of which may set its own model/effort/permission-mode/
 working-directory configuration, depend on an untracked personal path, or
 drift from the invocation strings src/Kanban/Solve.hs and
 src/Kanban/PullRequestFlow.hs actually spawn. The bundled coordinator is a

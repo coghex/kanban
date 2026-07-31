@@ -3,8 +3,10 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 `tools/test_codex_plugin.py` and `tools/test_claude_plugin.py` pin that both
-plugins *discover* a `repair` workflow and that it stays out of the Haskell
-name-parity set. Discovery is not the contract, though: `repair` mutates a
+plugins *discover* a `repair` workflow and — since issue #127 gave Kanban's
+`r` its Done-column repair branch — that it sits in the Haskell name-parity
+set alongside the other workflows Kanban spawns. Discovery and name parity are
+not the contract, though: `repair` mutates a
 pull request's own branch and hands the verdict back to the canonical
 coordinator, so what the packaged text actually instructs an agent to do is
 the part that must not drift.
