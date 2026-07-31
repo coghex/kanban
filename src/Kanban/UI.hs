@@ -1460,7 +1460,7 @@ drawHelp =
       txt "g / G        first / last visible item",
       txt "e            expand / collapse focused epic",
       txt "Enter        details",
-      txt "r            review/revise selected issue or PR; repair a red PR in Done",
+      txt "r            review/revise/repair selected issue or PR",
       txt "S            solve selected issue (choose model brand)",
       txt "A            autosolve selected issue (choose model brand)",
       txt "u            update board and both usage providers",
