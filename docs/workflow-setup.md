@@ -245,6 +245,6 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 already-configured machine, absent executables, an unreadable listing, a
 marketplace registered from another checkout, an ordinary legacy launcher,
 an occupied install path, and the no-write guarantee of a dry run.
-`test/Spec.hs`'s `workflow preflight` group covers the probe
+`test/Spec/Agent/Preflight.hs`'s `workflow preflight` group covers the probe
 classifications and the same fresh-machine states end to end, including
 that the doctor path only ever runs status-only probes and changes nothing.
