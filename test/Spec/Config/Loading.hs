@@ -84,9 +84,54 @@ spec = do
       resolved.resolvedCache `shouldBe` False
       resolved.resolvedRemoteName `shouldBe` "upstream"
 
-    it "selects the repository table by an exact, case-sensitive owner/name match" $ do
+    it "selects the canonical repository table whatever case the resolved identity carries" $ do
       let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)
-      (resolveConfig "COGHEX/KANBAN" config).resolvedWorkflow.approvalLabel `shouldBe` "lgtm"
+          -- A remote such as git@github.com:Coghex/Kanban.git resolves with
+          -- the clone's casing; the override key stays canonical lowercase.
+          selected identity = resolveConfig identity config
+      (selected "Coghex/Kanban").resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      (selected "COGHEX/KANBAN").resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      (selected "cOgHeX/kAnBaN").resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
+      -- Merge and precedence survive the normalized lookup unchanged.
+      (selected "Coghex/Kanban").resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
+      (selected "Coghex/Kanban").resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
+
+    it "folds the resolved identity ASCII-only, the way tools/kanban_config.py does" $ do
+      -- A Unicode fold (Data.Text.toLower here, str.lower() there) maps the
+      -- KELVIN SIGN onto 'k' and would match; the two languages' full
+      -- Unicode tables need not agree, so both sides fold ASCII only. A
+      -- non-ASCII identity then matches no canonical key, and does not fail.
+      let toml =
+            "[workflow]\n"
+              <> "approval_label = \"global\"\n"
+              <> "[repositories.\"acme/kanban\".workflow]\n"
+              <> "approval_label = \"override\"\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+      (resolveConfig "acme/Kanban" config).resolvedWorkflow.approvalLabel `shouldBe` "override"
+      (resolveConfig "acme/\x212Aanban" config).resolvedWorkflow.approvalLabel `shouldBe` "global"
+
+    it "rejects a repository key that is not canonical lowercase owner/name, naming the key" $ do
+      let rejects key =
+            decodeConfigText ("[repositories.\"" <> key <> "\".workflow]\napproval_label = \"x\"\n")
+              `shouldSatisfy` errorContains ["repositories", "\"" <> key <> "\""]
+      rejects "Coghex/Kanban"
+      rejects "kanban"
+      rejects "/kanban"
+      rejects "coghex/"
+      rejects "coghex//kanban"
+      rejects "coghex/kanban/extra"
+      rejects "coghex/kanban.git"
+      rejects "https://github.com/coghex/kanban"
+      rejects "git@github.com:coghex/kanban.git"
+      rejects " coghex/kanban"
+      rejects "coghex/kanban "
+      rejects "coghex/kan ban"
+      rejects "coghex/kanban!"
+
+    it "accepts every character the canonical repository-key grammar allows" $ do
+      decodeConfigText "[repositories.\"a-c.o_1/k-n.b_2\".workflow]\napproval_label = \"x\"\n"
+        `shouldSatisfy` isRight
 
     it "leaves an unrelated repository table without effect on a different repository's resolution" $ do
       let (config, _) = unsafeConfig (decodeConfigText fullFixtureToml)

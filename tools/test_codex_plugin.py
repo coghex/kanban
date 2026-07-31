@@ -448,6 +448,16 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
                 module.resolve_workflow_labels(str(config_path), "unrelated/repo"),
                 ("lgtm", "needs-work"),
             )
+            # Override keys are canonical lowercase, and the dashboard,
+            # approve_issues.py, and drain_prs.py fold the resolved identity
+            # before this lookup. A mixed-case clone must not leave this
+            # coordinator writing and verifying the global verdict label
+            # while they use the override's.
+            for mixed_case in ("Coghex/Kanban", "COGHEX/KANBAN"):
+                self.assertEqual(
+                    module.resolve_workflow_labels(str(config_path), mixed_case),
+                    ("ship-it", "needs-work"),
+                )
 
     def test_set_and_clear_verdict_label_use_the_resolved_labels(self):
         module = load_review_pr_module()
