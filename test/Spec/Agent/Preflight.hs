@@ -265,6 +265,37 @@ spec = do
           `shouldBe` []
         blockedProblems environment (ActionPullRequestFlow PullRequestClaude PullRequestRevision)
           `shouldBe` []
+      -- Repair edits the PR's own code and then hands off to one nested
+      -- canonical rereview exactly as pr-revise does, so its dependency set
+      -- is revise's: the launched brand's executable, sign-in and bundle,
+      -- plus the opposite brand's executable and sign-in but not its bundle.
+      it "gives repair the same cross-brand dependency set as a PR revision" $ do
+        let missingClaude = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
+            signedOutClaude = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeAuth = AuthNotAuthenticated "signed out"}
+            bundlelessCodex = withCodexProbe (readyProviderProbe CodexSolver) {probeBundle = BundleAbsent}
+            bundlelessClaude = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeBundle = BundleAbsent}
+        -- The launched brand is the PR's own, so a Codex-origin repair is
+        -- blocked by Codex's missing bundle and a Claude-origin one is not.
+        blockedProblems bundlelessCodex (ActionPullRequestFlow PullRequestCodex PullRequestRepair)
+          `shouldBe` [WorkflowBundleUnavailable]
+        blockedProblems bundlelessCodex (ActionPullRequestFlow PullRequestClaude PullRequestRepair)
+          `shouldBe` []
+        -- The nested rereview is a direct provider call, so the opposite
+        -- brand's absent bundle never blocks repair.
+        blockedProblems bundlelessClaude (ActionPullRequestFlow PullRequestCodex PullRequestRepair)
+          `shouldBe` []
+        -- but that brand's executable and sign-in are still required, here
+        -- purely as the nested reviewer of a Codex-origin repair.
+        blockedProblems missingClaude (ActionPullRequestFlow PullRequestCodex PullRequestRepair)
+          `shouldBe` [ExecutableUnavailable]
+        blockedProblems signedOutClaude (ActionPullRequestFlow PullRequestCodex PullRequestRepair)
+          `shouldBe` [ProviderUnauthenticated]
+        -- On a Claude-origin repair the same two gaps block it as the
+        -- launched brand instead, so neither origin can start without both.
+        blockedProblems missingClaude (ActionPullRequestFlow PullRequestClaude PullRequestRepair)
+          `shouldBe` [ExecutableUnavailable]
+        blockedProblems signedOutClaude (ActionPullRequestFlow PullRequestClaude PullRequestRepair)
+          `shouldBe` [ProviderUnauthenticated]
       -- The backend runs `codex exec`/`claude -p` itself, so no packaged
       -- workflow bundle is involved in a canonical review.
       it "never requires a packaged bundle for a canonical review" $ do
@@ -461,8 +492,19 @@ spec = do
               ActionPullRequestFlow PullRequestCodex PullRequestRereview,
               ActionPullRequestFlow PullRequestClaude PullRequestRereview,
               ActionPullRequestFlow PullRequestCodex PullRequestRevision,
-              ActionPullRequestFlow PullRequestClaude PullRequestRevision
+              ActionPullRequestFlow PullRequestClaude PullRequestRevision,
+              ActionPullRequestFlow PullRequestCodex PullRequestRepair,
+              ActionPullRequestFlow PullRequestClaude PullRequestRepair
             ]
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r)"
+          -- Exactly one repair line per PR origin: repair is selectable on
+          -- either brand's pull request, and on neither more than once.
+          length (filter isRepairAction doctorActions) `shouldBe` 2
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR repair (r) · codex-origin"
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR repair (r) · claude-origin"
           -- The drainer keeps its own dedicated install and status flow.
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
+
+isRepairAction :: PreflightAction -> Bool
+isRepairAction (ActionPullRequestFlow _ PullRequestRepair) = True
+isRepairAction _ = False

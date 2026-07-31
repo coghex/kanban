@@ -68,6 +68,7 @@ module Kanban.UI
     pullRequestSessionReusable,
     readyAttr,
     reconcileReviewSessions,
+    recoveredPullRequestSession,
     refreshOverlay,
     resolveReviewCancelAction,
     resolveProcessClick,
@@ -168,8 +169,10 @@ import Kanban.PullRequestFlow
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
     PullRequestVerdict (..),
-    actionForLabels,
     agentForAction,
+    authoredOnOwnBrand,
+    directPullRequestAction,
+    labelPullRequestAction,
     originFromBody,
     pullRequestVerdictForLabels,
   )
@@ -1452,7 +1455,7 @@ drawHelp =
       txt "g / G        first / last visible item",
       txt "e            expand / collapse focused epic",
       txt "Enter        details",
-      txt "r            review/revise selected issue or PR",
+      txt "r            review/revise selected issue or PR; repair a red PR in Done",
       txt "S            solve selected issue (choose model brand)",
       txt "A            autosolve selected issue (choose model brand)",
       txt "u            update board and both usage providers",
@@ -1844,9 +1847,10 @@ pullRequestActionText :: PullRequestAction -> Text
 pullRequestActionText PullRequestReview = "review"
 pullRequestActionText PullRequestRevision = "revision"
 pullRequestActionText PullRequestRereview = "rereview"
+pullRequestActionText PullRequestRepair = "repair"
 
 pullRequestAgentLabel :: PullRequestAction -> SolverBrand -> Text
-pullRequestAgentLabel PullRequestRevision brand = solverLabel brand
+pullRequestAgentLabel action brand | authoredOnOwnBrand action = solverLabel brand
 pullRequestAgentLabel _ CodexSolver = "codex · " <> codexReviewerModel
 pullRequestAgentLabel _ ClaudeSolver = "claude · " <> claudeReviewerModel
 
@@ -4251,18 +4255,24 @@ selectedReviewItem state = case selectedEntry state of
   Just (TrackerHeader tracker) -> Just (IssueItem tracker.trackerIssue)
   Nothing -> Nothing
 
+-- | The user's own @r@ on a pull request, which is the only dispatch that
+-- derives repair: a Done card whose status is a problem needs its own code
+-- worked on rather than another review round.
 startPullRequestReview :: PullRequest -> EventM Name AppState ()
-startPullRequestReview = startPullRequestReviewWithOptions True False
+startPullRequestReview = startPullRequestReviewWithOptions directPullRequestAction True False
 
+-- | Autosolve's internal PR sessions, which stay on the label-derived
+-- review/revise progression they have always driven: a problem status on the
+-- pull request it is looping over must not silently become a repair launch.
 startPullRequestReviewWithVisibility :: Bool -> PullRequest -> EventM Name AppState ()
-startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions showOverlay False
+startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOptions labelPullRequestAction showOverlay False
 
-startPullRequestReviewWithOptions :: Bool -> Bool -> PullRequest -> EventM Name AppState ()
-startPullRequestReviewWithOptions showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
+startPullRequestReviewWithOptions :: (WorkflowConfig -> PullRequest -> PullRequestAction) -> Bool -> Bool -> PullRequest -> EventM Name AppState ()
+startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullRequest = case originFromBody pullRequest.pullRequestBody of
   Left message -> setNotice message
   Right origin -> do
     state <- get
-    let action = actionForLabels state.appConfig.resolvedWorkflow (map (.labelName) pullRequest.pullRequestLabels)
+    let action = selectAction state.appConfig.resolvedWorkflow pullRequest
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
         | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->

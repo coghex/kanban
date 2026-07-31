@@ -107,7 +107,7 @@ If one of these keys reports that the action cannot start, the message names
 the missing component and the command that installs it. To check every
 action at once without starting anything, run `cabal run kanban -- --doctor`.
 
-- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview.
+- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview. On an approved pull request in Done that has a problem — a merge conflict, a failed check, or a blocking label — the same key repairs it instead, then sends it back for a fresh review. It never merges.
 - Press `S` to work on an issue and open a pull request.
 - Press `A` to work on an issue, review the result, and send requested changes back for another pass.
 - Choose `1` for Codex or `2` for Claude when Kanban asks which service to use.

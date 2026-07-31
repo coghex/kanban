@@ -66,7 +66,7 @@ Kanban reads the repository's GitHub remote and uses your existing GitHub CLI lo
 | `h` / `l` | Move between columns |
 | `Enter` | Open card details |
 | `u` | Refresh the board and usage information |
-| `r` | Review or revise the selected item |
+| `r` | Review or revise the selected item, or repair an approved pull request that has a problem |
 | `S` | Work on the selected issue |
 | `A` | Work on, review, and revise the selected issue |
 | `p` | Show running and completed jobs |

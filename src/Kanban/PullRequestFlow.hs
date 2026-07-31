@@ -8,7 +8,10 @@ module Kanban.PullRequestFlow
     PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
+    authoredOnOwnBrand,
+    directPullRequestAction,
     flowOutcome,
+    labelPullRequestAction,
     originFromBody,
     pullRequestArguments,
     pullRequestVerdictForLabels,
@@ -28,11 +31,12 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository (..), WorkflowConfig (..))
+import Kanban.Domain (BoardColumn (..), Label (..), PullRequest (..), Repository (..), WorkflowConfig (..))
 import Kanban.Process (ManagedProcess, managedProcess)
 import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveOutcome (..), SolverBrand (..), UnknownAggregator, agentOutcome, emitStreamEvent, parseSolveOutputLine, resumeProvenanceHeader, sealUnknownAggregates)
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
+import Kanban.Workflow (CardStatus (..), classifyPullRequest, pullRequestStatus)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
@@ -42,7 +46,7 @@ data PullRequestOrigin = PullRequestCodex | PullRequestClaude
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-data PullRequestAction = PullRequestReview | PullRequestRevision | PullRequestRereview
+data PullRequestAction = PullRequestReview | PullRequestRevision | PullRequestRereview | PullRequestRepair
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -82,6 +86,33 @@ actionForLabels config labels
     folded = map Text.toCaseFold labels
     has value = Text.toCaseFold value `elem` folded
 
+-- | The label-derived action alone. This is what Kanban's own automated
+-- progressions use: autosolve drives its pull request through review and
+-- revise itself, and must keep doing exactly that rather than turning into a
+-- repair launch merely because the pull request reports a problem status.
+labelPullRequestAction :: WorkflowConfig -> PullRequest -> PullRequestAction
+labelPullRequestAction config pullRequest =
+  actionForLabels config (map (.labelName) pullRequest.pullRequestLabels)
+
+-- | The action the user's own @r@ selects for a pull request:
+-- 'labelPullRequestAction', except for a card that is both in Done and
+-- reporting a problem, which repairs its own code instead.
+--
+-- Both halves are required. 'pullRequestStatus' also reports a merge
+-- conflict, failed checks, or a red blocking label for a draft or unapproved
+-- pull request, and 'classifyPullRequest' keeps those in Reviewing, where
+-- review, rereview, and revise still apply. Equally, Done membership alone
+-- means nothing here: an approved card with a clean status keeps whatever
+-- action its labels derive — which includes revision, e.g. under
+-- 'ApprovalByReview' with the configured changes-requested label still on it
+-- and 'SeverityAmber' keeping that label out of problem status.
+directPullRequestAction :: WorkflowConfig -> PullRequest -> PullRequestAction
+directPullRequestAction config pullRequest
+  | classifyPullRequest config pullRequest == Done,
+    StatusProblem _ <- pullRequestStatus config pullRequest =
+      PullRequestRepair
+  | otherwise = labelPullRequestAction config pullRequest
+
 -- | The canonical verdict a revised PR currently carries, derived directly
 -- from its labels rather than from a Kanban-created @reviewed:revised@
 -- handoff: @pr-revise@ invokes the canonical rereview itself, so the fresh
@@ -99,9 +130,17 @@ pullRequestVerdictForLabels config labels
     folded = map Text.toCaseFold labels
     has value = Text.toCaseFold value `elem` folded
 
+-- | Whether an action works on the pull request's own code and therefore
+-- runs on its origin brand, handing its verdict off to exactly one nested
+-- canonical rereview spawned on the opposite brand
+-- (agent-workflow-contract §2.2, §2.7). Review and rereview are that
+-- canonical gate themselves, so they run on the opposite brand instead.
+authoredOnOwnBrand :: PullRequestAction -> Bool
+authoredOnOwnBrand action = action `elem` [PullRequestRevision, PullRequestRepair]
+
 agentForAction :: PullRequestOrigin -> PullRequestAction -> SolverBrand
-agentForAction PullRequestCodex PullRequestRevision = CodexSolver
-agentForAction PullRequestClaude PullRequestRevision = ClaudeSolver
+agentForAction PullRequestCodex action | authoredOnOwnBrand action = CodexSolver
+agentForAction PullRequestClaude action | authoredOnOwnBrand action = ClaudeSolver
 agentForAction PullRequestCodex _ = ClaudeSolver
 agentForAction PullRequestClaude _ = CodexSolver
 
@@ -212,16 +251,18 @@ pullRequestArguments number origin action ClaudeSolver configPath repository con
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
     <> [Text.unpack (if existingSession == Nothing then initialPrompt number origin action configPath repository config ClaudeSolver else resumePrompt config action provenance userMessage)]
 
+-- | An action that edits the pull request's own code gets the author-side
+-- model pairing; review and rereview get the canonical reviewer's.
 codexModel :: PullRequestAction -> String
-codexModel PullRequestRevision = "gpt-5.4"
+codexModel action | authoredOnOwnBrand action = "gpt-5.4"
 codexModel _ = "gpt-5.6-terra"
 
 codexEffort :: PullRequestAction -> String
-codexEffort PullRequestRevision = "high"
+codexEffort action | authoredOnOwnBrand action = "high"
 codexEffort _ = "xhigh"
 
 claudeModel :: PullRequestAction -> String
-claudeModel PullRequestRevision = "claude-sonnet-5"
+claudeModel action | authoredOnOwnBrand action = "claude-sonnet-5"
 claudeModel _ = "claude-opus-5"
 
 claudeEffort :: PullRequestAction -> String
@@ -236,18 +277,27 @@ initialPrompt number _origin action configPath repository config brand = Text.un
     -- come from an explicit --repo override, e.g. reviewing upstream from a
     -- fork checkout) must never be silently re-derived by the canonical
     -- coordinator from the checkout's configured remote instead.
+    -- Repair invokes exactly one bundled coordinator, which takes the same
+    -- --repo and --config options (agent-workflow-contract §2.7); the other
+    -- three actions are still told the whole review family so the session can
+    -- pick whichever its labels turn out to select.
+    targetCommands = case action of
+      PullRequestRepair -> commandName "repair"
+      _ ->
+        commandName "pr-review"
+          <> ", "
+          <> commandName "pr-rereview"
+          <> ", or "
+          <> commandName "pr-revise"
+          <> " (whichever applies)"
     configLines =
       [ "Pass --repo "
           <> repository.repositoryOwner
           <> "/"
           <> repository.repositoryName
           <> " to "
-          <> commandName "pr-review"
-          <> ", "
-          <> commandName "pr-rereview"
-          <> ", or "
-          <> commandName "pr-revise"
-          <> " (whichever applies) so it resolves the same repository as this dashboard."
+          <> targetCommands
+          <> " so it resolves the same repository as this dashboard."
       ]
         <> case configPath of
           Nothing -> []
@@ -255,12 +305,8 @@ initialPrompt number _origin action configPath repository config brand = Text.un
             [ "Pass --config "
                 <> Text.pack path
                 <> " to "
-                <> commandName "pr-review"
-                <> ", "
-                <> commandName "pr-rereview"
-                <> ", or "
-                <> commandName "pr-revise"
-                <> " (whichever applies) so it resolves the same configured workflow labels as this dashboard."
+                <> targetCommands
+                <> " so it resolves the same configured workflow labels as this dashboard."
             ]
     actionLines = case action of
       PullRequestReview ->
@@ -280,6 +326,15 @@ initialPrompt number _origin action configPath repository config brand = Text.un
             <> config.changesRequestedLabel
             <> ", and reviewed:revised to the canonical review coordinator."
         ]
+      PullRequestRepair ->
+        [ "Run " <> commandName "repair" <> " for PR #" <> numberText <> ".",
+          "Use the canonical repair workflow: address the highest-priority blocking cause on this approved PR — merge conflict first, then a failed check, then a blocking label — on the pull request's own head branch, never overwriting a concurrently updated head; after a push that is verified to have advanced the head, invoke exactly one canonical PR rereview.",
+          "Never merge, never remove a blocking label yourself, and leave "
+            <> config.approvalLabel
+            <> ", "
+            <> config.changesRequestedLabel
+            <> ", and reviewed:revised to the canonical review coordinator."
+        ]
     interactionLines =
       [ "If ambiguity, credentials, or a product decision blocks safe progress, stop with exactly KANBAN_NEEDS_INPUT: <one concrete question>. Do not guess.",
         "Finish with the PR number, action, head commit, checks, publication/push status, and next expected r action."
@@ -293,6 +348,7 @@ actionName :: PullRequestAction -> Text
 actionName PullRequestReview = "review"
 actionName PullRequestRevision = "revision"
 actionName PullRequestRereview = "rereview"
+actionName PullRequestRepair = "repair"
 
 -- | Per-line handler for the stdout reader: raw-line session logging,
 -- session-id capture, and agent-message forwarding, unchanged from before

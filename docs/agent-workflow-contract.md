@@ -311,10 +311,10 @@ everything else.
   CLI its `kanban_run_claude` amendment authoring uses; neither needs a
   packaged bundle, since both run their providers directly. Auto-solve
   needs both brands, since it reviews its own pull request with the
-  opposite one, and so does `pr-revise`: it runs on the PR's own brand and
-  spawns the opposite one for its single nested canonical rereview (§2.2),
-  which is a direct provider call and therefore needs that brand's
-  executable and sign-in but not its bundle.
+  opposite one, and so do `pr-revise` and `repair`: each runs on the PR's own
+  brand and spawns the opposite one for its single nested canonical rereview
+  (§2.2, §2.7), which is a direct provider call and therefore needs that
+  brand's executable and sign-in but not its bundle.
 - **Required authority:** setup needs write access to the user's own
   provider configuration and to the Kanban-namespaced install directory.
   Preflight needs none: it is read-only and non-interactive, never starts an
@@ -342,20 +342,25 @@ everything else.
 
 ### 2.7 Pull-request repair (`$repair` / `/repair`)
 
-- **Owning source:** the packaged workflows themselves
+- **Owning source:** `src/Kanban/PullRequestFlow.hs` for the invocation, and
+  the packaged workflows themselves
   (`codex-plugin/plugins/kanban/skills/repair/SKILL.md`,
-  `claude-plugin/plugins/kanban/commands/repair.md`). Unlike §2.1-§2.2, no
-  Kanban Haskell code spawns this workflow yet: it is packaged ahead of the
-  Done-column repair action that will bind it to a key, so it is deliberately
-  excluded from the Haskell name-parity pinning in `tools/test_codex_plugin.py`
-  and `tools/test_claude_plugin.py`. It is not a drafting workflow either, and
-  is not part of the declared drafting surface
+  `claude-plugin/plugins/kanban/commands/repair.md`) for the behavior. Kanban's
+  own `r` spawns it by name since issue #127, so it is pinned by the Haskell
+  name-parity sets in `tools/test_codex_plugin.py` and
+  `tools/test_claude_plugin.py` alongside §2.1-§2.2's workflows. It is not a
+  drafting workflow, and is not part of the declared drafting surface
   ([drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)).
-- **Invocation:** user-invoked as `$repair <pr>` / `/repair <pr>`. Because it
-  works on the pull request's own code, it runs on the pull request's own
-  origin brand — the same rule as `pr-revise` — and therefore hands the verdict
-  off to the opposite brand's canonical reviewer rather than reviewing itself
-  (no `--self-review`).
+- **Invocation:** user-invoked as `$repair <pr>` / `/repair <pr>`, and spawned
+  by Kanban's `r` key on a pull request that is in the Done column *and*
+  reporting a problem status — a merge conflict, a failed check, or a blocking
+  label under a red `blocking_severity` (`src/Kanban/Workflow.hs`
+  `classifyPullRequest` and `pullRequestStatus`, both required). Autosolve's own
+  internal pull-request sessions keep their label-derived review/revise
+  progression and never spawn it. Because it works on the pull request's own
+  code, it runs on the pull request's own origin brand — the same rule as
+  `pr-revise` — and therefore hands the verdict off to the opposite brand's
+  canonical reviewer rather than reviewing itself (no `--self-review`).
 - **Inputs:** one positive pull request number, plus the repository and
   configuration context when the caller supplies it. The resolved repository
   scopes every `gh` call (`-R <owner/name>`) rather than being inferred from
@@ -406,8 +411,9 @@ everything else.
   new one at
   `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/pr-<n>-<slug>`. It never
   switches the repository's primary checkout.
-- **Mandatory/optional:** optional — packaged and user-invoked; no Kanban key
-  spawns it yet.
+- **Mandatory/optional:** optional — like every other AI action, it is only
+  reached by selecting it, and preflight reports its readiness per pull-request
+  origin (§2.5).
 
 ## 3. Migration boundary
 

@@ -213,7 +213,7 @@ Initial bindings:
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
-| `r` | Start or reopen the selected issue's review session |
+| `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
@@ -254,8 +254,9 @@ review stage, or reopens the issue's existing session. Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
 persistent Codex app-server. Pressing `r` on a collapsed epic targets the epic
 itself. On a PR, `r` is the unified
-review/revise key: it starts review, revision, or rereview according to the
-durable review labels. App-server starts on demand and one process hosts all
+review/revise/repair key: it starts review, revision, or rereview according to
+the durable review labels, except on a card that is both in Done and reporting
+a problem status, which starts a repair instead. App-server starts on demand and one process hosts all
 interactive revision threads for the running dashboard; PR actions use resumable
 canonical-model CLI sessions because their permissions include PR comments,
 labels, worktree edits, commits, and pushes.
@@ -277,11 +278,28 @@ separate:
 3. A PR still carrying a legacy `reviewed:revised` label (from before this
    unification) routes to the opposite brand for `pr-rereview` only, without
    editing the PR again, and removes the stale label once it publishes.
+4. A card that is in the Done column *and* whose §9 status is a problem —
+   a merge conflict, a failed check, or a blocking label while
+   `blocking_severity` is red — overrides all three above and runs the
+   packaged `repair` workflow. Both halves of that condition are required:
+   `pullRequestStatus` reports the same problems for a draft or unapproved PR,
+   and those stay in Reviewing under the routing above; a Done PR with no
+   problem status keeps whatever its labels derive, which includes revision.
+   Like `pr-revise`, repair works on the PR's own code, so it runs on the PR's
+   own origin brand and ends by invoking exactly one canonical rereview on the
+   opposite brand rather than reviewing itself. Repair never merges and never
+   removes a blocking label: it ends by triggering that rereview, and merging
+   stays a separate, explicit action.
 
-Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision;
-Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
-revision. A missing or contradictory `pr-origin` marker fails visibly rather
-than guessing.
+This fourth meaning belongs to the user's own `r` alone. Autosolve drives its
+pull request through the same session machinery internally, and keeps its
+label-derived review/revise progression so a problem status cannot divert a
+running loop into a repair.
+
+Codex-origin PRs use Opus 5 xhigh for review and GPT-5.4 high for revision and
+repair; Claude-origin PRs use GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh
+for revision and repair. A missing or contradictory `pr-origin` marker fails
+visibly rather than guessing.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
 Initial review and rereview synchronously invoke the vendored
