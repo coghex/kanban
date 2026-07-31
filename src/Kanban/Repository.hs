@@ -89,7 +89,10 @@ decodeRepositoryPath bytes = do
 
 -- | Parses an explicit @--repo@ value, which the user chose deliberately:
 -- the documented bare @OWNER\/NAME@ form, or any remote URL that
--- 'parseRemoteRepository' already accepts.
+-- 'parseRemoteRepository' already accepts.  A @[repositories.*]@
+-- configuration key is deliberately stricter than this — canonical lowercase
+-- @owner\/name@ only, see @Kanban.Config@ — because it is a stored
+-- identifier rather than input typed for one invocation.
 parseRepositoryName :: Text -> Either Text (Text, Text)
 parseRepositoryName rawValue
   | Just identity <- bareIdentity (Text.strip rawValue) = Right identity

@@ -52,8 +52,17 @@ claude_seconds = 45
 [usage.claude]
 # command = ["/usr/local/bin/my-claude-usage", "--json"]
 
-# The quoted key is the canonical, case-sensitive owner/name selected for the
-# invocation. Only [workflow], [limits], and [timeouts] may appear below it.
+# The quoted key must be a canonical lowercase owner/name: two non-empty
+# segments of [a-z0-9._-] around exactly one slash, with no uppercase letters,
+# surrounding whitespace, URL or SSH remote syntax, `.git` suffix, or extra
+# slashes. Anything else is a startup configuration error rather than a table
+# that silently never applies. This is deliberately stricter than `--repo`,
+# which you type per invocation and which still accepts the GitHub URL forms
+# it always has. The owner/name resolved from the remote or `--repo` is folded
+# to lowercase for this lookup only, so a `Coghex/Kanban` clone selects the
+# `coghex/kanban` key below.
+#
+# Only [workflow], [limits], and [timeouts] may appear below the key.
 # `cache`, `remote_name`, and `usage` are global-only and fail if set here.
 # Omitted values inherit from the global table; an array replaces the global
 # array in full rather than extending it.

@@ -31,7 +31,12 @@ choose how PR approval is determined, set the blocking-label severity, cap
 GitHub fetch sizes and the card excerpt height, tune provider timeouts, and
 override the git remote used to resolve `owner/name`. Repository-specific
 overrides live under `[repositories."owner/name"]` and replace the matching
-global values for that repository only.
+global values for that repository only. That key must be a canonical lowercase
+`owner/name` — stricter than what `--repo` accepts, which still takes the
+GitHub URL forms it always has — and anything else fails startup instead of
+sitting in the file never applying. The `owner/name` resolved from the remote
+or `--repo` is folded to lowercase to select the key, so a `Coghex/Kanban`
+clone still picks up a `coghex/kanban` override.
 
 The `[usage.codex]`/`[usage.claude]` `command` keys let a user-supplied
 executable replace the built-in Codex or Claude usage probe: when set, Kanban

@@ -169,12 +169,54 @@ class MergeAndSelectionTests(unittest.TestCase):
         self.assertEqual(resolved.workflow.ui_style_labels, frozenset({"widget-ui"}))
         self.assertEqual(resolved.workflow.problem_style_labels, frozenset({"defect"}))
 
-    def test_selection_is_exact_and_case_sensitive(self):
+    def test_selection_normalizes_the_resolved_identity_to_lowercase(self):
         raw = self._raw()
-        # A differently-cased owner/name must not match the configured table.
-        resolved = kc.resolve_config("Acme/Widgets", raw)
-        self.assertEqual(resolved.workflow.approval_label, "verdict:go")
-        self.assertEqual(resolved.limits.max_open_issues, 10)
+        # A remote such as git@github.com:Acme/Widgets.git resolves with the
+        # clone's casing; the override key stays canonical lowercase.
+        for identity in ("Acme/Widgets", "ACME/WIDGETS", "aCmE/wIdGeTs"):
+            with self.subTest(identity=identity):
+                resolved = kc.resolve_config(identity, raw)
+                self.assertEqual(resolved.workflow.approval_label, "acme:go")
+                # Merge and precedence survive the normalized lookup.
+                self.assertEqual(resolved.workflow.changes_requested_label, "verdict:no")
+                self.assertEqual(resolved.limits.max_open_issues, 999)
+                self.assertEqual(resolved.limits.max_open_pull_requests, 5)
+                self.assertEqual(resolved.timeouts.claude_seconds, 999)
+                self.assertEqual(resolved.timeouts.github_seconds, 11)
+
+    def test_selection_folds_case_the_ascii_only_way_the_dashboard_does(self):
+        # A Unicode fold (str.lower() here, Data.Text.toLower there) maps the
+        # KELVIN SIGN onto "k" and would match; the two languages' full
+        # Unicode tables need not agree, so both sides fold ASCII only. A
+        # non-ASCII identity then matches no canonical key, and does not raise.
+        self.assertEqual("\u212a".lower(), "k")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(
+                Path(tmp),
+                '[workflow]\napproval_label = "global"\n'
+                '[repositories."acme/kanban".workflow]\napproval_label = "override"\n',
+            )
+            raw, _ = kc.load_raw_config(str(path))
+        self.assertEqual(kc.resolve_config("acme/Kanban", raw).workflow.approval_label, "override")
+        self.assertEqual(
+            kc.resolve_config("acme/\u212aanban", raw).workflow.approval_label, "global"
+        )
+
+    def test_script_consumers_read_the_dashboard_labels_for_a_mixed_case_slug(self):
+        # approve_issues.py and drain_prs.py both take exactly this pair from
+        # exactly this call, passing the repo slug they resolved from the
+        # remote. A mixed-case clone must not send them to the global labels
+        # while the dashboard uses the override's.
+        raw = self._raw()
+        dashboard = kc.resolve_config("acme/widgets", raw).workflow
+        for slug in ("acme/widgets", "Acme/Widgets", "ACME/WIDGETS"):
+            with self.subTest(slug=slug):
+                consumer = kc.resolve_config(slug, raw).workflow
+                self.assertEqual(
+                    (consumer.approval_label, consumer.changes_requested_label),
+                    (dashboard.approval_label, dashboard.changes_requested_label),
+                )
+                self.assertEqual(consumer.approval_label, "acme:go")
 
     def test_unrelated_repository_table_has_zero_effect(self):
         raw = self._raw()
@@ -329,6 +371,49 @@ class RepositoryGlobalOnlyKeyTests(unittest.TestCase):
             '[repositories."acme/widgets".usage]\n',
             'repositories."acme/widgets".usage',
         )
+
+
+class RepositoryKeyGrammarTests(unittest.TestCase):
+    """Mirrors Spec.Config.Loading's canonical repository-key cases."""
+
+    def _expect_rejected(self, key: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(
+                Path(tmp), f'[repositories."{key}".workflow]\napproval_label = "x"\n'
+            )
+            with self.assertRaises(kc.KanbanConfigError) as ctx:
+                kc.load_raw_config(str(path))
+        # The error names the full offending key path, not just its parent.
+        self.assertIn(f'repositories."{key}"', str(ctx.exception))
+
+    def test_noncanonical_keys_are_rejected_naming_the_key(self):
+        for key in (
+            "Coghex/Kanban",
+            "kanban",
+            "/kanban",
+            "coghex/",
+            "coghex//kanban",
+            "coghex/kanban/extra",
+            "coghex/kanban.git",
+            "https://github.com/coghex/kanban",
+            "git@github.com:coghex/kanban.git",
+            " coghex/kanban",
+            "coghex/kanban ",
+            "coghex/kan ban",
+            "coghex/kanban!",
+        ):
+            with self.subTest(key=key):
+                self._expect_rejected(key)
+
+    def test_every_character_the_grammar_allows_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(
+                Path(tmp),
+                '[repositories."a-c.o_1/k-n.b_2".workflow]\napproval_label = "x"\n',
+            )
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(warnings, [])
+        self.assertIn("a-c.o_1/k-n.b_2", raw.repositories)
 
 
 class UnknownKeyWarningTests(unittest.TestCase):

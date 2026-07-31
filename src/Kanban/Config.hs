@@ -30,6 +30,7 @@ where
 
 import Control.Exception (IOException, try)
 import Control.Monad (join)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit, toLower)
 import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -235,9 +236,24 @@ data ResolvedConfig = ResolvedConfig
   }
   deriving stock (Eq, Show)
 
--- | The exact, case-sensitive key used to select a '[repositories.*]' table.
+-- | The resolved @OWNER\/NAME@ identity, spelled as the remote or @--repo@
+-- spelled it.  'resolveConfig' folds it to lowercase before selecting a
+-- @[repositories.*]@ table, so a @Coghex\/Kanban@ clone still selects the
+-- canonical @coghex\/kanban@ key; the identity itself keeps its case for the
+-- GitHub queries, cache paths, and display built from it.
 repositoryIdentity :: Text -> Text -> Text
 repositoryIdentity owner name = owner <> "/" <> name
+
+-- | ASCII-only case folding.  'Data.Text.toLower' would apply Unicode
+-- mappings that @tools\/kanban_config.py@ need not reproduce; under this
+-- mapping a non-ASCII identity simply matches no canonical key, which is the
+-- correct outcome on both sides.
+asciiLowercase :: Text -> Text
+asciiLowercase = Text.map lowerAscii
+  where
+    lowerAscii character
+      | isAsciiUpper character = toLower character
+      | otherwise = character
 
 resolveConfig :: Text -> RawConfig -> ResolvedConfig
 resolveConfig ownerName raw =
@@ -250,7 +266,10 @@ resolveConfig ownerName raw =
       resolvedUsage = raw.rawUsage
     }
   where
-    override = Map.findWithDefault emptyRepositoryOverride ownerName raw.rawRepositories
+    -- Override keys are canonical lowercase, so the lookup is the one place
+    -- the identity is folded.  Normalizing any further would relocate cache
+    -- files and change the identity GitHub is queried and displayed under.
+    override = Map.findWithDefault emptyRepositoryOverride (asciiLowercase ownerName) raw.rawRepositories
 
 applyWorkflowOverride :: WorkflowConfig -> WorkflowOverride -> WorkflowConfig
 applyWorkflowOverride base override =
@@ -447,7 +466,44 @@ usageCommandTableParser :: ParseTable Position (Maybe UsageCommandConfig)
 usageCommandTableParser = optKeyOf "command" parseCommandArgv
 
 parseRepositories :: Value' Position -> Matcher Position (Map Text RepositoryOverride)
-parseRepositories = mapOf (\_ key -> pure key) (\_ value -> parseTableFromValue repositoryOverrideParser value)
+parseRepositories = mapOf parseRepositoryKey (\_ value -> parseTableFromValue repositoryOverrideParser value)
+
+-- | A repository override key is a configuration identifier, not another
+-- spelling of @--repo@ input: exactly one canonical lowercase GitHub
+-- @owner\/name@ pair.  'Kanban.Repository.parseRepositoryName' stays
+-- deliberately broader, because the user typed that value for this
+-- invocation; a key admitted here but never selectable would instead sit in
+-- the file doing nothing.  The message names the key itself: this runs
+-- before the parser descends into the table, so the rendered scope is only
+-- @repositories@.
+parseRepositoryKey :: Position -> Text -> Matcher Position Text
+parseRepositoryKey location key
+  | isCanonicalRepositoryKey key = pure key
+  | otherwise =
+      failAt
+        location
+        ( "repositories.\""
+            <> Text.unpack key
+            <> "\" is not a canonical repository key;"
+            <> " expected lowercase OWNER/NAME such as \"coghex/kanban\""
+        )
+
+-- | Two non-empty segments of lowercase ASCII identifier characters around
+-- exactly one @\/@.  That rejects uppercase, surrounding whitespace, URL and
+-- SCP remote syntax, repeated or extra slashes, and a missing segment by
+-- character and shape alone; a @.git@ suffix needs its own rejection because
+-- every character in it is otherwise legal.
+isCanonicalRepositoryKey :: Text -> Bool
+isCanonicalRepositoryKey key = case Text.splitOn "/" key of
+  [owner, name] ->
+    isCanonicalSegment owner && isCanonicalSegment name && not (".git" `Text.isSuffixOf` name)
+  _ -> False
+  where
+    isCanonicalSegment segment = not (Text.null segment) && Text.all isCanonicalKeyCharacter segment
+
+isCanonicalKeyCharacter :: Char -> Bool
+isCanonicalKeyCharacter character =
+  isAsciiLower character || isDigit character || character `elem` ("._-" :: String)
 
 repositoryOverrideParser :: ParseTable Position RepositoryOverride
 repositoryOverrideParser = do

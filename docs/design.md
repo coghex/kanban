@@ -1260,7 +1260,19 @@ Defaults:
   back to the defaults silently for an unknown version.
 - Permit `--no-cache` and a global `cache = false` setting.
 - Key repository settings by `owner/name`; do not require modifying the target
-  repository.
+  repository. The key is canonical: two non-empty segments of ASCII lowercase
+  letters, digits, `.`, `_`, and `-` around exactly one `/`, with no
+  uppercase, surrounding whitespace, URL or SCP remote syntax, `.git` suffix,
+  or repeated slashes. A key outside that grammar is a decode-time
+  configuration error naming the full offending key path, rather than an
+  override that can never be selected. That is deliberately stricter than
+  `--repo`, which the user chooses per invocation and which keeps accepting
+  the GitHub URL forms section 5 describes. The `owner/name` resolved from the
+  remote or `--repo` is folded to lowercase — ASCII only, so the Haskell
+  dashboard and the shared Python loader agree on every input — to select an
+  override, and only for that selection: the identity used for GitHub queries,
+  cache paths, and display keeps the case it resolved with. A canonical key
+  naming a different repository stays silent and has no effect.
 
 Configurable repository semantics include:
 

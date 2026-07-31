@@ -200,6 +200,14 @@ def default_kanban_config_path() -> Path:
     return base / "kanban" / "config.toml"
 
 
+# Kanban.Config.asciiLowercase. str.lower() would apply Unicode mappings the
+# Haskell side does not, so a non-ASCII identity must fall through to the
+# global labels here too.
+_ASCII_LOWERCASE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
 def resolve_workflow_labels(config_path: str | None, repo: str) -> tuple[str, str]:
     """Minimal mirror of Kanban.Config's workflow.approval_label /
     changes_requested_label resolution (global value, then a matching
@@ -235,7 +243,12 @@ def resolve_workflow_labels(config_path: str | None, repo: str) -> tuple[str, st
     apply(data)
     repositories = data.get("repositories")
     if isinstance(repositories, dict):
-        apply(repositories.get(repo))
+        # Override keys are canonical lowercase owner/name, and the dashboard,
+        # approve_issues.py, and drain_prs.py all fold the resolved identity
+        # the same ASCII-only way before this lookup. Without it a mixed-case
+        # clone would make this coordinator write and verify the *global*
+        # verdict label while they use the override's.
+        apply(repositories.get(repo.translate(_ASCII_LOWERCASE)))
     return approval_label, changes_requested_label
 
 
