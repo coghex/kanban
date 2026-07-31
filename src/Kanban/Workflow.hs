@@ -1,5 +1,6 @@
 module Kanban.Workflow
   ( CardStatus (..),
+    classifyPullRequest,
     deriveBoard,
     entryItem,
     isApproved,

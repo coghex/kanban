@@ -18,7 +18,7 @@
 ║┃                          ┃┃                                   ┃ g / G        first / last visible item                            ┃otype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing hardening  ┃ e            expand / collapse focused epic                       ┃t                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete                         ┃ Enter        details                                              ┃                    │ ┃  │ #812 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  STANDALONE                       ┃ r            review/revise selected issue or PR                   ┃me → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  STANDALONE                       ┃ r            review/revise/repair selected issue or PR            ┃me → master ·       │ ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃ ▌╭────────────────────────────────┃ S            solve selected issue (choose model brand)            ┃                    │ ┃  │ Routes Shift-wheel through the     │ ┃║
 ║┃                          ┃┃  │ #812 Modal input leaks through ┃ A            autosolve selected issue (choose model brand)        ┃of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
 ║┃                          ┃┃  │ overlay                        ┃ u            update board and both usage providers                ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║

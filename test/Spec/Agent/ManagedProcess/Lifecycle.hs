@@ -209,6 +209,10 @@ examples = do
                 workerWorkflowConfig = defaultWorkflowConfig
               }
       eitherDecode (encode spec) `shouldBe` Right spec
+      -- Every PR action a key can spawn has to survive the durable spec, or
+      -- a dashboard restart reattaches the worker as the wrong workflow.
+      let repairSpec = spec {workerTask = PullRequestWorkerTaskKind (PullRequestWorkerTask 858 PullRequestClaude PullRequestRepair)}
+      eitherDecode (encode repairSpec) `shouldBe` Right repairSpec
       eitherDecode (encode (WorkerFinished (SolveNeedsInput "choose a branch")))
         `shouldBe` Right (WorkerFinished (SolveNeedsInput "choose a branch"))
       let orphan = processIdentity 901 1 901 "diagnostic engine"

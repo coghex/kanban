@@ -16,6 +16,8 @@ import Kanban.PullRequestFlow
     PullRequestVerdict (..),
     actionForLabels,
     agentForAction,
+    directPullRequestAction,
+    labelPullRequestAction,
     originFromBody,
     pullRequestArguments,
     pullRequestVerdictForLabels,
@@ -33,8 +35,16 @@ import Kanban.Solve
     unknownNoticeSamples
   )
 import Kanban.StreamReader (handleReadLine)
-import Kanban.UI (pullRequestSessionReusable, autoSolveRevisionPrompt)
+import Kanban.UI (ChatTranscript (..), PullRequestReviewSession (..), pullRequestSessionReusable, autoSolveRevisionPrompt, recoveredPullRequestSession)
+import Kanban.Worker
+  ( PullRequestWorkerTask (..),
+    WorkerDescriptor (..),
+    WorkerId (..),
+    WorkerSpec (..),
+    WorkerTask (..),
+  )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Fixtures (basePullRequest, epoch)
 import Spec.Support.Process
   ( chattyProvider,
     chattyProviderLines,
@@ -66,17 +76,102 @@ spec = do
     it "advances to revision from a configured changes-requested label" $
       actionForLabels (defaultWorkflowConfig {changesRequestedLabel = "needs-work"}) ["needs-work"] `shouldBe` PullRequestRevision
 
-    it "uses the opposite brand to review and the origin brand to revise" $ do
+    it "uses the opposite brand to review and the origin brand to revise or repair" $ do
       agentForAction PullRequestCodex PullRequestReview `shouldBe` ClaudeSolver
       agentForAction PullRequestCodex PullRequestRevision `shouldBe` CodexSolver
       agentForAction PullRequestClaude PullRequestReview `shouldBe` CodexSolver
       agentForAction PullRequestClaude PullRequestRevision `shouldBe` ClaudeSolver
+      -- Repair works on the PR's own code, so like revision it launches on
+      -- the PR's own origin brand rather than the reviewer's.
+      agentForAction PullRequestCodex PullRequestRepair `shouldBe` CodexSolver
+      agentForAction PullRequestClaude PullRequestRepair `shouldBe` ClaudeSolver
+
+    -- The fourth derived meaning of r: a Done card whose status is a problem
+    -- needs its own code worked on, not another review round. Both halves of
+    -- that condition are load-bearing, so each repair cause is paired with
+    -- the near-miss that must NOT select repair.
+    it "selects repair for every problem cause on a Done pull request" $ do
+      directPullRequestAction defaultWorkflowConfig (approvedFixture {pullRequestMergeState = MergeConflicting})
+        `shouldBe` PullRequestRepair
+      directPullRequestAction defaultWorkflowConfig (approvedFixture {pullRequestChecks = ChecksFailed 1 3 []})
+        `shouldBe` PullRequestRepair
+      -- A blocking label under the default red severity, from either
+      -- configured collection rather than a built-in name.
+      directPullRequestAction defaultWorkflowConfig (withLabels [approvalLabelChip, Label "blocked" "b60205"])
+        `shouldBe` PullRequestRepair
+      directPullRequestAction
+        (defaultWorkflowConfig {changesRequestedLabel = "needs-work"})
+        (withLabels [approvalLabelChip, Label "needs-work" "b60205"])
+        `shouldBe` PullRequestRepair
+
+    it "leaves r unchanged for a problem pull request that is not in Done" $ do
+      -- Unapproved: pullRequestStatus reports the conflict, but the card is
+      -- in Reviewing, where the label-derived action still applies.
+      directPullRequestAction defaultWorkflowConfig ((basePullRequest 900 [] False []) {pullRequestMergeState = MergeConflicting})
+        `shouldBe` PullRequestReview
+      -- Approved but still a draft, which classifyPullRequest keeps out of
+      -- Done however the review landed.
+      directPullRequestAction defaultWorkflowConfig (approvedFixture {pullRequestDraft = True, pullRequestMergeState = MergeConflicting})
+        `shouldBe` PullRequestReview
+
+    it "keeps the label-derived action for a Done pull request with no problem status" $ do
+      directPullRequestAction defaultWorkflowConfig approvedFixture `shouldBe` PullRequestReview
+      directPullRequestAction defaultWorkflowConfig (withLabels [approvalLabelChip, Label "reviewed:revised" "1d76db"])
+        `shouldBe` PullRequestRereview
+      -- Amber severity demotes a blocking label to pending, so this Done card
+      -- has no problem status and keeps whatever its labels derive — which
+      -- here is revision, reached through ApprovalByReview while the
+      -- configured changes-requested label is still on the pull request.
+      let amberByReview = defaultWorkflowConfig {approvalMode = ApprovalByReview, blockingSeverity = SeverityAmber}
+          reviewApprovedWithChanges =
+            (basePullRequest 900 [] False [Label "reviewed:changes" "b60205"])
+              { pullRequestReviewDecision = ReviewApproved
+              }
+      directPullRequestAction amberByReview reviewApprovedWithChanges `shouldBe` PullRequestRevision
+
+    -- Autosolve drives its own review/revise progression through the same PR
+    -- session starter, and must keep doing exactly that: a repair launch
+    -- there would abandon the loop's round accounting mid-flight.
+    it "never derives repair for Kanban's own automated label-driven progression" $ do
+      labelPullRequestAction defaultWorkflowConfig (approvedFixture {pullRequestMergeState = MergeConflicting})
+        `shouldBe` PullRequestReview
+      labelPullRequestAction defaultWorkflowConfig (withLabels [approvalLabelChip, Label "reviewed:changes" "b60205"])
+        `shouldBe` PullRequestRevision
 
     it "pins canonical reviewer and reviser models" $ do
       pullRequestArguments 42 PullRequestCodex PullRequestReview ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-opus-5", "--effort", "xhigh"]
       pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
       pullRequestArguments 42 PullRequestClaude PullRequestRevision ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
       pullRequestArguments 42 PullRequestClaude PullRequestRereview CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "" `shouldContain` ["--model", "gpt-5.6-terra", "--config", "model_reasoning_effort=\"xhigh\""]
+
+    it "invokes the packaged repair workflow on the PR's own brand, with the author-side model pairing" $ do
+      let repository = Repository "/tmp/repo" "coghex" "kanban"
+          codexOriginArguments = pullRequestArguments 42 PullRequestCodex PullRequestRepair CodexSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
+          claudeOriginArguments = pullRequestArguments 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing repository defaultWorkflowConfig Nothing ResumeAnswer ""
+      codexOriginArguments `shouldContain` ["--model", "gpt-5.4", "--config", "model_reasoning_effort=\"high\""]
+      claudeOriginArguments `shouldContain` ["--model", "claude-sonnet-5", "--effort", "xhigh"]
+      -- Each brand's own invocation token, and the repair coordinator rather
+      -- than the review family named as the target of --repo.
+      last codexOriginArguments `shouldContain` "$repair"
+      last claudeOriginArguments `shouldContain` "/repair"
+      last codexOriginArguments `shouldContain` "Pass --repo coghex/kanban to $repair"
+      last codexOriginArguments `shouldNotContain` "$pr-review"
+      last codexOriginArguments `shouldContain` "leave reviewed:approve, reviewed:changes, and reviewed:revised to the canonical review coordinator"
+      last claudeOriginArguments `shouldContain` "never remove a blocking label yourself"
+
+    it "keeps a resumed repair session on the repair workflow" $ do
+      let resumedPrompt = last (pullRequestArguments 42 PullRequestClaude PullRequestRepair ClaudeSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "use the base branch")
+      resumedPrompt `shouldContain` "Continue the same repair workflow"
+      resumedPrompt `shouldContain` "KANBAN_NEEDS_INPUT"
+
+    it "reattaches a persisted repair worker as a repair session on the PR's own brand" $ do
+      let task = PullRequestWorkerTask 900 PullRequestClaude PullRequestRepair
+          descriptor = repairWorkerDescriptor task
+          session = recoveredPullRequestSession descriptor approvedFixture task
+      session.pullRequestSessionAction `shouldBe` PullRequestRepair
+      session.pullRequestSessionOrigin `shouldBe` PullRequestClaude
+      session.pullRequestSessionBrand `shouldBe` ClaudeSolver
+      session.pullRequestSessionTranscript.fullTranscript `shouldSatisfy` Data.Text.isInfixOf "reattached persistent PR repair worker"
 
     it "routes r-key revisions through canonical pr-revise instead of the legacy manual-label prompt" $ do
       let codexOriginRevisionPrompt = last (pullRequestArguments 42 PullRequestCodex PullRequestRevision CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig Nothing ResumeAnswer "")
@@ -340,3 +435,44 @@ spec = do
                 summary.agentEventSummary `shouldBe` "[event] telemetry ×" <> Data.Text.pack (show chattyProviderLines)
               _ -> expectationFailure "expected the aggregate summary immediately before the terminal event"
             rawTelemetryLines [path | PullRequestLogOpened _ path <- collected] `shouldReturn` chattyProviderLines
+
+-- | An approved, non-draft pull request: in Done under the default
+-- label-based approval mode, with nothing wrong with it yet.
+approvedFixture :: PullRequest
+approvedFixture = basePullRequest 900 [] False [approvalLabelChip]
+
+approvalLabelChip :: Label
+approvalLabelChip = Label "reviewed:approve" "0e8a16"
+
+withLabels :: [Label] -> PullRequest
+withLabels labels = approvedFixture {pullRequestLabels = labels}
+
+-- | A discovered persistent worker carrying the given PR task, which is all
+-- 'recoveredPullRequestSession' reads: the paths are never touched by the
+-- pure reattach it performs.
+repairWorkerDescriptor :: PullRequestWorkerTask -> WorkerDescriptor
+repairWorkerDescriptor task =
+  WorkerDescriptor
+    { workerDescriptorSpec =
+        WorkerSpec
+          { workerId = WorkerId "pr-900-repair",
+            workerRepository = Repository "/tmp/repo" "coghex" "kanban",
+            workerTask = PullRequestWorkerTaskKind task,
+            workerExistingSession = Just "repair-session",
+            workerExistingLogPath = Just "/tmp/repair.jsonl",
+            workerResumeProvenance = ResumeAnswer,
+            workerUserMessage = "",
+            workerParent = Nothing,
+            workerCreatedAt = epoch,
+            workerMaxRuntimeSeconds = 60,
+            workerConfigPath = Nothing,
+            workerWorkflowConfig = defaultWorkflowConfig
+          },
+      workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
+      workerDescriptorEventPath = "/tmp/pr-900-repair.events.jsonl",
+      workerDescriptorStatePath = "/tmp/pr-900-repair.state.json",
+      workerDescriptorAckPath = "/tmp/pr-900-repair.ack",
+      workerDescriptorLeasePath = "/tmp/pr-900-repair.lease",
+      workerDescriptorLeaseOwnerPath = "/tmp/pr-900-repair.lease.owner",
+      workerDescriptorPendingTerminationPath = "/tmp/pr-900-repair.terminating"
+    }

@@ -2,7 +2,7 @@
 
 This directory is a Claude Code marketplace, tracked in this repository, that
 packages the Claude-side workflows Kanban invokes by name — `/solve`,
-`/pr-review`, `/pr-rereview`, and `/pr-revise` — plus the issue-drafting and
+`/pr-review`, `/pr-rereview`, `/pr-revise`, and `/repair` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
 `/issue`, `/draft-issues`, `/autoissue`, and `/issue-review`. It exists so a
 clean Claude Code installation can perform these actions without depending on
@@ -95,13 +95,14 @@ those subcommands cannot install this plugin.
 
 ## What's packaged
 
-Kanban's own CLI spawns the first four by name. The next four are drafting and
-readiness-gate workflows a user or the review daemon invokes directly; see
+Kanban's own CLI spawns five of these by name: the first four, plus `/repair`,
+which `r` selects for a Done pull request whose status is a problem (issue
+#127). The other four are drafting and readiness-gate workflows a user or the
+review daemon invokes directly; see
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
-`/repair` is packaged ahead of the Done-column repair action that will spawn
-it, and is deliberately *not* part of that declared drafting surface. None of
-the last five is included in the Haskell invocation-parity pinning in
-`tools/test_claude_plugin.py`, which covers only the names Kanban's own code
+`/repair` is not part of that declared drafting surface either. Only the four
+drafting commands are excluded from the Haskell invocation-parity pinning in
+`tools/test_claude_plugin.py`, which covers exactly the names Kanban's own code
 spawns.
 
 | Command | Invocation | Boundary |
@@ -120,8 +121,8 @@ spawns.
 arc rather than independently hunting for discretionary work, so it is not part
 of this drafting contract.
 
-`pr-review`, `pr-rereview`, and `pr-revise` all delegate publication to the
-bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
+`pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
+to the bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
 `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so each command
 resolves the coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`
 without depending on where the plugin happened to be installed, and without
@@ -159,8 +160,8 @@ is spawned, and this coordinator still cannot verify which model actually
 ran that top-level session (that pin happened outside its visibility), so
 it publishes `models=unspecified` for this path, matching
 [docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md#22-pr-review-rereview-and-revise).
-Only `pr-revise`'s cross-brand handoff (it runs on the PR's own origin
-brand but must hand off to the opposite brand) and the rare dual-review
+Only the cross-brand handoffs of `pr-revise` and `repair` (each runs on the
+PR's own origin brand but must hand off to the opposite brand) and the rare dual-review
 fallback for unknown/external origin — which Kanban's own invocation never
 triggers — spawn a nested `codex`/`claude` reviewer. Unlike the
 self-reviewed path, this coordinator fully constructs that nested
@@ -189,10 +190,10 @@ runs) checks that:
 - the marketplace and plugin manifests are valid and point at this
   directory;
 - the commands directory contains exactly the nine packaged workflows, and
-  the four Kanban spawns exactly match the `/`-prefixed tokens
+  the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  four drafting commands or the packaged-only `/repair`;
+  four drafting commands;
 - no packaged manifest sets model/effort/permission-mode/working-directory
   configuration, and every packaged command — drafting commands included —
   declares a `description:` and no forbidden frontmatter key;

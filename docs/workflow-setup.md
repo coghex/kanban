@@ -2,9 +2,11 @@
 
 Kanban's board is fully usable with nothing installed beyond `git` and a
 signed-in `gh`. Its optional AI actions — canonical issue review and
-revision (`r`), solve (`S`), auto-solve (`A`), and the PR review/revise
-flows (`r` on a pull request) — additionally need workflow assets this
-repository tracks but does not install for you.
+revision (`r`), solve (`S`), auto-solve (`A`), and the PR review, rereview,
+revise, and repair flows (`r` on a pull request) — additionally need workflow
+assets this repository tracks but does not install for you. Each is its own
+preflight action with its own dependency set, so `--doctor` reports repair
+separately, per pull-request origin.
 
 Two commands cover that whole surface:
 
@@ -51,8 +53,8 @@ four with `--all`.
 | Component | What it installs | Needed for |
 | --- | --- | --- |
 | `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/`, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
-| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise` |
-| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise` |
+| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
+| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
 
 A plugin component alone is not enough for the PR flows: they call the
@@ -178,7 +180,7 @@ that cannot reach a definite conclusion never blocks an action: a
 diagnostic that guessed wrong would break a working setup.
 
 The tracked bundles are the supported source of the `solve`/`pr-review`/
-`pr-rereview`/`pr-revise` workflows. If you previously relied on your own
+`pr-rereview`/`pr-revise`/`repair` workflows. If you previously relied on your own
 unpackaged copies of those commands, preflight will report the bundle as
 absent — install it once with `setup_workflows.py`, which neither removes
 nor overrides anything else you have.

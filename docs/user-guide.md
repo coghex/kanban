@@ -98,7 +98,7 @@ Every mouse action has a keyboard equivalent.
 These actions require a working Codex or Claude installation and login, plus
 the Kanban-owned workflow assets those actions call into (the canonical
 issue-review backend and the named `solve`/`pr-review`/`pr-rereview`/
-`pr-revise` commands). Provider installation alone does not make them ready;
+`pr-revise`/`repair` commands). Provider installation alone does not make them ready;
 install the components you want with `python3 tools/setup_workflows.py`, and
 see [workflow setup and preflight](workflow-setup.md) for the fresh-clone
 path and [the agent-workflow contract](agent-workflow-contract.md) for what
@@ -108,7 +108,7 @@ If one of these keys reports that the action cannot start, the message names
 the missing component and the command that installs it. To check every
 action at once without starting anything, run `cabal run kanban -- --doctor`.
 
-- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview.
+- Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview. On an approved pull request in Done that has a problem — a merge conflict, a failed check, or a blocking label — the same key repairs it instead, then sends it back for a fresh review. It never merges.
 - Press `S` to work on an issue and open a pull request.
 - Press `A` to work on an issue, review the result, and send requested changes back for another pass.
 - Choose `1` for Codex or `2` for Claude when Kanban asks which service to use.
