@@ -51,8 +51,8 @@ four with `--all`.
 | Component | What it installs | Needed for |
 | --- | --- | --- |
 | `issue-review` | A Kanban-managed link to the tracked `tools/approve_issues.py` backend (and its `kanban_config.py` companion) under `~/Library/Application Support/kanban/issue-review/`, plus the discovery record naming that link | Every AI action except issue revision: canonical issue review/rereview (`r`), the readiness gate a solve session checks before claiming an issue, and the gate the PR coordinator checks before publishing a verdict |
-| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise` |
-| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise` |
+| `codex-plugin` | `kanban@kanban` from `codex-plugin/`, through `codex plugin marketplace add` and `codex plugin add` | `$solve`, `$pr-review`, `$pr-rereview`, `$pr-revise`, `$repair` |
+| `claude-plugin` | `kanban@kanban` from `claude-plugin/`, through `claude plugin marketplace add` and `claude plugin install` | `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/repair` |
 | `legacy-launcher` | A symlink at `~/work/approve-issues.py` pointing at the installed backend | Nothing in Kanban. Purely a compatibility shim for pre-migration automation that still invokes that path directly — see [agent-workflow-contract §3](agent-workflow-contract.md#3-migration-boundary) |
 
 A plugin component alone is not enough for the PR flows: they call the

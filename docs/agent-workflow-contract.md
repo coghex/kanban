@@ -331,7 +331,7 @@ everything else.
 
 | Dependency | Mandatory | Why |
 | --- | --- | --- |
-| `codex`, `claude` | No | Only needed to exercise an AI action (solve, review, revise). |
+| `codex`, `claude` | No | Only needed to exercise an AI action (solve, review, revise, repair). |
 | `script` | No | Only needed to poll Claude's usage snapshot (`src/Kanban/Claude.hs`). |
 | `gh`, signed in via `gh auth login` | Yes | The board's GitHub data and every write action depend on it. |
 | `git` | Yes | Repository identity, worktree creation, and status. |

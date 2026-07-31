@@ -13,8 +13,9 @@ a Kanban plugin.
 Scope boundaries:
 
 - These workflows are **user- or daemon-invoked**, never spawned by Kanban's
-  own CLI. Kanban's Haskell code spawns exactly four workflows per brand
-  (`solve`, `pr-review`, `pr-rereview`, `pr-revise`), which is why the
+  own CLI. Kanban's Haskell code spawns exactly five workflows per brand
+  (`solve`, `pr-review`, `pr-rereview`, `pr-revise`, and — since issue #127 —
+  `repair`), which is why the
   drafting and issue-review assets are deliberately excluded from the Haskell
   invocation-parity pinning in `tools/test_claude_plugin.py` and
   `tools/test_codex_plugin.py`. See
