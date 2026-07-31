@@ -1,0 +1,48 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
+║┃ Codex                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃         Thu 16:05        ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃         Tue 09:00        ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude                   ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃         Thu 17:30        ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓n dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃         Sat 09:10        ┃┃     │ unassigned · updated 4h ago ┃                                                                   ┃hile preserving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃     │ Write the envelope header ah┃ j / Down    next card                                             ┃                    │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃     │ of the payload so a partial ┃ k / Up      previous card                                         ┃hind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃     │ write is detectable on load.┃ x           kill selected working process tree                    ┃────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰─────────────────────────────┃ h / Left    previous column                                       ┃                      ┃                                         ┃║
+║┃                          ┃┃                                   ┃ l / Right   next column                                           ┃────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                   ┃ g / G        first / last visible item                            ┃otype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardening  ┃ e            expand / collapse focused epic                       ┃t                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃  complete                         ┃ Enter        details                                              ┃                    │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE                       ┃ r            review/revise selected issue or PR                   ┃me → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃ ▌╭────────────────────────────────┃ S            solve selected issue (choose model brand)            ┃                    │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃  │ #812 Modal input leaks through ┃ A            autosolve selected issue (choose model brand)        ┃of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃  │ overlay                        ┃ u            update board and both usage providers                ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   ui   ┃ d / click    start or stop PR drainer                             ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ left click   select card; click selected card for details         ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal areas currently all┃ mouse wheel scroll column under pointer                           ┃────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach lower  ┃ right/outside click closes card details                           ┃                      ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is visible when a… ┃ c            collapse / expand sidebar                            ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ╰────────────────────────────────┃ s            settings                                             ┃                      ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                                   ┃ p            processes and agent sessions                         ┃                      ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭────────────────────────────────┃ i            everything needing attention; Enter goes to its work ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence    ┃ Ctrl-L       repaint                                              ┃                      ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract                       ┃ Esc          close overlay                                        ┃                      ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture                  ┃ Ctrl-C       interrupt open agent turn, then type guidance        ┃                      ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ q            quit                                                 ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ Document root owners, snapshot ┃                                                                   ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ barriers, and the versioned    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
+║┃ +--------------+         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃ | drain_prs.py |         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ +--------------+         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  i attention  u update  d drainer  c sidebar  s settings  ? help  q quit       ║
+║ board: updated 3h ago                                                                                                                                                                                ║
+║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

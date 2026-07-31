@@ -42,7 +42,15 @@ fixtureSnapshot :: RepoSnapshot
 fixtureSnapshot =
   RepoSnapshot
     { snapshotIssues =
-        [ issue 901 "Add repository snapshot cache" "Load the last good GitHub snapshot at startup and replace it atomically after a successful explicit refresh." [label "feature" "a2eeef"] [],
+        [ -- Two trackers, so a board drawn from this snapshot can show an
+          -- expanded one beside a collapsed one. Their children are their
+          -- own, which keeps every card above standalone.
+          tracker 700 "Persistence contract rollout" ["[x] #711 — A1: Save envelope", "[ ] #712 — A2: Cache reader"],
+          tracker 701 "Input routing hardening" ["[ ] #721 — B1: Pointer capture"],
+          issue 711 "Adopt the versioned save envelope" "Write the envelope header ahead of the payload so a partial write is detectable on load." [label "feature" "a2eeef"] [],
+          issue 712 "Migrate the terrain cache reader" "Read through the envelope and reject a payload whose recorded length disagrees with the file." [label "code-health" "1d76db"] [Assignee "codex-agent"],
+          issue 721 "Probe pointer capture ownership" "Record which layer owns the pointer before the overlay opens, so release restores it." [label "ui" "5319e7"] [],
+          issue 901 "Add repository snapshot cache" "Load the last good GitHub snapshot at startup and replace it atomically after a successful explicit refresh." [label "feature" "a2eeef"] [],
           issue 812 "Modal input leaks through overlay" "Empty modal areas currently allow pointer events to reach lower pages. This is visible when a dialog overlaps the world." [label "reviewed:approve" "2f9e44", label "bug" "d73a4a", label "ui" "5319e7"] [],
           issue 756 "Define the persistence contract" "Document root owners, snapshot barriers, and the versioned envelope before implementation begins." [label "architecture" "0e8a16"] [],
           issue 799 "Repair stale world cache invalidation" "A stale cache survives a save reload and exposes old terrain data to the renderer." [label "blocked" "b60205", label "bug" "d73a4a"] [Assignee "codex-agent"],
@@ -52,12 +60,22 @@ fixtureSnapshot =
         [ pullRequest 823 "Fix modal scroll routing" "Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel events." [label "reviewed:approve" "2f9e44", label "input" "0075ca", label "ui" "5319e7"] False [812] ReviewApproved MergeClean (ChecksPassed 14),
           pullRequest 841 "Split the input dispatch facade" "Moves per-domain dispatch into small modules while preserving the public facade." [label "refactor" "c5def5"] False [833] ReviewRequired MergeBehind (ChecksPending 12 14 [CheckDetail "integration-suite" CheckPending, CheckDetail "docs-lint" CheckPending]),
           pullRequest 847 "Prototype native sub-issue import" "An early draft of the native GitHub sub-issue membership adapter." [label "experimental" "fbca04"] True [756] ReviewUnknown MergeUnknown ChecksUnknown,
-          pullRequest 851 "Resolve save envelope conflict" "Updates the branch after the persistence registry changed on master." [label "reviewed:approve" "2f9e44"] False [] ReviewApproved MergeConflicting (ChecksPassed 12)
+          pullRequest 851 "Resolve save envelope conflict" "Updates the branch after the persistence registry changed on master." [label "reviewed:approve" "2f9e44"] False [] ReviewApproved MergeConflicting (ChecksPassed 12),
+          -- Approved but not yet mergeable, which is the amber readiness the
+          -- three-color spread would otherwise be missing: 823 is green, 851
+          -- is red, and nothing else here is pending.
+          pullRequest 861 "Adopt the envelope in the snapshot loader" "Reads the cache through the versioned envelope and reports a truncated payload." [label "reviewed:approve" "2f9e44", label "feature" "a2eeef"] False [901] ReviewApproved MergeBehind (ChecksPending 9 12 [CheckDetail "integration-suite" CheckPending])
         ],
       snapshotFetchedAt = at 12 0,
       snapshotIssuesTruncated = False,
       snapshotPullRequestsTruncated = False
     }
+
+-- | A tracker issue: the @epic@ label 'defaultWorkflowConfig' recognizes, and
+-- a checklist section in the shape 'Kanban.Tracker.trackerFromIssue' parses.
+tracker :: Int -> Text -> [Text] -> Issue
+tracker number title children =
+  issue number title (Data.Text.unlines ("## Children" : ["- " <> child | child <- children])) [label "epic" "5319e7"] []
 
 issue :: Int -> Text -> Text -> [Label] -> [Assignee] -> Issue
 issue number title body labels assignees =
