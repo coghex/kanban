@@ -18,48 +18,52 @@ import Kanban.Review
     ReviewRequestId (..),
     ReviewStage (..)
   )
-import Kanban.UI
+import Kanban.UI.Board (reviewPhaseGlyphFor)
+import Kanban.UI.Events (OverlayMouseAction (..), overlayMouseAction)
+import Kanban.UI.Overlay (reviewPhaseLabel)
+import Kanban.UI.Reconcile (reconcileReviewSessions)
+import Kanban.UI.Review
+  ( ReviewCancelAction (..),
+    ReviewDigitAction (..),
+    ReviewTickArmOutcome (..),
+    ReviewTickFireOutcome (..),
+    canonicalReviewCompletionSuperseded,
+    decideReviewTickArm,
+    decideReviewTickFire,
+    resolveReviewCancelAction,
+    resolveReviewDigitAction,
+    reviewSessionsNeedingArm,
+  )
+import Kanban.UI.Session
+  ( liveReviewSessions,
+    resolveProcessClick,
+    resolveProcessSelection,
+    reviewAgentSessionEntry,
+    reviewSessionLive,
+    reviewSessionReusable,
+    reviewTurnInterruptible,
+  )
+import Kanban.UI.Theme (reviewPhaseAttribute, revisedAttr)
+import Kanban.UI.Transcript
+  ( TranscriptGeometry (..),
+    TranscriptSession (..),
+    displayedTranscript,
+    followAfterScroll,
+    followAfterTurnStarted,
+    transcriptScrollKey,
+    transcriptShouldTail,
+  )
+import Kanban.UI.Types
   ( AgentSessionEntry (..),
     AgentSessionRef (..),
     ChatTranscript (..),
     Name (..),
     Overlay (..),
-    OverlayMouseAction (..),
     PendingReviewInteraction (..),
     ProcessClickOutcome (..),
     ProcessSelection (..),
-    ReviewCancelAction (..),
-    ReviewDigitAction (..),
     ReviewPhase (..),
     ReviewSession (..),
-    ReviewTickArmOutcome (..),
-    ReviewTickFireOutcome (..),
-    TranscriptGeometry (..),
-    TranscriptSession (..),
-    canonicalReviewCompletionSuperseded,
-    decideReviewTickArm,
-    decideReviewTickFire,
-    displayedTranscript,
-    followAfterScroll,
-    followAfterTurnStarted,
-    liveReviewSessions,
-    overlayMouseAction,
-    reconcileReviewSessions,
-    resolveReviewCancelAction,
-    resolveProcessClick,
-    resolveProcessSelection,
-    resolveReviewDigitAction,
-    reviewAgentSessionEntry,
-    reviewPhaseAttribute,
-    reviewPhaseGlyphFor,
-    reviewPhaseLabel,
-    reviewSessionLive,
-    reviewSessionReusable,
-    reviewSessionsNeedingArm,
-    reviewTurnInterruptible,
-    revisedAttr,
-    transcriptScrollKey,
-    transcriptShouldTail
   )
 import Kanban.Worker (WorkerId (..))
 import Spec.Support.Fixtures (baseIssue)

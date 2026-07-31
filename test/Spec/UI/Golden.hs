@@ -39,21 +39,23 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
 import Kanban.Settings (defaultSettings)
-import Kanban.UI
-  ( AppEvent,
-    AppState (..),
-    Overlay (..),
-    IncidentSelection (..),
-    ProcessSelection (..),
-    ReviewBackend (..),
-    approvedAttr,
-    drawApplication,
+import Kanban.UI (drawApplication)
+import Kanban.UI.Theme
+  ( approvedAttr,
     pendingAttr,
     problemAttr,
     readyAttr,
     selectedAttr,
     selectedTitleAttr,
     themeFor,
+  )
+import Kanban.UI.Types
+  ( AppEvent,
+    AppState (..),
+    IncidentSelection (..),
+    Overlay (..),
+    ProcessSelection (..),
+    ReviewBackend (..),
   )
 import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)

@@ -54,14 +54,10 @@ import Kanban.StreamReader
     runStreamReader,
     runStreamReaderWith
   )
-import Kanban.UI
-  ( ChatTranscript (..),
-    ReviewPhase (..),
-    ReviewSession (..),
-    applyUndeliveredSteer,
-    drawUndeliveredSteers,
-    themeFor
-  )
+import Kanban.UI.Overlay (drawUndeliveredSteers)
+import Kanban.UI.Review (applyUndeliveredSteer)
+import Kanban.UI.Theme (themeFor)
+import Kanban.UI.Types (ChatTranscript (..), ReviewPhase (..), ReviewSession (..))
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue)
 import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, testOptions)

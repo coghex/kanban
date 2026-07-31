@@ -14,15 +14,9 @@ import Kanban.Tracker
     parseTrackerChildren,
     renderTrackerDiagnostic
   )
-import Kanban.UI
-  ( Overlay (..),
-    normalizeCollapsedRow,
-    pendingAttr,
-    refreshOverlay,
-    trackerAttr,
-    trackerHeaderAttribute,
-    visibleSelectionRows
-  )
+import Kanban.UI.Selection (normalizeCollapsedRow, refreshOverlay, visibleSelectionRows)
+import Kanban.UI.Theme (pendingAttr, trackerAttr, trackerHeaderAttribute)
+import Kanban.UI.Types (Overlay (..))
 import Kanban.Workflow (deriveBoard)
 import Spec.Support.Fixtures
   ( baseIssue,

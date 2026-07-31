@@ -33,14 +33,16 @@ import Kanban.Drainer
     selectSinglePullRequestDrainer,
     singlePullRequestDrainerPath,
   )
-import Kanban.UI
+import Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
-    DirectMergeReport (..),
-    directMergeNoticeFor,
-    directMergeReportAfterRefresh,
-    outstandingDirectMergeReport,
     releaseQueuedBoardRefresh,
     requiredBoardRefreshDispatch,
+  )
+import Kanban.UI.Types (DirectMergeReport (..))
+import Kanban.UI.Util
+  ( directMergeNoticeFor,
+    directMergeReportAfterRefresh,
+    outstandingDirectMergeReport,
   )
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention, shouldNotMention)

@@ -10,18 +10,18 @@ import qualified Data.Text
 import Kanban.CLI (ColorPolicy (..), Options (..))
 import Kanban.Card (CardChip (..), boundedLines, displayWidth, labelChipRows)
 import Kanban.Domain
-import Kanban.UI
-  ( labelApprovalAttr,
+import Kanban.UI.Details (mergeExplanation)
+import Kanban.UI.Theme
+  ( itemHasAmberWarning,
+    labelApprovalAttr,
     labelAttribute,
     labelDefaultAttr,
     labelProblemAttr,
     labelUiAttr,
-    itemHasAmberWarning,
-    mergeExplanation,
-    mergeText,
     pendingAttr,
-    pullRequestCardAttribute
+    pullRequestCardAttribute,
   )
+import Kanban.UI.Util (mergeText)
 import Kanban.Workflow (orderCardLabels, rereviewLabel)
 import Spec.Support.Fixtures
   ( baseIssue,

@@ -7,7 +7,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Time (addUTCTime)
 import Kanban.Domain
-import Kanban.UI (normalizeCollapsedRow, normalizeSelectedRowsAfterToggle, visibleSelectionRows)
+import Kanban.UI.Selection
+  ( normalizeCollapsedRow,
+    normalizeSelectedRowsAfterToggle,
+    visibleSelectionRows,
+  )
 import Kanban.Workflow (deriveBoard, entryItem)
 import Spec.Support.Fixtures
   ( baseIssue,

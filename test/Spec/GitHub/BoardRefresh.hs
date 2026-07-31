@@ -30,7 +30,8 @@ import Kanban.Process
     readProcessSnapshot
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.UI (BoardRefreshOutcome (..), unverifiedRefreshNotice)
+import Kanban.UI.Reconcile (unverifiedRefreshNotice)
+import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Board
   ( captureBoardRefresh,
     forcedCleanupRun,

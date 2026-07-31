@@ -11,34 +11,34 @@ import qualified Data.Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
-import Kanban.UI
-  ( AgentSessionRef (..),
-    AppState (..),
-    BoardWorkLocation (..),
-    DrainerSourceState (..),
-    IncidentClickOutcome (..),
-    IncidentEntry (..),
-    IncidentRef (..),
-    IncidentSelection (..),
-    IncidentSource (..),
-    IncidentsAction (..),
-    Name (..),
-    Overlay (..),
-    ReviewPhase (..),
-    SolvePhase (..),
-    applyIncidentsAction,
+import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
+import Kanban.UI.Overlay (drawIncidents)
+import Kanban.UI.Session
+  ( BoardWorkLocation (..),
     drainerSourceState,
-    drawIncidents,
     incidentEntries,
     incidentSourceLabel,
-    incidentsAction,
     locateBoardWork,
     resolveIncidentActivation,
     resolveIncidentClick,
     resolveIncidentSelection,
     reviewIncidentPhase,
     solveIncidentPhase,
-    themeFor
+  )
+import Kanban.UI.Theme (themeFor)
+import Kanban.UI.Types
+  ( AgentSessionRef (..),
+    AppState (..),
+    DrainerSourceState (..),
+    IncidentClickOutcome (..),
+    IncidentEntry (..),
+    IncidentRef (..),
+    IncidentSelection (..),
+    IncidentSource (..),
+    Name (..),
+    Overlay (..),
+    ReviewPhase (..),
+    SolvePhase (..),
   )
 import Spec.Support.App
   ( testAppState,

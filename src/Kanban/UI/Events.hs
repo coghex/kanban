@@ -1,0 +1,698 @@
+module Kanban.UI.Events
+  ( IncidentsAction (..),
+    OverlayMouseAction (..),
+    applyIncidentsAction,
+    handleEvent,
+    incidentsAction,
+    killSelectionNotice,
+    overlayMouseAction,
+  )
+where
+
+
+import Brick
+import Control.Concurrent (forkIO )
+import Control.Monad (void, when)
+import Control.Monad.IO.Class (liftIO)
+import Data.Char (isPrint)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Time (getCurrentTime )
+import qualified Graphics.Vty as Vty
+import Kanban.Domain
+import Kanban.Process (killManagedProcess )
+import Kanban.Review
+  ( interruptReview,
+    killReviewTools
+    )
+import Kanban.Solve
+  ( SolveWorkflow (..),
+    SolverBrand (..)
+    )
+import Kanban.Settings
+  ( ChatVerbosity (..),
+    Settings (..),
+    saveSettings,
+    verbosityLabel
+  )
+import Kanban.Workflow (entryItem )
+import Kanban.Worker
+  ( terminateWorker
+    )
+import Kanban.UI.Types
+import Kanban.UI.Util
+import Kanban.UI.State
+import Kanban.UI.Transcript
+import Kanban.UI.Selection
+import Kanban.UI.Session
+import Kanban.UI.Refresh
+import Kanban.UI.Solve
+import Kanban.UI.PullRequest
+import Kanban.UI.Review
+import Kanban.UI.Worker
+import Kanban.UI.Reconcile
+
+handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
+handleEvent event = do
+  now <- liftIO getCurrentTime
+  modify (\state -> state {appNow = now})
+  state <- get
+  case (state.appOverlay, event) of
+    (_, AppEvent (BoardRefreshFinished result)) -> applyBoardRefresh result
+    (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
+    (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
+    (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
+    (_, AppEvent (DrainerToggleFinished result)) -> applyDrainerToggle result
+    (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
+    (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
+    (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent
+    (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applyReviewAnimationTick issueNumber generation
+    (_, AppEvent (SolveProtocolEvent solveEvent)) -> applySolveEvent solveEvent
+    (_, AppEvent (SolveAnimationTick issueNumber)) -> applySolveAnimationTick issueNumber
+    (_, AppEvent SolveBoardRefreshRequested) -> startBoardRefresh
+    (_, AppEvent (PullRequestProtocolEvent flowEvent)) -> applyPullRequestFlowEvent flowEvent
+    (_, AppEvent (PullRequestAnimationTick number)) -> applyPullRequestAnimationTick number
+    (_, AppEvent (WorkerRegistered descriptor)) -> registerWorker descriptor
+    (_, AppEvent (WorkerProtocolEvent descriptor workerEvent)) -> applyWorkerProtocolEvent descriptor workerEvent
+    (_, AppEvent (WorkerDiscoveryFinished descriptors)) -> mapM_ attachDiscoveredWorker descriptors
+    (_, AppEvent (CanonicalIssueReviewProcessStarted issueNumber process)) -> do
+      modify (\current -> current {appCanonicalReviewProcesses = Map.insert issueNumber process current.appCanonicalReviewProcesses})
+      modifyReviewSession issueNumber (\session -> session {reviewSessionActivity = "reviewing issue"})
+      armReviewTick issueNumber
+    (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
+    (Just HelpOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
+    (Just (DetailsOverlay _), VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
+    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> chooseChatVerbosity CompactChat
+    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> chooseChatVerbosity StandardChat
+    (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '3') [])) -> chooseChatVerbosity FullChat
+    (Just SettingsOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just SettingsOverlay, _) -> pure ()
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveProcessSelection 1
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveProcessSelection 1
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveProcessSelection (-1)
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> moveProcessSelection (-1)
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedAgentSession
+    (Just ProcessesOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killSelectedAgentSession
+    (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollUp _ _) -> scrollProcesses (-3)
+    (Just ProcessesOverlay, MouseDown ProcessesPanel Vty.BScrollDown _ _) -> scrollProcesses 3
+    (Just ProcessesOverlay, MouseDown (ProcessTarget ref) Vty.BLeft _ _) -> selectOrOpenAgentSession ref
+    (Just ProcessesOverlay, MouseDown ProcessesPanel _ _ _) -> pure ()
+    (Just ProcessesOverlay, _) -> pure ()
+    (overlay, incidentEvent)
+      | Just action <- incidentsAction overlay incidentEvent -> handleIncidentsAction action
+    (Just (ReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just (ReviewOverlay issueNumber), mouseEvent)
+      | Just action <- overlayMouseAction ReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (ReviewTranscript issueNumber)) action
+    (Just (ReviewOverlay issueNumber), reviewInputEvent) -> handleReviewOverlayEvent issueNumber reviewInputEvent
+    (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> startIssueSolve issue workflow CodexSolver
+    (Just (SolveChooser workflow issue), VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> startIssueSolve issue workflow ClaudeSolver
+    (Just (SolveChooser _ _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just (SolveChooser _ _), _) -> pure ()
+    (Just (SolveOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just (SolveOverlay issueNumber), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptSolveSession issueNumber
+    (Just (SolveOverlay issueNumber), mouseEvent)
+      | Just action <- overlayMouseAction SolvePanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (SolveTranscript issueNumber)) action
+    (Just (SolveOverlay issueNumber), solveInputEvent) -> handleSolveOverlayEvent issueNumber solveInputEvent
+    (Just (PullRequestReviewOverlay _), VtyEvent (Vty.EvKey Vty.KEsc [])) -> closeOverlay
+    (Just (PullRequestReviewOverlay number), VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl])) -> interruptPullRequestSession number
+    (Just (PullRequestReviewOverlay number), mouseEvent)
+      | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
+    (Just (PullRequestReviewOverlay number), inputEvent) -> handlePullRequestOverlayEvent number inputEvent
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startItemReview item
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openItemSolveChooser SolveOnly item
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openItemSolveChooser AutoSolve item
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killItemWorkingProcess item
+    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeItemDoneCard item
+    (Just (DetailsOverlay _), mouseEvent)
+      | Just action <- overlayMouseAction DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
+    (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
+    (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
+    (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> vScrollBy (viewportScroll DetailsViewport) 1
+    (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
+    (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
+    (Just _, _) -> pure ()
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
+    (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveCard 1
+    (Nothing, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveCard (-1)
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> moveCard (-1)
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killSelectedWorkingProcess
+    (Nothing, VtyEvent (Vty.EvKey Vty.KLeft [])) -> moveColumn (-1)
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'h') [])) -> moveColumn (-1)
+    (Nothing, VtyEvent (Vty.EvKey Vty.KRight [])) -> moveColumn 1
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [])) -> moveColumn 1
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'g') [])) -> selectBoundary False
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'G') [])) -> selectBoundary True
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'e') [])) -> toggleSelectedTracker
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'c') [])) -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 's') [])) -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'p') [])) -> openProcesses
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startSelectedReview
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openSelectedSolveChooser SolveOnly
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openSelectedSolveChooser AutoSolve
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> startAllRefreshes
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'd') [])) -> toggleDrainer
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeSelectedDoneCard
+    (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
+    (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
+    (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
+    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _) -> toggleTrackerFromClick column row trackerNumber
+    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _) -> openRunningProcessOrSelect column row
+    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _) -> selectOrOpenCard column row
+    (Nothing, MouseDown (CardTarget column _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
+    (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
+    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
+    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
+    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> forceTerminalRepaint
+    _ -> pure ()
+
+requestDashboardQuit :: EventM Name AppState ()
+requestDashboardQuit = do
+  state <- get
+  let liveInteractiveReviews =
+        liveReviewSessions
+          (reviewBackendReady state.appReviewBackend)
+          (Map.keysSet state.appCanonicalReviewProcesses)
+          state.appReviewSessions
+  if null liveInteractiveReviews
+    then halt
+    else
+      modify
+        ( \current ->
+            current
+              { appOverlay = Nothing,
+                appNotice =
+                  Just
+                    ( "Finish or kill the non-persistent issue review"
+                        <> (if length liveInteractiveReviews == 1 then " " else "s ")
+                        <> Text.intercalate ", " (map (("#" <>) . showText) liveInteractiveReviews)
+                        <> " before quitting; solve and PR workers may be safely left running"
+                    )
+              }
+        )
+
+-- | The decision a content overlay's shared mouse policy reaches for a given
+-- event, independent of how that decision gets carried out. Wheel events
+-- always resolve to a scroll regardless of which name they land on
+-- (background card, the panel, or the viewport itself) and never close the
+-- overlay; any other click outside the panel closes it, matching the
+-- outside-click contract. Pure so the policy can be unit tested without a
+-- running EventM.
+data OverlayMouseAction
+  = OverlayMouseScroll Int
+  | OverlayMouseClose
+  | OverlayMouseNoOp
+  deriving stock (Eq, Show)
+
+overlayMouseAction :: Name -> BrickEvent Name AppEvent -> Maybe OverlayMouseAction
+overlayMouseAction panel event = case event of
+  MouseDown _ Vty.BScrollUp _ _ -> Just (OverlayMouseScroll (-3))
+  MouseDown _ Vty.BScrollDown _ _ -> Just (OverlayMouseScroll 3)
+  VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollUp _) -> Just (OverlayMouseScroll (-3))
+  VtyEvent (Vty.EvMouseDown _ _ Vty.BScrollDown _) -> Just (OverlayMouseScroll 3)
+  MouseDown name Vty.BRight _ _
+    | name == panel -> Just OverlayMouseClose
+  MouseDown name _ _ _
+    | name == panel -> Just OverlayMouseNoOp
+  MouseDown _ _ _ _ -> Just OverlayMouseClose
+  VtyEvent (Vty.EvMouseDown _ _ _ _) -> Just OverlayMouseClose
+  _ -> Nothing
+
+applyOverlayMouseAction :: (Int -> EventM Name AppState ()) -> OverlayMouseAction -> EventM Name AppState ()
+applyOverlayMouseAction scrollOverlay = \case
+  OverlayMouseScroll amount -> scrollOverlay amount
+  OverlayMouseClose -> closeOverlay
+  OverlayMouseNoOp -> pure ()
+
+chooseChatVerbosity :: ChatVerbosity -> EventM Name AppState ()
+chooseChatVerbosity verbosity = do
+  state <- get
+  let settings = state.appSettings {settingsChatVerbosity = verbosity}
+  result <- liftIO (saveSettings settings)
+  case result of
+    Left message -> setNotice message
+    Right () ->
+      modify
+        ( \current ->
+            current
+              { appSettings = settings,
+                appNotice = Just ("Chat output set to " <> Text.toLower (verbosityLabel verbosity) <> " · full logs remain unchanged")
+              }
+        )
+
+-- | What one event does to the incidents panel. Separated from the dispatch
+-- that carries it out so the whole interaction — opening the panel, moving,
+-- clicking, activating, closing — is decided by pure code that needs no
+-- terminal (docs\/design.md §18).
+data IncidentsAction
+  = OpenIncidentsPanel
+  | CloseIncidentsPanel
+  | MoveIncidentSelection Int
+  | ScrollIncidentsPanel Int
+  | ActivateSelectedIncident
+  | ClickIncidentRow IncidentRef
+  | IgnoreIncidentsEvent
+  deriving stock (Eq, Show)
+
+-- | The panel's event policy: @i@ opens it from the board, and while it is
+-- open it consumes its own keys and mouse events. 'Nothing' means the event
+-- is not the panel's business and the dashboard's other bindings decide it.
+incidentsAction :: Maybe Overlay -> BrickEvent Name AppEvent -> Maybe IncidentsAction
+incidentsAction Nothing (VtyEvent (Vty.EvKey (Vty.KChar 'i') [])) = Just OpenIncidentsPanel
+incidentsAction (Just IncidentsOverlay) event = Just $ case event of
+  VtyEvent (Vty.EvKey Vty.KEsc []) -> CloseIncidentsPanel
+  VtyEvent (Vty.EvKey Vty.KDown []) -> MoveIncidentSelection 1
+  VtyEvent (Vty.EvKey (Vty.KChar 'j') []) -> MoveIncidentSelection 1
+  VtyEvent (Vty.EvKey Vty.KUp []) -> MoveIncidentSelection (-1)
+  VtyEvent (Vty.EvKey (Vty.KChar 'k') []) -> MoveIncidentSelection (-1)
+  VtyEvent (Vty.EvKey Vty.KEnter []) -> ActivateSelectedIncident
+  -- Wheel events resolve to a scroll wherever they land: the rows are
+  -- clickable, so a wheel over one is reported against the row rather than
+  -- against the panel.
+  MouseDown _ Vty.BScrollUp _ _ -> ScrollIncidentsPanel (-3)
+  MouseDown _ Vty.BScrollDown _ _ -> ScrollIncidentsPanel 3
+  MouseDown (IncidentTarget reference) Vty.BLeft _ _ -> ClickIncidentRow reference
+  _ -> IgnoreIncidentsEvent
+incidentsAction _ _ = Nothing
+
+-- | Carries out one 'IncidentsAction'. Read-only with respect to everything
+-- the panel lists: it moves the dashboard's own selection and overlay and
+-- touches no incident, session, or GitHub state.
+applyIncidentsAction :: IncidentsAction -> AppState -> AppState
+applyIncidentsAction action state = case action of
+  OpenIncidentsPanel ->
+    state
+      { appOverlay = Just IncidentsOverlay,
+        appIncidentSelection = resolveIncidentSelection entries state.appIncidentSelection,
+        appNotice = Nothing
+      }
+  CloseIncidentsPanel -> state {appOverlay = Nothing, appNotice = Nothing}
+  MoveIncidentSelection amount -> state {appIncidentSelection = movedSelection amount}
+  ScrollIncidentsPanel amount -> state {appIncidentSelection = movedSelection amount}
+  ActivateSelectedIncident -> activate (activationTarget state.appIncidentSelection)
+  ClickIncidentRow clickedRef -> case resolveIncidentClick entries state.appIncidentSelection clickedRef of
+    IncidentClickIgnored -> state
+    IncidentClickOpen -> activate (Just clickedRef)
+    IncidentClickSelect selection -> state {appIncidentSelection = selection}
+  IgnoreIncidentsEvent -> state
+  where
+    entries = incidentEntries state
+
+    -- Which identity a key press aims at, which is not always the one
+    -- stored. A selection that already names a row keeps that name even
+    -- after the row disappears: that is what stops a refresh from handing
+    -- the key press to whatever moved into its place. A selection that
+    -- names nothing has no such claim to protect — it is what a panel
+    -- opened over an empty list leaves behind — and a poll that lands the
+    -- first row while the panel is open makes 'drawIncidents' resolve and
+    -- highlight it. Resolving here too is what keeps Enter acting on the
+    -- row the user can see highlighted.
+    activationTarget selection = case selection.incidentSelectionRef of
+      Just reference -> Just reference
+      Nothing -> (resolveIncidentSelection entries selection).incidentSelectionRef
+
+    movedSelection amount =
+      let resolved = resolveIncidentSelection entries state.appIncidentSelection
+          maximumIndex = max 0 (length entries - 1)
+          nextIndex = max 0 (min maximumIndex (resolved.incidentSelectionRow + amount))
+       in IncidentSelection (incidentEntryRef <$> safeIndex nextIndex entries) nextIndex
+
+    activate Nothing = state {appNotice = Just "No incident is selected"}
+    activate (Just reference) = case resolveIncidentActivation state.appBoard entries reference of
+      -- The row went away between the last render and this key press. The
+      -- panel stays open with nothing acted on, rather than sending the user
+      -- to whichever incident took its place.
+      Nothing -> state {appNotice = Just "That incident is no longer listed"}
+      Just activation -> applyIncidentActivation activation state
+
+applyIncidentActivation :: IncidentActivation -> AppState -> AppState
+applyIncidentActivation activation state =
+  selectWork
+    state
+      { appOverlay = activation.incidentActivationSession >>= sessionOverlayFor,
+        appNotice = activation.incidentActivationNotice
+      }
+  where
+    selectWork current = case activation.incidentActivationWork of
+      -- No row to go to: column, row, and tracker expansion are all left
+      -- exactly as they were.
+      Nothing -> current
+      Just location ->
+        current
+          { appSelectedColumn = location.boardWorkColumn,
+            appSelectedRows = Map.insert location.boardWorkColumn location.boardWorkRow current.appSelectedRows,
+            appExpandedTrackers = maybe id Set.insert location.boardWorkExpands current.appExpandedTrackers,
+            appEnsureSelectionVisible = True
+          }
+
+sessionOverlayFor :: AgentSessionRef -> Maybe Overlay
+sessionOverlayFor (SolveAgent issueNumber) = Just (SolveOverlay issueNumber)
+sessionOverlayFor (PullRequestAgent number) = Just (PullRequestReviewOverlay number)
+sessionOverlayFor (ReviewAgent issueNumber) = Just (ReviewOverlay issueNumber)
+sessionOverlayFor (WorkerAgent _) = Nothing
+
+-- | Dispatches one panel action, adding the two effects the pure transition
+-- cannot express: the viewport scroll a wheel event asks for, and settling a
+-- session overlay that activation just opened at its live tail.
+handleIncidentsAction :: IncidentsAction -> EventM Name AppState ()
+handleIncidentsAction action = do
+  before <- get
+  modify (applyIncidentsAction action)
+  case action of
+    ScrollIncidentsPanel amount -> vScrollBy (viewportScroll IncidentsViewport) amount
+    _ -> pure ()
+  after <- get
+  when (after.appOverlay /= before.appOverlay) $ case after.appOverlay of
+    Just (ReviewOverlay _) -> presentTranscriptTail >> armVisibleReviewTicks
+    Just (SolveOverlay _) -> presentTranscriptTail
+    Just (PullRequestReviewOverlay _) -> presentTranscriptTail
+    _ -> pure ()
+
+openProcesses :: EventM Name AppState ()
+openProcesses = do
+  state <- get
+  let resolved = resolveProcessSelection (agentSessionEntries state) state.appProcessSelection
+  modify
+    ( \current ->
+        current
+          { appOverlay = Just ProcessesOverlay,
+            appProcessSelection = resolved,
+            appNotice = Nothing
+          }
+    )
+
+moveProcessSelection :: Int -> EventM Name AppState ()
+moveProcessSelection amount = do
+  state <- get
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+      maximumIndex = max 0 (length entries - 1)
+      nextIndex = max 0 (min maximumIndex (resolved.processSelectionRow + amount))
+      nextSelection = ProcessSelection (agentSessionRef <$> safeIndex nextIndex entries) nextIndex
+  modify (\current -> current {appProcessSelection = nextSelection})
+
+scrollProcesses :: Int -> EventM Name AppState ()
+scrollProcesses amount = do
+  moveProcessSelection amount
+  vScrollBy (viewportScroll ProcessesViewport) amount
+
+selectOrOpenAgentSession :: AgentSessionRef -> EventM Name AppState ()
+selectOrOpenAgentSession clickedRef = do
+  state <- get
+  case resolveProcessClick (agentSessionEntries state) state.appProcessSelection clickedRef of
+    ProcessClickIgnored -> pure ()
+    ProcessClickOpen -> openSelectedAgentSession
+    ProcessClickSelect selection -> modify (\current -> current {appProcessSelection = selection})
+
+openSelectedAgentSession :: EventM Name AppState ()
+openSelectedAgentSession = do
+  state <- get
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+  modify (\current -> current {appProcessSelection = resolved})
+  case safeIndex resolved.processSelectionRow entries of
+    Nothing -> setNotice "No agent session is selected"
+    Just entry -> case entry.agentSessionRef of
+      SolveAgent issueNumber -> do
+        modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
+        presentTranscriptTail
+      PullRequestAgent number -> do
+        modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay number), appNotice = Nothing})
+        presentTranscriptTail
+      ReviewAgent issueNumber -> do
+        modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
+        presentTranscriptTail
+        armVisibleReviewTicks
+      WorkerAgent _ -> setNotice "This persistent worker is waiting for its issue or PR metadata; press u to refresh the board"
+
+killSelectedAgentSession :: EventM Name AppState ()
+killSelectedAgentSession = do
+  state <- get
+  let entries = agentSessionEntries state
+      resolved = resolveProcessSelection entries state.appProcessSelection
+  modify (\current -> current {appProcessSelection = resolved})
+  case safeIndex resolved.processSelectionRow entries of
+    Nothing -> setNotice "No agent session is selected"
+    Just entry
+      | not entry.agentSessionLive -> setNotice (entry.agentSessionLabel <> " has no live process to kill")
+      | otherwise -> case entry.agentSessionRef of
+          SolveAgent issueNumber -> killSolveAgent issueNumber
+          PullRequestAgent number -> case Map.lookup number state.appPullRequestReviewSessions of
+            Nothing -> setNotice "PR session is no longer available"
+            Just session -> killItemWorkingProcess (PullRequestItem session.pullRequestSessionPullRequest)
+          ReviewAgent issueNumber -> killReviewAgent issueNumber
+          WorkerAgent identifier -> case Map.lookup identifier state.appWorkers of
+            Nothing -> setNotice "Persistent worker is no longer available"
+            Just descriptor -> do
+              modify
+                ( \current ->
+                    current
+                      { appWorkers = Map.delete identifier current.appWorkers,
+                        appWorkerMonitors = Set.delete identifier current.appWorkerMonitors
+                      }
+                )
+              void . liftIO . forkIO $ terminateWorker descriptor
+              setNotice ("Killing " <> entry.agentSessionLabel <> " and its process tree…")
+
+killSolveAgent :: Int -> EventM Name AppState ()
+killSolveAgent issueNumber = do
+  state <- get
+  case (solveWorkerFor state issueNumber, Map.lookup issueNumber state.appSolveProcesses) of
+    (Nothing, Nothing) -> setNotice ("Solve #" <> showText issueNumber <> " has no live process to kill")
+    (worker, process) -> do
+      appendToSolveSession issueNumber
+        ( \session ->
+            session
+              { solveSessionPhase = SolveKilledPhase,
+                solveSessionActivity = "killing process tree",
+                solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[killed by user]\n"
+              }
+        )
+      void . liftIO . forkIO $ case worker of
+        Just descriptor -> terminateWorker descriptor
+        Nothing -> mapM_ killManagedProcess process
+      setNotice ("Killing solve #" <> showText issueNumber <> " and its process tree…")
+
+killReviewAgent :: Int -> EventM Name AppState ()
+killReviewAgent issueNumber = do
+  state <- get
+  let canonicalProcess = Map.lookup issueNumber state.appCanonicalReviewProcesses
+      activeTurn = do
+        session <- Map.lookup issueNumber state.appReviewSessions
+        client <- case state.appReviewBackend of
+          ReviewBackendReady value -> Just value
+          _ -> Nothing
+        threadId <- session.reviewSessionThreadId
+        turnId <- session.reviewSessionTurnId
+        if reviewTurnInterruptible session.reviewSessionStage session.reviewSessionPhase
+          then Just (client, threadId, turnId)
+          else Nothing
+  case (canonicalProcess, activeTurn) of
+    (Nothing, Nothing) -> setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
+    _ -> do
+      appendToReviewSession issueNumber
+        ( \session ->
+            session
+              { reviewSessionPhase = ReviewFailed,
+                reviewSessionActivity = "killing process tree",
+                reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[killed by user]\n"
+              }
+        )
+      mapM_ (\process -> void . liftIO . forkIO $ killManagedProcess process) canonicalProcess
+      case activeTurn of
+        Nothing -> pure ()
+        Just (client, threadId, turnId) -> do
+          void . liftIO . forkIO $ killReviewTools client threadId
+          void (liftIO (interruptReview client threadId turnId))
+      setNotice ("Killing issue review #" <> showText issueNumber <> " and its process tree…")
+
+killSelectedWorkingProcess :: EventM Name AppState ()
+killSelectedWorkingProcess = do
+  state <- get
+  case selectedReviewItem state of
+    Nothing -> setNotice killSelectionNotice
+    Just item -> killItemWorkingProcess item
+
+-- | Shown when @x@ is pressed with nothing killable selected. It has to name
+-- @x@ itself: @k@ is the select-previous binding, so a reader who obeys a
+-- notice naming @k@ moves the selection instead of retrying the kill.
+killSelectionNotice :: Text
+killSelectionNotice = "Select a working issue or PR before pressing x"
+
+killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
+killItemWorkingProcess (PullRequestItem pullRequest) = do
+  state <- get
+  let number = pullRequest.pullRequestNumber
+  case (pullRequestWorkerFor state number, Map.lookup number state.appPullRequestProcesses) of
+    (Nothing, Nothing) -> setNotice ("PR #" <> showText number <> " has no live process to kill")
+    (worker, process) -> do
+      appendToPullRequestSession number
+        ( \session ->
+            session
+              { pullRequestSessionPhase = SolveKilledPhase,
+                pullRequestSessionActivity = "killing process tree",
+                pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[killed by user]\n"
+              }
+        )
+      void . liftIO . forkIO $ case worker of
+        Just descriptor -> terminateWorker descriptor
+        Nothing -> mapM_ killManagedProcess process
+      setNotice ("Killing PR workflow #" <> showText number <> " and its process tree…")
+killItemWorkingProcess (IssueItem issue) = do
+  state <- get
+  let issueNumber = issue.issueNumber
+      solveProcess = Map.lookup issueNumber state.appSolveProcesses
+      solveWorker = solveWorkerFor state issueNumber
+      canonicalProcess = Map.lookup issueNumber state.appCanonicalReviewProcesses
+      reviewSession = Map.lookup issueNumber state.appReviewSessions
+      activeReview = reviewSession >>= activeReviewTurn state
+  case (solveWorker, solveProcess, canonicalProcess, activeReview) of
+    (Nothing, Nothing, Nothing, Nothing) -> setNotice ("Issue #" <> showText issueNumber <> " has no live process to kill")
+    _ -> do
+      case (solveWorker, solveProcess) of
+        (Nothing, Nothing) -> pure ()
+        (worker, process) -> do
+          appendToSolveSession issueNumber
+            ( \session ->
+                session
+                  { solveSessionPhase = SolveKilledPhase,
+                    solveSessionActivity = "killing process tree",
+                    solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[killed by user]\n"
+                  }
+            )
+          void . liftIO . forkIO $ case worker of
+            Just descriptor -> terminateWorker descriptor
+            Nothing -> mapM_ killManagedProcess process
+      case canonicalProcess of
+        Nothing -> pure ()
+        Just process -> do
+          appendToReviewSession issueNumber
+            ( \session ->
+                session
+                  { reviewSessionPhase = ReviewFailed,
+                    reviewSessionActivity = "killing process tree",
+                    reviewSessionTranscript = appendReviewTranscript session.reviewSessionTranscript "\n[killed by user]\n"
+                  }
+            )
+          void . liftIO . forkIO $ killManagedProcess process
+      reviewInterruption <- case activeReview of
+        Nothing -> pure (Right ())
+        Just (client, threadId, turnId) -> do
+          void . liftIO . forkIO $ killReviewTools client threadId
+          liftIO (interruptReview client threadId turnId)
+      case reviewInterruption of
+        Left message -> setNotice ("Process-tree kill started, but review interruption failed: " <> message)
+        Right () -> setNotice ("Killing work for issue #" <> showText issueNumber <> " and its process tree…")
+  where
+    activeReviewTurn state session
+      | reviewSessionActive session,
+        ReviewBackendReady client <- state.appReviewBackend,
+        Just threadId <- session.reviewSessionThreadId,
+        Just turnId <- session.reviewSessionTurnId = Just (client, threadId, turnId)
+      | otherwise = Nothing
+
+scrollDetails :: Int -> EventM Name AppState ()
+scrollDetails = vScrollBy (viewportScroll DetailsViewport)
+
+handleSolveOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
+handleSolveOverlayEvent issueNumber event = case event of
+  VtyEvent vtyEvent
+    | Just amount <- transcriptScrollKey False vtyEvent -> scrollTranscript (SolveTranscript issueNumber) amount
+  VtyEvent (Vty.EvKey Vty.KBS []) -> modifySolveSession issueNumber (\session -> session {solveSessionInput = Text.dropEnd 1 session.solveSessionInput})
+  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitSolveInput issueNumber
+  VtyEvent (Vty.EvKey (Vty.KChar character) [])
+    | isPrint character ->
+        modifySolveSession issueNumber
+          (\session -> session {solveSessionInput = Text.take reviewInputLimit (session.solveSessionInput <> Text.singleton character)})
+  _ -> pure ()
+
+handleReviewOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
+handleReviewOverlayEvent issueNumber event = case event of
+  VtyEvent (Vty.EvKey (Vty.KChar '\t') []) -> cycleReviewSession issueNumber
+  VtyEvent vtyEvent
+    | Just amount <- transcriptScrollKey True vtyEvent -> scrollTranscript (ReviewTranscript issueNumber) amount
+  VtyEvent (Vty.EvKey (Vty.KChar 'x') [Vty.MCtrl]) -> cancelReviewSession issueNumber
+  VtyEvent (Vty.EvKey (Vty.KChar 'c') [Vty.MCtrl]) -> cancelReviewSession issueNumber
+  VtyEvent (Vty.EvKey Vty.KBS []) -> modifyReviewSession issueNumber removeReviewInputCharacter
+  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitReviewInput issueNumber
+  VtyEvent (Vty.EvKey (Vty.KChar character) [])
+    | character >= '1' && character <= '9' -> chooseReviewOption issueNumber (fromEnum character - fromEnum '1')
+    | isPrint character -> modifyReviewSession issueNumber (appendReviewInput character)
+  _ -> pure ()
+
+handlePullRequestOverlayEvent :: Int -> BrickEvent Name AppEvent -> EventM Name AppState ()
+handlePullRequestOverlayEvent number event = case event of
+  VtyEvent vtyEvent
+    | Just amount <- transcriptScrollKey False vtyEvent -> scrollTranscript (PullRequestTranscript number) amount
+  VtyEvent (Vty.EvKey Vty.KBS []) -> modifyPullRequestSession number (\session -> session {pullRequestSessionInput = Text.dropEnd 1 session.pullRequestSessionInput})
+  VtyEvent (Vty.EvKey Vty.KEnter []) -> submitPullRequestInput number
+  VtyEvent (Vty.EvKey (Vty.KChar character) [])
+    | isPrint character -> modifyPullRequestSession number (\session -> session {pullRequestSessionInput = Text.take reviewInputLimit (session.pullRequestSessionInput <> Text.singleton character)})
+  _ -> pure ()
+
+scrollColumn :: BoardColumn -> Int -> EventM Name AppState ()
+scrollColumn column amount = do
+  modify (\state -> state {appEnsureSelectionVisible = False})
+  vScrollBy (viewportScroll (ColumnViewport column)) amount
+
+selectOrOpenCard :: BoardColumn -> Int -> EventM Name AppState ()
+selectOrOpenCard column row = modify $ \state ->
+  if state.appSelectedColumn == column && selectedRow state column == row
+    then case safeIndex row (entriesFor state column) of
+      Just entry -> state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
+      Nothing -> state
+    else
+      state
+        { appSelectedColumn = column,
+          appSelectedRows = Map.insert column row state.appSelectedRows,
+          appEnsureSelectionVisible = True,
+          appNotice = Nothing
+        }
+
+openRunningProcessOrSelect :: BoardColumn -> Int -> EventM Name AppState ()
+openRunningProcessOrSelect column row = do
+  state <- get
+  let selectedState = selectCardOnly column row state
+  case safeIndex row (entriesFor state column) >>= runningProcessOverlay state . entryItem of
+    Nothing -> put selectedState
+    Just overlay -> do
+      put (selectedState {appOverlay = Just overlay})
+      presentTranscriptTail
+      armVisibleReviewTicks
+
+selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
+selectCardOnly column row state =
+  state
+    { appSelectedColumn = column,
+      appSelectedRows = Map.insert column row state.appSelectedRows,
+      appEnsureSelectionVisible = True,
+      appNotice = Nothing
+    }
+
+runningProcessOverlay :: AppState -> BoardItem -> Maybe Overlay
+runningProcessOverlay state (PullRequestItem pullRequest)
+  | Map.member pullRequest.pullRequestNumber state.appPullRequestProcesses || pullRequestWorkerFor state pullRequest.pullRequestNumber /= Nothing =
+      Just (PullRequestReviewOverlay pullRequest.pullRequestNumber)
+  | otherwise = Nothing
+runningProcessOverlay state (IssueItem issue)
+  | issueReviewIsActive = Just (ReviewOverlay issueNumber)
+  | Map.member issueNumber state.appSolveProcesses || solveWorkerFor state issueNumber /= Nothing = Just (SolveOverlay issueNumber)
+  | Just pullRequestNumber <- boundAutoSolvePullRequest,
+    Map.member pullRequestNumber state.appPullRequestProcesses =
+      Just (PullRequestReviewOverlay pullRequestNumber)
+  | otherwise = Nothing
+  where
+    issueNumber = issue.issueNumber
+    issueReviewIsActive =
+      Map.member issueNumber state.appCanonicalReviewProcesses
+        || maybe False reviewSessionActive (Map.lookup issueNumber state.appReviewSessions)
+    boundAutoSolvePullRequest = do
+      session <- Map.lookup issueNumber state.appSolveSessions
+      progress <- session.solveSessionAutoProgress
+      progress.autoSolvePullRequest

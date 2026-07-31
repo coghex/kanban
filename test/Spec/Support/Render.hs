@@ -30,7 +30,10 @@ import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp (..))
 import Kanban.CLI (Options (..))
 import Kanban.Domain
-import Kanban.UI (CardEnv (..), DetailsEnv (..), Name (..), drawCardFrame, drawDetails, themeFor)
+import Kanban.UI.Board (CardEnv (..), drawCardFrame)
+import Kanban.UI.Details (DetailsEnv (..), drawDetails)
+import Kanban.UI.Theme (themeFor)
+import Kanban.UI.Types (Name (..))
 import Spec.Support.Fixtures (detailsFixtureUpdatedAt, epoch, testOptions, testResolvedConfig)
 
 -- | Draw the details overlay at the width the real overlay gives its content

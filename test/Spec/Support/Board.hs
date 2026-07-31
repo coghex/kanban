@@ -16,7 +16,8 @@ import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..))
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
-import Kanban.UI (BoardRefreshOutcome (..), runBoardRefreshWith)
+import Kanban.UI.Refresh (runBoardRefreshWith)
+import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Env (withEnvironmentValue, withFakeOnPath)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import System.Directory (createDirectoryIfMissing)
