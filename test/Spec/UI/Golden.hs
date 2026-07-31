@@ -295,6 +295,7 @@ restingState channel =
       appDrainerIncidents = Nothing,
       appDrainerBusy = False,
       appDirectMergePending = Nothing,
+      appDirectMergeResult = Nothing,
       appBoardRefreshQueued = False,
       appReviewBackend = ReviewBackendStopped,
       appReviewSessions = Map.empty,

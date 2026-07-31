@@ -50,6 +50,7 @@ module Kanban.UI
     codexRefreshTimeoutMicros,
     decideReviewTickArm,
     decideReviewTickFire,
+    directMergeResultAfterRefresh,
     displayedTranscript,
     drainerSourceState,
     drawApplication,
@@ -77,6 +78,7 @@ module Kanban.UI
     mergeExplanation,
     mergeText,
     neutralAttr,
+    noticeWithDirectMergeResult,
     normalizeCollapsedRow,
     normalizeSelectedRowsAfterToggle,
     orphanMessage,
@@ -637,6 +639,11 @@ data AppState = AppState
     -- apart from 'appDrainerStatus', which reports the launchd service and
     -- has nothing to say about a run this dashboard started instead of it.
     appDirectMergePending :: Maybe Int,
+    -- | The notice a direct merge that actually landed produced, held until
+    -- the board refresh it requires has run. That notice is the only report
+    -- an irreversible action gets, and the refresh it triggers would
+    -- otherwise overwrite it before it could be read.
+    appDirectMergeResult :: Maybe Text,
     -- | A board refresh that has to observe something already committed, and
     -- could not start because a fetch was already in flight. That fetch may
     -- have read GitHub before the change landed, so it does not satisfy the
@@ -714,6 +721,7 @@ runDashboard options config repository = do
             appDrainerIncidents = Nothing,
             appDrainerBusy = False,
             appDirectMergePending = Nothing,
+            appDirectMergeResult = Nothing,
             appBoardRefreshQueued = False,
             appReviewBackend = ReviewBackendStopped,
             appReviewSessions = Map.empty,
@@ -2816,7 +2824,7 @@ handleEvent event = do
     (Just _, _) -> pure ()
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
     (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
-    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
+    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing, appDirectMergeResult = Nothing})
     (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveCard 1
     (Nothing, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveCard (-1)
@@ -5625,10 +5633,29 @@ applyDirectMerge number result = do
         state
           { appDirectMergePending =
               if state.appDirectMergePending == Just number then Nothing else state.appDirectMergePending,
-            appNotice = Just effect.directMergeNotice
+            appNotice = Just effect.directMergeNotice,
+            -- Outstanding only when a refresh follows. A declined run reports
+            -- itself and nothing overwrites it, and clearing here is also what
+            -- retires the previous merge's result.
+            appDirectMergeResult =
+              if effect.directMergeRefreshesBoard then Just effect.directMergeNotice else Nothing
           }
     )
   when effect.directMergeRefreshesBoard requireBoardRefresh
+
+-- | A notice shown while a direct-merge result is still outstanding, with
+-- that result kept in front of it.
+noticeWithDirectMergeResult :: Maybe Text -> Text -> Text
+noticeWithDirectMergeResult Nothing notice = notice
+noticeWithDirectMergeResult (Just result) notice = result <> " · " <> notice
+
+-- | Whether an outstanding direct-merge result survives a refresh that has
+-- just published. It is dropped once the refresh it required has actually
+-- run, and kept while that refresh is still only queued -- otherwise the
+-- fetch that merely happened to be in flight would carry the result away
+-- before the one the merge required had even started.
+directMergeResultAfterRefresh :: Bool -> Maybe Text -> Maybe Text
+directMergeResultAfterRefresh queued result = if queued then result else Nothing
 
 startAllRefreshes :: EventM Name AppState ()
 startAllRefreshes = do
@@ -5680,13 +5707,13 @@ startBoardRefresh :: EventM Name AppState ()
 startBoardRefresh = do
   state <- get
   case state.appBoardFreshness of
-    Loading -> setNotice "GitHub refresh is already running"
+    Loading -> setNotice (noticeWithDirectMergeResult state.appDirectMergeResult "GitHub refresh is already running")
     _ -> do
       modify
         ( \current ->
             current
               { appBoardFreshness = Loading,
-                appNotice = Just "Refreshing GitHub…"
+                appNotice = Just (noticeWithDirectMergeResult current.appDirectMergeResult "Refreshing GitHub…")
               }
         )
       void
@@ -5786,6 +5813,7 @@ runUsageProvider timeoutMicros (Just command) _ = runUsageCommand timeoutMicros 
 
 applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
 applyBoardRefresh outcome = do
+  before <- get
   modify $ \state -> case outcome of
     -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
     -- re-verifies it before spawning anything, so a later refresh -- in this
@@ -5827,6 +5855,18 @@ applyBoardRefresh outcome = do
               appPullRequestsTruncated = snapshot.snapshotPullRequestsTruncated,
               appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
             }
+  -- Applied over whichever notice the outcome above produced, so a merge that
+  -- landed is still reported once the refresh it required has published --
+  -- above all a merge whose post-merge work then failed, which this is the
+  -- only place the user is ever told about.
+  modify
+    ( \state ->
+        state
+          { appNotice = noticeWithDirectMergeResult before.appDirectMergeResult <$> state.appNotice,
+            appDirectMergeResult =
+              directMergeResultAfterRefresh before.appBoardRefreshQueued before.appDirectMergeResult
+          }
+    )
   startPendingWorkerMonitors
   case outcome of
     BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot

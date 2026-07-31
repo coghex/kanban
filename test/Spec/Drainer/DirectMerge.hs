@@ -33,7 +33,13 @@ import Kanban.Drainer
     selectSinglePullRequestDrainer,
     singlePullRequestDrainerPath,
   )
-import Kanban.UI (BoardRefreshDispatch (..), releaseQueuedBoardRefresh, requiredBoardRefreshDispatch)
+import Kanban.UI
+  ( BoardRefreshDispatch (..),
+    directMergeResultAfterRefresh,
+    noticeWithDirectMergeResult,
+    releaseQueuedBoardRefresh,
+    requiredBoardRefreshDispatch,
+  )
 import Spec.Support.Env (withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, basePullRequest)
@@ -415,6 +421,27 @@ examples = do
       -- a way that leaves it unable to fetch at all, so the request waits
       -- rather than being spent on a call that would only be turned away.
       releaseQueuedBoardRefresh True Loading `shouldBe` False
+
+    -- The merge is irreversible and its result is the only report of it, so
+    -- the refresh that same result requires must not be what removes it from
+    -- the screen. This is the whole reason a merged-and-unfinished outcome is
+    -- ever readable.
+    it "keeps a landed merge's result in front of the refresh it required" $ do
+      let landed = Just "PR #42 merged, but the run did not finish cleanly (post_merge_cleanup_failed): the linked issue is still open."
+      noticeWithDirectMergeResult landed "Refreshing GitHub…"
+        `shouldMention` "post_merge_cleanup_failed"
+      noticeWithDirectMergeResult landed "Refreshing GitHub…" `shouldMention` "Refreshing GitHub"
+      noticeWithDirectMergeResult landed "GitHub refresh is already running"
+        `shouldMention` "the linked issue is still open"
+      -- Nothing outstanding leaves every other notice exactly as it was.
+      noticeWithDirectMergeResult Nothing "Refreshing GitHub…" `shouldBe` "Refreshing GitHub…"
+
+    it "drops that result only once the refresh it required has run" $ do
+      let landed = Just "PR #42 merged."
+      -- The fetch that merely happened to be in flight publishes first; the
+      -- required one has not started, so the result has to survive it.
+      directMergeResultAfterRefresh True landed `shouldBe` landed
+      directMergeResultAfterRefresh False landed `shouldBe` Nothing
 
 -- | A status shaped as the controller's decoder builds one, so an example
 -- never has to restate the field order.

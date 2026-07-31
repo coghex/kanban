@@ -69,6 +69,7 @@ testAppState board = do
         appDrainerIncidents = Just [],
         appDrainerBusy = False,
         appDirectMergePending = Nothing,
+        appDirectMergeResult = Nothing,
         appBoardRefreshQueued = False,
         appReviewBackend = ReviewBackendStopped,
         appReviewSessions = Map.empty,

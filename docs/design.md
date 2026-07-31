@@ -1164,6 +1164,14 @@ a countdown.
   the pull request merged requires a GitHub refresh that begins after that
   result: when a fetch is already in flight the request is queued rather than
   dropped, because that fetch may have read GitHub before the merge landed.
+- A landed merge's result stays in front of the user across that refresh
+  rather than being replaced by it. The result is the only report an
+  irreversible action gets — and the merged-but-unfinished case is reported
+  nowhere else — so the refresh the same result requires must not be what
+  removes it from the screen. It is carried in front of the refresh's own
+  notices and dropped once the required refresh has actually published, not
+  once whichever fetch happened to be in flight did. Dismissing the notice
+  dismisses it.
 - The canonical drainer, controller, and safety-first installer are versioned
   with Kanban under `tools/`. The installer creates stable per-user links under
   `~/Library/Application Support/kanban/pr-drainer/`; rerunning it refreshes
