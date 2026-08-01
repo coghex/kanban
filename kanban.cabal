@@ -109,6 +109,9 @@ library
     Kanban.GitHub.Warnings
     Kanban.Preflight.Environment
     Kanban.Preflight.Readiness
+    Kanban.Solve.Event
+    Kanban.Solve.Parse
+    Kanban.Solve.Unknown
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
