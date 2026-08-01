@@ -98,6 +98,9 @@ library
     Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
+  other-modules:
+    Kanban.Preflight.Environment
+    Kanban.Preflight.Readiness
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
