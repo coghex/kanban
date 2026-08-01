@@ -98,6 +98,14 @@ library
     Kanban.UsageCommand
     Kanban.Worker
     Kanban.Workflow
+  other-modules:
+    Kanban.GitHub.Decode
+    Kanban.GitHub.Fetch
+    Kanban.GitHub.Group
+    Kanban.GitHub.Guard
+    Kanban.GitHub.Message
+    Kanban.GitHub.Run
+    Kanban.GitHub.Warnings
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,

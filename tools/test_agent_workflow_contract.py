@@ -33,7 +33,7 @@ SURFACE_FILES = [
     "src/Kanban/Review.hs",
     "src/Kanban/Codex.hs",
     "src/Kanban/Claude.hs",
-    "src/Kanban/GitHub.hs",
+    "src/Kanban/GitHub/Run.hs",
     "src/Kanban/Repository.hs",
     "src/Kanban/Drainer.hs",
     "src/Kanban/Process.hs",

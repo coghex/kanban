@@ -558,7 +558,7 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review.hs;src/Kanban/Preflight.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
@@ -698,9 +698,12 @@ runs) parses the manifest in §4 and:
 
 - fails if the solve, PR-flow, canonical-review, or shared provider/process
   source files (`src/Kanban/Solve.hs`, `PullRequestFlow.hs`, `Review.hs`,
-  `Codex.hs`, `Claude.hs`, `GitHub.hs`, `Repository.hs`, `Drainer.hs`,
+  `Codex.hs`, `Claude.hs`, `GitHub/Run.hs`, `Repository.hs`, `Drainer.hs`,
   `Process.hs`) invoke a literal external command that has no matching
-  `executable` manifest entry;
+  `executable` manifest entry — `GitHub/Run.hs` rather than `GitHub.hs`
+  because the split in #160 left `Kanban.GitHub` a re-export façade and moved
+  the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
+  `src/Kanban/GitHub/` that resolves or starts an executable;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files
   (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) or the tracked Claude
   plugin's packaged `commands/*.md` files
