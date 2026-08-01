@@ -734,8 +734,11 @@ runs) parses the manifest in §4 and:
   home-relative path segment that has no matching `personal-path` manifest
   entry;
 - fails if a non-test Python module under `tools/` invokes a command, as the
-  first element of a literal `run`/`subprocess.run`/`run_command`/`Popen`
-  argument list in either Python quote style, that has no matching
+  first element of a literal argument list in either Python quote style
+  passed to `subprocess.run`/`Popen` or to any of these modules' own
+  `run`-family wrappers (`run`, `run_command`, `run_json`, and anything else
+  spelled `run`, matched as a family so the next wrapper is covered before it
+  is written), that has no matching
   `executable` manifest entry — that is how `launchctl` is held to the same
   standard as `/usr/bin/plutil`, which merely reads the job `launchctl`
   installs. This surface is discovered rather than enumerated, so a tool

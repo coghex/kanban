@@ -270,19 +270,24 @@ def discovered_commands_for_plugin_file(relative_path, content):
 
 
 # run(["git", ...]) / subprocess.run(["gh", ...]) / run_command(["launchctl",
-# ...]) / subprocess.Popen(["...", ...]) — the repository tools' own external
-# -command surface. These modules spawn through their own thin wrappers as
-# often as through subprocess directly: every launchctl call in
-# tools/drain_prs_service.py goes through its run_command helper, so an
-# extractor keyed to `run(` alone, the way the packaged coordinators' one
-# above is, would discover nothing at all in the module that owns the
-# pipeline's only irreversible action. `\s` matches newlines without
-# re.DOTALL, so a list literal split across lines is covered too, and either
-# Python quote style is accepted: every tool here happens to use double
-# quotes, but a check whose gate a single-quoted literal walks through is not
-# a gate.
+# ...]) / run_json(["gh", ...]) / subprocess.Popen(["...", ...]) — the
+# repository tools' own external-command surface. These modules spawn through
+# their own thin wrappers at least as often as through subprocess directly,
+# and each module names its wrappers differently: every launchctl call in
+# tools/drain_prs_service.py goes through run_command, while approve_issues.py
+# and drain_prs.py add run_json on top of run. So the callee is matched as a
+# family — anything spelled `run`, plus the subprocess entry points — rather
+# than as a fixed list of wrapper names that the next wrapper would slip past.
+# The net is deliberately generous: a false positive fails loudly and is
+# corrected by declaring or renaming, whereas a miss is a dependency that
+# lands undocumented, which is the failure this whole file exists to prevent.
+# `\s` matches newlines without re.DOTALL, so a list literal split across
+# lines is covered too, and either Python quote style is accepted: every tool
+# here happens to use double quotes, but a check whose gate a single-quoted
+# literal walks through is not a gate.
 TOOL_COMMAND_CALL_RE = re.compile(
-    r'\b(?:subprocess\.)?(?:run(?:_command)?|Popen|check_call|check_output)'
+    r'\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?'
+    r'(?:[a-z_]*run[a-z_0-9]*|Popen|check_call|check_output|call)'
     r'\(\s*\[\s*(?P<quote>["\'])(?P<name>[^"\']+)(?P=quote)'
 )
 
@@ -678,6 +683,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
             discovered_tool_commands("run_command(['launchctl', 'print'])"),
             {"launchctl"},
         )
+        # And any wrapper of the same family, not a fixed list of names:
+        # approve_issues.py and drain_prs.py both reach gh through run_json,
+        # which is neither `run` nor `run_command`.
+        for relative_path in ("tools/approve_issues.py", "tools/drain_prs.py"):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("gh", discovered_tool_commands(content), relative_path)
+        self.assertEqual(
+            discovered_tool_commands('run_json(\n    ["gh", "repo", "view"],\n)'),
+            {"gh"},
+        )
 
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
@@ -717,9 +732,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_undeclared_tool_command_fails_the_tool_surface_check(self):
         # A temporary tools/ tree stands in for a future edit: an undeclared
         # command reaches the report whether it is spawned directly or through
-        # a run_command wrapper, and in either Python quote style — a gate a
-        # single-quoted literal walks through is not a gate. Neither a test
-        # module nor a fake-builder contributes one.
+        # any wrapper of the run family, and in either Python quote style — a
+        # gate a single-quoted literal walks through is not a gate. Neither a
+        # test module nor a fake-builder contributes one.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
@@ -737,6 +752,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 'run_command(["undeclared-wrapped", "print", target])\n',
                 encoding="utf-8",
             )
+            (tools_dir / "json_tool.py").write_text(
+                'data = run_json(\n    ["undeclared-json-wrapped", "list"],\n    cwd=root,\n)\n',
+                encoding="utf-8",
+            )
             (tools_dir / "test_wrapper_tool.py").write_text(
                 'run_command(["fixture-only", "print"])\n', encoding="utf-8"
             )
@@ -748,6 +767,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             findings,
             [
                 ("tools/direct_tool.py", "undeclared-direct"),
+                ("tools/json_tool.py", "undeclared-json-wrapped"),
                 ("tools/quoted_tool.py", "undeclared-single-quoted"),
                 ("tools/wrapper_tool.py", "undeclared-wrapped"),
             ],
