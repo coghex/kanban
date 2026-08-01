@@ -1,9 +1,6 @@
 module Kanban.UI.Transcript
   ( TranscriptGeometry (..),
     TranscriptSession (..),
-    appendToPullRequestSession,
-    appendToReviewSession,
-    appendToSolveSession,
     displayedTranscript,
     followAfterScroll,
     followAfterTurnStarted,
@@ -12,7 +9,6 @@ module Kanban.UI.Transcript
     tailDisplayedTranscript,
     tailReviewThread,
     tailTranscript,
-    transcriptScrollKey,
     transcriptShouldTail,
   )
 where
@@ -22,7 +18,6 @@ import Brick
 import Control.Monad (when)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import qualified Graphics.Vty as Vty
 import Kanban.UI.Types
 import Kanban.UI.State
 
@@ -93,32 +88,23 @@ followAfterTurnStarted :: Bool -> Maybe Text -> Text -> Bool
 followAfterTurnStarted following currentTurnId startedTurnId =
   following || currentTurnId /= Just startedTurnId
 
--- | The relative transcript scroll a key press asks for, if any.
--- 'reviewChords' enables the review overlay's additional Ctrl-J/Ctrl-K
--- bindings, which the solve and PR overlays do not offer. Pure so every
--- binding that can change follow state is unit-testable without an
--- 'EventM' harness; the wheel equivalents come from 'overlayMouseAction'.
-transcriptScrollKey :: Bool -> Vty.Event -> Maybe Int
-transcriptScrollKey _ (Vty.EvKey Vty.KDown []) = Just 1
-transcriptScrollKey _ (Vty.EvKey Vty.KUp []) = Just (-1)
-transcriptScrollKey True (Vty.EvKey (Vty.KChar 'j') [Vty.MCtrl]) = Just 1
-transcriptScrollKey True (Vty.EvKey (Vty.KChar 'k') [Vty.MCtrl]) = Just (-1)
-transcriptScrollKey _ _ = Nothing
-
+-- | Follow state lives in the shared session core, so these two only pick
+-- the map the identity names; the decisions above and in
+-- 'Kanban.UI.SessionCore' are what all three kinds actually share.
 transcriptFollowing :: AppState -> TranscriptSession -> Bool
 transcriptFollowing state = \case
-  SolveTranscript issueNumber -> maybe False (.solveSessionFollowing) (Map.lookup issueNumber state.appSolveSessions)
-  PullRequestTranscript number -> maybe False (.pullRequestSessionFollowing) (Map.lookup number state.appPullRequestReviewSessions)
-  ReviewTranscript issueNumber -> maybe False (.reviewSessionFollowing) (Map.lookup issueNumber state.appReviewSessions)
+  SolveTranscript issueNumber -> maybe False (.sessionFollowing) (Map.lookup issueNumber state.appSolveSessions)
+  PullRequestTranscript number -> maybe False (.sessionFollowing) (Map.lookup number state.appPullRequestReviewSessions)
+  ReviewTranscript issueNumber -> maybe False (.sessionFollowing) (Map.lookup issueNumber state.appReviewSessions)
 
 setTranscriptFollowing :: TranscriptSession -> Bool -> AppState -> AppState
 setTranscriptFollowing session following state = case session of
   SolveTranscript issueNumber ->
-    state {appSolveSessions = Map.adjust (\current -> current {solveSessionFollowing = following}) issueNumber state.appSolveSessions}
+    state {appSolveSessions = Map.adjust (\current -> current {sessionFollowing = following}) issueNumber state.appSolveSessions}
   PullRequestTranscript number ->
-    state {appPullRequestReviewSessions = Map.adjust (\current -> current {pullRequestSessionFollowing = following}) number state.appPullRequestReviewSessions}
+    state {appPullRequestReviewSessions = Map.adjust (\current -> current {sessionFollowing = following}) number state.appPullRequestReviewSessions}
   ReviewTranscript issueNumber ->
-    state {appReviewSessions = Map.adjust (\current -> current {reviewSessionFollowing = following}) issueNumber state.appReviewSessions}
+    state {appReviewSessions = Map.adjust (\current -> current {sessionFollowing = following}) issueNumber state.appReviewSessions}
 
 -- | Move a transcript to the live tail, but only when 'transcriptShouldTail'
 -- allows it. Every transcript-growing event routes through here, so a
@@ -169,27 +155,6 @@ presentTranscriptTail = do
     Just session -> do
       modify (setTranscriptFollowing session True)
       vScrollToEnd (viewportScroll (transcriptViewport session))
-
--- | Update a session and move its transcript to the new tail under the
--- same gate streamed output uses. A completion result, an interrupt
--- notice, a killed marker, or an echoed answer grows the transcript
--- exactly as an output delta does, so a following visible session must not
--- be left sitting above it; routing every transcript-growing path through
--- these keeps that from having to be remembered per call site.
-appendToSolveSession :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
-appendToSolveSession issueNumber update = do
-  modifySolveSession issueNumber update
-  tailTranscript (SolveTranscript issueNumber)
-
-appendToPullRequestSession :: Int -> (PullRequestReviewSession -> PullRequestReviewSession) -> EventM Name AppState ()
-appendToPullRequestSession number update = do
-  modifyPullRequestSession number update
-  tailTranscript (PullRequestTranscript number)
-
-appendToReviewSession :: Int -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
-appendToReviewSession issueNumber update = do
-  modifyReviewSession issueNumber update
-  tailTranscript (ReviewTranscript issueNumber)
 
 -- | Tail whichever transcript is on screen, for updates that grow many
 -- sessions at once -- a backend disconnect marks every live review session

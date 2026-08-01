@@ -1,21 +1,12 @@
 module Kanban.UI.State
   ( agentActivity,
     appendAgentTranscript,
-    appendReviewTranscript,
-    appendSolveTranscript,
-    boundedAppend,
     closeOverlay,
     findReviewSessionByThread,
     forceTerminalRepaint,
-    modifyPullRequestSession,
-    modifyReviewSession,
     modifyReviewSessionByThread,
-    modifySolveSession,
     plainTranscript,
-    reviewInputLimit,
     setNotice,
-    setPullRequestActivity,
-    setSolveActivity,
     transcriptFor,
   )
 where
@@ -27,7 +18,6 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe )
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime )
 import qualified Graphics.Vty as Vty
 import Kanban.Solve
   ( AgentEvent (..),
@@ -38,6 +28,7 @@ import Kanban.Settings
     )
 import Kanban.Text (sanitizeText)
 import Kanban.UI.Types
+import Kanban.UI.SessionCore
 import Kanban.UI.Util
 
 setNotice :: Text -> EventM Name AppState ()
@@ -58,10 +49,9 @@ forceTerminalRepaint = do
 closeOverlay :: EventM Name AppState ()
 closeOverlay = modify (\state -> state {appOverlay = Nothing, appNotice = Nothing})
 
-modifyReviewSession :: Int -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
-modifyReviewSession issueNumber update =
-  modify (\state -> state {appReviewSessions = Map.adjust update issueNumber state.appReviewSessions})
-
+-- | Review protocol events are addressed by the app-server's thread id
+-- rather than by issue number, which is the one session lookup the shared
+-- key-addressed helpers in 'Kanban.UI.SessionEvents' cannot express.
 modifyReviewSessionByThread :: Text -> (ReviewSession -> ReviewSession) -> EventM Name AppState ()
 modifyReviewSessionByThread threadId update = modify $ \state ->
   case findReviewSessionByThread threadId state of
@@ -73,7 +63,7 @@ findReviewSessionByThread threadId state =
   safeIndex 0
     [ (issueNumber, session)
       | (issueNumber, session) <- Map.toList state.appReviewSessions,
-        session.reviewSessionThreadId == Just threadId
+        session.sessionDetail.reviewSessionThreadId == Just threadId
     ]
 
 plainTranscript :: Text -> ChatTranscript
@@ -83,27 +73,6 @@ transcriptFor :: ChatVerbosity -> ChatTranscript -> Text
 transcriptFor CompactChat = (.compactTranscript)
 transcriptFor StandardChat = (.standardTranscript)
 transcriptFor FullChat = (.fullTranscript)
-
-appendReviewTranscript :: ChatTranscript -> Text -> ChatTranscript
-appendReviewTranscript transcript addition =
-  ChatTranscript
-    { compactTranscript = boundedAppend transcript.compactTranscript addition,
-      standardTranscript = boundedAppend transcript.standardTranscript addition,
-      fullTranscript = boundedAppend transcript.fullTranscript addition
-    }
-
-reviewInputLimit :: Int
-reviewInputLimit = 4000
-
-reviewTranscriptLimit :: Int
-reviewTranscriptLimit = 50000
-
-modifySolveSession :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
-modifySolveSession issueNumber update =
-  modify (\state -> state {appSolveSessions = Map.adjust update issueNumber state.appSolveSessions})
-
-appendSolveTranscript :: ChatTranscript -> Text -> ChatTranscript
-appendSolveTranscript = appendReviewTranscript
 
 appendAgentTranscript :: AgentEvent -> ChatTranscript -> ChatTranscript
 appendAgentTranscript agentEvent transcript =
@@ -136,17 +105,3 @@ activitySummary prefix summary =
     . Text.words
     . sanitizeText
     $ fromMaybe summary (Text.stripPrefix prefix summary)
-
-setSolveActivity :: UTCTime -> Text -> SolveSession -> SolveSession
-setSolveActivity now activity session =
-  session {solveSessionActivity = activity, solveSessionActivityStartedAt = now}
-
-setPullRequestActivity :: UTCTime -> Text -> PullRequestReviewSession -> PullRequestReviewSession
-setPullRequestActivity now activity session =
-  session {pullRequestSessionActivity = activity, pullRequestSessionActivityStartedAt = now}
-
-boundedAppend :: Text -> Text -> Text
-boundedAppend transcript addition = Text.takeEnd reviewTranscriptLimit (transcript <> addition)
-
-modifyPullRequestSession :: Int -> (PullRequestReviewSession -> PullRequestReviewSession) -> EventM Name AppState ()
-modifyPullRequestSession number update = modify (\state -> state {appPullRequestReviewSessions = Map.adjust update number state.appPullRequestReviewSessions})

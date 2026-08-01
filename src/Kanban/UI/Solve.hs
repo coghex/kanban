@@ -1,6 +1,5 @@
 module Kanban.UI.Solve
-  ( applySolveAnimationTick,
-    applySolveEvent,
+  ( applySolveEvent,
     interruptSolveSession,
     issueFromBoard,
     launchSolveInvocation,
@@ -51,11 +50,13 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.AutoSolve
 import Kanban.UI.Transcript
 import Kanban.UI.Selection
 import Kanban.UI.Session
+import Kanban.UI.SessionEvents
 import Kanban.UI.Overlay
 import Kanban.UI.Refresh
 
@@ -98,16 +99,12 @@ startFreshIssueSolve issue workflow brand = do
   state <- get
   let autoProgress = initialAutoSolveProgress workflow (boardPullRequestNumbers state.appBoard) state.appNow
   let session =
-        SolveSession
-          { solveSessionIssue = issue,
-            solveSessionWorkflow = workflow,
-            solveSessionBrand = brand,
-            solveSessionId = Nothing,
-            solveSessionPhase = SolveStarting,
-            solveSessionActivity = "starting",
-            solveSessionActivityStartedAt = state.appNow,
-            solveSessionLogPath = Nothing,
-            solveSessionTranscript = plainTranscript $
+        newAgentSession
+          (priorTickGeneration issue.issueNumber state.appSolveSessions)
+          SolveStarting
+          "starting"
+          (Just state.appNow)
+          ( plainTranscript $
               "workflow: "
                 <> Text.toLower (workflowTitle workflow)
                 <> "\nsolver: "
@@ -116,13 +113,16 @@ startFreshIssueSolve issue workflow brand = do
                        SolveOnly -> ""
                        AutoSolve -> "\nreviewer: " <> solveReviewerLabel brand
                    )
-                <> "\n\n",
-            solveSessionInput = "",
-            solveSessionSpinnerFrame = 0,
-            solveSessionAutoProgress = autoProgress,
-            solveSessionResumeProvenance = ResumeAnswer,
-            solveSessionFollowing = True
-          }
+                <> "\n\n"
+          )
+          SolveDetail
+            { solveSessionIssue = issue,
+              solveSessionWorkflow = workflow,
+              solveSessionBrand = brand,
+              solveSessionId = Nothing,
+              solveSessionAutoProgress = autoProgress,
+              solveSessionResumeProvenance = ResumeAnswer
+            }
   modify
     ( \current ->
         current
@@ -137,18 +137,18 @@ startFreshIssueSolve issue workflow brand = do
 launchSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
-  let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.solveSessionLogPath)
+  let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel
       parent = do
         session <- Map.lookup issueNumber state.appSolveSessions
-        progress <- session.solveSessionAutoProgress
+        progress <- session.sessionDetail.solveSessionAutoProgress
         pure
           WorkerParent
             { workerParentIssueNumber = issueNumber,
               workerParentReviewRound = progress.autoSolveReviewRound,
-              workerParentSolverBrand = session.solveSessionBrand,
-              workerParentSolverSession = session.solveSessionId,
-              workerParentSolverLogPath = session.solveSessionLogPath,
+              workerParentSolverBrand = session.sessionDetail.solveSessionBrand,
+              workerParentSolverSession = session.sessionDetail.solveSessionId,
+              workerParentSolverLogPath = session.sessionLogPath,
               workerParentStartedAt = progress.autoSolveStartedAt,
               workerParentKnownPullRequests = progress.autoSolveKnownPullRequests
             }
@@ -197,28 +197,28 @@ submitSolveInput issueNumber = do
   case Map.lookup issueNumber state.appSolveSessions of
     Nothing -> setNotice "Solve session is no longer available"
     Just session
-      | session.solveSessionPhase == SolveAttention,
-        Just progress <- session.solveSessionAutoProgress,
+      | session.sessionPhase == SolveAttention,
+        Just progress <- session.sessionDetail.solveSessionAutoProgress,
         progress.autoSolveStage == AutoReviewing,
         Just pullRequestNumber <- progress.autoSolvePullRequest -> do
           modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequestNumber), appNotice = Nothing})
           presentTranscriptTail
-      | session.solveSessionPhase /= SolveAttention -> setNotice "This solve session is not waiting for input"
-      | Text.null (Text.strip session.solveSessionInput) -> setNotice "Type an answer before pressing Enter"
-      | otherwise -> case session.solveSessionId of
+      | session.sessionPhase /= SolveAttention -> setNotice "This solve session is not waiting for input"
+      | Text.null (Text.strip session.sessionInput) -> setNotice "Type an answer before pressing Enter"
+      | otherwise -> case session.sessionDetail.solveSessionId of
           Nothing -> setNotice "The solver did not return a resumable session id"
           Just sessionId -> do
-            let answer = Text.strip session.solveSessionInput
+            let answer = Text.strip session.sessionInput
             appendToSolveSession issueNumber
               ( \current ->
                   current
-                    { solveSessionPhase = SolveStarting,
-                      solveSessionActivity = "resuming",
-                      solveSessionInput = "",
-                      solveSessionTranscript = appendSolveTranscript current.solveSessionTranscript ("\nYou: " <> answer <> "\n")
+                    { sessionPhase = SolveStarting,
+                      sessionActivity = "resuming",
+                      sessionInput = "",
+                      sessionTranscript = appendTranscript current.sessionTranscript ("\nYou: " <> answer <> "\n")
                     }
               )
-            launchSolveInvocation issueNumber session.solveSessionWorkflow session.solveSessionBrand (Just sessionId) session.solveSessionResumeProvenance answer
+            launchSolveInvocation issueNumber session.sessionDetail.solveSessionWorkflow session.sessionDetail.solveSessionBrand (Just sessionId) session.sessionDetail.solveSessionResumeProvenance answer
 
 applySolveEvent :: SolveEvent -> EventM Name AppState ()
 applySolveEvent solveEvent = case solveEvent of
@@ -230,18 +230,18 @@ applySolveEvent solveEvent = case solveEvent of
             { appSolveProcesses = Map.insert issueNumber process state.appSolveProcesses,
               -- issue #39: spawning a process is this workflow's new turn,
               -- so it re-engages the live tail.
-              appSolveSessions = Map.adjust (setSolveActivity state.appNow "thinking" . (\session -> session {solveSessionPhase = SolveRunning, solveSessionFollowing = True})) issueNumber state.appSolveSessions
+              appSolveSessions = Map.adjust (setSessionActivity state.appNow "thinking" . (\session -> session {sessionPhase = SolveRunning, sessionFollowing = True})) issueNumber state.appSolveSessions
             }
       )
-    scheduleSolveTick issueNumber
+    armSessionTick solveSessionOps issueNumber
   SolveLogOpened issueNumber path ->
-    modifySolveSession issueNumber (\session -> session {solveSessionLogPath = Just path})
+    modifySolveSession issueNumber (\session -> session {sessionLogPath = Just path})
   SolveSessionIdentified issueNumber sessionId ->
-    modifySolveSession issueNumber (\session -> session {solveSessionId = Just sessionId})
+    modifySolveSession issueNumber (withSessionDetail (\detail -> detail {solveSessionId = Just sessionId}))
   SolveOutput issueNumber output -> do
     now <- (.appNow) <$> get
     appendToSolveSession issueNumber
-      (setSolveActivity now (agentActivity output) . (\session -> session {solveSessionTranscript = appendAgentTranscript output session.solveSessionTranscript}))
+      (setSessionActivity now (agentActivity output) . (\session -> session {sessionTranscript = appendAgentTranscript output session.sessionTranscript}))
   SolveDiagnostic issueNumber diagnostic -> do
     now <- (.appNow) <$> get
     -- This specific diagnostic means a user-requested kill could not be
@@ -252,18 +252,18 @@ applySolveEvent solveEvent = case solveEvent of
     -- event from a fresh session (which never ran the "killed by user" UI
     -- transition) still renders it correctly.
     appendToSolveSession issueNumber
-      ( setSolveActivity now "diagnostic output"
+      ( setSessionActivity now "diagnostic output"
           . ( \session ->
                 session
-                  { solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("[solver] " <> sanitizeText diagnostic <> "\n"),
-                    solveSessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` diagnostic then SolveOrphanedPhase else session.solveSessionPhase
+                  { sessionTranscript = appendTranscript session.sessionTranscript ("[solver] " <> sanitizeText diagnostic <> "\n"),
+                    sessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` diagnostic then SolveOrphanedPhase else session.sessionPhase
                   }
             )
       )
   SolveProcessFinished issueNumber outcome -> do
     state <- get
     let priorSession = Map.lookup issueNumber state.appSolveSessions
-        priorPhase = (.solveSessionPhase) <$> priorSession
+        priorPhase = (.sessionPhase) <$> priorSession
     modify
       ( \current ->
           current
@@ -282,92 +282,73 @@ applySolveEvent solveEvent = case solveEvent of
             . maybe
               ("Solve workflow for #" <> showText issueNumber <> " finished")
               (autoSolveCompletionNotice issueNumber . (.autoSolveCompletionHandoff))
-            $ priorSession >>= (.solveSessionAutoProgress) >>= autoSolveAfterCompletion
+            $ priorSession >>= (.sessionDetail.solveSessionAutoProgress) >>= autoSolveAfterCompletion
         SolveNeedsInput _ -> setNotice ("Solve workflow for #" <> showText issueNumber <> " needs input")
         SolveFailed message -> setNotice (agentFailureNotice ("Solve workflow for #" <> showText issueNumber) message)
   where
     finishSolveSession (Just SolveInterrupting) _ session =
-      session
-        { solveSessionPhase = SolveAttention,
-          solveSessionActivity = "waiting for guidance",
-          solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n",
-          solveSessionResumeProvenance = ResumeInterruptGuidance
-        }
+      withResumeProvenance ResumeInterruptGuidance
+        session
+          { sessionPhase = SolveAttention,
+            sessionActivity = "waiting for guidance",
+            sessionTranscript = appendTranscript session.sessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n"
+          }
     finishSolveSession (Just SolveKilledPhase) _ session =
-      session {solveSessionActivity = "killed", solveSessionAutoProgress = autoSolveStopped <$> session.solveSessionAutoProgress}
+      (stopAutoSolve session) {sessionActivity = "killed"}
     finishSolveSession _ outcome session = case outcome of
-      SolveCompleted -> case session.solveSessionAutoProgress >>= autoSolveAfterCompletion of
+      SolveCompleted -> case session.sessionDetail.solveSessionAutoProgress >>= autoSolveAfterCompletion of
         Just continuation ->
-          session
-            { solveSessionPhase = SolveRunning,
-              solveSessionActivity = continuation.autoSolveCompletionActivity,
-              solveSessionAutoProgress = Just continuation.autoSolveCompletionProgress
+          (withSessionDetail (\detail -> detail {solveSessionAutoProgress = Just continuation.autoSolveCompletionProgress}) session)
+            { sessionPhase = SolveRunning,
+              sessionActivity = continuation.autoSolveCompletionActivity
             }
-        Nothing -> session {solveSessionPhase = SolveFinished, solveSessionActivity = "completed"}
+        Nothing -> session {sessionPhase = SolveFinished, sessionActivity = "completed"}
       SolveNeedsInput question ->
-        session
-          { solveSessionPhase = SolveAttention,
-            solveSessionActivity = "waiting for input",
-            solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n"),
-            solveSessionResumeProvenance = ResumeAnswer
-          }
+        withResumeProvenance ResumeAnswer
+          session
+            { sessionPhase = SolveAttention,
+              sessionActivity = "waiting for input",
+              sessionTranscript = appendTranscript session.sessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n")
+            }
       SolveFailed message ->
-        session
-          { solveSessionPhase = SolveFailedPhase,
-            solveSessionActivity = failureActivity message,
-            solveSessionAutoProgress = autoSolveStopped <$> session.solveSessionAutoProgress,
-            solveSessionTranscript = appendSolveTranscript session.solveSessionTranscript ("\n" <> sanitizeText message <> "\n")
+        (stopAutoSolve session)
+          { sessionPhase = SolveFailedPhase,
+            sessionActivity = failureActivity message,
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText message <> "\n")
           }
+
+    withResumeProvenance provenance = withSessionDetail (\detail -> detail {solveSessionResumeProvenance = provenance})
+    stopAutoSolve = withSessionDetail (\detail -> detail {solveSessionAutoProgress = autoSolveStopped <$> detail.solveSessionAutoProgress})
 
 interruptSolveSession :: Int -> EventM Name AppState ()
 interruptSolveSession issueNumber = do
   state <- get
   case (Map.lookup issueNumber state.appSolveSessions, Map.lookup issueNumber state.appSolveProcesses) of
     (Just session, Just process)
-      | session.solveSessionPhase `elem` [SolveStarting, SolveRunning], session.solveSessionId /= Nothing -> do
+      | session.sessionPhase `elem` [SolveStarting, SolveRunning], session.sessionDetail.solveSessionId /= Nothing -> do
           appendToSolveSession issueNumber
             ( \current ->
                 current
-                  { solveSessionPhase = SolveInterrupting,
-                    solveSessionActivity = "interrupting",
-                    solveSessionTranscript = appendSolveTranscript current.solveSessionTranscript "\n[interrupt requested]\n"
+                  { sessionPhase = SolveInterrupting,
+                    sessionActivity = "interrupting",
+                    sessionTranscript = appendTranscript current.sessionTranscript "\n[interrupt requested]\n"
                   }
             )
           liftIO (interruptManagedProcess process)
           setNotice ("Interrupting solve workflow #" <> showText issueNumber <> "…")
-      | session.solveSessionId == Nothing -> setNotice "Wait for the resumable session id before interrupting"
+      | session.sessionDetail.solveSessionId == Nothing -> setNotice "Wait for the resumable session id before interrupting"
       | otherwise -> setNotice "This solve workflow has no live turn to interrupt"
     _ -> setNotice "This solve workflow has no live process to interrupt"
-
-applySolveAnimationTick :: Int -> EventM Name AppState ()
-applySolveAnimationTick issueNumber = do
-  state <- get
-  case (Map.lookup issueNumber state.appSolveSessions, Map.member issueNumber state.appSolveProcesses) of
-    (Just session, True)
-      | session.solveSessionPhase `elem` [SolveStarting, SolveRunning] -> do
-          modifySolveSession issueNumber (\current -> current {solveSessionSpinnerFrame = current.solveSessionSpinnerFrame + 1})
-          scheduleSolveTick issueNumber
-    _ -> pure ()
-
-scheduleSolveTick :: Int -> EventM Name AppState ()
-scheduleSolveTick issueNumber = do
-  eventChannel <- (.appEventChannel) <$> get
-  void
-    . liftIO
-    . forkIO
-    $ do
-      threadDelay reviewAnimationIntervalMicros
-      writeBChan eventChannel (SolveAnimationTick issueNumber)
 
 suppressIfResolvedSolve :: Int -> EventM Name AppState () -> EventM Name AppState ()
 suppressIfResolvedSolve issueNumber action = do
   sessions <- (.appSolveSessions) <$> get
-  unless (solveSessionAlreadyResolved issueNumber sessions) action
+  unless (sessionAlreadyResolved issueNumber sessions) action
 
 suppressIfResolvedPullRequest :: Int -> EventM Name AppState () -> EventM Name AppState ()
 suppressIfResolvedPullRequest number action = do
   sessions <- (.appPullRequestReviewSessions) <$> get
-  unless (pullRequestSessionAlreadyResolved number sessions) action
+  unless (sessionAlreadyResolved number sessions) action
 
 issueFromBoard :: Board -> Int -> Maybe Issue
 issueFromBoard board issueNumber = do

@@ -32,11 +32,11 @@
 ║┃                          ┃┃  ╭────────────────────────────────┃ i            everything needing attention; Enter goes to its work ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  │ #756 Define the persistence    ┃ Ctrl-L       repaint                                              ┃                      ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract                       ┃ Esc          close overlay                                        ┃                      ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture                  ┃ Ctrl-C       interrupt open agent turn, then type guidance        ┃                      ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ q            quit                                                 ┃                      ┃  │ truncated payload.                 │ ┃║
-║┃                          ┃┃  │ Document root owners, snapshot ┃                                                                   ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃                          ┃┃  │ barriers, and the versioned    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  architecture                  ┃ Tab          next session in an open solve/PR/review overlay      ┃                      ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ Ctrl-C       interrupt open agent turn, then type guidance        ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ Document root owners, snapshot ┃ q            quit                                                 ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ barriers, and the versioned    ┃                                                                   ┃                      ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ envelope before implementation…┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃                                         ┃║
 ║┃ +--------------+         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ | drain_prs.py |         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ +--------------+         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║

@@ -35,10 +35,11 @@ import Kanban.Text (sanitizeText)
 import Kanban.Workflow (deriveBoard )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.AutoSolve
-import Kanban.UI.Transcript
 import Kanban.UI.Selection
+import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
 import Kanban.UI.Solve
 import Kanban.UI.PullRequest
@@ -135,7 +136,7 @@ reconcilePullRequestSessions pullRequests = Map.mapWithKey reconcile
     pullRequestsByNumber = Map.fromList [(pullRequest.pullRequestNumber, pullRequest) | pullRequest <- pullRequests]
     reconcile number session = case Map.lookup number pullRequestsByNumber of
       Nothing -> session
-      Just pullRequest -> session {pullRequestSessionPullRequest = pullRequest}
+      Just pullRequest -> withSessionDetail (\detail -> detail {pullRequestSessionPullRequest = pullRequest}) session
 
 reconcileReviewSessions :: WorkflowConfig -> [Issue] -> Map Int ReviewSession -> Map Int ReviewSession
 reconcileReviewSessions config issues = Map.mapWithKey reconcile
@@ -144,18 +145,16 @@ reconcileReviewSessions config issues = Map.mapWithKey reconcile
     reconcile issueNumber session = case Map.lookup issueNumber issuesByNumber of
       Nothing -> session
       Just issue ->
-        session
-          { reviewSessionIssue = issue,
-            reviewSessionPhase = reconciledPhase issue session
-          }
+        (withSessionDetail (\detail -> detail {reviewSessionIssue = issue}) session)
+          {sessionPhase = reconciledPhase issue session}
     reconciledPhase issue session
       | issueHasLabel config.approvalLabel issue = ReviewFinished
       | issueHasLabel "reviewed:revised" issue
-          && session.reviewSessionPhase == ReviewFailed
-          && session.reviewSessionStage == IssueRevision =
+          && session.sessionPhase == ReviewFailed
+          && session.sessionDetail.reviewSessionStage == IssueRevision =
           ReviewRevised
-      | issueHasLabel config.changesRequestedLabel issue && session.reviewSessionPhase == ReviewFailed = ReviewNeedsChanges
-      | otherwise = session.reviewSessionPhase
+      | issueHasLabel config.changesRequestedLabel issue && session.sessionPhase == ReviewFailed = ReviewNeedsChanges
+      | otherwise = session.sessionPhase
 
 issueHasLabel :: Text -> Issue -> Bool
 issueHasLabel labelName issue =
@@ -245,7 +244,7 @@ advanceAutoSolves snapshot = do
   mapM_ (uncurry (advanceAutoSolve snapshot)) sessions
 
 advanceAutoSolve :: RepoSnapshot -> Int -> SolveSession -> EventM Name AppState ()
-advanceAutoSolve snapshot issueNumber session = case session.solveSessionAutoProgress of
+advanceAutoSolve snapshot issueNumber session = case session.sessionDetail.solveSessionAutoProgress of
   Nothing -> pure ()
   Just progress -> do
     state <- get
@@ -257,12 +256,12 @@ autoSolveObservation state snapshot issueNumber session progress =
   AutoSolveObservation
     { autoSolveIssueNumber = issueNumber,
       autoSolveWorkflowConfig = state.appConfig.resolvedWorkflow,
-      autoSolveSolverBrand = session.solveSessionBrand,
-      autoSolveSolverSession = session.solveSessionId,
+      autoSolveSolverBrand = session.sessionDetail.solveSessionBrand,
+      autoSolveSolverSession = session.sessionDetail.solveSessionId,
       autoSolveSolverRunning = Map.member issueNumber state.appSolveProcesses,
       autoSolveSnapshotPullRequests = snapshot.snapshotPullRequests,
       autoSolveReviewPhase =
-        (.pullRequestSessionPhase)
+        (.sessionPhase)
           <$> (progress.autoSolvePullRequest >>= (`Map.lookup` state.appPullRequestReviewSessions))
     }
 
@@ -270,19 +269,18 @@ runAutoSolveDecision :: RepoSnapshot -> Int -> SolveSession -> AutoSolveDecision
 runAutoSolveDecision snapshot issueNumber session decision = case decision of
   AutoSolveWait -> pure ()
   AutoSolveWaitingOn activity ->
-    modifySolveSession issueNumber (\current -> current {solveSessionActivity = activity})
+    modifySolveSession issueNumber (\current -> current {sessionActivity = activity})
   AutoSolveStartReview number -> startAutoSolveReview snapshot number
   AutoSolveOpenReview number progress -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          current
-            { solveSessionPhase = SolveRunning,
-              solveSessionActivity = "reviewing PR #" <> showText number,
-              solveSessionAutoProgress = Just progress,
-              solveSessionTranscript =
-                appendSolveTranscript
-                  current.solveSessionTranscript
+          (withAutoSolveProgress progress current)
+            { sessionPhase = SolveRunning,
+              sessionActivity = "reviewing PR #" <> showText number,
+              sessionTranscript =
+                appendTranscript
+                  current.sessionTranscript
                   ("\n[kanban] Discovered PR #" <> showText number <> "; starting review round " <> showText progress.autoSolveReviewRound <> ".\n")
             }
       )
@@ -295,37 +293,35 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
             state.appConfig.resolvedWorkflow
             state.appOptions.optionConfig
             state.appRepository
-            session.solveSessionBrand
+            session.sessionDetail.solveSessionBrand
             number
             progress.autoSolveReviewRound
     appendToSolveSession
       issueNumber
       ( \current ->
-          current
-            { solveSessionPhase = SolveStarting,
-              solveSessionActivity = "resuming solver for requested changes",
-              solveSessionAutoProgress = Just progress,
-              solveSessionTranscript =
-                appendSolveTranscript
-                  current.solveSessionTranscript
+          (withAutoSolveProgress progress current)
+            { sessionPhase = SolveStarting,
+              sessionActivity = "resuming solver for requested changes",
+              sessionTranscript =
+                appendTranscript
+                  current.sessionTranscript
                   ("\n[kanban] Review requested changes on PR #" <> showText number <> "; resuming the original solver.\n")
             }
       )
     mapM_
-      (\sessionId -> launchSolveInvocation issueNumber AutoSolve session.solveSessionBrand (Just sessionId) ResumeAutomatedChangesRequested prompt)
-      session.solveSessionId
+      (\sessionId -> launchSolveInvocation issueNumber AutoSolve session.sessionDetail.solveSessionBrand (Just sessionId) ResumeAutomatedChangesRequested prompt)
+      session.sessionDetail.solveSessionId
     setNotice ("Autosolve #" <> showText issueNumber <> " resumed its original solver for PR #" <> showText number)
   AutoSolveApprove number -> do
     appendToSolveSession
       issueNumber
       ( \current ->
-          current
-            { solveSessionPhase = SolveFinished,
-              solveSessionActivity = "approved PR #" <> showText number,
-              solveSessionAutoProgress = autoSolveCompleted <$> current.solveSessionAutoProgress,
-              solveSessionTranscript =
-                appendSolveTranscript
-                  current.solveSessionTranscript
+          (mapAutoSolveProgress autoSolveCompleted current)
+            { sessionPhase = SolveFinished,
+              sessionActivity = "approved PR #" <> showText number,
+              sessionTranscript =
+                appendTranscript
+                  current.sessionTranscript
                   ("\n[kanban] PR #" <> showText number <> " approved; autosolve complete.\n")
             }
       )
@@ -334,13 +330,12 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
     appendToSolveSession
       issueNumber
       ( \current ->
-          current
-            { solveSessionPhase = haltPhase haltKind,
-              solveSessionActivity = reason,
-              solveSessionAutoProgress = autoSolveStopped <$> current.solveSessionAutoProgress,
-              solveSessionTranscript =
-                appendSolveTranscript
-                  current.solveSessionTranscript
+          (mapAutoSolveProgress autoSolveStopped current)
+            { sessionPhase = haltPhase haltKind,
+              sessionActivity = reason,
+              sessionTranscript =
+                appendTranscript
+                  current.sessionTranscript
                   ("\n[kanban] Autosolve " <> haltWord haltKind <> ": " <> sanitizeText reason <> "\n")
             }
       )
@@ -350,6 +345,8 @@ runAutoSolveDecision snapshot issueNumber session decision = case decision of
     haltPhase AutoSolveHaltFailed = SolveFailedPhase
     haltWord AutoSolveHaltStopped = "stopped"
     haltWord AutoSolveHaltFailed = "failed"
+    withAutoSolveProgress progress = withSessionDetail (\detail -> detail {solveSessionAutoProgress = Just progress})
+    mapAutoSolveProgress advance = withSessionDetail (\detail -> detail {solveSessionAutoProgress = advance <$> detail.solveSessionAutoProgress})
 
 -- | Autosolve's own review launch. It stays on the label-derived route, and
 -- never the user's direct @r@ dispatch, so a problem status on the pull

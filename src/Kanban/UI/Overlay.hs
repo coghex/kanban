@@ -11,7 +11,8 @@ where
 import Brick
 import Brick.Widgets.Border (borderWithLabel, hBorder )
 import Brick.Widgets.Center (centerLayer)
-import Data.List (intersperse, sortOn)
+import Data.List (intersperse)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -100,7 +101,7 @@ drawOverlay state overlay =
       PullRequestReviewOverlay number -> " PR #" <> showText number <> " REVIEW/REVISE "
 
 reviewOverlayTitle :: AppState -> Int -> Text
-reviewOverlayTitle state issueNumber = case (.reviewSessionStage) <$> Map.lookup issueNumber state.appReviewSessions of
+reviewOverlayTitle state issueNumber = case (.sessionDetail.reviewSessionStage) <$> Map.lookup issueNumber state.appReviewSessions of
   Just InitialReview -> "REVIEW"
   Just IssueRevision -> "REVISION"
   Just IssueRereview -> "REREVIEW"
@@ -132,6 +133,7 @@ drawHelp =
       txt "i            everything needing attention; Enter goes to its work",
       txt "Ctrl-L       repaint",
       txt "Esc          close overlay",
+      txt "Tab          next session in an open solve/PR/review overlay",
       txt "Ctrl-C       interrupt open agent turn, then type guidance",
       txt "q            quit"
     ]
@@ -276,17 +278,18 @@ drawSolve :: AppState -> Int -> Widget Name
 drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions of
   Nothing -> withAttr problemAttr (txt "Solve session is no longer available")
   Just session ->
-    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.solveSessionTranscript
+    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ withAttr (solveSessionAttribute session) (txt (solvePhaseLabel session)),
-        drawLiveActivity state (Map.member issueNumber state.appSolveProcesses) session.solveSessionSpinnerFrame session.solveSessionActivityStartedAt session.solveSessionActivity,
-        case session.solveSessionWorkflow of
+      [ drawSessionTabs solveSessionAttribute (solvePhaseGlyph state) issueNumber state.appSolveSessions,
+        withAttr (solveSessionAttribute session) (txt (solvePhaseLabel session)),
+        drawLiveActivity state (Map.member issueNumber state.appSolveProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
+        case session.sessionDetail.solveSessionWorkflow of
           SolveOnly -> emptyWidget
-          AutoSolve -> withAttr dimAttr (txt ("reviewer: " <> solveReviewerLabel session.solveSessionBrand)),
+          AutoSolve -> withAttr dimAttr (txt ("reviewer: " <> solveReviewerLabel session.sessionDetail.solveSessionBrand)),
+        maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
-        maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.solveSessionLogPath,
-        vLimit 20
+        vLimit 19
           . clickable SolveViewport
           . viewport SolveViewport Vertical
           . padRight Max
@@ -295,13 +298,13 @@ drawSolve state issueNumber = case Map.lookup issueNumber state.appSolveSessions
             else txtWrap transcript,
         hBorder,
         drawSolveInput session,
-        withAttr footerAttr (txt "Esc hide  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
+        withAttr footerAttr (txt "Esc hide  Tab next session  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
       ]
 
 solvePhaseLabel :: SolveSession -> Text
-solvePhaseLabel session = case session.solveSessionPhase of
-  SolveStarting -> "Starting " <> workflowTitle session.solveSessionWorkflow <> " with " <> solverLabel session.solveSessionBrand <> "…"
-  SolveRunning -> solverLabel session.solveSessionBrand <> " is " <> workflowActivity session.solveSessionWorkflow
+solvePhaseLabel session = case session.sessionPhase of
+  SolveStarting -> "Starting " <> workflowTitle session.sessionDetail.solveSessionWorkflow <> " with " <> solverLabel session.sessionDetail.solveSessionBrand <> "…"
+  SolveRunning -> solverLabel session.sessionDetail.solveSessionBrand <> " is " <> workflowActivity session.sessionDetail.solveSessionWorkflow
   SolveInterrupting -> "Interrupting the current solver turn…"
   SolveAttention -> "Needs your input"
   SolveFinished -> "Solve workflow finished"
@@ -319,63 +322,64 @@ solveReviewerLabel ClaudeSolver = codexReviewerModel
 
 drawSolveInput :: SolveSession -> Widget Name
 drawSolveInput session
-  | session.solveSessionPhase == SolveAttention,
-    Just progress <- session.solveSessionAutoProgress,
+  | session.sessionPhase == SolveAttention,
+    Just progress <- session.sessionDetail.solveSessionAutoProgress,
     progress.autoSolveStage == AutoReviewing =
       padTop (Pad 1)
         . withAttr attentionAttr
         . txtWrap
         $ "The PR agent needs input. Press Enter to open that session, or use p processes."
 drawSolveInput session
-  | session.solveSessionPhase == SolveAttention =
+  | session.sessionPhase == SolveAttention =
       padTop (Pad 1)
         . withAttr attentionAttr
         . txtWrap
-        $ "> " <> session.solveSessionInput <> "█"
+        $ "> " <> session.sessionInput <> "█"
   | otherwise = emptyWidget
 
 drawPullRequestReview :: AppState -> Int -> Widget Name
 drawPullRequestReview state number = case Map.lookup number state.appPullRequestReviewSessions of
   Nothing -> withAttr problemAttr (txt "PR review/revision session is no longer available")
   Just session ->
-    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.pullRequestSessionTranscript
+    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseLabel session)),
-        drawLiveActivity state (Map.member number state.appPullRequestProcesses) session.pullRequestSessionSpinnerFrame session.pullRequestSessionActivityStartedAt session.pullRequestSessionActivity,
-        withAttr dimAttr (txt ("agent: " <> pullRequestAgentLabel session.pullRequestSessionAction session.pullRequestSessionBrand)),
-        maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.pullRequestSessionLogPath,
+      [ drawSessionTabs pullRequestSessionAttribute (pullRequestPhaseGlyph state) number state.appPullRequestReviewSessions,
+        withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseLabel session)),
+        drawLiveActivity state (Map.member number state.appPullRequestProcesses) session.sessionSpinnerFrame session.sessionActivityStartedAt session.sessionActivity,
+        withAttr dimAttr (txt ("agent: " <> pullRequestAgentLabel session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand)),
+        maybe emptyWidget (withAttr dimAttr . txt . ("full log: " <>) . Text.pack) session.sessionLogPath,
         txt "",
-        vLimit 20 . clickable PullRequestReviewViewport . viewport PullRequestReviewViewport Vertical . padRight Max $
+        vLimit 19 . clickable PullRequestReviewViewport . viewport PullRequestReviewViewport Vertical . padRight Max $
           if Text.null transcript then withAttr dimAttr (txt "Waiting for agent output…") else txtWrap transcript,
         hBorder,
-        if session.pullRequestSessionPhase == SolveAttention
-          then padTop (Pad 1) . withAttr attentionAttr . txtWrap $ "> " <> session.pullRequestSessionInput <> "█"
+        if session.sessionPhase == SolveAttention
+          then padTop (Pad 1) . withAttr attentionAttr . txtWrap $ "> " <> session.sessionInput <> "█"
           else emptyWidget,
-        withAttr footerAttr (txt "Esc hide  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
+        withAttr footerAttr (txt "Esc hide  Tab next session  Ctrl-C interrupt  Enter answer  arrows/wheel scroll")
       ]
 
 pullRequestPhaseLabel :: PullRequestReviewSession -> Text
-pullRequestPhaseLabel session = case session.pullRequestSessionPhase of
-  SolveStarting -> "Starting PR " <> pullRequestActionText session.pullRequestSessionAction <> "…"
-  SolveRunning -> "PR " <> pullRequestActionText session.pullRequestSessionAction <> " in progress"
+pullRequestPhaseLabel session = case session.sessionPhase of
+  SolveStarting -> "Starting PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> "…"
+  SolveRunning -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " in progress"
   SolveInterrupting -> "Interrupting the current PR agent turn…"
   SolveAttention -> "PR workflow needs your input"
-  SolveFinished -> "PR " <> pullRequestActionText session.pullRequestSessionAction <> " finished"
-  SolveFailedPhase -> "PR " <> pullRequestActionText session.pullRequestSessionAction <> " failed"
-  SolveKilledPhase -> "PR " <> pullRequestActionText session.pullRequestSessionAction <> " killed"
-  SolveOrphanedPhase -> "PR " <> pullRequestActionText session.pullRequestSessionAction <> " has orphaned subprocesses"
+  SolveFinished -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " finished"
+  SolveFailedPhase -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " failed"
+  SolveKilledPhase -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " killed"
+  SolveOrphanedPhase -> "PR " <> pullRequestActionText session.sessionDetail.pullRequestSessionAction <> " has orphaned subprocesses"
 
 drawReview :: AppState -> Int -> Widget Name
 drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessions of
   Nothing -> withAttr problemAttr (txt "Review session is no longer available")
   Just session ->
-    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.reviewSessionTranscript
+    let transcript = transcriptFor state.appSettings.settingsChatVerbosity session.sessionTranscript
      in
     vBox
-      [ drawReviewTabs state issueNumber,
+      [ drawSessionTabs (reviewPhaseAttribute . (.sessionPhase)) (reviewPhaseGlyph state) issueNumber state.appReviewSessions,
         txt "",
-        withAttr (reviewPhaseAttribute session.reviewSessionPhase) (txt (reviewPhaseLabel session)),
+        withAttr (reviewPhaseAttribute session.sessionPhase) (txt (reviewPhaseLabel session)),
         txt "",
         vLimit 17
           . clickable ReviewViewport
@@ -391,38 +395,48 @@ drawReview state issueNumber = case Map.lookup issueNumber state.appReviewSessio
         withAttr footerAttr (txt "Esc hide  Tab next session  Enter send  Ctrl-C interrupt  arrows/wheel scroll")
       ]
 
-drawReviewTabs :: AppState -> Int -> Widget Name
-drawReviewTabs state selectedIssue =
+-- | The strip of tabs every session overlay carries, one per in-memory
+-- session of that kind, in the same ascending numeric order @Tab@ cycles
+-- through (docs\/design.md section 7). Only the colour and badge of a tab
+-- are kind-specific, so those are the parameters and the strip itself exists
+-- once -- which is what the solve and PR overlays had silently lost.
+drawSessionTabs ::
+  (AgentSession phase detail -> AttrName) ->
+  (AgentSession phase detail -> Text) ->
+  Int ->
+  Map Int (AgentSession phase detail) ->
+  Widget Name
+drawSessionTabs attribute glyph selectedKey sessions =
   hBox
     . intersperse (txt "  ")
-    $ map drawTab (sortOn fst (Map.toList state.appReviewSessions))
+    $ map drawTab (Map.toAscList sessions)
   where
-    drawTab (issueNumber, session) =
+    drawTab (key, session) =
       withAttr
-        (if issueNumber == selectedIssue then selectedAttr else reviewPhaseAttribute session.reviewSessionPhase)
-        (txt ("#" <> showText issueNumber <> " " <> reviewPhaseGlyph state session))
+        (if key == selectedKey then selectedAttr else attribute session)
+        (txt ("#" <> showText key <> " " <> glyph session))
 
 reviewPhaseLabel :: ReviewSession -> Text
-reviewPhaseLabel session = case session.reviewSessionPhase of
-  ReviewStarting -> "Starting " <> stageActivity session.reviewSessionStage <> " session…"
-  ReviewRunning -> stageActivity session.reviewSessionStage <> " in progress"
+reviewPhaseLabel session = case session.sessionPhase of
+  ReviewStarting -> "Starting " <> stageActivity session.sessionDetail.reviewSessionStage <> " session…"
+  ReviewRunning -> stageActivity session.sessionDetail.reviewSessionStage <> " in progress"
   ReviewWaiting -> "Waiting for your response"
-  ReviewFinished -> case session.reviewSessionStage of
+  ReviewFinished -> case session.sessionDetail.reviewSessionStage of
     IssueRevision -> "Specification amendment posted · Esc, then r for rereview"
     _ -> "Review completed"
-  ReviewNeedsChanges -> case session.reviewSessionStage of
+  ReviewNeedsChanges -> case session.sessionDetail.reviewSessionStage of
     IssueRevision -> "Specification revision remains blocked"
     _ -> "Review completed with changes requested"
-  ReviewFailed -> stageActivity session.reviewSessionStage <> " failed"
+  ReviewFailed -> stageActivity session.sessionDetail.reviewSessionStage <> " failed"
   ReviewRevised -> "Specification revised · awaiting opposite-brand rereview"
-  ReviewInterrupted -> stageActivity session.reviewSessionStage <> " interrupted"
+  ReviewInterrupted -> stageActivity session.sessionDetail.reviewSessionStage <> " interrupted"
   where
     stageActivity InitialReview = "review"
     stageActivity IssueRevision = "revision"
     stageActivity IssueRereview = "rereview"
 
 drawPendingInteraction :: ReviewSession -> Widget Name
-drawPendingInteraction session = case session.reviewSessionPending of
+drawPendingInteraction session = case session.sessionDetail.reviewSessionPending of
   Nothing -> emptyWidget
   Just (PendingReviewQuestion _ question) ->
     vBox
@@ -454,7 +468,7 @@ drawPendingInteraction session = case session.reviewSessionPending of
 -- did make it onto the input line needs no entry here: it is already visible
 -- there, and its transcript note says it was not delivered.
 drawUndeliveredSteers :: ReviewSession -> Widget Name
-drawUndeliveredSteers session = case session.reviewSessionUndelivered of
+drawUndeliveredSteers session = case session.sessionDetail.reviewSessionUndelivered of
   [] -> emptyWidget
   messages ->
     vBox
@@ -467,4 +481,4 @@ drawReviewInput session =
   padTop (Pad 1)
     . withAttr neutralAttr
     . txtWrap
-    $ "> " <> session.reviewSessionInput <> "█"
+    $ "> " <> session.sessionInput <> "█"

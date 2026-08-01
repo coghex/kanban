@@ -2,7 +2,6 @@ module Kanban.UI.PullRequest
   ( applyDirectMerge,
     applyDrainerStatus,
     applyDrainerToggle,
-    applyPullRequestAnimationTick,
     applyPullRequestFlowEvent,
     drainerErrorStatus,
     interruptPullRequestSession,
@@ -19,7 +18,7 @@ where
 
 import Brick
 import Brick.BChan (writeBChan)
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
@@ -71,10 +70,12 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.Transcript
 import Kanban.UI.Selection
 import Kanban.UI.Session
+import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
 import Kanban.UI.Solve
 
@@ -98,30 +99,28 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
     let action = selectAction state.appConfig.resolvedWorkflow pullRequest
     case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
       Just session
-        | pullRequestSessionReusable forceFresh (pullRequestReviewActive session) session.pullRequestSessionAction action session.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
+        | pullRequestSessionReusable forceFresh (solvePhaseActive session.sessionPhase) session.sessionDetail.pullRequestSessionAction action session.sessionDetail.pullRequestSessionLaunchedForUpdatedAt pullRequest.pullRequestUpdatedAt ->
             when showOverlay $ do
               modify (\current -> current {appOverlay = Just (PullRequestReviewOverlay pullRequest.pullRequestNumber), appNotice = Nothing})
               presentTranscriptTail
       _ -> do
         let brand = agentForAction origin action
             session =
-              PullRequestReviewSession
-                { pullRequestSessionPullRequest = pullRequest,
-                  pullRequestSessionOrigin = origin,
-                  pullRequestSessionAction = action,
-                  pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
-                  pullRequestSessionBrand = brand,
-                  pullRequestSessionId = Nothing,
-                  pullRequestSessionPhase = SolveStarting,
-                  pullRequestSessionActivity = "starting",
-                  pullRequestSessionActivityStartedAt = state.appNow,
-                  pullRequestSessionLogPath = Nothing,
-                  pullRequestSessionTranscript = plainTranscript ("action: " <> pullRequestActionText action <> "\nagent: " <> pullRequestAgentLabel action brand <> "\n\n"),
-                  pullRequestSessionInput = "",
-                  pullRequestSessionSpinnerFrame = 0,
-                  pullRequestSessionResumeProvenance = ResumeAnswer,
-                  pullRequestSessionFollowing = True
-                }
+              newAgentSession
+                (priorTickGeneration pullRequest.pullRequestNumber state.appPullRequestReviewSessions)
+                SolveStarting
+                "starting"
+                (Just state.appNow)
+                (plainTranscript ("action: " <> pullRequestActionText action <> "\nagent: " <> pullRequestAgentLabel action brand <> "\n\n"))
+                PullRequestDetail
+                  { pullRequestSessionPullRequest = pullRequest,
+                    pullRequestSessionOrigin = origin,
+                    pullRequestSessionAction = action,
+                    pullRequestSessionLaunchedForUpdatedAt = pullRequest.pullRequestUpdatedAt,
+                    pullRequestSessionBrand = brand,
+                    pullRequestSessionId = Nothing,
+                    pullRequestSessionResumeProvenance = ResumeAnswer
+                  }
         modify
           ( \current ->
               current
@@ -136,7 +135,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
 launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchPullRequestFlow number origin action _brand existingSession provenance input = do
   state <- get
-  let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.pullRequestSessionLogPath)
+  let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionLogPath)
       parent = autoSolveWorkerParent state number
       eventChannel = state.appEventChannel
   void . liftIO . forkIO $ do
@@ -160,14 +159,14 @@ autoSolveWorkerParent state pullRequestNumber =
       [ WorkerParent
           { workerParentIssueNumber = issueNumber,
             workerParentReviewRound = progress.autoSolveReviewRound,
-            workerParentSolverBrand = session.solveSessionBrand,
-            workerParentSolverSession = session.solveSessionId,
-            workerParentSolverLogPath = session.solveSessionLogPath,
+            workerParentSolverBrand = session.sessionDetail.solveSessionBrand,
+            workerParentSolverSession = session.sessionDetail.solveSessionId,
+            workerParentSolverLogPath = session.sessionLogPath,
             workerParentStartedAt = progress.autoSolveStartedAt,
             workerParentKnownPullRequests = progress.autoSolveKnownPullRequests
           }
         | (issueNumber, session) <- Map.toList state.appSolveSessions,
-          Just progress <- [session.solveSessionAutoProgress],
+          Just progress <- [session.sessionDetail.solveSessionAutoProgress],
           progress.autoSolvePullRequest == Just pullRequestNumber
       ] of
     parent : _ -> Just parent
@@ -178,14 +177,14 @@ submitPullRequestInput number = do
   state <- get
   case Map.lookup number state.appPullRequestReviewSessions of
     Just session
-      | session.pullRequestSessionPhase == SolveAttention,
-        Just sessionId <- session.pullRequestSessionId,
-        not (Text.null (Text.strip session.pullRequestSessionInput)) -> do
-          let answer = Text.strip session.pullRequestSessionInput
-          appendToPullRequestSession number (\current -> current {pullRequestSessionPhase = SolveStarting, pullRequestSessionActivity = "resuming", pullRequestSessionInput = "", pullRequestSessionTranscript = appendSolveTranscript current.pullRequestSessionTranscript ("\nYou: " <> answer <> "\n")})
+      | session.sessionPhase == SolveAttention,
+        Just sessionId <- session.sessionDetail.pullRequestSessionId,
+        not (Text.null (Text.strip session.sessionInput)) -> do
+          let answer = Text.strip session.sessionInput
+          appendToPullRequestSession number (\current -> current {sessionPhase = SolveStarting, sessionActivity = "resuming", sessionInput = "", sessionTranscript = appendTranscript current.sessionTranscript ("\nYou: " <> answer <> "\n")})
           modifyAutoSolveForPullRequest number
-            (\current -> current {solveSessionPhase = SolveRunning, solveSessionActivity = "resuming PR review"})
-          launchPullRequestFlow number session.pullRequestSessionOrigin session.pullRequestSessionAction session.pullRequestSessionBrand (Just sessionId) session.pullRequestSessionResumeProvenance answer
+            (\current -> current {sessionPhase = SolveRunning, sessionActivity = "resuming PR review"})
+          launchPullRequestFlow number session.sessionDetail.pullRequestSessionOrigin session.sessionDetail.pullRequestSessionAction session.sessionDetail.pullRequestSessionBrand (Just sessionId) session.sessionDetail.pullRequestSessionResumeProvenance answer
       | otherwise -> setNotice "This PR workflow is not waiting for a resumable answer"
     Nothing -> setNotice "PR workflow session is no longer available"
 
@@ -198,19 +197,20 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
           state
             { appPullRequestProcesses = Map.insert number process state.appPullRequestProcesses,
               -- issue #39: see 'SolveProcessStarted'.
-              appPullRequestReviewSessions = Map.adjust (setPullRequestActivity state.appNow "thinking" . (\session -> session {pullRequestSessionPhase = SolveRunning, pullRequestSessionFollowing = True})) number state.appPullRequestReviewSessions
+              appPullRequestReviewSessions = Map.adjust (setSessionActivity state.appNow "thinking" . (\session -> session {sessionPhase = SolveRunning, sessionFollowing = True})) number state.appPullRequestReviewSessions
             }
       )
     modifyAutoSolveForPullRequest number
-      (\session -> session {solveSessionPhase = SolveRunning, solveSessionActivity = "PR agent is thinking"})
-    schedulePullRequestTick number
+      (\session -> session {sessionPhase = SolveRunning, sessionActivity = "PR agent is thinking"})
+    armSessionTick pullRequestSessionOps number
   PullRequestLogOpened number path ->
-    modifyPullRequestSession number (\session -> session {pullRequestSessionLogPath = Just path})
-  PullRequestSessionIdentified number sessionId -> modifyPullRequestSession number (\session -> session {pullRequestSessionId = Just sessionId})
+    modifyPullRequestSession number (\session -> session {sessionLogPath = Just path})
+  PullRequestSessionIdentified number sessionId ->
+    modifyPullRequestSession number (withSessionDetail (\detail -> detail {pullRequestSessionId = Just sessionId}))
   PullRequestFlowOutput number output -> do
     now <- (.appNow) <$> get
     appendToPullRequestSession number
-      (setPullRequestActivity now (agentActivity output) . (\session -> session {pullRequestSessionTranscript = appendAgentTranscript output session.pullRequestSessionTranscript}))
+      (setSessionActivity now (agentActivity output) . (\session -> session {sessionTranscript = appendAgentTranscript output session.sessionTranscript}))
   PullRequestFlowDiagnostic number output -> do
     now <- (.appNow) <$> get
     appendOutput number ("[agent] " <> sanitizeText output <> "\n")
@@ -222,12 +222,12 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
     -- event from a fresh session (which never ran the "killed by user" UI
     -- transition) still renders it correctly.
     modifyPullRequestSession number
-      ( setPullRequestActivity now "diagnostic output"
-          . (\session -> session {pullRequestSessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` output then SolveOrphanedPhase else session.pullRequestSessionPhase})
+      ( setSessionActivity now "diagnostic output"
+          . (\session -> session {sessionPhase = if pendingTerminationDiagnosticPrefix `Text.isInfixOf` output then SolveOrphanedPhase else session.sessionPhase})
       )
   PullRequestProcessFinished number outcome -> do
     state <- get
-    let priorPhase = (.pullRequestSessionPhase) <$> Map.lookup number state.appPullRequestReviewSessions
+    let priorPhase = (.sessionPhase) <$> Map.lookup number state.appPullRequestReviewSessions
     modify
       ( \current ->
           current
@@ -239,20 +239,23 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
     case outcome of
       SolveNeedsInput _ ->
         modifyAutoSolveForPullRequest number
-          (\session -> session {solveSessionPhase = SolveAttention, solveSessionActivity = "PR review needs input; press p"})
+          (\session -> session {sessionPhase = SolveAttention, sessionActivity = "PR review needs input; press p"})
       SolveFailed message ->
         modifyAutoSolveForPullRequest number
-          (\session -> session {solveSessionPhase = SolveFailedPhase, solveSessionActivity = agentFailureNotice "PR agent" message})
+          (\session -> session {sessionPhase = SolveFailedPhase, sessionActivity = agentFailureNotice "PR agent" message})
       SolveCompleted -> pure ()
     startBoardRefresh
   where
     appendOutput number output =
-      appendToPullRequestSession number (\session -> session {pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript output})
-    finish (Just SolveInterrupting) _ session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for guidance", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n", pullRequestSessionResumeProvenance = ResumeInterruptGuidance}
-    finish (Just SolveKilledPhase) _ session = session {pullRequestSessionActivity = "killed"}
-    finish _ SolveCompleted session = session {pullRequestSessionPhase = SolveFinished, pullRequestSessionActivity = "completed"}
-    finish _ (SolveNeedsInput question) session = session {pullRequestSessionPhase = SolveAttention, pullRequestSessionActivity = "waiting for input", pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n"), pullRequestSessionResumeProvenance = ResumeAnswer}
-    finish _ (SolveFailed message) session = session {pullRequestSessionPhase = SolveFailedPhase, pullRequestSessionActivity = failureActivity message, pullRequestSessionTranscript = appendSolveTranscript session.pullRequestSessionTranscript ("\n" <> sanitizeText message <> "\n")}
+      appendToPullRequestSession number (\session -> session {sessionTranscript = appendTranscript session.sessionTranscript output})
+    finish (Just SolveInterrupting) _ session =
+      withResumeProvenance ResumeInterruptGuidance session {sessionPhase = SolveAttention, sessionActivity = "waiting for guidance", sessionTranscript = appendTranscript session.sessionTranscript "\n[interrupted] Type guidance and press Enter to resume this session.\n"}
+    finish (Just SolveKilledPhase) _ session = session {sessionActivity = "killed"}
+    finish _ SolveCompleted session = session {sessionPhase = SolveFinished, sessionActivity = "completed"}
+    finish _ (SolveNeedsInput question) session =
+      withResumeProvenance ResumeAnswer session {sessionPhase = SolveAttention, sessionActivity = "waiting for input", sessionTranscript = appendTranscript session.sessionTranscript ("\nQuestion: " <> sanitizeText question <> "\n")}
+    finish _ (SolveFailed message) session = session {sessionPhase = SolveFailedPhase, sessionActivity = failureActivity message, sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText message <> "\n")}
+    withResumeProvenance provenance = withSessionDetail (\detail -> detail {pullRequestSessionResumeProvenance = provenance})
 
 modifyAutoSolveForPullRequest :: Int -> (SolveSession -> SolveSession) -> EventM Name AppState ()
 modifyAutoSolveForPullRequest pullRequestNumber update =
@@ -262,7 +265,7 @@ modifyAutoSolveForPullRequest pullRequestNumber update =
           { appSolveSessions =
               Map.map
                 ( \session ->
-                    case session.solveSessionAutoProgress of
+                    case session.sessionDetail.solveSessionAutoProgress of
                       Just progress
                         | progress.autoSolvePullRequest == Just pullRequestNumber,
                           progress.autoSolveStage == AutoReviewing -> update session
@@ -277,34 +280,20 @@ interruptPullRequestSession number = do
   state <- get
   case (Map.lookup number state.appPullRequestReviewSessions, Map.lookup number state.appPullRequestProcesses) of
     (Just session, Just process)
-      | session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning], session.pullRequestSessionId /= Nothing -> do
+      | session.sessionPhase `elem` [SolveStarting, SolveRunning], session.sessionDetail.pullRequestSessionId /= Nothing -> do
           appendToPullRequestSession number
             ( \current ->
                 current
-                  { pullRequestSessionPhase = SolveInterrupting,
-                    pullRequestSessionActivity = "interrupting",
-                    pullRequestSessionTranscript = appendSolveTranscript current.pullRequestSessionTranscript "\n[interrupt requested]\n"
+                  { sessionPhase = SolveInterrupting,
+                    sessionActivity = "interrupting",
+                    sessionTranscript = appendTranscript current.sessionTranscript "\n[interrupt requested]\n"
                   }
             )
           liftIO (interruptManagedProcess process)
           setNotice ("Interrupting PR workflow #" <> showText number <> "…")
-      | session.pullRequestSessionId == Nothing -> setNotice "Wait for the resumable session id before interrupting"
+      | session.sessionDetail.pullRequestSessionId == Nothing -> setNotice "Wait for the resumable session id before interrupting"
       | otherwise -> setNotice "This PR workflow has no live turn to interrupt"
     _ -> setNotice "This PR workflow has no live process to interrupt"
-
-applyPullRequestAnimationTick :: Int -> EventM Name AppState ()
-applyPullRequestAnimationTick number = do
-  state <- get
-  case Map.lookup number state.appPullRequestReviewSessions of
-    Just session | session.pullRequestSessionPhase `elem` [SolveStarting, SolveRunning] -> do
-      modifyPullRequestSession number (\current -> current {pullRequestSessionSpinnerFrame = current.pullRequestSessionSpinnerFrame + 1})
-      schedulePullRequestTick number
-    _ -> pure ()
-
-schedulePullRequestTick :: Int -> EventM Name AppState ()
-schedulePullRequestTick number = do
-  channel <- (.appEventChannel) <$> get
-  void . liftIO . forkIO $ threadDelay reviewAnimationIntervalMicros >> writeBChan channel (PullRequestAnimationTick number)
 
 toggleDrainer :: EventM Name AppState ()
 toggleDrainer = do

@@ -1,5 +1,6 @@
 module Kanban.UI.Types
-  ( AgentSessionEntry (..),
+  ( AgentSession (..),
+    AgentSessionEntry (..),
     AgentSessionRef (..),
     AppEvent (..),
     AppState (..),
@@ -19,12 +20,16 @@ module Kanban.UI.Types
     PendingReviewInteraction (..),
     ProcessClickOutcome (..),
     ProcessSelection (..),
-    PullRequestReviewSession (..),
+    PullRequestDetail (..),
+    PullRequestReviewSession,
     ReviewBackend (..),
+    ReviewDetail (..),
     ReviewPhase (..),
-    ReviewSession (..),
+    ReviewSession,
+    SolveDetail (..),
     SolvePhase (..),
-    SolveSession (..),
+    SolveSession,
+    withSessionDetail,
   )
 where
 
@@ -147,33 +152,74 @@ data ChatTranscript = ChatTranscript
   }
   deriving stock (Eq, Show)
 
-data SolveSession = SolveSession
+-- | One agent session, whatever kind of agent it runs.
+--
+-- Everything above 'sessionDetail' is the shared core the three kinds used to
+-- keep three hand-maintained copies of, and is where every behavior that is
+-- not genuinely kind-specific now lives exactly once: status presentation,
+-- transcript growth and follow state, input editing, the animation tick
+-- chain, and the base overlay dispatch (issue #51). Only 'sessionDetail'
+-- differs by kind, and only the hooks that read it may differ with it.
+data AgentSession phase detail = AgentSession
+  { sessionPhase :: phase,
+    sessionActivity :: Text,
+    -- | When 'sessionActivity' began, for the elapsed suffix the solve and
+    -- pull-request presentations put beside it. 'Nothing' for a kind that
+    -- shows no elapsed time -- which is what keeps this shared field from
+    -- introducing one where there was none.
+    sessionActivityStartedAt :: Maybe UTCTime,
+    -- | The provider's full JSONL log, once the agent reports opening one.
+    -- 'Nothing' for a kind that has no such log of its own.
+    sessionLogPath :: Maybe FilePath,
+    sessionTranscript :: ChatTranscript,
+    sessionInput :: Text,
+    sessionSpinnerFrame :: Int,
+    -- | Identifies the current tick chain. A fired tick only advances the
+    -- frame and reschedules itself when it still carries this generation;
+    -- bumped only when a new chain is actually armed (see
+    -- 'Kanban.UI.SessionCore.decideSessionTickArm'), never on every trigger,
+    -- so concurrent triggers for the same running turn coalesce onto one
+    -- chain.
+    sessionTickGeneration :: Int,
+    -- | Whether a tick chain is currently in flight for
+    -- 'sessionTickGeneration', so a repeated trigger (e.g. an answered
+    -- question followed by the backend's matching turn notification) is
+    -- absorbed instead of arming a second chain.
+    sessionTickArmed :: Bool,
+    -- | See 'TranscriptSession': whether this transcript still follows the
+    -- live tail, or the user has scrolled back into it and must be left
+    -- where they are.
+    sessionFollowing :: Bool,
+    sessionDetail :: detail
+  }
+  deriving stock (Eq, Show)
+
+-- | Update the kind-specific half of a session, leaving the shared core
+-- alone. The core is updated with ordinary record syntax, which works
+-- uniformly across all three kinds precisely because they share this type.
+withSessionDetail :: (detail -> detail) -> AgentSession phase detail -> AgentSession phase detail
+withSessionDetail update session = session {sessionDetail = update session.sessionDetail}
+
+type SolveSession = AgentSession SolvePhase SolveDetail
+
+data SolveDetail = SolveDetail
   { solveSessionIssue :: Issue,
     solveSessionWorkflow :: SolveWorkflow,
     solveSessionBrand :: SolverBrand,
     solveSessionId :: Maybe Text,
-    solveSessionPhase :: SolvePhase,
-    solveSessionActivity :: Text,
-    solveSessionActivityStartedAt :: UTCTime,
-    solveSessionLogPath :: Maybe FilePath,
-    solveSessionTranscript :: ChatTranscript,
-    solveSessionInput :: Text,
-    solveSessionSpinnerFrame :: Int,
     solveSessionAutoProgress :: Maybe AutoSolveProgress,
     -- | Why the session last entered 'SolveAttention', so 'submitSolveInput'
     -- can tell a real answer to a 'KANBAN_NEEDS_INPUT' question apart from
     -- guidance typed after an interrupt -- both land in the same phase and
     -- are submitted through the same key -- and frame the resumed prompt
     -- accordingly. Meaningless while not in 'SolveAttention'.
-    solveSessionResumeProvenance :: ResumeProvenance,
-    -- | See 'TranscriptSession': whether this transcript still follows the
-    -- live tail, or the user has scrolled back into it and must be left
-    -- where they are.
-    solveSessionFollowing :: Bool
+    solveSessionResumeProvenance :: ResumeProvenance
   }
   deriving stock (Eq, Show)
 
-data PullRequestReviewSession = PullRequestReviewSession
+type PullRequestReviewSession = AgentSession SolvePhase PullRequestDetail
+
+data PullRequestDetail = PullRequestDetail
   { pullRequestSessionPullRequest :: PullRequest,
     pullRequestSessionOrigin :: PullRequestOrigin,
     pullRequestSessionAction :: PullRequestAction,
@@ -184,18 +230,9 @@ data PullRequestReviewSession = PullRequestReviewSession
     pullRequestSessionLaunchedForUpdatedAt :: UTCTime,
     pullRequestSessionBrand :: SolverBrand,
     pullRequestSessionId :: Maybe Text,
-    pullRequestSessionPhase :: SolvePhase,
-    pullRequestSessionActivity :: Text,
-    pullRequestSessionActivityStartedAt :: UTCTime,
-    pullRequestSessionLogPath :: Maybe FilePath,
-    pullRequestSessionTranscript :: ChatTranscript,
-    pullRequestSessionInput :: Text,
-    pullRequestSessionSpinnerFrame :: Int,
     -- | See 'solveSessionResumeProvenance'; the PR flow's own resume path
     -- has the same answer-vs-interrupt ambiguity.
-    pullRequestSessionResumeProvenance :: ResumeProvenance,
-    -- | See 'solveSessionFollowing'.
-    pullRequestSessionFollowing :: Bool
+    pullRequestSessionResumeProvenance :: ResumeProvenance
   }
   deriving stock (Eq, Show)
 
@@ -215,37 +252,21 @@ data PendingReviewInteraction
   | PendingReviewApproval ReviewRequestId ReviewApproval
   deriving stock (Eq, Show)
 
-data ReviewSession = ReviewSession
+type ReviewSession = AgentSession ReviewPhase ReviewDetail
+
+data ReviewDetail = ReviewDetail
   { reviewSessionIssue :: Issue,
     reviewSessionStage :: ReviewStage,
     reviewSessionThreadId :: Maybe Text,
     reviewSessionTurnId :: Maybe Text,
-    reviewSessionPhase :: ReviewPhase,
-    reviewSessionActivity :: Text,
-    reviewSessionTranscript :: ChatTranscript,
     reviewSessionPending :: Maybe PendingReviewInteraction,
-    reviewSessionInput :: Text,
     -- | Messages the app-server rejected as steers and that could not be
     -- resent automatically, oldest first. Nothing here is ever dropped:
     -- 'applyUndeliveredSteer' only takes the input line when it is free, so a
     -- draft typed after the original send — and a second independently
     -- rejected steer — survives, and 'takeNextUndelivered' hands the queue
     -- back one message at a time as the line frees up (issue #17).
-    reviewSessionUndelivered :: [Text],
-    reviewSessionSpinnerFrame :: Int,
-    -- | Identifies the current tick chain. A fired tick only advances the
-    -- frame and reschedules itself when it still carries this generation;
-    -- bumped only when a new chain is actually armed (see
-    -- 'decideReviewTickArm'), never on every trigger, so concurrent
-    -- triggers for the same running turn coalesce onto one chain.
-    reviewSessionTickGeneration :: Int,
-    -- | Whether a tick chain is currently in flight for
-    -- 'reviewSessionTickGeneration', so a repeated trigger (e.g. an
-    -- answered question followed by the backend's matching
-    -- 'ReviewTurnStarted') is absorbed instead of arming a second chain.
-    reviewSessionTickArmed :: Bool,
-    -- | See 'solveSessionFollowing'.
-    reviewSessionFollowing :: Bool
+    reviewSessionUndelivered :: [Text]
   }
   deriving stock (Eq, Show)
 
@@ -377,12 +398,16 @@ data AppEvent
   | DirectMergeFinished Int (Either Text DirectMergeOutcome)
   | ReviewBackendStarted (Either Text ReviewClient)
   | ReviewProtocolEvent ReviewEvent
-  | ReviewAnimationTick Int Int
+  | -- | Session key, then the tick chain's generation. Every kind carries a
+    -- generation so a superseded chain's queued tick is dropped rather than
+    -- rearming alongside its replacement (issue #30, extended to solve and
+    -- pull-request sessions by issue #51).
+    ReviewAnimationTick Int Int
   | SolveProtocolEvent SolveEvent
-  | SolveAnimationTick Int
+  | SolveAnimationTick Int Int
   | SolveBoardRefreshRequested
   | PullRequestProtocolEvent PullRequestFlowEvent
-  | PullRequestAnimationTick Int
+  | PullRequestAnimationTick Int Int
   | WorkerRegistered WorkerDescriptor
   | WorkerProtocolEvent WorkerDescriptor WorkerEvent
   | WorkerDiscoveryFinished [WorkerDescriptor]

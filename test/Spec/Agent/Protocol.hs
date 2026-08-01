@@ -57,7 +57,8 @@ import Kanban.StreamReader
 import Kanban.UI.Overlay (drawUndeliveredSteers)
 import Kanban.UI.Review (applyUndeliveredSteer)
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types (ChatTranscript (..), ReviewPhase (..), ReviewSession (..))
+import Kanban.UI.SessionCore (newAgentSession)
+import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..), ReviewPhase (..), ReviewSession)
 import Spec.Support.Env (createTemporaryDirectory, withEnvironmentValue)
 import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, testOptions)
@@ -378,50 +379,51 @@ spec = do
   describe "undelivered review message recovery" $ do
     let steerMessage = "actually, check the drainer path too" :: Text
         laterMessage = "and the label cleanup" :: Text
+        undeliveredSession :: Text -> [Text] -> ReviewSession
         undeliveredSession input undelivered =
-          ReviewSession
-            { reviewSessionIssue = baseIssue 17 [],
-              reviewSessionStage = InitialReview,
-              reviewSessionThreadId = Just "thread-1",
-              reviewSessionTurnId = Just "turn-2",
-              reviewSessionPhase = ReviewRunning,
-              reviewSessionActivity = "thinking",
-              reviewSessionTranscript = plainChatTranscript ("\nYou: " <> steerMessage <> "\n"),
-              reviewSessionPending = Nothing,
-              reviewSessionInput = input,
-              reviewSessionUndelivered = undelivered,
-              reviewSessionSpinnerFrame = 0,
-              reviewSessionTickGeneration = 1,
-              reviewSessionTickArmed = False,
-              reviewSessionFollowing = True
-            }
+          ( newAgentSession
+              0
+              ReviewRunning
+              "thinking"
+              Nothing
+              (plainChatTranscript ("\nYou: " <> steerMessage <> "\n"))
+              ReviewDetail
+                { reviewSessionIssue = baseIssue 17 [],
+                  reviewSessionStage = InitialReview,
+                  reviewSessionThreadId = Just "thread-1",
+                  reviewSessionTurnId = Just "turn-2",
+                  reviewSessionPending = Nothing,
+                  reviewSessionUndelivered = undelivered
+                }
+          )
+            {sessionInput = input}
 
     it "restores the rejected message to an input line the user left alone" $ do
       let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
-      recovered.reviewSessionInput `shouldBe` steerMessage
-      recovered.reviewSessionUndelivered `shouldBe` []
+      recovered.sessionInput `shouldBe` steerMessage
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` []
 
     it "qualifies the optimistic transcript entry rather than leaving it claiming delivery" $ do
       let recovered = applyUndeliveredSteer steerMessage (undeliveredSession "" [])
-      recovered.reviewSessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> steerMessage)
+      recovered.sessionTranscript.standardTranscript `shouldMention` ("[not delivered] " <> steerMessage)
 
     it "keeps a draft typed after the send, queueing the rejected message behind it" $ do
       let draft = "wait, ignore that"
           recovered = applyUndeliveredSteer steerMessage (undeliveredSession draft [])
-      recovered.reviewSessionInput `shouldBe` draft
-      recovered.reviewSessionUndelivered `shouldBe` [steerMessage]
+      recovered.sessionInput `shouldBe` draft
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [steerMessage]
 
     it "preserves every independently rejected steer instead of overwriting the first" $ do
       let draft = "wait, ignore that"
           recovered =
             applyUndeliveredSteer laterMessage (applyUndeliveredSteer steerMessage (undeliveredSession draft []))
-      recovered.reviewSessionInput `shouldBe` draft
-      recovered.reviewSessionUndelivered `shouldBe` [steerMessage, laterMessage]
+      recovered.sessionInput `shouldBe` draft
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [steerMessage, laterMessage]
 
     it "returns queued messages oldest first once the input line is free again" $ do
       let recovered = applyUndeliveredSteer laterMessage (undeliveredSession "" [steerMessage])
-      recovered.reviewSessionInput `shouldBe` steerMessage
-      recovered.reviewSessionUndelivered `shouldBe` [laterMessage]
+      recovered.sessionInput `shouldBe` steerMessage
+      recovered.sessionDetail.reviewSessionUndelivered `shouldBe` [laterMessage]
 
     it "shows what is still waiting inside the session overlay, not only in a transient notice" $ do
       let rendered =

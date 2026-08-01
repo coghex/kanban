@@ -30,6 +30,7 @@ import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Layout as Layout
 import qualified Spec.UI.ReviewSession as ReviewSession
+import qualified Spec.UI.SessionCore as SessionCore
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
@@ -54,6 +55,7 @@ suite = do
   Transcript.spec
   PullRequestFlow.spec
   ReviewSession.spec
+  SessionCore.spec
   RepositoryIdentity.spec
   UIText.spec
   Workflow.spec
