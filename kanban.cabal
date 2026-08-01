@@ -100,6 +100,13 @@ library
     Kanban.Worker
     Kanban.Workflow
   other-modules:
+    Kanban.GitHub.Decode
+    Kanban.GitHub.Fetch
+    Kanban.GitHub.Group
+    Kanban.GitHub.Guard
+    Kanban.GitHub.Message
+    Kanban.GitHub.Run
+    Kanban.GitHub.Warnings
     Kanban.Preflight.Environment
     Kanban.Preflight.Readiness
   build-depends:
