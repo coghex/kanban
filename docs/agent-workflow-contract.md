@@ -194,9 +194,13 @@ everything else.
   §4 manifest and reconciled against it the same way the Haskell and
   packaged-workflow surfaces are: every non-test module under `tools/` is a
   scanned surface, so `launchctl` carries both a manifest row and a §2.6
-  host-prerequisite entry. Only the executable half is reconciled that way —
-  the home-relative paths these modules build have `personal-path` rows but
-  are not scanned in reverse. Their behavior stays covered by
+  host-prerequisite entry. That surface is executable-only. The home-relative
+  paths these modules build are neither asserted nor scanned from here: some
+  have `personal-path` rows (the drainer's install directory, its discovery
+  record, its LaunchAgent label), others deliberately have none yet
+  (`~/Library/LaunchAgents`, the drainer's log root, the legacy
+  `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
+  not this surface's. Their behavior stays covered by
   `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`, and
   `tools/test_install_drainer.py`.
   `tools/drain_prs.py --pr <number>` is the same merge path driven for one
@@ -726,16 +730,20 @@ runs) parses the manifest in §4 and:
   matching `executable` manifest entry — the coordinator is Python, not
   bash, so it is reconciled with a separate extractor from the `.md` files
   above, not exempted from coverage;
+- fails if any of the Haskell source files in the first bullet build a
+  home-relative path segment that has no matching `personal-path` manifest
+  entry;
 - fails if a non-test Python module under `tools/` invokes a command, as the
   first element of a literal `run`/`subprocess.run`/`run_command`/`Popen`
-  argument list, that has no matching `executable` manifest entry — that is
-  how `launchctl` is held to the same standard as `/usr/bin/plutil`, which
-  merely reads the job `launchctl` installs. This surface is discovered rather
-  than enumerated, so a tool module added later is scanned as soon as it
-  lands; `test_*.py` modules and `tools/fake_cli.py` are excluded because they
-  construct fake executables rather than depend on real ones;
-- fails if those same files build a home-relative path segment that has no
-  matching `personal-path` manifest entry;
+  argument list in either Python quote style, that has no matching
+  `executable` manifest entry — that is how `launchctl` is held to the same
+  standard as `/usr/bin/plutil`, which merely reads the job `launchctl`
+  installs. This surface is discovered rather than enumerated, so a tool
+  module added later is scanned as soon as it lands; `test_*.py` modules and
+  `tools/fake_cli.py` are excluded because they construct fake executables
+  rather than depend on real ones. It is executable-only: the home-relative
+  paths these modules build are not scanned, so the bullet above does not
+  extend to `tools/`;
 - fails if any of the seven drafting and canonical issue-review assets
   declared in
   [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)

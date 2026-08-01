@@ -274,10 +274,13 @@ def discovered_commands_for_plugin_file(relative_path, content):
 # extractor keyed to `run(` alone, the way the packaged coordinators' one
 # above is, would discover nothing at all in the module that owns the
 # pipeline's only irreversible action. `\s` matches newlines without
-# re.DOTALL, so a list literal split across lines is covered too.
+# re.DOTALL, so a list literal split across lines is covered too, and either
+# Python quote style is accepted: every tool here happens to use double
+# quotes, but a check whose gate a single-quoted literal walks through is not
+# a gate.
 TOOL_COMMAND_CALL_RE = re.compile(
     r'\b(?:subprocess\.)?(?:run(?:_command)?|Popen|check_call|check_output)'
-    r'\(\s*\[\s*"([^"]+)"'
+    r'\(\s*\[\s*(?P<quote>["\'])(?P<name>[^"\']+)(?P=quote)'
 )
 
 
@@ -287,7 +290,7 @@ def discovered_tool_commands(content):
     not matched, the same way the coordinator extractor above skips
     `sys.executable`: this reads source, and nothing here runs a tool to find
     out what it spawns."""
-    return {match.group(1) for match in TOOL_COMMAND_CALL_RE.finditer(content)}
+    return {match.group("name") for match in TOOL_COMMAND_CALL_RE.finditer(content)}
 
 
 def tool_surface_files(tools_dir=TOOLS_DIR):
@@ -664,6 +667,12 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertEqual(
                 discovered_tool_commands(content), {"git", "launchctl"}, relative_path
             )
+        # Either Python quote style, so a tool written with single quotes is
+        # held to the same standard as the ones already here.
+        self.assertEqual(
+            discovered_tool_commands("run_command(['launchctl', 'print'])"),
+            {"launchctl"},
+        )
 
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
@@ -703,8 +712,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_undeclared_tool_command_fails_the_tool_surface_check(self):
         # A temporary tools/ tree stands in for a future edit: an undeclared
         # command reaches the report whether it is spawned directly or through
-        # a run_command wrapper, and neither a test module nor a fake-builder
-        # contributes one.
+        # a run_command wrapper, and in either Python quote style — a gate a
+        # single-quoted literal walks through is not a gate. Neither a test
+        # module nor a fake-builder contributes one.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
@@ -713,6 +723,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
             tools_dir.mkdir()
             (tools_dir / "direct_tool.py").write_text(
                 'subprocess.run(["undeclared-direct", "status"])\n', encoding="utf-8"
+            )
+            (tools_dir / "quoted_tool.py").write_text(
+                "subprocess.run(['undeclared-single-quoted', 'status'])\n",
+                encoding="utf-8",
             )
             (tools_dir / "wrapper_tool.py").write_text(
                 'run_command(["undeclared-wrapped", "print", target])\n',
@@ -729,6 +743,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             findings,
             [
                 ("tools/direct_tool.py", "undeclared-direct"),
+                ("tools/quoted_tool.py", "undeclared-single-quoted"),
                 ("tools/wrapper_tool.py", "undeclared-wrapped"),
             ],
         )
