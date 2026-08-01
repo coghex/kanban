@@ -48,6 +48,7 @@ import Kanban.PullRequestFlow
     pullRequestVerdictForLabels,
   )
 import Kanban.Solve (SolveWorkflow (..), SolverBrand (..))
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.UI.Util (allColumns, entriesForBoard, showText)
 import Kanban.Worker (WorkerParent (..))
@@ -117,7 +118,7 @@ decideAutoSolve observation progress = case progress.autoSolveStage of
 decideDiscovery :: AutoSolveObservation -> AutoSolveProgress -> AutoSolveDecision
 decideDiscovery observation progress =
   case newAutoSolvePullRequests observation.autoSolveIssueNumber progress observation.autoSolveSnapshotPullRequests of
-    [] -> AutoSolveWaitingOn "waiting for linked PR; press u to retry"
+    [] -> AutoSolveWaitingOn ("waiting for linked PR; press " <> actionKeyText RefreshAll <> " to retry")
     [pullRequest] -> case originFromBody pullRequest.pullRequestBody of
       Right origin
         | origin == expectedPullRequestOrigin observation.autoSolveSolverBrand ->
@@ -137,13 +138,13 @@ decideReview observation progress = case boundPullRequest observation progress o
   Nothing -> AutoSolveHalted AutoSolveHaltStopped "the autosolve PR disappeared before review completed"
   Just pullRequest -> case observation.autoSolveReviewPhase of
     Nothing -> AutoSolveStartReview pullRequest.pullRequestNumber
-    Just SolveFailedPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review failed; press p to inspect it")
+    Just SolveFailedPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review failed; press " <> actionKeyText ShowProcesses <> " to inspect it")
     Just SolveKilledPhase -> AutoSolveHalted AutoSolveHaltFailed ("PR #" <> showText pullRequest.pullRequestNumber <> " review was killed")
-    Just SolveAttention -> AutoSolveWaitingOn "PR review needs input; press p"
+    Just SolveAttention -> AutoSolveWaitingOn ("PR review needs input; press " <> actionKeyText ShowProcesses)
     Just SolveFinished
       | pullRequestHasLabel config.approvalLabel pullRequest -> AutoSolveApprove pullRequest.pullRequestNumber
       | pullRequestHasLabel config.changesRequestedLabel pullRequest -> decideRevision observation progress pullRequest
-      | otherwise -> AutoSolveWaitingOn "waiting for review verdict; press u to retry"
+      | otherwise -> AutoSolveWaitingOn ("waiting for review verdict; press " <> actionKeyText RefreshAll <> " to retry")
     Just _ -> AutoSolveWaitingOn ("reviewing PR #" <> showText pullRequest.pullRequestNumber)
   where
     config = observation.autoSolveWorkflowConfig
@@ -160,7 +161,7 @@ decideRereview observation progress = case boundPullRequest observation progress
       PullRequestVerdictApproved -> AutoSolveApprove pullRequest.pullRequestNumber
       PullRequestVerdictChangesRequested ->
         decideRevision observation (progress {autoSolveReviewRound = progress.autoSolveReviewRound + 1}) pullRequest
-      PullRequestVerdictPending -> AutoSolveWaitingOn "waiting for the canonical rereview verdict; press u to retry"
+      PullRequestVerdictPending -> AutoSolveWaitingOn ("waiting for the canonical rereview verdict; press " <> actionKeyText RefreshAll <> " to retry")
 
 -- | The five-round bound, and the two conditions that make a revision
 -- impossible or premature.

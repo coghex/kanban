@@ -32,6 +32,7 @@ module Kanban.UI.SessionCore
     removeSessionInputCharacter,
     renderPhaseGlyph,
     sessionInputEvent,
+    sessionInputHelp,
     sessionInputLimit,
     sessionsNeedingArm,
     setSessionActivity,
@@ -48,6 +49,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import qualified Graphics.Vty as Vty
+import Kanban.UI.Keys (HelpEntry (..), chord)
 import Kanban.UI.Types
 import Kanban.UI.Util (safeIndex)
 
@@ -247,6 +249,18 @@ data SessionInputCaps = SessionInputCaps
 
 noSessionInputCaps :: SessionInputCaps
 noSessionInputCaps = SessionInputCaps False False False
+
+-- | The help overlay's rows for the two bindings above that §7 lists. They
+-- live here, beside 'sessionInputEvent', because that is where the keys
+-- themselves are decided: the overlay renders these rather than keeping a
+-- second copy of the same facts. The rest of the shared table — backspace,
+-- the arrows, printable characters, and the capability-gated chords — is
+-- ordinary text entry that §7 does not enumerate.
+sessionInputHelp :: [HelpEntry]
+sessionInputHelp =
+  [ HelpEntry [chord (Vty.KChar '\t') []] Nothing "next session in an open solve/PR/review overlay",
+    HelpEntry [chord (Vty.KChar 'c') [Vty.MCtrl]] Nothing "interrupt open agent turn, then type guidance"
+  ]
 
 sessionInputEvent :: SessionInputCaps -> Vty.Event -> Maybe SessionInputEvent
 sessionInputEvent caps event = case event of

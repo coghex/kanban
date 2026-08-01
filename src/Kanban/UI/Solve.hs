@@ -48,6 +48,7 @@ import Kanban.Worker
     launchSolveWorker,
     pendingTerminationDiagnosticPrefix
     )
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -83,9 +84,11 @@ openExistingSolveOverlay issueNumber = do
   modify (\current -> current {appOverlay = Just (SolveOverlay issueNumber), appNotice = Nothing})
   presentTranscriptTail
 
+-- | The base-board key that starts each workflow, named from the one table
+-- that declares it rather than spelled out a second time here.
 workflowKey :: SolveWorkflow -> Text
-workflowKey SolveOnly = "S"
-workflowKey AutoSolve = "A"
+workflowKey SolveOnly = actionKeyText SolveSelection
+workflowKey AutoSolve = actionKeyText AutoSolveSelection
 
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do

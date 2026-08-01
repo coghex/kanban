@@ -6,43 +6,43 @@
 ║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
 ║┃         Tue 09:00        ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
 ║┃ Claude                   ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃         Thu 17:30        ┃┃     │ envelope                    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓                    │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                    ┃                                                                   ┃n dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
-║┃         Sat 09:10        ┃┃     │ unassigned · updated 4h ago ┃ j / Down    next card                                             ┃hile preserving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the envelope header ah┃ k / Up      previous card                                         ┃                    │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payload so a partial ┃ x           kill selected working process tree                    ┃hind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is detectable on load.┃ h / Left    previous column                                       ┃────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰─────────────────────────────┃ l / Right   next column                                           ┃                      ┃                                         ┃║
-║┃                          ┃┃                                   ┃ g / G        first / last visible item                            ┃────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                                   ┃ e            expand / collapse focused epic                       ┃otype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
-║┃                          ┃┃  ▸ #701  Input routing hardening  ┃ Enter        details                                              ┃t                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
-║┃                          ┃┃  complete                         ┃ r            review/revise/repair selected issue or PR            ┃                    │ ┃  │ #812 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  STANDALONE                       ┃ S            solve selected issue (choose model brand)            ┃me → master ·       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃ ▌╭────────────────────────────────┃ A            autosolve selected issue (choose model brand)        ┃                    │ ┃  │ Routes Shift-wheel through the     │ ┃║
-║┃                          ┃┃  │ #812 Modal input leaks through ┃ u            update board and both usage providers                ┃of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
-║┃                          ┃┃  │ overlay                        ┃ d / click    start or stop PR drainer                             ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
-║┃                          ┃┃  │  reviewed:approve   bug   ui   ┃ m            merge the selected approved PR in Done               ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ left click   select card; click selected card for details         ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas currently all┃ mouse wheel scroll column under pointer                           ┃────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to reach lower  ┃ right/outside click closes card details                           ┃                      ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is visible when a… ┃ c            collapse / expand sidebar                            ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ╰────────────────────────────────┃ s            settings                                             ┃                      ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃                                   ┃ p            processes and agent sessions                         ┃                      ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭────────────────────────────────┃ i            everything needing attention; Enter goes to its work ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the persistence    ┃ Ctrl-L       repaint                                              ┃                      ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract                       ┃ Esc          close overlay                                        ┃                      ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture                  ┃ Tab          next session in an open solve/PR/review overlay      ┃                      ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago    ┃ Ctrl-C       interrupt open agent turn, then type guidance        ┃                      ┃  │ truncated payload.                 │ ┃║
-║┃                          ┃┃  │ Document root owners, snapshot ┃ q            quit                                                 ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃                          ┃┃  │ barriers, and the versioned    ┃                                                                   ┃                      ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ envelope before implementation…┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃                                         ┃║
-║┃ +--------------+         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the versioned┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃         Thu 17:30        ┃┃     │ envelope                ┃                                                                           ┃                │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                ┃ j / Down             next card                                            ┃spatch into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃         Sat 09:10        ┃┃     │ unassigned · updated 4h ┃ k / Up               previous card                                        ┃ preserving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃     │ Write the envelope heade┃ x                    kill selected working process tree                   ┃                │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃     │ of the payload so a part┃ h / Left             previous column                                      ┃                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃     │ write is detectable on l┃ l / Right            next column                                          ┃────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰─────────────────────────┃ g                    first visible item in the column                     ┃                  ┃                                         ┃║
+║┃                          ┃┃                               ┃ G                    last visible item in the column                      ┃────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                               ┃ e                    expand / collapse focused epic                       ┃e native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardeni┃ Enter                details                                              ┃                │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃  complete                     ┃ Esc                  close overlay or dismiss a notice                    ┃                │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE                   ┃ r                    review/revise/repair selected issue or PR            ┃ master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃ ▌╭────────────────────────────┃ S                    solve selected issue (choose model brand)            ┃                │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃  │ #812 Modal input leaks thro┃ A                    autosolve selected issue (choose model brand)        ┃he native       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃  │ overlay                    ┃ p                    processes and agent sessions                         ┃mbership        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃  │  reviewed:approve   bug   u┃ i                    everything needing attention; Enter goes to its work ┃                │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago┃ u                    update board and both usage providers                ┃ulating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ Empty modal areas currently┃ d / click            start or stop PR drainer                             ┃────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ pointer events to reach low┃ m                    merge the selected approved PR in Done               ┃                  ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ pages. This is visible when┃ c                    collapse / expand sidebar                            ┃                  ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ╰────────────────────────────┃ s                    settings                                             ┃                  ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                               ┃ ?                    this help overlay                                    ┃                  ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭────────────────────────────┃ Ctrl-L               repaint                                              ┃                  ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence┃ q                    quit                                                 ┃                  ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract                   ┃ Tab                  next session in an open solve/PR/review overlay      ┃                  ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture              ┃ Ctrl-C               interrupt open agent turn, then type guidance        ┃                  ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago┃ left click           select card; click selected card for details         ┃                  ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ Document root owners, snaps┃ mouse wheel          scroll column under pointer                          ┃                  ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ barriers, and the versioned┃ right/outside click  close card details                                   ┃                  ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ envelope before implementat┃                                                                           ┃                  ┃                                         ┃║
+║┃ +--------------+         ┃┃  ╰────────────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                  ┃                                         ┃║
 ║┃ | drain_prs.py |         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ +--------------+         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  i attention  u update  d drainer  c sidebar  s settings  ? help  q quit       ║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i attention  u update  d dr ║
 ║ board: updated 3h ago                                                                                                                                                                                ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

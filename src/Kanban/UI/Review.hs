@@ -73,6 +73,7 @@ import Kanban.Settings
   ( ChatVerbosity (..)
     )
 import Kanban.Text (sanitizeText)
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -356,7 +357,7 @@ startSelectedReview :: EventM Name AppState ()
 startSelectedReview = do
   state <- get
   case selectedReviewItem state of
-    Nothing -> setNotice "Select an issue or PR before pressing r"
+    Nothing -> setNotice ("Select an issue or PR before pressing " <> actionKeyText ReviewSelection)
     Just item -> startItemReview item
 
 startItemReview :: BoardItem -> EventM Name AppState ()

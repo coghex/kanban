@@ -2,6 +2,8 @@ module Kanban.UI.Overlay
   ( drawIncidents,
     drawOverlay,
     drawUndeliveredSteers,
+    helpLines,
+    mouseHelpEntries,
     reviewPhaseLabel,
     solveReviewerLabel,
   )
@@ -40,6 +42,16 @@ import Kanban.Settings
     verbosityLabel
   )
 import Kanban.Text (sanitizeText)
+import Kanban.UI.Keys
+  ( BoardAction (..),
+    HelpEntry (..),
+    actionKeyText,
+    bindingHelpEntry,
+    boardBindings,
+    gestureHelpEntry,
+    helpRows,
+  )
+import Kanban.UI.SessionCore (sessionInputHelp)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -78,6 +90,10 @@ drawOverlay state overlay =
       SolveChooser _ _ -> 10
       SettingsOverlay -> 19
       ProcessesOverlay -> 32
+      -- Tall enough for the list it draws, so a binding added to the table
+      -- cannot silently push a row past the border: the two rows 'padAll'
+      -- adds and the two the border takes are the whole difference.
+      HelpOverlay -> length helpLines + 4
       _ -> 32
     panelExtent = case overlay of
       HelpOverlay -> id
@@ -108,35 +124,28 @@ reviewOverlayTitle state issueNumber = case (.sessionDetail.reviewSessionStage) 
   Nothing -> "REVIEW"
 
 drawHelp :: Widget Name
-drawHelp =
-  vBox
-    [ txt "j / Down    next card",
-      txt "k / Up      previous card",
-      txt "x           kill selected working process tree",
-      txt "h / Left    previous column",
-      txt "l / Right   next column",
-      txt "g / G        first / last visible item",
-      txt "e            expand / collapse focused epic",
-      txt "Enter        details",
-      txt "r            review/revise/repair selected issue or PR",
-      txt "S            solve selected issue (choose model brand)",
-      txt "A            autosolve selected issue (choose model brand)",
-      txt "u            update board and both usage providers",
-      txt "d / click    start or stop PR drainer",
-      txt "m            merge the selected approved PR in Done",
-      txt "left click   select card; click selected card for details",
-      txt "mouse wheel scroll column under pointer",
-      txt "right/outside click closes card details",
-      txt "c            collapse / expand sidebar",
-      txt "s            settings",
-      txt "p            processes and agent sessions",
-      txt "i            everything needing attention; Enter goes to its work",
-      txt "Ctrl-L       repaint",
-      txt "Esc          close overlay",
-      txt "Tab          next session in an open solve/PR/review overlay",
-      txt "Ctrl-C       interrupt open agent turn, then type guidance",
-      txt "q            quit"
-    ]
+drawHelp = vBox (map txt helpLines)
+
+-- | The complete binding list, in three blocks: every base-board binding in
+-- §7's order, then the bindings a live-agent overlay adds, then the mouse.
+--
+-- Nothing here is a key hint this module wrote down. The board rows come from
+-- the table in "Kanban.UI.Keys" and the overlay rows from beside the decoder
+-- that answers them in "Kanban.UI.SessionCore", so the overlay cannot claim a
+-- binding that dispatch does not have — which is exactly how it came to omit
+-- @?@, its own binding, before this list was derived.
+helpLines :: [Text]
+helpLines = helpRows (map bindingHelpEntry boardBindings <> sessionInputHelp <> mouseHelpEntries)
+
+-- | The gestures no key covers, so no binding defines them. Mouse policy
+-- lives in @Kanban.UI.Events@ rather than in a table, and this is prose about
+-- it, not a key hint.
+mouseHelpEntries :: [HelpEntry]
+mouseHelpEntries =
+  [ gestureHelpEntry "left click" "select card; click selected card for details",
+    gestureHelpEntry "mouse wheel" "scroll column under pointer",
+    gestureHelpEntry "right/outside click" "close card details"
+  ]
 
 drawSettings :: AppState -> Widget Name
 drawSettings state =
@@ -328,7 +337,7 @@ drawSolveInput session
       padTop (Pad 1)
         . withAttr attentionAttr
         . txtWrap
-        $ "The PR agent needs input. Press Enter to open that session, or use p processes."
+        $ "The PR agent needs input. Press Enter to open that session, or use " <> actionKeyText ShowProcesses <> " processes."
 drawSolveInput session
   | session.sessionPhase == SolveAttention =
       padTop (Pad 1)

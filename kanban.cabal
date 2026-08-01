@@ -79,6 +79,7 @@ library
     Kanban.UI.Board
     Kanban.UI.Details
     Kanban.UI.Events
+    Kanban.UI.Keys
     Kanban.UI.Overlay
     Kanban.UI.PullRequest
     Kanban.UI.Reconcile
@@ -173,6 +174,7 @@ test-suite kanban-test
     Spec.UI.Cards
     Spec.UI.Golden
     Spec.UI.Incidents
+    Spec.UI.Keys
     Spec.UI.Layout
     Spec.UI.ReviewSession
     Spec.UI.SessionCore
