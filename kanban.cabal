@@ -70,6 +70,9 @@ library
     Kanban.Review
     Kanban.Settings
     Kanban.Solve
+    Kanban.Solve.Event
+    Kanban.Solve.Parse
+    Kanban.Solve.Unknown
     Kanban.StreamReader
     Kanban.Text
     Kanban.Transcript

@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DerivingStrategies #-}
-
 module Kanban.Solve
   ( AgentEvent (..),
     ResumeProvenance (..),
@@ -35,32 +32,48 @@ module Kanban.Solve
 where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try, uninterruptibleMask_)
-import Control.Monad (void, when)
-import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict', encode)
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Control.Monad (void)
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Foldable (toList)
-import GHC.Generics (Generic)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Domain (Repository (..), WorkflowConfig (..))
-import Kanban.Process (ManagedProcess, managedProcess)
-import Kanban.Settings (ChatVerbosity (..))
+import Kanban.Process (managedProcess)
+import Kanban.Solve.Event
+  ( AgentEvent (..),
+    ResumeProvenance (..),
+    SolveEvent (..),
+    SolveOutcome (..),
+    SolveWorkflow (..),
+    SolverBrand (..),
+    StreamEvent (..),
+    UnknownStreamCategory (..),
+    UnknownStreamKey (..),
+    agentOutcome,
+    claudeReviewerModel,
+    claudeSolverModel,
+    codexReviewerModel,
+    codexSolverModel,
+    renderAgentEvent,
+    solveOutcome,
+    solverLabel,
+  )
+import Kanban.Solve.Parse (parseSolveOutputLine)
+import Kanban.Solve.Unknown
+  ( UnknownAggregator,
+    emitStreamEvent,
+    maxUnknownNoticeLength,
+    maxUnknownTypeLength,
+    newUnknownAggregator,
+    sealUnknownAggregates,
+    unknownNoticeSamples,
+  )
 import Kanban.StreamReader (handleReadLine, onStreamAbandoned, runStreamReaderWith)
-import Kanban.Text (excerpt)
 import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Directory (findExecutable)
-import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process
   ( CreateProcess (..),
@@ -73,202 +86,6 @@ import System.Process
     std_out,
     waitForProcess,
   )
-
-data SolverBrand = CodexSolver | ClaudeSolver
-  deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
-data SolveWorkflow = SolveOnly | AutoSolve
-  deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
--- | Why a resumed agent session is being fed this message, so the resume
--- prompt can state the true provenance instead of always framing it as a
--- user answer. 'ResumeAutomatedChangesRequested' covers Kanban's own
--- reviewed:changes handoff (e.g. 'resumeAutoSolveRevision'), not a message
--- typed by a person.
-data ResumeProvenance = ResumeAnswer | ResumeInterruptGuidance | ResumeAutomatedChangesRequested
-  deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
-data SolveOutcome
-  = SolveCompleted
-  | SolveNeedsInput Text
-  | SolveFailed Text
-  deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
-data SolveEvent
-  = SolveProcessStarted Int SolverBrand ManagedProcess
-  | SolveProcessSpawning Int Bool
-  | SolveLogOpened Int FilePath
-  | SolveSessionIdentified Int Text
-  | SolveOutput Int AgentEvent
-  | SolveDiagnostic Int Text
-  | SolveProcessFinished Int SolveOutcome
-
-data ParsedSolveOutput = ParsedSolveOutput
-  { parsedSessionId :: Maybe Text,
-    parsedMessages :: [StreamEvent]
-  }
-  deriving stock (Eq, Show)
-
-data AgentEvent = AgentEvent
-  { agentEventKind :: Text,
-    agentEventSummary :: Text,
-    agentEventDetail :: Text,
-    agentEventOutcomeText :: Maybe Text
-  }
-  deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
-
--- | A parsed agent event paired with the identity of the unknown-payload
--- fallback that produced it, if any. The identity rides alongside
--- 'AgentEvent' rather than inside it deliberately: aggregation is decided in
--- the stream loops and never reaches a worker-journal envelope, so journals
--- written before this bounding existed keep decoding exactly as they did.
-data StreamEvent = StreamEvent
-  { streamEventUnknown :: Maybe UnknownStreamKey,
-    streamEventAgent :: AgentEvent
-  }
-  deriving stock (Eq, Show)
-
--- | Which of the parser's three unrecognized-payload fallbacks produced a
--- notice. It is part of the aggregation key so a top-level event, a Codex
--- item, and a Claude content block that happen to share a type string are
--- still counted apart.
-data UnknownStreamCategory = UnknownTopLevel | UnknownCodexItem | UnknownClaudeContent
-  deriving stock (Eq, Ord, Show)
-
--- | The identity repeated unknown payloads collapse under: the fallback's
--- category plus the payload's usable literal-string @type@, or 'Nothing'
--- when that type is missing, not a JSON string, or blank once normalized.
--- The /full/ type text is kept rather than the truncated display label, so
--- two long distinct types that share a bounded prefix never merge into one
--- another's count.
-data UnknownStreamKey = UnknownStreamKey UnknownStreamCategory (Maybe Text)
-  deriving stock (Eq, Ord, Show)
-
--- | The deterministic ceiling on an entire unknown-payload notice — category
--- tag, type label, separator, and bounded detail together, not just the
--- detail. A provider that starts emitting a chatty unrecognized event type
--- therefore costs a fixed number of characters per occurrence in the worker
--- journal and replayed transcript instead of its whole payload.
-maxUnknownNoticeLength :: Int
-maxUnknownNoticeLength = 200
-
--- | The short fixed width an unknown payload's type label is normalized and
--- truncated to before the detail is appended, so a pathological type string
--- cannot by itself consume the whole notice budget.
-maxUnknownTypeLength :: Int
-maxUnknownTypeLength = 48
-
--- | How many occurrences of one unknown key are reported individually before
--- the remainder only accumulate a count, redeemed as a single aggregate
--- summary when the invocation ends. Keeping a few samples preserves the
--- payload variation worth seeing; suppressing the rest is what makes a
--- chatty type cost O(1) per invocation instead of O(n).
-unknownNoticeSamples :: Int
-unknownNoticeSamples = 3
-
--- | The stable label a payload with no usable @type@ is reported and
--- aggregated under, so such payloads still produce a deterministic bounded
--- notice rather than being dropped or falling back to their raw JSON.
-unknownTypePlaceholder :: Text
-unknownTypePlaceholder = "unknown"
-
--- | Invocation-local aggregation state. Its lifetime is exactly one provider
--- invocation and its worker journal: nothing is carried across a resume, and
--- no entry is ever rewritten, which is what keeps this compatible with the
--- append-only journal.
-data UnknownAggregator = UnknownAggregator (MVar ()) (IORef UnknownTally)
-
--- | An aggregator's counts plus whether it has been sealed.
-data UnknownTally = UnknownTally
-  { unknownTallyCounts :: Map UnknownStreamKey Int,
-    unknownTallySealed :: Bool
-  }
-
-newUnknownAggregator :: IO UnknownAggregator
-newUnknownAggregator = UnknownAggregator <$> newMVar () <*> newIORef (UnknownTally Map.empty False)
-
--- | Passes one parsed event to @emitEvent@, or withholds it. Recognized
--- events always go straight through, sealed or not. An unknown notice is
--- emitted for its key's first 'unknownNoticeSamples' occurrences and
--- withheld afterwards, its count accumulating for 'sealUnknownAggregates'.
---
--- Deciding /and emitting/ happen under the aggregator's lock, which
--- 'sealUnknownAggregates' also takes, because the two halves cannot be
--- allowed to straddle a seal. Were emission left to the caller, a stream
--- thread could be descheduled between "admitted" and "written" while a
--- supervisor sealed, wrote the aggregate, and wrote the terminal envelope —
--- landing that sample after the envelope, where replay stops, or losing it
--- to the cancellation that follows. Under one lock a sample is either
--- wholly written before the seal or never admitted at all.
-emitStreamEvent :: UnknownAggregator -> (AgentEvent -> IO ()) -> StreamEvent -> IO ()
-emitStreamEvent _ emitEvent (StreamEvent Nothing agentEvent) = emitEvent agentEvent
-emitStreamEvent (UnknownAggregator lock tally) emitEvent (StreamEvent (Just key) agentEvent) =
-  withMVar lock $ \() -> do
-    current <- readIORef tally
-    if current.unknownTallySealed
-      then pure ()
-      else do
-        let total = Map.findWithDefault 0 key current.unknownTallyCounts + 1
-        writeIORef tally current {unknownTallyCounts = Map.insert key total current.unknownTallyCounts}
-        when (total <= unknownNoticeSamples) (emitEvent agentEvent)
-
--- | Seals the aggregator and writes, through @emitEvent@, the one aggregate
--- summary each key with suppressed occurrences contributes.
---
--- Sealing is what makes this safe to call from a supervisor that is about to
--- cancel the stream loop still feeding the aggregator. Without it, that loop
--- could drain buffered provider output after the summary was written: fresh
--- occurrences would restart from zero and be emitted /after/ the final
--- summary — possibly after the terminal envelope, where replay stops — and
--- any they suppressed would die with the cancelled thread, counted but never
--- reported. Sealed, every later unknown notice is refused, so the summary is
--- final for the invocation. Recognized output is untouched.
---
--- Sealing and writing happen under the lock 'emitStreamEvent' also holds,
--- which is what makes the seal a real boundary rather than an instant. It
--- covers both directions. Inbound, it waits out a sample already being
--- written, so a sample admitted before the seal can never trail it. Outbound,
--- the summaries are written before the lock is released, so the /other/
--- caller of this — the flow and its supervisor both call it, and only the
--- first finds anything to report — cannot observe an already-sealed
--- aggregator, conclude there is nothing to write, and terminalize while the
--- winner's summaries are still in flight. When this returns, every unknown
--- notice this invocation will ever produce has already been written.
---
--- Callers seal before the invocation's terminal event, which is the whole
--- point: replay stops at that envelope.
-sealUnknownAggregates :: UnknownAggregator -> (AgentEvent -> IO ()) -> IO ()
-sealUnknownAggregates (UnknownAggregator lock tally) emitEvent =
-  withMVar lock $ \() -> do
-    current <- readIORef tally
-    writeIORef tally (UnknownTally Map.empty True)
-    mapM_
-      emitEvent
-      [ AgentEvent "event" (unknownAggregateNotice key total) "" Nothing
-        | (key, total) <- Map.toAscList current.unknownTallyCounts,
-          total > unknownNoticeSamples
-      ]
-
-codexSolverModel :: Text
-codexSolverModel = "gpt-5.4 high"
-
-claudeSolverModel :: Text
-claudeSolverModel = "Sonnet 5 high"
-
-codexReviewerModel :: Text
-codexReviewerModel = "GPT-5.6-Terra xhigh"
-
-claudeReviewerModel :: Text
-claudeReviewerModel = "Opus 5 xhigh"
-
-solverLabel :: SolverBrand -> Text
-solverLabel CodexSolver = "codex · " <> codexSolverModel
-solverLabel ClaudeSolver = "claude · " <> claudeSolverModel
 
 runSolve :: Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> WorkflowConfig -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> UnknownAggregator -> (SolveEvent -> IO ()) -> IO ()
 runSolve = runSolveWith (const handleReadLine)
@@ -493,233 +310,6 @@ resumeProvenanceHeader config ResumeAutomatedChangesRequested =
     <> config.changesRequestedLabel
     <> ", not because of a user message. The following automated handoff directs you to the canonical review blockers; it is not the blocker text itself:"
 
-parseSolveOutputLine :: ByteString.ByteString -> Either Text (Maybe Text, [StreamEvent])
-parseSolveOutputLine bytes = do
-  value <- case eitherDecodeStrict' bytes of
-    Left message -> Left (Text.pack message)
-    Right decoded -> Right decoded
-  let parsed = parseSolveValue value
-  pure (parsed.parsedSessionId, parsed.parsedMessages)
-
-parseSolveValue :: Value -> ParsedSolveOutput
-parseSolveValue value = case fieldString "type" value of
-  Just "thread.started" -> ParsedSolveOutput (fieldText "thread_id" value) []
-  Just "system" -> ParsedSolveOutput (fieldText "session_id" value) []
-  Just "item.completed" -> ParsedSolveOutput Nothing (maybe [] parseCodexItem (fieldValue "item" value))
-  Just "assistant" -> ParsedSolveOutput Nothing (maybe [] parseClaudeMessage (fieldValue "message" value))
-  Just "user" -> ParsedSolveOutput Nothing (maybe [] parseClaudeMessage (fieldValue "message" value))
-  Just "result" ->
-    let resultText = fieldText "result" value
-        usage = maybe "" (("usage: " <>) . compactValue) (fieldValue "usage" value)
-     in ParsedSolveOutput (fieldText "session_id" value) (maybe [] (\message -> [recognized (agentMessage message usage)]) resultText)
-  Just "turn.completed" -> ParsedSolveOutput Nothing (maybe [] (\usage -> [recognized (AgentEvent "usage" "[usage] turn complete" (compactValue usage) Nothing)]) (fieldValue "usage" value))
-  Just "error" -> ParsedSolveOutput Nothing [errorOrUnknown UnknownTopLevel value]
-  _ -> ParsedSolveOutput Nothing [unknownStreamEvent UnknownTopLevel value]
-
-parseCodexItem :: Value -> [StreamEvent]
-parseCodexItem item = case fieldString "type" item of
-  Just "agent_message" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" item)
-  Just "reasoning" ->
-    let reasoning = firstText [fieldValue "summary" item, fieldValue "text" item, fieldValue "content" item]
-     in maybe [] (\message -> [recognized (AgentEvent "reasoning" "[reasoning]" message Nothing)]) reasoning
-  Just "command_execution" ->
-    let command = fromMaybe "" (fieldText "command" item)
-        status = maybe "" (" · " <>) (fieldText "status" item)
-        output = fromMaybe "" (firstText [fieldValue "aggregated_output" item, fieldValue "output" item])
-     in [recognized (AgentEvent "command" ("[command] " <> command <> status) output Nothing) | not (Text.null command)]
-  Just "file_change" -> [recognized (AgentEvent "file" "[files] changes applied" (compactValue item) Nothing)]
-  Just "mcp_tool_call" -> toolEvent item
-  Just "web_search" -> [recognized (AgentEvent "tool" "[web search] " (compactValue item) Nothing)]
-  Just "todo_list" -> [recognized (AgentEvent "plan" "[plan] updated" (compactValue item) Nothing)]
-  Just "error" -> [errorOrUnknown UnknownCodexItem item]
-  _ -> [unknownStreamEvent UnknownCodexItem item]
-
-parseClaudeMessage :: Value -> [StreamEvent]
-parseClaudeMessage message = maybe [] (concatMap parseClaudeContent . valueList) (fieldValue "content" message)
-
-parseClaudeContent :: Value -> [StreamEvent]
-parseClaudeContent content = case fieldString "type" content of
-  Just "text" -> maybe [] (\message -> [recognized (agentMessage message "")]) (fieldText "text" content)
-  Just "thinking" -> maybe [] (\message -> [recognized (AgentEvent "reasoning" "[reasoning]" message Nothing)]) (firstText [fieldValue "thinking" content, fieldValue "text" content])
-  Just "tool_use" -> toolEvent content
-  Just "tool_result" ->
-    let result = fromMaybe (compactValue content) (firstText [fieldValue "content" content, fieldValue "result" content])
-     in [recognized (AgentEvent "tool-result" "[tool result]" result Nothing)]
-  _ -> [unknownStreamEvent UnknownClaudeContent content]
-
--- | A recognized event, carrying no aggregation identity: it is emitted
--- as-is however often it repeats.
-recognized :: AgentEvent -> StreamEvent
-recognized = StreamEvent Nothing
-
--- | A recognized @error@ payload. Its full literal-string @message@ survives
--- verbatim — the one deliberate exemption from the notice bound. A payload
--- whose @message@ is missing, blank, or any non-string JSON is /not/
--- exempt: it degrades to the same bounded, aggregatable notice as any other
--- unrecognized payload instead of embedding its whole raw JSON. The check is
--- deliberately stricter than 'fieldText', which would also coerce an array,
--- object, number, or boolean into a "message".
-errorOrUnknown :: UnknownStreamCategory -> Value -> StreamEvent
-errorOrUnknown category value = case fieldString "message" value >>= nonEmptyText of
-  Just message -> recognized (errorEvent message)
-  Nothing -> unknownStreamEvent category value
-
--- | The bounded one-line notice an unrecognized payload contributes, tagged
--- with the identity repeated occurrences collapse under.
-unknownStreamEvent :: UnknownStreamCategory -> Value -> StreamEvent
-unknownStreamEvent category value =
-  let key = unknownStreamKey category value
-   in StreamEvent (Just key) (AgentEvent "event" (unknownNotice key value) "" Nothing)
-
--- | The aggregation identity of an unrecognized payload. Only a literal JSON
--- string is a usable type; everything else — missing, non-string, or blank
--- once normalized — shares the one stable placeholder key.
-unknownStreamKey :: UnknownStreamCategory -> Value -> UnknownStreamKey
-unknownStreamKey category value = UnknownStreamKey category usableType
-  where
-    usableType = case fieldString "type" value of
-      Just typeText | not (Text.null (excerpt typeText)) -> Just typeText
-      _ -> Nothing
-
--- | The whole notice for one occurrence: category tag, bounded type label,
--- and a bounded compact rendering of the payload, all on one line and
--- together within 'maxUnknownNoticeLength'. The detail lives in the summary
--- rather than 'agentEventDetail' so even the Full chat rendering — which
--- would otherwise put the detail on its own indented lines — stays one line.
-unknownNotice :: UnknownStreamKey -> Value -> Text
-unknownNotice key value =
-  let prefix = unknownNoticePrefix key
-      budget = maxUnknownNoticeLength - Text.length prefix - 1
-      detail = if budget <= 0 then "" else elide budget (excerpt (boundedCompactValue budget value))
-   in elide maxUnknownNoticeLength (if Text.null detail then prefix else prefix <> " " <> detail)
-
--- | The single summary a key with suppressed occurrences leaves behind,
--- reporting how many times it occurred in total.
-unknownAggregateNotice :: UnknownStreamKey -> Int -> Text
-unknownAggregateNotice key total = elide maxUnknownNoticeLength (unknownNoticePrefix key <> " ×" <> Text.pack (show total))
-
--- | The category tag and normalized, bounded type label shared by a key's
--- per-occurrence notices and its aggregate summary.
-unknownNoticePrefix :: UnknownStreamKey -> Text
-unknownNoticePrefix (UnknownStreamKey category usableType) = categoryTag category <> label
-  where
-    label = maybe unknownTypePlaceholder (elide maxUnknownTypeLength . excerpt) usableType
-
-categoryTag :: UnknownStreamCategory -> Text
-categoryTag UnknownTopLevel = "[event] "
-categoryTag UnknownCodexItem = "[item] "
-categoryTag UnknownClaudeContent = "[content] "
-
--- | Truncates to at most @limit@ characters, marking any loss with a single
--- ellipsis so a bounded notice never reads as a complete payload. The length
--- probe drops at most @limit@ characters rather than measuring the whole
--- value, so an oversized input is never fully traversed.
-elide :: Int -> Text -> Text
-elide limit value
-  | limit <= 0 = ""
-  | Text.null (Text.drop limit value) = value
-  | otherwise = Text.take (limit - 1) value <> "…"
-
--- | A compact JSON rendering truncated to at least @limit@ characters
--- without ever materializing the whole encoded value: 'encode' yields a lazy
--- 'LazyByteString.ByteString', so taking a bounded byte prefix forces only
--- the chunks that prefix needs. Four bytes is UTF-8's maximum per character,
--- so the prefix always carries @limit@ characters when the value has them,
--- and 'lenientDecode' absorbs the partial character the cut may leave.
-boundedCompactValue :: Int -> Value -> Text
-boundedCompactValue limit =
-  TextEncoding.decodeUtf8With lenientDecode
-    . LazyByteString.toStrict
-    . LazyByteString.take (fromIntegral (4 * max 0 limit + 4))
-    . encode
-
-toolEvent :: Value -> [StreamEvent]
-toolEvent value =
-  let name = fromMaybe "tool" (fieldText "name" value <|> fieldText "tool" value)
-      inputValue = fieldValue "input" value <|> fieldValue "arguments" value
-      input = fromMaybe "" (compactValue <$> inputValue)
-      command = inputValue >>= fieldText "command"
-      status = maybe "" (" · " <>) (fieldText "status" value)
-   in case command of
-        Just commandText
-          | Text.toCaseFold name `elem` ["bash", "shell"] ->
-              [recognized (AgentEvent "command" ("[command] " <> commandText <> status) input Nothing)]
-        _ -> [recognized (AgentEvent "tool" ("[tool] " <> name <> status) input Nothing)]
-
-agentMessage :: Text -> Text -> AgentEvent
-agentMessage message detail = AgentEvent "message" message detail (Just message)
-
-errorEvent :: Text -> AgentEvent
-errorEvent message = AgentEvent "error" ("[error] " <> message) "" (Just message)
-
-renderAgentEvent :: ChatVerbosity -> AgentEvent -> Maybe Text
-renderAgentEvent verbosity event
-  | verbosity == CompactChat && event.agentEventKind `elem` ["reasoning", "usage", "event", "plan", "file", "tool-result"] = Nothing
-  | verbosity == StandardChat && event.agentEventKind `elem` ["usage", "event"] = Nothing
-  | otherwise = Just (event.agentEventSummary <> renderedDetail)
-  where
-    detail = Text.strip event.agentEventDetail
-    renderedDetail
-      | Text.null detail = ""
-      | verbosity == CompactChat = ""
-      | verbosity == StandardChat = "\n  " <> Text.replace "\n" "\n  " (Text.take 2000 detail)
-      | otherwise = "\n  " <> Text.replace "\n" "\n  " detail
-
-fieldValue :: Text -> Value -> Maybe Value
-fieldValue key (Object values) = KeyMap.lookup (Key.fromText key) values
-fieldValue _ _ = Nothing
-
-fieldText :: Text -> Value -> Maybe Text
-fieldText key value = fieldValue key value >>= valueText
-
--- | The literal JSON string at @key@, with none of 'fieldText' \'s coercion
--- of arrays, objects, numbers, and booleans — the strict reading the
--- unknown-payload contract needs, where "the payload had no textual type" and
--- "the payload had a type-shaped object" must not be confused.
---
--- Every @type@ discriminator reads through this, not 'fieldText'. Coercion
--- there would let a non-string type reach a /recognized/ branch and escape
--- the bound entirely: @{"type":["error"],"message":…}@ would forward an
--- arbitrarily large message, and @{"type":["tool_result"]}@ would fall back
--- to the whole raw payload. A non-string type is an unrecognized payload,
--- and must be bounded as one.
-fieldString :: Text -> Value -> Maybe Text
-fieldString key value = case fieldValue key value of
-  Just (String text) -> Just text
-  _ -> Nothing
-
-valueText :: Value -> Maybe Text
-valueText (String value) = Just value
-valueText (Array values) = nonEmptyText (Text.intercalate "\n" (mapMaybe valueText (toList values)))
-valueText (Object values) =
-  firstText
-    [ KeyMap.lookup "text" values,
-      KeyMap.lookup "content" values,
-      KeyMap.lookup "output" values,
-      KeyMap.lookup "summary" values
-    ]
-valueText value@(Number _) = Just (compactValue value)
-valueText (Bool value) = Just (if value then "true" else "false")
-valueText Null = Nothing
-
-firstText :: [Maybe Value] -> Maybe Text
-firstText = foldr (\candidate fallback -> (candidate >>= valueText) <|> fallback) Nothing
-
-valueList :: Value -> [Value]
-valueList (Array values) = toList values
-valueList value = [value]
-
-nonEmptyText :: Text -> Maybe Text
-nonEmptyText value | Text.null (Text.strip value) = Nothing
-nonEmptyText value = Just value
-
-compactValue :: Value -> Text
-compactValue = TextEncoding.decodeUtf8With lenientDecode . LazyByteString.toStrict . encode
-
-(<|>) :: Maybe value -> Maybe value -> Maybe value
-Just value <|> _ = Just value
-Nothing <|> fallback = fallback
-
 -- | Per-line handler for the stdout reader: raw-line session logging,
 -- session-id capture, and agent-message forwarding, unchanged from before
 -- this module's reader loop was unified in "Kanban.StreamReader".
@@ -754,56 +344,6 @@ stderrOnLine sessionLog eventSink issueNumber line
   | otherwise = do
       mapM_ (\value -> logRawLine value "stderr" line) sessionLog
       eventSink (SolveDiagnostic issueNumber (decodeBytes line))
-
--- | The one outcome classifier both agent workflows use, so the solve and
--- PR flows can no longer disagree about what a terminal message means. A
--- valid stop-and-ask handoff outranks the exit status: an agent that printed
--- its question and then exited nonzero (a CLI quirk, a cleanup failure after
--- the ask) has still followed the protocol, and needs-input is always more
--- useful to the user than a bare failure that buries the question in error
--- text. Without a handoff the exit status decides, and each workflow passes
--- its own @agentLabel@ so the failure diagnostic keeps its existing wording.
-agentOutcome :: Text -> ExitCode -> Text -> SolveOutcome
-agentOutcome agentLabel exitCode lastMessage = case needsInputQuestion lastMessage of
-  Just question -> SolveNeedsInput question
-  Nothing -> case exitCode of
-    ExitSuccess -> SolveCompleted
-    ExitFailure code ->
-      SolveFailed
-        ( agentLabel
-            <> " exited with status "
-            <> Text.pack (show code)
-            <> if Text.null (Text.strip lastMessage) then "" else ": " <> Text.take 1000 (Text.strip lastMessage)
-        )
-
-solveOutcome :: ExitCode -> Text -> SolveOutcome
-solveOutcome = agentOutcome "Solver"
-
--- | The question from a stop-and-ask handoff, if the agent's final message
--- really carries one. The marker must /begin/ a line (leading whitespace
--- allowed) and be followed by a non-empty question. Anchoring is what makes
--- this trustworthy: the workflow prompts themselves instruct the agent to
--- "stop with exactly KANBAN_NEEDS_INPUT: <question>", so a completion
--- summary that merely quotes that contract mid-sentence would otherwise turn
--- a finished run into a phantom question nobody asked — the card goes orange
--- and autosolve stalls waiting for an answer. When several lines qualify the
--- last one wins, so a resumed session's newest ask is the one that reaches
--- the user.
-needsInputQuestion :: Text -> Maybe Text
-needsInputQuestion message = case mapMaybe handoffQuestion (Text.lines message) of
-  [] -> Nothing
-  questions -> Just (last questions)
-
--- | The question a single line hands off, or 'Nothing' when the line is not
--- an anchored marker line or leaves the question empty.
-handoffQuestion :: Text -> Maybe Text
-handoffQuestion line = do
-  remainder <- Text.stripPrefix needsInputMarker (Text.stripStart line)
-  let question = Text.strip remainder
-  if Text.null question then Nothing else Just question
-
-needsInputMarker :: Text
-needsInputMarker = "KANBAN_NEEDS_INPUT:"
 
 decodeBytes :: ByteString.ByteString -> Text
 decodeBytes = Text.strip . TextEncoding.decodeUtf8With lenientDecode

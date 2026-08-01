@@ -147,7 +147,7 @@ everything else.
     comment and verdict labels; Kanban's own code never runs `--check`.
   - The solve readiness gate is a separate, **read-only** invocation that
     Kanban's Haskell code does not run itself. The solve prompt
-    (`src/Kanban/Solve.hs:229`) explicitly forbids the spawned solving agent
+    (`src/Kanban/Solve.hs:251`) explicitly forbids the spawned solving agent
     from running `--review`/`--rereview` against `approve-issues.py`, its
     `~/work/approve-issues.py` compatibility symlink, or the installed
     `tools/approve_issues.py` backend ("Kanban's `r` workflow owns that
