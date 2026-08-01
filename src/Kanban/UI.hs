@@ -53,6 +53,7 @@ import Kanban.Workflow (deriveBoard )
 import Kanban.Worker
   ( discoverWorkers
     )
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -150,7 +151,7 @@ initialBoardState workflowConfig limits now cacheLoad = case cacheLoad of
       Just snapshot.snapshotFetchedAt,
       snapshot.snapshotIssuesTruncated,
       snapshot.snapshotPullRequestsTruncated,
-      appendWarnings "Cached GitHub snapshot loaded · press u to update" (snapshotWarnings limits workflowConfig snapshot)
+      appendWarnings ("Cached GitHub snapshot loaded · press " <> actionKeyText RefreshAll <> " to update") (snapshotWarnings limits workflowConfig snapshot)
     )
   CacheAbsent ->
     ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
@@ -158,7 +159,7 @@ initialBoardState workflowConfig limits now cacheLoad = case cacheLoad of
       Nothing,
       False,
       False,
-      "No cached GitHub snapshot · press u to update"
+      ("No cached GitHub snapshot · press " <> actionKeyText RefreshAll <> " to update")
     )
   CacheInvalid warning ->
     ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
@@ -166,7 +167,7 @@ initialBoardState workflowConfig limits now cacheLoad = case cacheLoad of
       Nothing,
       False,
       False,
-      warning <> " · press u to update"
+      warning <> " · press " <> actionKeyText RefreshAll <> " to update"
     )
 
 initialUsageState :: UsageCacheLoad -> (Map UsageProvider UsageSnapshot, Map UsageProvider Freshness, Maybe Text)

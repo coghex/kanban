@@ -5,6 +5,7 @@ module Kanban.UI.Board
     drawBase,
     drawCardFrame,
     drawLiveActivity,
+    footerHintLine,
     pullRequestPhaseGlyph,
     pullRequestPhaseGlyphFor,
     reviewPhaseGlyph,
@@ -45,6 +46,7 @@ import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Workflow (entryItem, isApproved, isProblem, orderCardLabels )
 import Kanban.UI.Types
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, footerHint, scopeBindings)
 import Kanban.UI.SessionCore
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -130,7 +132,7 @@ usageStatusText _ (Fresh _) = "loaded"
 usageStatusText _ (Stale _ message) = "stale · " <> message
 usageStatusText _ (Unavailable message) = message
 usageStatusText _ (Unsupported message) = message
-usageStatusText _ NotLoaded = "press u to refresh"
+usageStatusText _ NotLoaded = "press " <> actionKeyText RefreshAll <> " to refresh"
 
 drawUsageWindow :: AppState -> UsageWindow -> Widget Name
 drawUsageWindow state usageWindow =
@@ -530,13 +532,23 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    -- `m` is deliberately absent: the line is already at the width the
-    -- narrowest supported four-column board can show, and one more entry
-    -- truncates `q quit` off the end. The help overlay is the complete list.
-    $ [ withAttr footerAttr (txt "j/↓ next  k/↑ previous  x kill  h/l column  e epic  enter details  r review/revise  S solve  A autosolve  p processes  i attention  u update  d drainer  c sidebar  s settings  ? help  q quit"),
+    $ [ withAttr footerAttr (txt footerHintLine),
         withAttr dimAttr (txt (boardFreshnessText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
+
+-- | Every base-board binding, as one hint chip each, projected from the table
+-- in "Kanban.UI.Keys" rather than transcribed here.
+--
+-- The line is a single row and 'txt' clips it at the terminal width, which is
+-- the policy it has always had: even the shorter hand-written line this
+-- replaced lost its tail on the 164-cell four-column minimum §6 names. What
+-- changed is that the content is now complete — @g@, @G@, @Esc@, @Ctrl-L@,
+-- and @m@ were all missing from it — so at narrow widths more of the tail is
+-- clipped. The help overlay behind @?@ is, as before, the complete list, and
+-- is the one that has to stay readable.
+footerHintLine :: Text
+footerHintLine = Text.intercalate "  " (map footerHint (scopeBindings BoardScope))
 
 boardFreshnessText :: AppState -> Text
 boardFreshnessText state = "board: " <> case state.appBoardFreshness of

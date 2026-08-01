@@ -42,6 +42,7 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.Keys
 import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.Transcript
@@ -83,9 +84,10 @@ handleEvent event = do
       modifyReviewSession issueNumber (\session -> session {sessionActivity = "reviewing issue"})
       armReviewTick issueNumber
     (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
-    (Just HelpOverlay, VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
-    (Just (DetailsOverlay _), VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) -> requestDashboardQuit
+    -- The help overlay answers nothing of its own, so its scoped bindings can
+    -- be resolved before the overlays below, which do.
+    (Just HelpOverlay, VtyEvent keyEvent)
+      | Just action <- boardAction HelpScope keyEvent -> applyBoardAction action
     (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '1') [])) -> chooseChatVerbosity CompactChat
     (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '2') [])) -> chooseChatVerbosity StandardChat
     (Just SettingsOverlay, VtyEvent (Vty.EvKey (Vty.KChar '3') [])) -> chooseChatVerbosity FullChat
@@ -124,43 +126,22 @@ handleEvent event = do
       | Just action <- overlayMouseAction PullRequestReviewPanel mouseEvent -> applyOverlayMouseAction (scrollTranscript (PullRequestTranscript number)) action
     (Just (PullRequestReviewOverlay number), inputEvent) ->
       handleSessionOverlayEvent pullRequestSessionOps pullRequestInputHooks number inputEvent
-    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startItemReview item
-    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openItemSolveChooser SolveOnly item
-    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openItemSolveChooser AutoSolve item
-    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killItemWorkingProcess item
-    (Just (DetailsOverlay item), VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeItemDoneCard item
+    (Just (DetailsOverlay _), VtyEvent keyEvent)
+      | Just action <- boardAction DetailsScope keyEvent -> applyBoardAction action
     (Just (DetailsOverlay _), mouseEvent)
       | Just action <- overlayMouseAction DetailsPanel mouseEvent -> applyOverlayMouseAction scrollDetails action
+    -- What is left for an overlay that answered none of the above. Esc is the
+    -- fallback for one that neither handles it itself nor appears as a
+    -- 'BindingScope'; the scrolling keys are live for the help and details
+    -- overlays, which the table deliberately does not claim @j@ and @k@ in.
     (Just _, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appOverlay = Nothing, appNotice = Nothing})
     (Just _, VtyEvent (Vty.EvKey Vty.KDown [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> vScrollBy (viewportScroll DetailsViewport) 1
     (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, _) -> pure ()
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar '?') [])) -> modify (\current -> current {appOverlay = Just HelpOverlay})
-    (Nothing, VtyEvent (Vty.EvKey Vty.KEnter [])) -> openSelectedDetails
-    (Nothing, VtyEvent (Vty.EvKey Vty.KEsc [])) -> modify (\current -> current {appNotice = Nothing})
-    (Nothing, VtyEvent (Vty.EvKey Vty.KDown [])) -> moveCard 1
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) -> moveCard 1
-    (Nothing, VtyEvent (Vty.EvKey Vty.KUp [])) -> moveCard (-1)
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> moveCard (-1)
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'x') [])) -> killSelectedWorkingProcess
-    (Nothing, VtyEvent (Vty.EvKey Vty.KLeft [])) -> moveColumn (-1)
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'h') [])) -> moveColumn (-1)
-    (Nothing, VtyEvent (Vty.EvKey Vty.KRight [])) -> moveColumn 1
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [])) -> moveColumn 1
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'g') [])) -> selectBoundary False
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'G') [])) -> selectBoundary True
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'e') [])) -> toggleSelectedTracker
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'c') [])) -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 's') [])) -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'p') [])) -> openProcesses
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'r') [])) -> startSelectedReview
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'S') [])) -> openSelectedSolveChooser SolveOnly
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'A') [])) -> openSelectedSolveChooser AutoSolve
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'u') [])) -> startAllRefreshes
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'd') [])) -> toggleDrainer
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'm') [])) -> mergeSelectedDoneCard
+    (Nothing, VtyEvent keyEvent)
+      | Just action <- boardAction BoardScope keyEvent -> applyBoardAction action
     (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
@@ -171,8 +152,47 @@ handleEvent event = do
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, VtyEvent (Vty.EvKey (Vty.KChar 'l') [Vty.MCtrl])) -> forceTerminalRepaint
     _ -> pure ()
+
+-- | Carries out one binding from "Kanban.UI.Keys". Total in 'BoardAction', so
+-- a binding cannot be added to that table without deciding here what pressing
+-- it does.
+--
+-- The scope it fired in is not a parameter: the five actions that are live
+-- from a card's details overlay as well as from the board act on whichever
+-- selection is in front of the user, and that is exactly what the open
+-- overlay says.
+applyBoardAction :: BoardAction -> EventM Name AppState ()
+applyBoardAction = \case
+  NextCard -> moveCard 1
+  PreviousCard -> moveCard (-1)
+  KillWorking -> onSelection killItemWorkingProcess killSelectedWorkingProcess
+  PreviousColumn -> moveColumn (-1)
+  NextColumn -> moveColumn 1
+  FirstItem -> selectBoundary False
+  LastItem -> selectBoundary True
+  ToggleEpic -> toggleSelectedTracker
+  ShowDetails -> openSelectedDetails
+  DismissOrClose -> closeOverlay
+  ReviewSelection -> onSelection startItemReview startSelectedReview
+  SolveSelection -> onSelection (openItemSolveChooser SolveOnly) (openSelectedSolveChooser SolveOnly)
+  AutoSolveSelection -> onSelection (openItemSolveChooser AutoSolve) (openSelectedSolveChooser AutoSolve)
+  ShowProcesses -> openProcesses
+  ShowIncidents -> handleIncidentsAction OpenIncidentsPanel
+  RefreshAll -> startAllRefreshes
+  ToggleDrainer -> toggleDrainer
+  MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
+  ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
+  ShowSettings -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
+  ShowHelp -> modify (\current -> current {appOverlay = Just HelpOverlay})
+  RepaintTerminal -> forceTerminalRepaint
+  QuitDashboard -> requestDashboardQuit
+  where
+    onSelection onItem onBoard = do
+      state <- get
+      case state.appOverlay of
+        Just (DetailsOverlay item) -> onItem item
+        _ -> onBoard
 
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
@@ -262,11 +282,12 @@ data IncidentsAction
   | IgnoreIncidentsEvent
   deriving stock (Eq, Show)
 
--- | The panel's event policy: @i@ opens it from the board, and while it is
--- open it consumes its own keys and mouse events. 'Nothing' means the event
--- is not the panel's business and the dashboard's other bindings decide it.
+-- | The panel's event policy while it is open: it consumes its own keys and
+-- mouse events. 'Nothing' means the event is not the panel's business and the
+-- dashboard's other bindings decide it — including the @i@ that opens the
+-- panel in the first place, which is a base-board binding like any other and
+-- is declared once in "Kanban.UI.Keys" rather than a second time here.
 incidentsAction :: Maybe Overlay -> BrickEvent Name AppEvent -> Maybe IncidentsAction
-incidentsAction Nothing (VtyEvent (Vty.EvKey (Vty.KChar 'i') [])) = Just OpenIncidentsPanel
 incidentsAction (Just IncidentsOverlay) event = Just $ case event of
   VtyEvent (Vty.EvKey Vty.KEsc []) -> CloseIncidentsPanel
   VtyEvent (Vty.EvKey Vty.KDown []) -> MoveIncidentSelection 1
@@ -431,7 +452,7 @@ openSelectedAgentSession = do
         modify (\current -> current {appOverlay = Just (ReviewOverlay issueNumber), appNotice = Nothing})
         presentTranscriptTail
         armVisibleReviewTicks
-      WorkerAgent _ -> setNotice "This persistent worker is waiting for its issue or PR metadata; press u to refresh the board"
+      WorkerAgent _ -> setNotice ("This persistent worker is waiting for its issue or PR metadata; press " <> actionKeyText RefreshAll <> " to refresh the board")
 
 killSelectedAgentSession :: EventM Name AppState ()
 killSelectedAgentSession = do
@@ -521,11 +542,13 @@ killSelectedWorkingProcess = do
     Nothing -> setNotice killSelectionNotice
     Just item -> killItemWorkingProcess item
 
--- | Shown when @x@ is pressed with nothing killable selected. It has to name
--- @x@ itself: @k@ is the select-previous binding, so a reader who obeys a
--- notice naming @k@ moves the selection instead of retrying the kill.
+-- | Shown when the kill binding is pressed with nothing killable selected. It
+-- has to name that binding itself: @k@ is the select-previous binding, so a
+-- reader who obeys a notice naming @k@ moves the selection instead of
+-- retrying the kill. Naming it from the table is what keeps the two from
+-- disagreeing again.
 killSelectionNotice :: Text
-killSelectionNotice = "Select a working issue or PR before pressing x"
+killSelectionNotice = "Select a working issue or PR before pressing " <> actionKeyText KillWorking
 
 killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
 killItemWorkingProcess (PullRequestItem pullRequest) = do
