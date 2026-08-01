@@ -139,7 +139,11 @@ data KeyBinding = KeyBinding
     -- | The footer hint line's short label.
     bindingLabel :: Text,
     -- | The help overlay's longer description.
-    bindingDescription :: Text
+    bindingDescription :: Text,
+    -- | The action §7's table states for this binding, verbatim. §7 is the
+    -- contract and this is the copy a test holds it to, so an edit to
+    -- either without the other fails the suite.
+    bindingContract :: Text
   }
   deriving stock (Eq, Show)
 
@@ -150,50 +154,73 @@ binding :: BoardAction -> KeyBinding
 binding action = case action of
   NextCard ->
     KeyBinding action [key 'j', plain Vty.KDown] [BoardScope] Nothing "next" "next card"
+      "Select next visible card or collapsed epic"
   PreviousCard ->
     KeyBinding action [key 'k', plain Vty.KUp] [BoardScope] Nothing "previous" "previous card"
+      "Select previous visible card or collapsed epic"
   KillWorking ->
     KeyBinding action [key 'x'] [BoardScope, DetailsScope] Nothing "kill" "kill selected working process tree"
+      "Kill the selected working issue/PR process group and its child processes"
   PreviousColumn ->
     KeyBinding action [key 'h', plain Vty.KLeft] [BoardScope] Nothing "prev column" "previous column"
+      "Select previous column"
   NextColumn ->
     KeyBinding action [key 'l', plain Vty.KRight] [BoardScope] Nothing "next column" "next column"
+      "Select next column"
   FirstItem ->
     KeyBinding action [key 'g'] [BoardScope] Nothing "first" "first visible item in the column"
+      "Select first visible item in the column"
   LastItem ->
     KeyBinding action [key 'G'] [BoardScope] Nothing "last" "last visible item in the column"
+      "Select last visible item in the column"
   ToggleEpic ->
     KeyBinding action [key 'e'] [BoardScope] Nothing "epic" "expand / collapse focused epic"
+      "Expand or collapse the focused epic"
   ShowDetails ->
     KeyBinding action [plain Vty.KEnter] [BoardScope] Nothing "details" "details"
+      "Open the selected card's details overlay"
   DismissOrClose ->
     KeyBinding action [plain Vty.KEsc] [BoardScope, DetailsScope, HelpScope] Nothing "close" "close overlay or dismiss a notice"
+      "Close an overlay or dismiss a transient error"
   ReviewSelection ->
     KeyBinding action [key 'r'] [BoardScope, DetailsScope] Nothing "review/revise" "review/revise/repair selected issue or PR"
+      "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session"
   SolveSelection ->
     KeyBinding action [key 'S'] [BoardScope, DetailsScope] Nothing "solve" "solve selected issue (choose model brand)"
+      "Choose Codex or Claude and start/reopen an issue solve through PR creation"
   AutoSolveSelection ->
     KeyBinding action [key 'A'] [BoardScope, DetailsScope] Nothing "autosolve" "autosolve selected issue (choose model brand)"
+      "Choose Codex or Claude and start/reopen the full autosolve review loop"
   ShowProcesses ->
     KeyBinding action [key 'p'] [BoardScope] Nothing "processes" "processes and agent sessions"
+      "Open the process/session inspector; Enter opens a session and `x` kills its live process tree"
   ShowIncidents ->
     KeyBinding action [key 'i'] [BoardScope] Nothing "attention" "everything needing attention; Enter goes to its work"
+      "Open the incidents panel listing everything needing attention; Enter goes to that work"
   RefreshAll ->
     KeyBinding action [key 'u'] [BoardScope] Nothing "update" "update board and both usage providers"
+      "Update GitHub board data and both usage providers"
   ToggleDrainer ->
     KeyBinding action [key 'd'] [BoardScope] (Just "click") "drainer" "start or stop PR drainer"
+      "Start or stop the launchd-managed PR drainer"
   MergeDoneCard ->
     KeyBinding action [key 'm'] [BoardScope, DetailsScope] Nothing "merge" "merge the selected approved PR in Done"
+      "Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path"
   ToggleSidebar ->
     KeyBinding action [key 'c'] [BoardScope] Nothing "sidebar" "collapse / expand sidebar"
+      "Collapse or expand the usage sidebar"
   ShowSettings ->
     KeyBinding action [key 's'] [BoardScope] Nothing "settings" "settings"
+      "Open settings, including chat-output verbosity"
   ShowHelp ->
     KeyBinding action [key '?'] [BoardScope] Nothing "help" "this help overlay"
+      "Open a help overlay listing all bindings"
   RepaintTerminal ->
     KeyBinding action [chord (Vty.KChar 'l') [Vty.MCtrl]] [BoardScope] Nothing "repaint" "repaint"
+      "Force a terminal repaint without a network request"
   QuitDashboard ->
     KeyBinding action [key 'q'] [BoardScope, DetailsScope, HelpScope] Nothing "quit" "quit"
+      "Quit and restore the terminal"
   where
     key character = chord (Vty.KChar character) []
     plain named = chord named []
@@ -227,18 +254,29 @@ boardAction scope event = do
 data HelpEntry = HelpEntry
   { helpEntryKeys :: [BindingKey],
     helpEntryGesture :: Maybe Text,
-    helpEntryDescription :: Text
+    helpEntryDescription :: Text,
+    -- | The row §7 documents this binding in, verbatim, or 'Nothing' for a
+    -- row §7 does not carry at all. §7's wording is the contract and the
+    -- description above is its cheat-sheet short form, so the two are
+    -- deliberately not the same text; carrying the contract here is what
+    -- lets a test compare §7's whole inventory — keys /and/ actions —
+    -- against this table instead of only its keys.
+    helpEntryContract :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 -- | A binding's help row.
 bindingHelpEntry :: KeyBinding -> HelpEntry
 bindingHelpEntry candidate =
-  HelpEntry candidate.bindingKeys candidate.bindingGesture candidate.bindingDescription
+  HelpEntry
+    candidate.bindingKeys
+    candidate.bindingGesture
+    candidate.bindingDescription
+    (Just candidate.bindingContract)
 
 -- | A help row for a mouse gesture that no key binding covers.
 gestureHelpEntry :: Text -> Text -> HelpEntry
-gestureHelpEntry gesture description = HelpEntry [] (Just gesture) description
+gestureHelpEntry gesture description = HelpEntry [] (Just gesture) description Nothing
 
 -- | Render help rows with their key columns aligned against each other. The
 -- width comes from the rows themselves, so a longer key name cannot silently

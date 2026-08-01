@@ -85,6 +85,11 @@ drawOverlay state overlay =
       SettingsOverlay -> 68
       ProcessesOverlay -> 100
       IncidentsOverlay -> 100
+      -- Wide enough for the list it draws, for the same reason its height is:
+      -- a description added to the table has to widen the box rather than be
+      -- silently cut off inside it. A terminal narrower than this still clips
+      -- the overlay, which is the overlay system's existing policy.
+      HelpOverlay -> maximum (1 : map Text.length helpLines) + 4
       _ -> 88
     overlayHeight = case overlay of
       SolveChooser _ _ -> 10

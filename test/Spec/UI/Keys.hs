@@ -150,13 +150,19 @@ spec = describe "keybinding table" $ do
         ]
 
   describe "docs/design.md §7" $ do
-    it "lists exactly the keys the table declares, grouped the same way" $ do
-      documented <- documentedKeys
-      sort documented `shouldBe` sort declaredKeys
+    it "states exactly the keys and actions the table declares" $ do
+      documented <- documentedBindings
+      sort documented `shouldBe` sort declaredBindings
 
     it "lists exactly as many bindings as the table declares" $ do
-      documented <- documentedKeys
+      documented <- documentedBindings
       length documented `shouldBe` length boardBindings + length sessionInputHelp
+
+    it "leaves no row of its table unaccounted for on either side" $ do
+      documented <- documentedBindings
+      let documentedOnly = filter (`notElem` declaredBindings) documented
+          declaredOnly = filter (`notElem` documented) declaredBindings
+      (documentedOnly, declaredOnly) `shouldBe` ([], [])
 
 -- | Every help row the overlay is allowed to show, from the definitions that
 -- back them rather than from a copy of the overlay's own output.
@@ -170,22 +176,27 @@ rowOf entry = case helpRows (entry : declaredEntries) of
   row : _ -> row
   [] -> ""
 
--- | Every key name the table declares, one list per binding.
-declaredKeys :: [[Text]]
-declaredKeys =
-  map (map singleKeyName . (.bindingKeys)) boardBindings
-    <> map (map singleKeyName . (.helpEntryKeys)) sessionInputHelp
+-- | Every binding the table declares, as the pair §7 states it in: the key
+-- names, and the action. The short footer label and help description are
+-- deliberately not that wording — §7 is prose and they are a cheat sheet — so
+-- what a binding claims §7 says is the field compared here.
+declaredBindings :: [([Text], Text)]
+declaredBindings =
+  [ (map singleKeyName entry.helpEntryKeys <> maybe [] pure entry.helpEntryGesture, contract)
+    | entry <- map bindingHelpEntry boardBindings <> sessionInputHelp,
+      Just contract <- [entry.helpEntryContract]
+  ]
 
 singleKeyName :: BindingKey -> Text
 singleKeyName pressed = helpKeyText [pressed]
 
--- | Every key name §7's table documents, one list per row. Parsed rather than
--- restated: a second hand-copied inventory here would recreate the drift this
--- module exists to catch.
-documentedKeys :: IO [[Text]]
-documentedKeys = do
+-- | Every binding §7's table documents, one pair per row, both columns.
+-- Parsed rather than restated: a second hand-copied inventory here would
+-- recreate the drift this module exists to catch.
+documentedBindings :: IO [([Text], Text)]
+documentedBindings = do
   contents <- TextIO.readFile "docs/design.md"
-  pure (map keyCell (bindingRows (Text.lines contents)))
+  pure [(keyCell row, actionCell row) | row <- bindingRows (Text.lines contents)]
   where
     bindingRows =
       filter isBindingRow
@@ -202,9 +213,12 @@ documentedKeys = do
       _ : cell : _ -> Text.strip cell
       _ -> ""
 
+    actionCell line = case Text.splitOn "|" line of
+      _ : _ : cell : _ -> Text.strip cell
+      _ -> ""
+
     keyCell =
-      filter (/= "click")
-        . map (Text.strip . Text.filter (/= '`'))
+      map (Text.strip . Text.filter (/= '`'))
         . Text.splitOn "/"
         . Text.replace " or " "/"
         . firstCell

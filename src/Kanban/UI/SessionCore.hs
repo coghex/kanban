@@ -256,10 +256,24 @@ noSessionInputCaps = SessionInputCaps False False False
 -- second copy of the same facts. The rest of the shared table — backspace,
 -- the arrows, printable characters, and the capability-gated chords — is
 -- ordinary text entry that §7 does not enumerate.
+-- Ctrl-C is not the single promise its old help row made. A resumable
+-- session takes guidance afterwards, but a canonical review stage's process
+-- is killed outright and lands in an interrupted terminal state that only a
+-- fresh @r@ leaves — see 'Kanban.UI.Review.cancelReviewSession' and §7. The
+-- row has to say so, or it tells a reader to type guidance into a session
+-- that will never accept it.
 sessionInputHelp :: [HelpEntry]
 sessionInputHelp =
-  [ HelpEntry [chord (Vty.KChar '\t') []] Nothing "next session in an open solve/PR/review overlay",
-    HelpEntry [chord (Vty.KChar 'c') [Vty.MCtrl]] Nothing "interrupt open agent turn, then type guidance"
+  [ HelpEntry
+      [chord (Vty.KChar '\t') []]
+      Nothing
+      "next session in an open solve/PR/review overlay"
+      (Just "In an open solve, PR, or review overlay, show the next in-memory session of that kind"),
+    HelpEntry
+      [chord (Vty.KChar 'c') [Vty.MCtrl]]
+      Nothing
+      "interrupt agent turn; guidance resumes it, r restarts canonical review"
+      (Just "Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r`")
   ]
 
 sessionInputEvent :: SessionInputCaps -> Vty.Event -> Maybe SessionInputEvent
