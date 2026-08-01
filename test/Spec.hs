@@ -28,6 +28,7 @@ import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
+import qualified Spec.UI.Keys as Keys
 import qualified Spec.UI.Layout as Layout
 import qualified Spec.UI.ReviewSession as ReviewSession
 import qualified Spec.UI.SessionCore as SessionCore
@@ -76,4 +77,5 @@ suite = do
   Layout.spec
   Golden.spec
   Incidents.spec
+  Keys.spec
   Preflight.spec

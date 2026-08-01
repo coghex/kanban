@@ -68,6 +68,7 @@ import Kanban.Worker
     launchPullRequestWorker,
     pendingTerminationDiagnosticPrefix
     )
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -239,7 +240,7 @@ applyPullRequestFlowEvent flowEvent = case flowEvent of
     case outcome of
       SolveNeedsInput _ ->
         modifyAutoSolveForPullRequest number
-          (\session -> session {sessionPhase = SolveAttention, sessionActivity = "PR review needs input; press p"})
+          (\session -> session {sessionPhase = SolveAttention, sessionActivity = "PR review needs input; press " <> actionKeyText ShowProcesses})
       SolveFailed message ->
         modifyAutoSolveForPullRequest number
           (\session -> session {sessionPhase = SolveFailedPhase, sessionActivity = agentFailureNotice "PR agent" message})

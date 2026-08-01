@@ -29,6 +29,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Kanban.Domain
 import Kanban.Workflow (entryItem )
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 
@@ -133,7 +134,7 @@ toggleSelectedTracker = modify $ \state ->
       entries = entriesFor state column
       currentRow = selectedRow state column
    in case safeIndex currentRow entries >>= entryPrimaryTrackerNumber of
-        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Just "Focus an epic header or child before pressing e"}
+        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Just ("Focus an epic header or child before pressing " <> actionKeyText ToggleEpic)}
         Just trackerNumber ->
           let firstRow = maybe currentRow id (findIndex ((== Just trackerNumber) . entryPrimaryTrackerNumber) entries)
            in toggleTrackerState column firstRow trackerNumber state
@@ -167,7 +168,7 @@ openSelectedDetails = modify $ \state ->
   case selectedEntry state of
     Just entry@(Tracked trackingContext _)
       | primaryTrackerNumber trackingContext `Set.notMember` state.appExpandedTrackers ->
-          state {appNotice = Just "Press e to expand this epic"}
+          state {appNotice = Just ("Press " <> actionKeyText ToggleEpic <> " to expand this epic")}
       | otherwise -> openEntry state entry
     Just entry -> openEntry state entry
     Nothing -> state {appNotice = Just "No item is selected in this column"}

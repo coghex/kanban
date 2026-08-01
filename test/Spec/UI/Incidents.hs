@@ -12,6 +12,7 @@ import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Overlay (drawIncidents)
 import Kanban.UI.Session
   ( BoardWorkLocation (..),
@@ -377,7 +378,10 @@ spec = do
   describe "incident panel events" $ do
     it "opens on i from the board and closes on Esc" $ do
       state <- solveSessionOn <$> navigationState
-      incidentsAction Nothing (key (Vty.KChar 'i')) `shouldBe` Just OpenIncidentsPanel
+      -- The board's own @i@ is a base-board binding declared once in
+      -- "Kanban.UI.Keys"; this module's policy starts at the open panel.
+      boardAction BoardScope (Vty.EvKey (Vty.KChar 'i') []) `shouldBe` Just ShowIncidents
+      incidentsAction Nothing (key (Vty.KChar 'i')) `shouldBe` Nothing
       let opened = applyIncidentsAction OpenIncidentsPanel state
       opened.appOverlay `shouldBe` Just IncidentsOverlay
       opened.appIncidentSelection `shouldBe` IncidentSelection (Just (SessionIncidentRef (SolveAgent 10))) 0

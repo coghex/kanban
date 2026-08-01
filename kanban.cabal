@@ -79,6 +79,7 @@ library
     Kanban.UI.Board
     Kanban.UI.Details
     Kanban.UI.Events
+    Kanban.UI.Keys
     Kanban.UI.Overlay
     Kanban.UI.PullRequest
     Kanban.UI.Reconcile
@@ -99,6 +100,15 @@ library
     Kanban.Worker
     Kanban.Workflow
   other-modules:
+    Kanban.GitHub.Decode
+    Kanban.GitHub.Fetch
+    Kanban.GitHub.Group
+    Kanban.GitHub.Guard
+    Kanban.GitHub.Message
+    Kanban.GitHub.Run
+    Kanban.GitHub.Warnings
+    Kanban.Preflight.Environment
+    Kanban.Preflight.Readiness
     Kanban.Solve.Event
     Kanban.Solve.Parse
     Kanban.Solve.Unknown
@@ -177,6 +187,7 @@ test-suite kanban-test
     Spec.UI.Cards
     Spec.UI.Golden
     Spec.UI.Incidents
+    Spec.UI.Keys
     Spec.UI.Layout
     Spec.UI.ReviewSession
     Spec.UI.SessionCore

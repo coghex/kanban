@@ -43,6 +43,7 @@ import Kanban.Worker
     acknowledgeSupersededWorkers,
     monitorWorker
     )
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -133,7 +134,7 @@ applySolveOrphans issueNumber outcome processes = do
           }
     )
   tailTranscript (SolveTranscript issueNumber)
-  setNotice ("Solve #" <> showText issueNumber <> " is orphaned; press p to inspect it or x to kill it")
+  setNotice ("Solve #" <> showText issueNumber <> " is orphaned; press " <> actionKeyText ShowProcesses <> " to inspect it or " <> actionKeyText KillWorking <> " to kill it")
 
 applyPullRequestOrphans :: Int -> SolveOutcome -> [ProcessIdentity] -> EventM Name AppState ()
 applyPullRequestOrphans number outcome processes = do
@@ -159,16 +160,16 @@ applyPullRequestOrphans number outcome processes = do
           }
     )
   tailTranscript (PullRequestTranscript number)
-  modifyAutoSolveForPullRequest number (\session -> session {sessionActivity = "PR agent left orphaned subprocesses; press p"})
-  setNotice ("PR workflow #" <> showText number <> " is orphaned; press p to inspect it or x to kill it")
+  modifyAutoSolveForPullRequest number (\session -> session {sessionActivity = "PR agent left orphaned subprocesses; press " <> actionKeyText ShowProcesses})
+  setNotice ("PR workflow #" <> showText number <> " is orphaned; press " <> actionKeyText ShowProcesses <> " to inspect it or " <> actionKeyText KillWorking <> " to kill it")
 
 -- | The orphan-pending activity text for a still-unverified outcome: a
 -- deadline that left survivors behind reads distinctly from ordinary
 -- subprocesses surviving a solver/PR agent that ran to completion.
 orphanMessage :: SolveOutcome -> Text -> Text -> Text
 orphanMessage outcome count subject
-  | isDeadlineOutcome outcome = "deadline exceeded; " <> count <> " subprocesses survived termination; press x to terminate the orphaned process tree"
-  | otherwise = count <> " subprocesses survived " <> subject <> "; press x to terminate the orphaned process tree"
+  | isDeadlineOutcome outcome = "deadline exceeded; " <> count <> " subprocesses survived termination; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
+  | otherwise = count <> " subprocesses survived " <> subject <> "; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
 
 attachDiscoveredWorker :: WorkerDescriptor -> EventM Name AppState ()
 attachDiscoveredWorker descriptor = do
@@ -215,11 +216,11 @@ ensureWorkerSession descriptor = do
                         current.appSolveSessions
                   }
             )
-      | otherwise -> setNotice ("Persistent worker for issue #" <> showText task.solveWorkerIssueNumber <> " is running, but the issue is absent from the cached board; press u to refresh")
+      | otherwise -> setNotice ("Persistent worker for issue #" <> showText task.solveWorkerIssueNumber <> " is running, but the issue is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh")
     PullRequestWorkerTaskKind task -> do
       when (Map.notMember task.pullRequestWorkerNumber state.appPullRequestReviewSessions) $
         case pullRequestFromBoard state.appBoard task.pullRequestWorkerNumber of
-          Nothing -> setNotice ("Persistent worker for PR #" <> showText task.pullRequestWorkerNumber <> " is running, but the PR is absent from the cached board; press u to refresh")
+          Nothing -> setNotice ("Persistent worker for PR #" <> showText task.pullRequestWorkerNumber <> " is running, but the PR is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh")
           Just pullRequest ->
             modify
               ( \current ->
