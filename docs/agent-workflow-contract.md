@@ -740,8 +740,9 @@ runs) parses the manifest in §4 and:
   standard as `/usr/bin/plutil`, which merely reads the job `launchctl`
   installs. This surface is discovered rather than enumerated, so a tool
   module added later is scanned as soon as it lands; `test_*.py` modules and
-  `tools/fake_cli.py` are excluded because they construct fake executables
-  rather than depend on real ones. It is executable-only: the home-relative
+  `tools/fake_cli.py` — that one path, not every module sharing its name —
+  are excluded because they construct fake executables rather than depend on
+  real ones. It is executable-only: the home-relative
   paths these modules build are not scanned, so the bullet above does not
   extend to `tools/`;
 - fails if any of the seven drafting and canonical issue-review assets

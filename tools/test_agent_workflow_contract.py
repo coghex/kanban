@@ -102,8 +102,11 @@ DRAFTING_SURFACE_FILES = [
 # modules are excluded because they build fake executables on a temporary PATH
 # rather than depend on real ones, and tools/fake_cli.py is excluded for the
 # same reason despite its non-test name: it is the library those fakes run.
+# That one is excluded by its path relative to tools/, not by basename — an
+# exclusion keyed to the name alone would silently exempt a future
+# tools/<subpackage>/fake_cli.py that is an ordinary module.
 TOOLS_DIR = REPO_ROOT / "tools"
-TOOL_SURFACE_EXCLUDED_NAMES = {"fake_cli.py"}
+TOOL_SURFACE_EXCLUDED_PATHS = {"fake_cli.py"}
 
 MANIFEST_ROW_RE = re.compile(
     r"^(?P<id>[\w-]+)\s*\|\s*(?P<kind>[\w-]+)\s*\|\s*(?P<token>[^|]+?)\s*\|"
@@ -299,7 +302,7 @@ def tool_surface_files(tools_dir=TOOLS_DIR):
         path
         for path in tools_dir.rglob("*.py")
         if not path.name.startswith("test_")
-        and path.name not in TOOL_SURFACE_EXCLUDED_NAMES
+        and path.relative_to(tools_dir).as_posix() not in TOOL_SURFACE_EXCLUDED_PATHS
     )
 
 
@@ -641,19 +644,21 @@ class AgentWorkflowContractTests(unittest.TestCase):
         )
 
     def test_tool_surface_covers_every_non_test_module_and_excludes_fakes(self):
-        names = {path.name for path in tool_surface_files()}
-        self.assertIn("drain_prs_service.py", names)
-        self.assertIn("install_drainer.py", names)
-        self.assertIn("drain_prs.py", names)
+        paths = {
+            path.relative_to(TOOLS_DIR).as_posix() for path in tool_surface_files()
+        }
+        self.assertIn("drain_prs_service.py", paths)
+        self.assertIn("install_drainer.py", paths)
+        self.assertIn("drain_prs.py", paths)
         self.assertNotIn(
             "fake_cli.py",
-            names,
+            paths,
             "tools/fake_cli.py builds the fake executables the tests install "
             "on a temporary PATH; scanning it would declare fixtures as real "
             "dependencies",
         )
         self.assertEqual(
-            sorted(name for name in names if name.startswith("test_")), []
+            sorted(path for path in paths if Path(path).name.startswith("test_")), []
         )
 
     def test_tool_command_discovery_covers_the_run_command_wrapper(self):
@@ -746,6 +751,28 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 ("tools/quoted_tool.py", "undeclared-single-quoted"),
                 ("tools/wrapper_tool.py", "undeclared-wrapped"),
             ],
+        )
+
+    def test_only_the_root_fake_cli_is_exempt_from_the_tool_surface(self):
+        # The exemption is tools/fake_cli.py, the library the fakes run — not
+        # the basename. A nested module that merely shares that name is an
+        # ordinary tool and must be scanned, or the exclusion becomes a way to
+        # smuggle an undeclared dependency into the surface.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tools_dir = Path(temp_dir) / "tools"
+            (tools_dir / "subpackage").mkdir(parents=True)
+            (tools_dir / "fake_cli.py").write_text(
+                'subprocess.run(["fake-only", "print"])\n', encoding="utf-8"
+            )
+            (tools_dir / "subpackage" / "fake_cli.py").write_text(
+                'subprocess.run(["undeclared-nested", "print"])\n', encoding="utf-8"
+            )
+            findings = tool_surface_findings(executable_tokens, tools_dir=tools_dir)
+        self.assertEqual(
+            findings, [("tools/subpackage/fake_cli.py", "undeclared-nested")]
         )
         for relative_path, name in findings:
             message = undocumented_command_message(relative_path, name)
