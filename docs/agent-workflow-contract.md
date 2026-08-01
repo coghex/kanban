@@ -190,10 +190,19 @@ everything else.
   `kill`) manages the LaunchAgent. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
   operation, and, only for automated stale-head rereview rounds, to
-  `codex exec`. These Python-tool invocations sit
-  outside the manifest in §4, which reconciles the solve/PR-flow/canonical
-  -review Haskell surface; they are covered by `tools/test_pure_logic.py`,
-  `tools/test_drain_prs_service.py`, and `tools/test_install_drainer.py`.
+  `codex exec`. Every executable these Python tools spawn is declared in the
+  §4 manifest and reconciled against it the same way the Haskell and
+  packaged-workflow surfaces are: every non-test module under `tools/` is a
+  scanned surface, so `launchctl` carries both a manifest row and a §2.6
+  host-prerequisite entry. That surface is executable-only. The home-relative
+  paths these modules build are neither asserted nor scanned from here: some
+  have `personal-path` rows (the drainer's install directory, its discovery
+  record, its LaunchAgent label), others deliberately have none yet
+  (`~/Library/LaunchAgents`, the drainer's log root, the legacy
+  `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
+  not this surface's. Their behavior stays covered by
+  `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`, and
+  `tools/test_install_drainer.py`.
   `tools/drain_prs.py --pr <number>` is the same merge path driven for one
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
@@ -386,6 +395,7 @@ everything else.
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Worker.hs`) runs it unconditionally. |
+| `launchctl` | No | Only needed to install and control the optional drainer's LaunchAgent; `/usr/bin/plutil` below only reads the job it installs. |
 | `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
@@ -531,19 +541,21 @@ Machine-readable; parsed verbatim by `tools/test_agent_workflow_contract.py`,
 which also reconciles this manifest against the tracked Codex plugin's own
 bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) and the
 tracked Claude plugin's own bash surface
-(`claude-plugin/plugins/kanban/commands/*.md`) in addition to the Haskell
-invocation surface — a command a packaged workflow shells out to is as
-undocumented-if-missing as one Kanban's own Haskell code spawns. Those two
-globs include the seven drafting and canonical issue-review assets declared in
+(`claude-plugin/plugins/kanban/commands/*.md`), and every non-test Python
+module under `tools/`, in addition to the Haskell invocation surface — a
+command a packaged workflow or a repository tool shells out to is as
+undocumented-if-missing as one Kanban's own Haskell code spawns. The two
+plugin globs include the seven drafting and canonical issue-review assets
+declared in
 [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets),
 whose user-scoped paths are reconciled against the `personal-path` rows below
 by a markdown counterpart of the Haskell home-relative-path check.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
-- `kind`: `executable` (a literal command Kanban's Haskell source or the
-  tracked Codex or Claude plugin's packaged workflows spawn or resolve) or
-  `personal-path` (a home-relative path Kanban's Haskell source builds or
-  depends on).
+- `kind`: `executable` (a literal command Kanban's Haskell source, the tracked
+  Codex or Claude plugin's packaged workflows, or a non-test module under
+  `tools/` spawns or resolves) or `personal-path` (a home-relative path
+  Kanban's Haskell source builds or depends on).
 - `token`: the exact literal string the check searches for.
 - `files`: `;`-separated repository-relative paths where the token is
   expected to appear (empty when nothing in this repository references it).
@@ -563,6 +575,7 @@ git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanba
 python3-cli | executable | python3 | src/Kanban/Review.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
+launchctl-cli | executable | launchctl | tools/drain_prs_service.py;tools/install_drainer.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
@@ -717,8 +730,24 @@ runs) parses the manifest in §4 and:
   matching `executable` manifest entry — the coordinator is Python, not
   bash, so it is reconciled with a separate extractor from the `.md` files
   above, not exempted from coverage;
-- fails if those same files build a home-relative path segment that has no
-  matching `personal-path` manifest entry;
+- fails if any of the Haskell source files in the first bullet build a
+  home-relative path segment that has no matching `personal-path` manifest
+  entry;
+- fails if a non-test Python module under `tools/` invokes a command, as the
+  first element of a literal argument list in either Python quote style
+  passed to `subprocess.run`/`Popen` or to any of these modules' own
+  `run`-family wrappers (`run`, `run_command`, `run_json`, and anything else
+  spelled `run`, matched as a family so the next wrapper is covered before it
+  is written), that has no matching
+  `executable` manifest entry — that is how `launchctl` is held to the same
+  standard as `/usr/bin/plutil`, which merely reads the job `launchctl`
+  installs. This surface is discovered rather than enumerated, so a tool
+  module added later is scanned as soon as it lands; `test_*.py` modules and
+  `tools/fake_cli.py` — that one path, not every module sharing its name —
+  are excluded because they construct fake executables rather than depend on
+  real ones. It is executable-only: the home-relative
+  paths these modules build are not scanned, so the bullet above does not
+  extend to `tools/`;
 - fails if any of the seven drafting and canonical issue-review assets
   declared in
   [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)

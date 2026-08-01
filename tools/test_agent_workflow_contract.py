@@ -3,9 +3,10 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
-solve, PR-flow, and canonical issue-review invocation surface, and against
+solve, PR-flow, and canonical issue-review invocation surface, against
 the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
-so a new external command or home-relative path cannot land undocumented.
+and against every non-test Python module under tools/, so a new external
+command or home-relative path cannot land undocumented.
 
 Since issue #118 that plugin surface also covers the seven vendored drafting
 and canonical issue-review assets (docs/drafting-workflow-contract.md §2),
@@ -15,6 +16,7 @@ the user-scoped install path those assets name is reconciled against the same
 """
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -91,6 +93,20 @@ DRAFTING_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
 ]
+
+# The repository's own tools (issue #149): the drainer, its installer and
+# controller, the canonical issue-review backend, and the workflow installers.
+# Unlike the lists above this surface is discovered rather than
+# enumerated, so a tool module added later is scanned as soon as it lands
+# instead of bypassing the check until someone remembers to list it. Test
+# modules are excluded because they build fake executables on a temporary PATH
+# rather than depend on real ones, and tools/fake_cli.py is excluded for the
+# same reason despite its non-test name: it is the library those fakes run.
+# That one is excluded by its path relative to tools/, not by basename — an
+# exclusion keyed to the name alone would silently exempt a future
+# tools/<subpackage>/fake_cli.py that is an ordinary module.
+TOOLS_DIR = REPO_ROOT / "tools"
+TOOL_SURFACE_EXCLUDED_PATHS = {"fake_cli.py"}
 
 MANIFEST_ROW_RE = re.compile(
     r"^(?P<id>[\w-]+)\s*\|\s*(?P<kind>[\w-]+)\s*\|\s*(?P<token>[^|]+?)\s*\|"
@@ -251,6 +267,69 @@ def discovered_commands_for_plugin_file(relative_path, content):
     if relative_path.endswith(".py"):
         return discovered_python_commands(content)
     return discovered_plugin_commands(content)
+
+
+# run(["git", ...]) / subprocess.run(["gh", ...]) / run_command(["launchctl",
+# ...]) / run_json(["gh", ...]) / subprocess.Popen(["...", ...]) — the
+# repository tools' own external-command surface. These modules spawn through
+# their own thin wrappers at least as often as through subprocess directly,
+# and each module names its wrappers differently: every launchctl call in
+# tools/drain_prs_service.py goes through run_command, while approve_issues.py
+# and drain_prs.py add run_json on top of run. So the callee is matched as a
+# family — anything spelled `run`, plus the subprocess entry points — rather
+# than as a fixed list of wrapper names that the next wrapper would slip past.
+# The net is deliberately generous: a false positive fails loudly and is
+# corrected by declaring or renaming, whereas a miss is a dependency that
+# lands undocumented, which is the failure this whole file exists to prevent.
+# `\s` matches newlines without re.DOTALL, so a list literal split across
+# lines is covered too, and either Python quote style is accepted: every tool
+# here happens to use double quotes, but a check whose gate a single-quoted
+# literal walks through is not a gate.
+TOOL_COMMAND_CALL_RE = re.compile(
+    r'\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?'
+    r'(?:[a-z_]*run[a-z_0-9]*|Popen|check_call|check_output|call)'
+    r'\(\s*\[\s*(?P<quote>["\'])(?P<name>[^"\']+)(?P=quote)'
+)
+
+
+def discovered_tool_commands(content):
+    """Every external command a tools/ module invokes as the first element of
+    a literal argument list. A dynamically-built command list is deliberately
+    not matched, the same way the coordinator extractor above skips
+    `sys.executable`: this reads source, and nothing here runs a tool to find
+    out what it spawns."""
+    return {match.group("name") for match in TOOL_COMMAND_CALL_RE.finditer(content)}
+
+
+def tool_surface_files(tools_dir=TOOLS_DIR):
+    """Every eligible module of the tools/ surface, discovered by walking it."""
+    return sorted(
+        path
+        for path in tools_dir.rglob("*.py")
+        if not path.name.startswith("test_")
+        and path.relative_to(tools_dir).as_posix() not in TOOL_SURFACE_EXCLUDED_PATHS
+    )
+
+
+def undocumented_command_message(relative_path, name):
+    return (
+        f"{relative_path} invokes undocumented external command "
+        f"{name!r}; add it to the manifest in "
+        "docs/agent-workflow-contract.md"
+    )
+
+
+def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
+    """`(path, command)` for every literal invocation in an eligible tools/
+    module whose command has no `executable` manifest row."""
+    findings = []
+    for path in tool_surface_files(tools_dir):
+        relative_path = path.relative_to(tools_dir.parent).as_posix()
+        content = path.read_text(encoding="utf-8")
+        for name in sorted(discovered_tool_commands(content)):
+            if name not in executable_tokens:
+                findings.append((relative_path, name))
+    return findings
 
 
 # A `$HOME/`- or `~/`-prefixed path in a packaged markdown workflow, the
@@ -554,6 +633,171 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "/Library/Application Support/kanban",
             },
         )
+
+    def test_every_tool_module_command_invocation_is_documented(self):
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        findings = tool_surface_findings(executable_tokens)
+        self.assertEqual(
+            findings,
+            [],
+            "; ".join(
+                undocumented_command_message(relative_path, name)
+                for relative_path, name in findings
+            ),
+        )
+
+    def test_tool_surface_covers_every_non_test_module_and_excludes_fakes(self):
+        paths = {
+            path.relative_to(TOOLS_DIR).as_posix() for path in tool_surface_files()
+        }
+        self.assertIn("drain_prs_service.py", paths)
+        self.assertIn("install_drainer.py", paths)
+        self.assertIn("drain_prs.py", paths)
+        self.assertNotIn(
+            "fake_cli.py",
+            paths,
+            "tools/fake_cli.py builds the fake executables the tests install "
+            "on a temporary PATH; scanning it would declare fixtures as real "
+            "dependencies",
+        )
+        self.assertEqual(
+            sorted(path for path in paths if Path(path).name.startswith("test_")), []
+        )
+
+    def test_tool_command_discovery_covers_the_run_command_wrapper(self):
+        # Pins the extractor against the two modules that actually spawn
+        # launchctl rather than a synthetic snippet. drain_prs_service.py
+        # reaches launchctl only through its own run_command wrapper, so an
+        # extractor keyed to `run(`/`subprocess.run(` finds zero commands
+        # here and the completeness check silently has nothing to discover.
+        for relative_path in ("tools/drain_prs_service.py", "tools/install_drainer.py"):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertEqual(
+                discovered_tool_commands(content), {"git", "launchctl"}, relative_path
+            )
+        # Either Python quote style, so a tool written with single quotes is
+        # held to the same standard as the ones already here.
+        self.assertEqual(
+            discovered_tool_commands("run_command(['launchctl', 'print'])"),
+            {"launchctl"},
+        )
+        # And any wrapper of the same family, not a fixed list of names:
+        # approve_issues.py and drain_prs.py both reach gh through run_json,
+        # which is neither `run` nor `run_command`.
+        for relative_path in ("tools/approve_issues.py", "tools/drain_prs.py"):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("gh", discovered_tool_commands(content), relative_path)
+        self.assertEqual(
+            discovered_tool_commands('run_json(\n    ["gh", "repo", "view"],\n)'),
+            {"gh"},
+        )
+
+    def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
+        # Adding this surface must not require re-declaring commands that
+        # already have rows: the whole eligible surface spawns exactly these
+        # five, and only launchctl was missing before issue #149.
+        found = set()
+        for path in tool_surface_files():
+            found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "launchctl"})
+
+    def test_launchctl_is_declared_and_its_removal_fails_the_check(self):
+        by_id = {row["id"]: row for row in self.manifest}
+        self.assertIn("launchctl-cli", by_id)
+        entry = by_id["launchctl-cli"]
+        self.assertEqual(entry["kind"], "executable")
+        self.assertEqual(entry["token"], "launchctl")
+        self.assertEqual(
+            entry["files"], ["tools/drain_prs_service.py", "tools/install_drainer.py"]
+        )
+        # mandatory: no, matching §2.6 — the drainer is an optional component.
+        self.assertEqual(entry["mandatory"], "no")
+        # And the row is load-bearing rather than decorative: drop it while
+        # the invocations remain and both invoking modules are reported.
+        without_launchctl = {
+            row["token"]
+            for row in self.manifest
+            if row["kind"] == "executable" and row["token"] != "launchctl"
+        }
+        self.assertEqual(
+            tool_surface_findings(without_launchctl),
+            [
+                ("tools/drain_prs_service.py", "launchctl"),
+                ("tools/install_drainer.py", "launchctl"),
+            ],
+        )
+
+    def test_undeclared_tool_command_fails_the_tool_surface_check(self):
+        # A temporary tools/ tree stands in for a future edit: an undeclared
+        # command reaches the report whether it is spawned directly or through
+        # any wrapper of the run family, and in either Python quote style — a
+        # gate a single-quoted literal walks through is not a gate. Neither a
+        # test module nor a fake-builder contributes one.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tools_dir = Path(temp_dir) / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "direct_tool.py").write_text(
+                'subprocess.run(["undeclared-direct", "status"])\n', encoding="utf-8"
+            )
+            (tools_dir / "quoted_tool.py").write_text(
+                "subprocess.run(['undeclared-single-quoted', 'status'])\n",
+                encoding="utf-8",
+            )
+            (tools_dir / "wrapper_tool.py").write_text(
+                'run_command(["undeclared-wrapped", "print", target])\n',
+                encoding="utf-8",
+            )
+            (tools_dir / "json_tool.py").write_text(
+                'data = run_json(\n    ["undeclared-json-wrapped", "list"],\n    cwd=root,\n)\n',
+                encoding="utf-8",
+            )
+            (tools_dir / "test_wrapper_tool.py").write_text(
+                'run_command(["fixture-only", "print"])\n', encoding="utf-8"
+            )
+            (tools_dir / "fake_cli.py").write_text(
+                'subprocess.run(["fake-only", "print"])\n', encoding="utf-8"
+            )
+            findings = tool_surface_findings(executable_tokens, tools_dir=tools_dir)
+        self.assertEqual(
+            findings,
+            [
+                ("tools/direct_tool.py", "undeclared-direct"),
+                ("tools/json_tool.py", "undeclared-json-wrapped"),
+                ("tools/quoted_tool.py", "undeclared-single-quoted"),
+                ("tools/wrapper_tool.py", "undeclared-wrapped"),
+            ],
+        )
+
+    def test_only_the_root_fake_cli_is_exempt_from_the_tool_surface(self):
+        # The exemption is tools/fake_cli.py, the library the fakes run — not
+        # the basename. A nested module that merely shares that name is an
+        # ordinary tool and must be scanned, or the exclusion becomes a way to
+        # smuggle an undeclared dependency into the surface.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tools_dir = Path(temp_dir) / "tools"
+            (tools_dir / "subpackage").mkdir(parents=True)
+            (tools_dir / "fake_cli.py").write_text(
+                'subprocess.run(["fake-only", "print"])\n', encoding="utf-8"
+            )
+            (tools_dir / "subpackage" / "fake_cli.py").write_text(
+                'subprocess.run(["undeclared-nested", "print"])\n', encoding="utf-8"
+            )
+            findings = tool_surface_findings(executable_tokens, tools_dir=tools_dir)
+        self.assertEqual(
+            findings, [("tools/subpackage/fake_cli.py", "undeclared-nested")]
+        )
+        for relative_path, name in findings:
+            message = undocumented_command_message(relative_path, name)
+            self.assertIn(name, message)
+            self.assertIn("docs/agent-workflow-contract.md", message)
 
     def test_issue_review_backend_is_kanban_owned_and_supported(self):
         by_id = {row["id"]: row for row in self.manifest}
