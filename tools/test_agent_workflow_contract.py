@@ -27,12 +27,18 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # the shared provider/process helpers they call into. This list is
 # exhaustive for src/: nothing else under src/ matches
 # findExecutable/proc/readProcessWithExitCode/readCreateProcessWithExitCode/
-# getHomeDirectory.
+# getHomeDirectory. The review surface is spread over three modules since
+# issue #164 split Kanban.Review: the app-server spawn stayed in Review.hs,
+# the gh/claude tool runners moved to Review/Tools.hs, and the canonical
+# backend's python3 invocation and discovery record moved to
+# Review/Canonical.hs.
 SURFACE_FILES = [
     "src/Kanban/Solve.hs",
     "src/Kanban/PullRequestFlow.hs",
     "src/Kanban/Preflight/Environment.hs",
     "src/Kanban/Review.hs",
+    "src/Kanban/Review/Canonical.hs",
+    "src/Kanban/Review/Tools.hs",
     "src/Kanban/Codex.hs",
     "src/Kanban/Claude.hs",
     "src/Kanban/GitHub/Run.hs",
@@ -890,7 +896,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(
             entry["files"],
             [
-                "src/Kanban/Review.hs",
+                "src/Kanban/Review/Canonical.hs",
                 "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
                 "claude-plugin/plugins/kanban/scripts/review_pr.py",
                 "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",

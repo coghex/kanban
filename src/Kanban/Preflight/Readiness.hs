@@ -137,7 +137,7 @@ reviewBackendAction = ActionIssueRevision IssueOriginCodex
 -- needs the Claude CLI as well as the Codex coordinator thread; a
 -- Codex-origin or unmarked issue is authored by the coordinator itself.
 -- Mirrors the REVISION rule in
--- 'Kanban.Review.reviewDeveloperInstructions'.
+-- 'Kanban.Review.Prompts.reviewDeveloperInstructions'.
 revisionAuthorBrand :: IssueOrigin -> SolverBrand
 revisionAuthorBrand IssueOriginClaude = ClaudeSolver
 revisionAuthorBrand _ = CodexSolver
