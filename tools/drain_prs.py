@@ -37,6 +37,8 @@ DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
 CONFIG_FILENAME = ".drain-prs.json"
 STALE_APPROVAL_CHECK = "dismiss-stale-approval"
 DEFAULT_INTERVAL_SECONDS = 300
+CI_RERUN_INTERVAL_SECONDS = 60
+MAX_CI_RERUN_ATTEMPTS = 3
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
 MODEL_TIMEOUT_SECONDS = 60 * 60
@@ -572,6 +574,10 @@ def remember_approved_head(
         "retry_after_attempt": 0,
         "last_attempt": previous.get("last_attempt", 0),
         "last_error": None,
+        "ci_rerun_head": None,
+        "ci_rerun_attempts": 0,
+        "ci_rerun_active": False,
+        "ci_rerun_exhausted_head": None,
         # Approval bookkeeping is reset here; a recorded cleanup obligation is
         # not. It belongs to a merge that already landed, and only completing
         # it -- never a new approval -- may discharge it.
@@ -624,10 +630,32 @@ def choose_next_pr(
         return None, False
 
     attempt_counter = state["attempt_counter"]
-    ready = [
+    eligible = [
         pr
         for pr in approved
-        if state["prs"][str(pr["number"])]["retry_after_attempt"]
+        if not (
+            state["prs"][str(pr["number"])].get("ci_rerun_exhausted_head")
+            and state["prs"][str(pr["number"])].get("ci_rerun_exhausted_head")
+            == pr.get("headRefOid")
+        )
+    ]
+    if not eligible:
+        return None, False
+
+    active = [
+        pr
+        for pr in eligible
+        if state["prs"][str(pr["number"])].get("ci_rerun_active")
+        and state["prs"][str(pr["number"])].get("ci_rerun_head")
+        == pr.get("headRefOid")
+    ]
+    if active:
+        eligible = active
+
+    ready = [
+        pr
+        for pr in eligible
+        if state["prs"][str(pr["number"])].get("retry_after_attempt", 0)
         <= attempt_counter
     ]
     if ready:
@@ -647,7 +675,7 @@ def choose_next_pr(
     # pushes that PR's next-attempt counter farther out.
     return (
         min(
-            approved,
+            eligible,
             key=lambda pr: (
                 state["prs"][str(pr["number"])]["retry_after_attempt"],
                 state["prs"][str(pr["number"])]["last_attempt"],
@@ -820,6 +848,92 @@ def latest_non_skipped_check(
     if not matches:
         return None
     return max(matches, key=parse_check_sort_key)
+
+
+def action_run_id(check: dict[str, Any] | None) -> str | None:
+    """Extract the GitHub Actions run id from a check's details URL."""
+    if check is None:
+        return None
+    details_url = check.get("detailsUrl") or check.get("details_url") or ""
+    match = re.search(r"/actions/runs/(\d+)(?:/|$)", details_url)
+    return match.group(1) if match else None
+
+
+def rerun_failed_ci(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    check_name: str,
+    dry_run: bool,
+) -> bool:
+    """Request one bounded retry of a failed GitHub Actions run.
+
+    The retry is keyed to the approved head. A persistent source failure is
+    therefore retried at most MAX_CI_RERUN_ATTEMPTS times and then quarantined
+    until a new reviewed head arrives. The polling loop gives an active retry
+    a short cadence without changing the normal queue interval.
+    """
+    number = pr["number"]
+    head = pr["headRefOid"]
+    entry = state["prs"][str(number)]
+    if entry.get("ci_rerun_head") != head:
+        entry["ci_rerun_head"] = head
+        entry["ci_rerun_attempts"] = 0
+        entry["ci_rerun_active"] = False
+        entry["ci_rerun_exhausted_head"] = None
+
+    attempts = int(entry.get("ci_rerun_attempts", 0))
+    if attempts >= MAX_CI_RERUN_ATTEMPTS:
+        entry["ci_rerun_active"] = False
+        entry["ci_rerun_exhausted_head"] = head
+        log(
+            f"PR #{number}: {check_name} remained failed after "
+            f"{attempts} automatic rerun(s); leaving it for human action"
+        )
+        return False
+
+    run_id = action_run_id(latest_check(pr, check_name))
+    if run_id is None:
+        return False
+
+    attempts += 1
+    if dry_run:
+        log(
+            f"PR #{number}: would rerun failed Actions run {run_id} "
+            f"({attempts}/{MAX_CI_RERUN_ATTEMPTS})"
+        )
+    else:
+        log(
+            f"PR #{number}: rerunning failed Actions run {run_id} "
+            f"({attempts}/{MAX_CI_RERUN_ATTEMPTS})"
+        )
+        run(
+            [
+                "gh",
+                "run",
+                "rerun",
+                run_id,
+                "--failed",
+                "--repo",
+                ctx.repo_slug,
+            ],
+            cwd=ctx.path,
+        )
+    entry["ci_rerun_head"] = head
+    entry["ci_rerun_attempts"] = attempts
+    entry["ci_rerun_active"] = True
+    return True
+
+
+def clear_ci_rerun(state: dict[str, Any], number: int) -> None:
+    entry = state["prs"].get(str(number))
+    if entry is None:
+        return
+    entry["ci_rerun_head"] = None
+    entry["ci_rerun_attempts"] = 0
+    entry["ci_rerun_active"] = False
+    entry["ci_rerun_exhausted_head"] = None
 
 
 def classify_check(item: dict[str, Any] | None) -> str:
@@ -2336,6 +2450,20 @@ def process_pr(
     # caller shown one blocking gate is never left guessing about the other.
     gate_detail = describe_check_gates(gates, build_state, review_state)
     if build_state == "failure":
+        if rerun_failed_ci(
+            ctx,
+            pr,
+            state=state,
+            check_name=gates.required_ci_check or DEFAULT_REQUIRED_CI_CHECK,
+            dry_run=dry_run,
+        ):
+            message = (
+                f"PR #{number}: required CI check failed ({gate_detail}); "
+                f"automatic rerun requested, polling again in "
+                f"{CI_RERUN_INTERVAL_SECONDS}s."
+            )
+            set_outcome(report, "checks_pending", message)
+            return True
         message = (
             f"PR #{number}: required CI check {gates.required_ci_check} failed "
             f"({gate_detail})."
@@ -2351,6 +2479,8 @@ def process_pr(
         raise DrainError(message)
 
     if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
+        if build_state == "success":
+            clear_ci_rerun(state, number)
         log(
             f"PR #{number}: waiting "
             f"({gate_detail}, mergeStateStatus={merge_state})"
@@ -2362,6 +2492,8 @@ def process_pr(
             f"({gate_detail}, mergeStateStatus={merge_state}).",
         )
         return True
+
+    clear_ci_rerun(state, number)
 
     if mergeable in {"UNKNOWN", None} or merge_state == "UNKNOWN":
         log(f"PR #{number}: mergeability still computing; waiting")
@@ -2793,7 +2925,17 @@ def loop(
             save_drain_state(ctx, state, dry_run=dry_run)
         if once:
             return
-        time.sleep(interval)
+        retry_entry = (
+            state["prs"].get(str(selected["number"]))
+            if selected is not None
+            else None
+        )
+        sleep_seconds = (
+            CI_RERUN_INTERVAL_SECONDS
+            if retry_entry and retry_entry.get("ci_rerun_active")
+            else interval
+        )
+        time.sleep(sleep_seconds)
 
 
 def single_pr_result(

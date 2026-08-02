@@ -94,6 +94,79 @@ class LatestCheckTests(unittest.TestCase):
         self.assertIsNone(drain_prs.latest_check({}, "build-test"))
 
 
+class ActionsRerunTests(unittest.TestCase):
+    def test_extracts_run_id_from_actions_details_url(self):
+        check = {
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890"
+        }
+        self.assertEqual(drain_prs.action_run_id(check), "12345")
+
+    def test_rerun_is_capped_per_approved_head(self):
+        ctx = drain_prs.RepoContext(
+            Path("/fake-repo"), "acme/widgets", "widgets", "master"
+        )
+        head = "a" * 40
+        pr = {
+            "number": 42,
+            "headRefOid": head,
+            "statusCheckRollup": [
+                {
+                    "name": "build-test",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "completedAt": "2026-08-01T00:00:00Z",
+                    "detailsUrl": "https://github.com/acme/widgets/actions/runs/12345/job/67890",
+                }
+            ],
+        }
+        state = {
+            "prs": {
+                "42": {
+                    "approved_head": head,
+                    "ci_rerun_head": None,
+                    "ci_rerun_attempts": 0,
+                    "ci_rerun_active": False,
+                    "ci_rerun_exhausted_head": None,
+                }
+            }
+        }
+        with mock.patch.object(drain_prs, "run") as run_mock:
+            self.assertTrue(
+                drain_prs.rerun_failed_ci(
+                    ctx,
+                    pr,
+                    state=state,
+                    check_name="build-test",
+                    dry_run=False,
+                )
+            )
+        run_mock.assert_called_once_with(
+            [
+                "gh",
+                "run",
+                "rerun",
+                "12345",
+                "--failed",
+                "--repo",
+                "acme/widgets",
+            ],
+            cwd=Path("/fake-repo"),
+        )
+        state["prs"]["42"]["ci_rerun_attempts"] = drain_prs.MAX_CI_RERUN_ATTEMPTS
+        self.assertFalse(
+            drain_prs.rerun_failed_ci(
+                ctx,
+                pr,
+                state=state,
+                check_name="build-test",
+                dry_run=False,
+            )
+        )
+        self.assertEqual(
+            state["prs"]["42"]["ci_rerun_exhausted_head"], head
+        )
+
+
 class FailureBackoffAttemptsTests(unittest.TestCase):
     def test_below_threshold_has_no_backoff(self):
         self.assertEqual(drain_prs.failure_backoff_attempts(0), 0)
