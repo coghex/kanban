@@ -701,7 +701,7 @@ class SingleSourceInstallPathTests(unittest.TestCase):
             "tools/approve_issues.py",
             "tools/install_issue_review.py",
             "tools/setup_workflows.py",
-            "src/Kanban/Review.hs",
+            "src/Kanban/Review/Canonical.hs",
             "src/Kanban/Preflight.hs",
         ):
             content = (self.REPO_ROOT / relative_path).read_text(encoding="utf-8")

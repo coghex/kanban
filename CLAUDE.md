@@ -56,9 +56,14 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   and `UI.Details` (drawing), `UI.Events` (dispatch), `UI.Session`, `UI.Solve`,
   `UI.Review`, `UI.PullRequest`, `UI.Worker` (lifecycles), `UI.Refresh` and
   `UI.Reconcile` (refresh), and `UI.AutoSolve`, the autosolve loop as pure functions.
-- `Worker`, `Solve`, `Review`, `PullRequestFlow`, `Codex`, `Claude`, `Process`,
-  `Transcript`, `Preflight`, `Provider`, `StreamReader`, `CommandCapture` — the agent
-  execution layer.
+- `Worker`, `Solve`, `Review` with `Review.*`, `PullRequestFlow`, `Codex`, `Claude`,
+  `Process`, `Transcript`, `Preflight`, `Provider`, `StreamReader`, `CommandCapture` —
+  the agent execution layer. `Review` itself is the Codex app-server client and the
+  compatibility facade every consumer imports; its seams live beside it —
+  `Review.Types` (wire and result payloads), `Review.Client` (the `ReviewClient`
+  record and its tool registry), `Review.Tools` (the `gh` and `claude` tool runners),
+  `Review.Canonical` (the `approve_issues.py` gate), `Review.Prompts` (instructions
+  and JSON schemas), and `Review.Diagnostics` (shared failure vocabulary).
 - `Drainer` with `tools/` — the launchd-managed PR drainer and its Python tests.
 
 Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests, and

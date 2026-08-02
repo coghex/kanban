@@ -70,10 +70,11 @@ never-replace-an-ordinary-file policy as the PR-drainer installer.
 Nothing that consults the backend reconstructs that location. Installing
 writes the linked backend's absolute path into
 `~/Library/Application Support/kanban/issue-review/config.json` — a document
-whose own path `--install-dir` cannot move — and `src/Kanban/Review.hs`,
-`src/Kanban/Preflight.hs`, both packaged `review_pr.py` coordinators, and the
-packaged `issue-review` and `solve` workflows all read it, with the same
-precedence: a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR` first, then the
+whose own path `--install-dir` cannot move — and
+`src/Kanban/Review/Canonical.hs`, `src/Kanban/Preflight.hs`, both packaged
+`review_pr.py` coordinators, and the packaged `issue-review` and `solve`
+workflows all read it, with the same precedence: a non-empty
+`KANBAN_ISSUE_REVIEW_INSTALL_DIR` first, then the
 recorded path, then — only when the record carries no `backend_path`, which
 is how an installation predating the record reads — the directory the record
 lives in. So an install made with `--install-dir` is found by a dashboard

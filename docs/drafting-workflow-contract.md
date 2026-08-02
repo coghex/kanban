@@ -204,8 +204,8 @@ body template, and the same signoff flow.
 Every issue a packaged drafting workflow creates ends its body with an
 origin marker. `tools/approve_issues.py` (`ORIGIN_RE`) parses it to route the
 issue to the opposite agent for canonical review, and
-`src/Kanban/Review.hs` tells reviewers to find it, so the literals are a
-hard contract, not a formatting preference:
+`src/Kanban/Review/Prompts.hs` tells reviewers to find it, so the literals
+are a hard contract, not a formatting preference:
 
 - Claude-created issue bodies end with `<!-- issue-origin:claude -->`.
 - Codex-created issue bodies end with `<!-- issue-origin:codex -->`.

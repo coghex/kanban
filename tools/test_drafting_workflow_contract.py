@@ -53,7 +53,7 @@ EXPECTED_DECLARED_PATHS = {
 }
 
 # The exact literals tools/approve_issues.py's ORIGIN_RE parses and
-# src/Kanban/Review.hs tells reviewers to find. Raw and unescaped: an
+# src/Kanban/Review/Prompts.hs tells reviewers to find. Raw and unescaped: an
 # HTML-entity-escaped transcription would not match the parser.
 CLAUDE_ORIGIN_MARKER = "<!-- issue-origin:claude -->"
 CODEX_ORIGIN_MARKER = "<!-- issue-origin:codex -->"
@@ -294,8 +294,8 @@ class DeclaredAssetTests(unittest.TestCase):
 class OriginMarkerTests(unittest.TestCase):
     """The origin markers are the one drafting behavior with a repo-side
     parser: tools/approve_issues.py's ORIGIN_RE consumes them to route an
-    issue to the opposite agent, and src/Kanban/Review.hs tells reviewers to
-    find them. They are asserted as raw, unescaped literals so an
+    issue to the opposite agent, and src/Kanban/Review/Prompts.hs tells
+    reviewers to find them. They are asserted as raw, unescaped literals so an
     HTML-entity-escaped transcription fails CI."""
 
     def test_approve_issues_still_parses_the_asserted_literals(self):
