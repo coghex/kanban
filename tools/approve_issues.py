@@ -45,11 +45,11 @@ DEFAULT_INTERVAL_SECONDS = 60
 PRIMARY_CODEX_MODEL = "gpt-5.6-sol"
 LEGACY_CODEX_MODEL = "gpt-5.6-terra"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
-# Claude Fable 5 is the canonical Claude-side issue reviewer. Claude Opus 5
-# remains a sanctioned fallback and is retained below so historical review
-# markers continue to validate after this default changes.
-PRIMARY_CLAUDE_MODEL = "claude-fable-5"
-FALLBACK_CLAUDE_MODEL = "claude-opus-5"
+# Claude Opus 5 is the canonical Claude-side issue reviewer. Claude Fable 5
+# remains a legacy accepted model so historical review markers continue to
+# validate after this default change.
+PRIMARY_CLAUDE_MODEL = "claude-opus-5"
+LEGACY_CLAUDE_MODEL = "claude-fable-5"
 CODEX_MODEL = os.environ.get("APPROVE_ISSUES_CODEX_MODEL", PRIMARY_CODEX_MODEL)
 CODEX_EFFORT = "xhigh"
 CLAUDE_MODEL = os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)
@@ -120,7 +120,7 @@ CODEX_REVIEWER = Reviewer(
 )
 CLAUDE_REVIEWER = Reviewer(
     "claude",
-    os.environ.get("APPROVE_ISSUES_CLAUDE_DISPLAY_NAME", "Claude Fable 5"),
+    os.environ.get("APPROVE_ISSUES_CLAUDE_DISPLAY_NAME", "Claude Opus 5"),
     CLAUDE_MODEL,
     CLAUDE_EFFORT,
 )
@@ -498,7 +498,7 @@ def reviewer_models_for_route(
 
 
 def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
-    """Allow the canonical route plus sanctioned fallback and historical routes."""
+    """Allow the canonical route plus historical reviewer-model routes."""
     return {
         reviewer_models_for_route(
             reviewers,
@@ -508,12 +508,12 @@ def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
         reviewer_models_for_route(
             reviewers,
             codex_model=FALLBACK_CODEX_MODEL,
-            claude_model=FALLBACK_CLAUDE_MODEL,
+            claude_model=LEGACY_CLAUDE_MODEL,
         ),
         reviewer_models_for_route(
             reviewers,
             codex_model=PRIMARY_CODEX_MODEL,
-            claude_model=FALLBACK_CLAUDE_MODEL,
+            claude_model=LEGACY_CLAUDE_MODEL,
         ),
         reviewer_models_for_route(
             reviewers,
@@ -528,7 +528,7 @@ def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
         reviewer_models_for_route(
             reviewers,
             codex_model=LEGACY_CODEX_MODEL,
-            claude_model=FALLBACK_CLAUDE_MODEL,
+            claude_model=LEGACY_CLAUDE_MODEL,
         ),
     }
 
@@ -553,9 +553,9 @@ def reviewer_display_names(key: str) -> list[str]:
     # remains accepted, so the corresponding verdict must remain readable too.
     if key == CODEX_REVIEWER.key and "GPT-5.6-Terra" not in names:
         names.append("GPT-5.6-Terra")
-    # Opus-authored markers remain parseable after Fable became canonical.
-    if key == CLAUDE_REVIEWER.key and "Claude Opus 5" not in names:
-        names.append("Claude Opus 5")
+    # Fable-authored markers remain parseable after Opus became canonical.
+    if key == CLAUDE_REVIEWER.key and "Claude Fable 5" not in names:
+        names.append("Claude Fable 5")
     return names
 
 
@@ -1703,7 +1703,7 @@ def self_test() -> None:
         "models": reviewer_models_for_route(
             [CODEX_REVIEWER],
             codex_model=FALLBACK_CODEX_MODEL,
-            claude_model=FALLBACK_CLAUDE_MODEL,
+            claude_model=LEGACY_CLAUDE_MODEL,
         ),
     }
     assert marker_matches(
@@ -1715,7 +1715,7 @@ def self_test() -> None:
     assert reviewer_models_for_route(
         [CLAUDE_REVIEWER],
         codex_model=PRIMARY_CODEX_MODEL,
-        claude_model=FALLBACK_CLAUDE_MODEL,
+        claude_model=LEGACY_CLAUDE_MODEL,
     ) in accepted_reviewer_models([CLAUDE_REVIEWER])
     approved_issue = {
         **issue,
@@ -1754,7 +1754,7 @@ def self_test() -> None:
         + reviewer_models_for_route(
             [CODEX_REVIEWER, CLAUDE_REVIEWER],
             codex_model=PRIMARY_CODEX_MODEL,
-            claude_model=FALLBACK_CLAUDE_MODEL,
+            claude_model=LEGACY_CLAUDE_MODEL,
         )
         + f" base={'a' * 40} verdict=APPROVE -->"
     )
@@ -1872,7 +1872,7 @@ def self_test() -> None:
     failure_message = reviewer_failure_message(
         CLAUDE_REVIEWER, ApproveError("CLI transport reset")
     )
-    assert "Claude Fable 5 (claude-fable-5@xhigh) failed" in failure_message
+    assert "Claude Opus 5 (claude-opus-5@xhigh) failed" in failure_message
     assert "no retry or fallback was attempted" in failure_message
     assert "Underlying reviewer error: CLI transport reset" in failure_message
     original_incident_dir = PIPELINE_INCIDENT_DIR

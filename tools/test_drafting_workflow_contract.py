@@ -566,7 +566,7 @@ class PortableBackendTests(unittest.TestCase):
         # Pins the claim above: dropping the personal env vars preserves
         # behavior only because the backend's own default is the same model.
         source = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
-        self.assertIn('PRIMARY_CLAUDE_MODEL = "claude-fable-5"', source)
+        self.assertIn('PRIMARY_CLAUDE_MODEL = "claude-opus-5"', source)
         self.assertIn('os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)', source)
 
 
