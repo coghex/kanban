@@ -55,8 +55,8 @@ def issue_review_record_path() -> Path:
     Kanban discovers an `--install-dir` installation it never saw the option
     for. Fixed rather than install-dir-relative on purpose: a dashboard that
     inherits no environment still has to find it, so the record's own path is
-    the one thing that cannot move. Read by src/Kanban/Review.hs and by both
-    packaged PR coordinators; written only by
+    the one thing that cannot move. Read by src/Kanban/Review/Canonical.hs and
+    by both packaged PR coordinators; written only by
     tools/install_issue_review.py."""
     return default_issue_review_install_dir() / "config.json"
 

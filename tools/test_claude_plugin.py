@@ -58,7 +58,7 @@ REVIEW_COORDINATOR = PLUGIN_ROOT / "scripts" / "review_pr.py"
 SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
 UI_HS = REPO_ROOT / "src" / "Kanban" / "UI.hs"
-REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review.hs"
+REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 
 # The workflows Kanban's own Haskell code spawns by name. WorkflowNameParityTests
 # pins this set — and only this set — against src/Kanban/Solve.hs and
@@ -297,7 +297,7 @@ class NoPersonalPathTests(unittest.TestCase):
 class IssueReviewBackendResolutionTests(unittest.TestCase):
     """The coordinator's approver_path() must resolve the canonical
     issue-review backend with the same precedence
-    Kanban.Review.resolveCanonicalIssueReviewer uses -- environment override,
+    Kanban.Review.Canonical.resolveCanonicalIssueReviewer uses -- environment override,
     then the installer's discovery record, then the directory that record
     lives in -- and never a personal ~/work/approve-issues.py default."""
 
