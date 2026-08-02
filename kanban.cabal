@@ -112,6 +112,14 @@ library
     Kanban.Solve.Event
     Kanban.Solve.Parse
     Kanban.Solve.Unknown
+    Kanban.Worker.Census
+    Kanban.Worker.Discovery
+    Kanban.Worker.Journal
+    Kanban.Worker.Lease
+    Kanban.Worker.Monitor
+    Kanban.Worker.Paths
+    Kanban.Worker.Termination
+    Kanban.Worker.Types
   build-depends:
     aeson                 >= 2.2 && < 2.3,
     base                  >= 4.20 && < 4.22,
