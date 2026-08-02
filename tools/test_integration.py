@@ -1943,6 +1943,74 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertTrue(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
         self.assertTrue(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
 
+    def test_a_content_safe_branch_update_reclaims_the_stale_approval(self):
+        # The head advanced via a synchronize push that touched none of this
+        # PR's own files -- review-gate.yml's dismiss-stale-approval job
+        # deliberately keeps reviewed:approve for exactly this case (#801),
+        # e.g. a busy base branch repeatedly merging forward into the PR
+        # branch. No fresh review runs for that kind of push, so no marker
+        # is ever posted at the new head; recovery must fall back to the
+        # workflow's own verdict for this head instead of waiting forever
+        # for a marker that will never come.
+        new_head = "c" * 40
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "prs": {"42": self._entry(self.head_sha)},
+        }
+        pr_json = self._base_pr_json()
+        pr_json["headRefOid"] = new_head
+        pr_json["statusCheckRollup"].append(
+            {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-08-02T00:00:02Z",
+            }
+        )
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout=json.dumps([[]]),
+        )
+
+        with self._drainer():
+            recovered = drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False
+            )
+
+        self.assertTrue(recovered)
+        self.assertEqual(state["prs"]["42"]["approved_head"], new_head)
+
+    def test_a_stale_head_with_no_dismiss_stale_approval_verdict_keeps_waiting(self):
+        # Same moved head as above, but nothing has told us yet whether the
+        # push was content-safe (check missing/still pending) -- recovery
+        # must not guess and must leave the stale approval exactly as it
+        # found it.
+        new_head = "c" * 40
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "prs": {"42": self._entry(self.head_sha)},
+        }
+        pr_json = self._base_pr_json()
+        pr_json["headRefOid"] = new_head
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout=json.dumps([[]]),
+        )
+
+        with self._drainer():
+            recovered = drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False
+            )
+
+        self.assertFalse(recovered)
+        self.assertEqual(state["prs"]["42"]["approved_head"], self.head_sha)
+
     def test_a_version_2_state_file_recovers_an_unfinished_merge(self):
         # Exactly the pre-change shape: version 2, no cleanup slot, and an
         # entry for a PR whose merge landed before the upgrade.

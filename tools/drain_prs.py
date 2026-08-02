@@ -1549,6 +1549,30 @@ def recover_stale_approval(
                 )
                 remember_approved_head(state, number, current_head)
                 return True
+            # review-gate.yml's dismiss-stale-approval job deliberately KEEPS
+            # this label when a synchronize push touched none of this PR's own
+            # files -- a content-safe "merge base into head" branch-forwarding
+            # update (see that workflow's own comments, #801). A busy base
+            # branch can push several of these before a human or a fresh
+            # review ever runs, and none of them post a review marker at the
+            # new head, so the check above never matches and this PR would
+            # wait forever even though nothing it owns actually changed.
+            # Trust the workflow's own verdict for this exact head instead of
+            # re-deriving it: the check only completes successfully once
+            # dismiss-stale-approval has finished deciding, and the label is
+            # only still attached here because it decided to keep it.
+            stale_check = classify_check(
+                latest_non_skipped_check(pr, STALE_APPROVAL_CHECK)
+            )
+            if stale_check == "success":
+                log(
+                    f"PR #{number}: head changed from {approved_head[:12]} to "
+                    f"{current_head[:12]}, but {STALE_APPROVAL_CHECK} confirmed "
+                    "the push touched none of this PR's own files; keeping the "
+                    "existing approval"
+                )
+                remember_approved_head(state, number, current_head)
+                return True
             # No recovery work to report, and nothing was mutated -- keep
             # sweeping so a later entry's bookkeeping is not deferred a cycle.
             log(
