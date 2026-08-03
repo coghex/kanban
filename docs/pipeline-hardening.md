@@ -11,13 +11,15 @@ when the pipeline is interrupted, misdirected, or inspected.
 
 Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without an issue · `[deferred]` blocked on a concrete precondition
 
-> **Scope.** Seven chapters: intentional-stop safety (1-2), issue/pull-request
+> **Scope.** Eight chapters: intentional-stop safety (1-2), issue/pull-request
 > number confusion (3), the two generations of the issue-review pipeline (4),
 > recovery from a conflicted autostash (5), the blast radius of an approval
-> incident (6), and the autostash anchor's lifecycle (7).
+> incident (6), the autostash anchor's lifecycle (7), and where a fix lives
+> versus where it runs (8).
 >
-> Only one dependency constrains filing order: chapter 2's PH-3 is specified
-> against the rule PH-1 settles. Chapter 4 blocks nothing, but PH-6 governs
+> Two dependencies constrain filing order: chapter 2's PH-3 is specified
+> against the rule PH-1 settles, and chapter 8's PH-12 is resolved by the
+> migration PH-6 describes. Chapter 4 blocks nothing, but PH-6 governs
 > whether the fixes recorded under PH-4 and PH-5 execute on a machine still
 > running the pre-Kanban launcher.
 
@@ -34,6 +36,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 - [ ] PH-9. The wedge reports a misleading cause and never names its remedy
 - [ ] PH-10. A malformed issue halts approval for every issue in the repository
 - [ ] PH-11. Autostash anchor refs leak and are never reaped
+- [ ] PH-12. The only executing pull-request guard is an untracked local edit
 
 ---
 
@@ -780,3 +783,72 @@ accumulation and ambiguity, not data loss.
   operator-invoked command; and whether the anchors should appear in status
   alongside the outstanding obligations of PH-2, since both answer "what does
   this checkout still owe me".
+
+---
+
+## Chapter 8 — Where a fix lives versus where it runs
+
+Chapter 4 established that the issue-review half of the pipeline executes an
+untracked pre-Kanban generation. This chapter records the operational
+consequence, made concrete by the PH-4 fix: a repository can hold a correct,
+tested, reviewed fix while the machine runs an untracked copy, and nothing in
+either place can answer "is the pipeline actually protected?"
+
+Blocked on chapter 4 in the same sense PH-3 is blocked on PH-1: PH-12 is
+resolved by PH-6's migration and has no independent fix of its own.
+
+**Precondition for filing:** PH-6 has a disposition, since PH-12's only
+resolution is the migration PH-6 describes.
+
+### PH-12. The only executing pull-request guard is an untracked local edit
+
+**Verification:** Verified on this machine. The canonical guard landed in
+`tools/approve_issues.py`, which is not the file the daemon runs; the file it
+does run carries a hand-applied copy of the same guard that no repository
+tracks, no test covers, and no review saw.
+
+**Evidence:**
+
+- The guard was applied to `~/work/approve-issues.py` on 2026-08-03, before it
+  was understood that this file is not the canonical backend. It is still
+  there: nine references to `issue_is_pull_request`.
+- The canonical fix is a separate, later implementation in
+  `tools/approve_issues.py`, committed with `--self-test` and
+  `PullRequestRejectionTests` coverage.
+- `~/.codex/skills/approve-issues/scripts/approve_issues_service.py` sets
+  `APPROVER_PATH = WORK_DIR / "approve-issues.py"` as a constant, so the daemon
+  runs the untracked file regardless of what the repository contains.
+- `~/work/approve-issues.py` is still an ordinary file, not a symlink to a
+  managed backend, and `~/Library/Application Support/kanban/issue-review/`
+  does not exist — the migration described in PH-6 has not run.
+- Therefore the tracked fix does not execute here, and the executing guard is
+  the untracked one. Removing the untracked copy on the assumption that the
+  tracked fix supersedes it would reinstate the exact failure of 2026-08-03
+  while the repository showed a fix in place. This was proposed and rejected on
+  the evidence above; it is recorded here because it is an easy and plausible
+  mistake to make later.
+- The two copies are independent implementations of the same rule. Nothing
+  compares them, so they can diverge silently — and only one of them is
+  reachable by `tools/test_approve_issues.py`.
+
+**Handoff context:**
+
+- **Current behavior:** Protection depends on an untracked file. The
+  repository's own tests pass against a copy that does not run, so a green test
+  suite is not evidence that the pipeline is guarded.
+- **Expected behavior:** One implementation, in the repository, executing.
+  PH-6's migration achieves this: `install_issue_review.py
+  --migrate-legacy-launcher` backs the ordinary file up to
+  `approve-issues.py.pre-kanban-backup` and replaces it with a symlink to the
+  managed link, after which the daemon's hardcoded path resolves to the tracked
+  backend and the local copy stops being live.
+- **Scope and constraints:** Order matters and is the whole point — the
+  untracked guard must not be removed *before* the migration makes the tracked
+  one executable, or the pipeline is unprotected in the interval. After the
+  migration the backup file is inert and may be deleted at leisure. Nothing
+  should be deleted on the strength of a repository fix alone.
+- **Remaining uncertainty:** Whether anything should detect this class of
+  divergence generally — a check that the executing backend carries the
+  identity marker the repository expects, which `Kanban.Preflight.Environment`
+  already has the mechanism for (`isManagedAsset`) but applies to the install
+  path rather than to what the daemon actually launches.
