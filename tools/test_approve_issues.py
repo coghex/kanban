@@ -104,6 +104,49 @@ class InstalledConfigReferenceTests(unittest.TestCase):
                 )
 
 
+class PullRequestRejectionTests(unittest.TestCase):
+    """get_issue refuses a pull-request number.
+
+    GitHub shares one number space, and `gh issue view` resolves a pull
+    request into a complete, valid-looking issue document. The guard lives at
+    this one fetch funnel because --check, --review and --rereview all pass
+    through it, and because it must land before a review reaches
+    clear_verdict_labels -- pointed at a pull request, this backend would
+    otherwise strip that pull request's approval label and publish an
+    issue-review verdict onto it.
+    """
+
+    def _context(self, root: Path) -> approve_issues.RepoContext:
+        return approve_issues.RepoContext(
+            path=root, repo_slug="owner/repo", default_branch="master"
+        )
+
+    def _get_issue_returning(self, url: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = {"number": 1080, "title": "t", "body": "", "url": url,
+                       "state": "OPEN", "labels": []}
+            with mock.patch.object(approve_issues, "run_json", return_value=payload):
+                return approve_issues.get_issue(self._context(root), 1080)
+
+    def test_refuses_a_pull_request_url(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._get_issue_returning("https://github.com/owner/repo/pull/1080")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_accepts_an_ordinary_issue_url(self):
+        issue = self._get_issue_returning(
+            "https://github.com/owner/repo/issues/1080"
+        )
+        self.assertEqual(issue["number"], 1080)
+
+    def test_accepts_an_issue_in_a_repository_named_pull(self):
+        # `/pull/` appears in this URL, but not as the segment before the
+        # number -- a substring test would refuse every issue in that repo.
+        issue = self._get_issue_returning("https://github.com/owner/pull/issues/1080")
+        self.assertEqual(issue["number"], 1080)
+
+
 class ParseRepoSlugTests(unittest.TestCase):
     """parse_repo_slug delegates to kanban_config.parse_repository_name, so
     it accepts the same broader remote forms the dashboard's own

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -356,9 +357,29 @@ def get_open_issues(ctx: RepoContext) -> list[dict[str, Any]]:
     return sorted(issues, key=lambda item: (item.get("createdAt") or "", item["number"]))
 
 
+def issue_is_pull_request(issue: dict[str, Any]) -> bool:
+    """True when a fetched dossier is really a pull request.
+
+    GitHub shares ONE number space between issues and pull requests, and
+    `gh issue view <n>` resolves a pull-request number without complaint --
+    none of the fields fetched below are pull-request-specific, so a pull
+    request looks like a perfectly ordinary issue all the way down. The `url`
+    field is the discriminator: issues render under `/issues/<n>`, pull
+    requests under `/pull/<n>`.
+
+    Compare the path SEGMENT, not a substring -- a repository literally named
+    `pull` puts `/pull/` in the URL of every one of its issues. Only an
+    affirmative `/pull/<n>` refuses, so an unfamiliar or missing url can never
+    block a genuine issue.
+    """
+    url = issue.get("url") or ""
+    segments = [part for part in urllib.parse.urlsplit(url).path.split("/") if part]
+    return len(segments) >= 2 and segments[-2] == "pull"
+
+
 def get_issue(ctx: RepoContext, number: int) -> dict[str, Any]:
     fields = "number,title,body,url,state,labels,createdAt,updatedAt,author"
-    return run_json(
+    issue = run_json(
         [
             "gh",
             "issue",
@@ -371,6 +392,26 @@ def get_issue(ctx: RepoContext, number: int) -> dict[str, Any]:
         ],
         cwd=ctx.path,
     )
+    # Enforced HERE, at the single fetch funnel, rather than at each entry
+    # point: --check, --review and --rereview all pass through this call, so
+    # neither they nor any future number-taking mode can forget the guard. It
+    # also lands before a review reaches clear_verdict_labels, which is what
+    # makes it safe rather than merely tidy -- pointed at a pull request, this
+    # backend used to strip that pull request's `reviewed:approve` about a
+    # second in (failing its branch-protection gate), publish an
+    # `issue-review:v2` INVALID verdict onto it, and open a circuit-breaker
+    # incident that halts approval for every issue in the repository. Refusing
+    # costs one comparison on data already fetched.
+    if issue_is_pull_request(issue):
+        fail(
+            f"approve_issues.py error: #{number} is a PULL REQUEST, not an issue "
+            f"({issue.get('url')}). This backend reviews issue specifications "
+            "only; GitHub shares one number space, so `gh issue view` resolved "
+            "it anyway. Nothing was modified. Use the pull-request review "
+            f"workflow for #{number} instead. If you meant an issue, re-run "
+            "with the issue's own number -- a pull request's `Closes #N` names it."
+        )
+    return issue
 
 
 def get_comments(ctx: RepoContext, number: int) -> list[dict[str, Any]]:
@@ -1637,6 +1678,20 @@ def open_invalid_incident(
 
 def self_test() -> None:
     global PIPELINE_INCIDENT_DIR
+    # A pull request must be recognised from `url` alone: every other field
+    # get_issue requests looks identical for both kinds.
+    assert issue_is_pull_request({"url": "https://github.com/owner/repo/pull/1080"})
+    assert not issue_is_pull_request(
+        {"url": "https://github.com/owner/repo/issues/1078"}
+    )
+    # A repository named `pull` puts `/pull/` in every issue URL it has, so the
+    # segment before the number is what decides, never a bare substring.
+    assert not issue_is_pull_request({"url": "https://github.com/owner/pull/issues/12"})
+    assert issue_is_pull_request({"url": "https://ghe.example/owner/pull/pull/12"})
+    # Unknown or short shapes must never be mistaken for a pull request.
+    assert not issue_is_pull_request({"url": "https://example.invalid/7"})
+    assert not issue_is_pull_request({"url": ""})
+    assert not issue_is_pull_request({})
     assert "single-issue review #42" in describe_lock_owner(
         {"pid": 123, "mode": "single", "issue": 42}
     )
