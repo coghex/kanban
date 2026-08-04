@@ -176,6 +176,23 @@ what it was holding ended up, and the two kinds recover differently.
   the incoming content, so the local copy waits in the holding directory for
   manual reconciliation instead.
 
+A conflicted restore also leaves the conflict itself in the checkout: git writes
+the partial merge it computed into the working tree and unmerged entries into
+the index. The drainer leaves both exactly as they stand — that partial merge is
+usually most of the resolution work — and every later fast-forward refuses while
+they do, naming the unmerged index and the paths, because no snapshot of local
+changes can be taken over one. Only that step refuses: the drainer keeps
+running, keeps merging every other approved pull request, and keeps discharging
+their other post-merge obligations, so the fast-forwards accumulate as
+outstanding debts on the records that own them.
+
+Resolve the named paths and `git add` them. That is the whole recovery — the
+next ordinary pass discharges the outstanding fast-forward on its own, with no
+restart, no acknowledgement, and no manual drainer command. Recovering the
+snapshot itself is independent of all of this and unchanged: it stays reachable
+through `git stash list` and `refs/drain-prs/autostash/<sha>` whether or not the
+index is resolved first.
+
 ## Merging one pull request
 
 Besides the polling service, the drainer can process exactly one named pull
