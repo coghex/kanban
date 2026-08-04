@@ -194,7 +194,11 @@ through the queue's fair rotation, and no failure cooldown is advanced.
 `--pr` and `--once` are mutually exclusive.
 
 Kanban's `m` key drives exactly this entry point for the selected Done card;
-see [the user guide](user-guide.md).
+see [the user guide](user-guide.md). It refuses while *any* open incident
+stands, whatever its kind and whichever pull request it names. A merge-conflict
+or cleanup incident now survives an intentional stop, so it refuses `m` where
+being cleared by the stop used to allow the merge. Finish the work the incident
+names, or dismiss it with `ack`, before `m` will run.
 
 ### Naming the repository
 
@@ -341,7 +345,10 @@ When a conflict is detected, the drainer:
 Resolve the conflict on the pull request branch. Once GitHub reports the pull
 request mergeable again — or the pull request is closed — the next poll
 resolves that incident on its own. Incidents belonging to other pull requests,
-and to a drainer crash, are left open. There is no manual dismissal step.
+and to a drainer crash, are left open. Stopping the drainer does not clear it
+either: a stop makes no pull request mergeable, so the incident waits for the
+poll that finds the conflict gone. The one manual dismissal is `ack`, which
+resolves an open incident of any kind.
 
 ## Post-merge cleanup
 
@@ -360,7 +367,9 @@ any of them, and drops the record only once every one of them is done.
 - Obligations still outstanding after three passes are recorded as an open
   incident, which Kanban shows in the sidebar. The drainer keeps retrying them
   and keeps draining every other approved pull request; the incident resolves
-  itself once the last obligation succeeds.
+  itself once the last obligation succeeds. Stopping the drainer does not clear
+  it: a stop completes no step, so the incident stands until the pass that
+  discharges the debt does, or until it is dismissed with `ack`.
 - If the drainer is restarted or the pull request merges without its cleanup
   being recorded, the next poll reads the merged pull request and finishes the
   outstanding work. A pull request closed *without* merging owes nothing: it is
@@ -401,7 +410,7 @@ the plist of one repository all carry the same name.
   excluded from running concurrently by their shared canonical identity, which
   the lock cannot see.
 
-The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears any open incidents for that repository, and no other repository's; a conflict or cleanup that is still unresolved is recorded again on the next poll after it restarts.
+The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
 
 ## Manual status
 
@@ -411,12 +420,16 @@ Normal control should happen through Kanban. For diagnosis, run:
 CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
 python3 "$CONTROL" --path /path/to/project --json status
 python3 "$CONTROL" --path /path/to/project --json logs --lines 120
+python3 "$CONTROL" --path /path/to/project --json ack --note "conflict resolved by hand"
 ```
 
 Every command selects the repository `--path` is a checkout of, including
 `logs`, which shows that repository's own dated log. Add
 `--repo OWNER/NAME` to assert which repository you expect; the controller
 refuses it when the checkout's remote says otherwise.
+
+`ack` is the manual dismissal named above. With no incident ID it resolves the
+newest open incident for that repository, of any kind; with one, that incident.
 
 Do not run `drain_prs.py` directly during normal operation, apart from the
 single-pull-request mode above, which is meant to be invoked on request.
