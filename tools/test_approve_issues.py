@@ -11,6 +11,7 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -318,13 +319,63 @@ class OpenInvalidIncidentTests(unittest.TestCase):
         )
         self.assertEqual(written["repo"], str(self.repo_path.resolve()))
 
-    def test_is_idempotent_and_does_not_duplicate_an_open_incident(self):
+    def test_is_idempotent_per_issue_and_does_not_duplicate_its_own_incident(self):
         with mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir):
             with mock.patch.object(approve_issues, "NTFY_URL", None):
                 first = approve_issues.open_invalid_incident(self.ctx, 7, "first")
                 second = approve_issues.open_invalid_incident(self.ctx, 7, "second")
         self.assertEqual(first["incident_id"], second["incident_id"])
         self.assertEqual(len(list(self.incident_dir.glob("incident-*.json"))), 1)
+
+    def test_a_second_invalid_issue_gets_its_own_independently_scoped_incident(self):
+        # Deduplicating against any repository incident would have handed
+        # issue #8 issue #7's record, leaving #8 unblocked once a record only
+        # halts the issue it names.
+        with mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir):
+            with mock.patch.object(approve_issues, "NTFY_URL", None):
+                first = approve_issues.open_invalid_incident(self.ctx, 7, "issue #7")
+                second = approve_issues.open_invalid_incident(self.ctx, 8, "issue #8")
+                blocked_seven = approve_issues.blocking_pipeline_incident(self.repo_path, 7)
+                blocked_eight = approve_issues.blocking_pipeline_incident(self.repo_path, 8)
+                unrelated = approve_issues.blocking_pipeline_incident(self.repo_path, 9)
+        self.assertNotEqual(first["incident_id"], second["incident_id"])
+        self.assertEqual(len(list(self.incident_dir.glob("incident-*.json"))), 2)
+        self.assertEqual(blocked_seven["incident_id"], first["incident_id"])
+        self.assertEqual(blocked_eight["incident_id"], second["incident_id"])
+        self.assertIsNone(unrelated)
+
+    def test_two_issues_recorded_in_one_second_do_not_share_an_id_or_a_path(self):
+        # The identifier used to be timestamp-plus-PID alone, so the second
+        # record written by one process inside one second overwrote the first.
+        frozen = time.gmtime(0)
+        with mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir):
+            with mock.patch.object(approve_issues, "NTFY_URL", None):
+                with mock.patch.object(approve_issues.time, "gmtime", return_value=frozen):
+                    first = approve_issues.open_invalid_incident(self.ctx, 7, "issue #7")
+                    second = approve_issues.open_invalid_incident(self.ctx, 8, "issue #8")
+        self.assertNotEqual(first["incident_id"], second["incident_id"])
+        written = sorted(path.name for path in self.incident_dir.glob("incident-*.json"))
+        self.assertEqual(
+            written,
+            sorted([f"{first['incident_id']}.json", f"{second['incident_id']}.json"]),
+        )
+
+    def test_a_resolved_record_is_neither_reused_nor_overwritten(self):
+        frozen = time.gmtime(0)
+        with mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir):
+            with mock.patch.object(approve_issues, "NTFY_URL", None):
+                with mock.patch.object(approve_issues.time, "gmtime", return_value=frozen):
+                    first = approve_issues.open_invalid_incident(self.ctx, 7, "first")
+                    resolved_path = self.incident_dir / f"{first['incident_id']}.json"
+                    record = json.loads(resolved_path.read_text(encoding="utf-8"))
+                    record["status"] = "resolved"
+                    resolved_path.write_text(json.dumps(record), encoding="utf-8")
+                    second = approve_issues.open_invalid_incident(self.ctx, 7, "second")
+        self.assertNotEqual(first["incident_id"], second["incident_id"])
+        self.assertEqual(
+            json.loads(resolved_path.read_text(encoding="utf-8"))["status"], "resolved"
+        )
+        self.assertEqual(second["summary"], "second")
 
     def test_notifies_only_when_configured(self):
         with mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir):
@@ -340,10 +391,261 @@ class OpenInvalidIncidentTests(unittest.TestCase):
             with mock.patch.object(approve_issues, "NTFY_URL", None):
                 approve_issues.open_invalid_incident(self.ctx, 7, "issue #7 is invalid")
             status = approve_issues.apply_pipeline_circuit_breaker(
-                {"approved": True, "reasons": []}, self.repo_path
+                {"approved": True, "reasons": []}, self.repo_path, issue_number=7
             )
         self.assertFalse(status["approved"])
         self.assertIsNotNone(status["pipeline_incident"])
+
+
+class ReachedWork(Exception):
+    """Raised from a patched acquire_lock to prove a gate let a call past it,
+    without running any of the GitHub work that follows."""
+
+
+class IncidentScopeTests(unittest.TestCase):
+    """An open invalid-issue incident blocks the issue it names, not the
+    whole repository.
+
+    A verdict about one issue's specification used to stop every --check,
+    --review, --rereview and daemon start for the repository until a human
+    cleared the record. Scope now comes from the `issue` field
+    open_invalid_incident already persisted, and the breaker fails closed --
+    repository-wide, exactly as before -- for any record whose scope cannot
+    be established.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.incident_dir = self.root / "incidents"
+        self.incident_dir.mkdir()
+        self.repo_path = self.root / "repo"
+        self.repo_path.mkdir()
+        self.other_repo = self.root / "other-repo"
+        self.other_repo.mkdir()
+        self.ctx = make_ctx(self.repo_path)
+        patcher = mock.patch.object(
+            approve_issues, "PIPELINE_INCIDENT_DIR", self.incident_dir
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_incident(self, incident_id, *, issue="omit", repo=None, status="open"):
+        record = {
+            "incident_id": incident_id,
+            "status": status,
+            "kind": "invalid-issue",
+            "repo": str((repo or self.repo_path).resolve()),
+            "summary": f"{incident_id} summary",
+        }
+        if issue != "omit":
+            record["issue"] = issue
+        path = self.incident_dir / f"{incident_id}.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return path
+
+    def _check(self, issue_number):
+        return approve_issues.apply_pipeline_circuit_breaker(
+            {"approved": True, "reasons": []},
+            self.repo_path,
+            issue_number=issue_number,
+        )
+
+    # --- scope classification -------------------------------------------
+
+    def test_only_a_positive_integer_is_a_determinate_scope(self):
+        self.assertEqual(approve_issues.incident_issue_scope({"issue": 7}), 7)
+        for indeterminate in ({}, {"issue": None}, {"issue": "7"}, {"issue": 0},
+                              {"issue": -1}, {"issue": True}, {"issue": 7.0}):
+            with self.subTest(record=indeterminate):
+                self.assertIsNone(approve_issues.incident_issue_scope(indeterminate))
+
+    def test_the_projection_carries_the_scope_the_incident_persisted(self):
+        # It used to be dropped, so nothing downstream could read it.
+        self._write_incident("incident-a", issue=7)
+        latest = approve_issues.latest_open_pipeline_incident(self.repo_path)
+        self.assertEqual(latest["issue"], 7)
+        self.assertEqual(
+            [record["issue"]
+             for record in approve_issues.open_pipeline_incidents(self.repo_path)],
+            [7],
+        )
+
+    # --- --check ---------------------------------------------------------
+
+    def test_check_blocks_the_named_issue_and_names_it_in_the_reason(self):
+        self._write_incident("incident-a", issue=7)
+        status = self._check(7)
+        self.assertFalse(status["approved"])
+        self.assertEqual(status["pipeline_incident"]["incident_id"], "incident-a")
+        self.assertEqual(
+            status["reasons"][0],
+            "issue approval pipeline is halted for issue #7 by open incident incident-a",
+        )
+
+    def test_check_leaves_an_unrelated_issue_with_its_ordinary_verdict(self):
+        self._write_incident("incident-a", issue=7)
+        status = self._check(8)
+        self.assertTrue(status["approved"])
+        self.assertEqual(status["reasons"], [])
+        self.assertIsNone(status["pipeline_incident"])
+
+    def test_a_scopeless_record_still_halts_every_issue(self):
+        self._write_incident("incident-a")
+        for number in (7, 8):
+            with self.subTest(issue=number):
+                status = self._check(number)
+                self.assertFalse(status["approved"])
+                self.assertEqual(
+                    status["reasons"][0],
+                    "issue approval pipeline is halted for this repository "
+                    "by open incident incident-a",
+                )
+
+    # --- more than one open record ---------------------------------------
+
+    def test_each_scoped_record_keeps_blocking_its_issue_in_either_order(self):
+        # Only the newest record used to be consulted, so whichever incident
+        # sorted last silently stopped applying.
+        for older, newer in (("incident-a", "incident-b"), ("incident-b", "incident-a")):
+            with self.subTest(older=older, newer=newer):
+                for path in self.incident_dir.glob("incident-*.json"):
+                    path.unlink()
+                self._write_incident(older, issue=7)
+                self._write_incident(newer, issue=8)
+                self.assertFalse(self._check(7)["approved"])
+                self.assertFalse(self._check(8)["approved"])
+                self.assertTrue(self._check(9)["approved"])
+
+    def test_a_scopeless_record_outranks_scoped_ones_whether_older_or_newer(self):
+        for scopeless in ("incident-a", "incident-c"):
+            with self.subTest(scopeless=scopeless):
+                for path in self.incident_dir.glob("incident-*.json"):
+                    path.unlink()
+                self._write_incident("incident-b", issue=7)
+                self._write_incident(scopeless)
+                blocked = self._check(9)
+                self.assertFalse(blocked["approved"])
+                self.assertEqual(
+                    blocked["pipeline_incident"]["incident_id"], scopeless
+                )
+
+    def test_resolving_one_record_leaves_the_other_effective(self):
+        resolved = self._write_incident("incident-a", issue=7)
+        self._write_incident("incident-b", issue=8)
+        record = json.loads(resolved.read_text(encoding="utf-8"))
+        record["status"] = "resolved"
+        resolved.write_text(json.dumps(record), encoding="utf-8")
+        self.assertTrue(self._check(7)["approved"])
+        self.assertFalse(self._check(8)["approved"])
+
+    # --- --review and --rereview -----------------------------------------
+
+    def _run_gated(self, entry_point, issue_number):
+        with mock.patch.object(
+            approve_issues, "acquire_lock", side_effect=ReachedWork
+        ):
+            return entry_point(self.ctx, issue_number, legacy_policy="dual")
+
+    def test_review_and_rereview_refuse_the_named_issue(self):
+        self._write_incident("incident-a", issue=7)
+        for entry_point in (approve_issues.review_one, approve_issues.rereview_one):
+            with self.subTest(entry_point=entry_point.__name__):
+                with self.assertRaises(approve_issues.ApproveError) as caught:
+                    self._run_gated(entry_point, 7)
+                self.assertEqual(
+                    str(caught.exception),
+                    "Issue approval pipeline is halted for issue #7 "
+                    "by open incident incident-a",
+                )
+
+    def test_review_and_rereview_proceed_for_an_unrelated_issue(self):
+        # ReachedWork comes from the patched lock acquisition immediately
+        # after the gate: reaching it is what proves the gate let issue #8 by.
+        self._write_incident("incident-a", issue=7)
+        for entry_point in (approve_issues.review_one, approve_issues.rereview_one):
+            with self.subTest(entry_point=entry_point.__name__):
+                with self.assertRaises(ReachedWork):
+                    self._run_gated(entry_point, 8)
+
+    def test_review_and_rereview_still_refuse_everything_for_a_scopeless_record(self):
+        self._write_incident("incident-a")
+        for entry_point in (approve_issues.review_one, approve_issues.rereview_one):
+            with self.subTest(entry_point=entry_point.__name__):
+                with self.assertRaises(approve_issues.ApproveError):
+                    self._run_gated(entry_point, 8)
+
+    # --- the polling daemon ----------------------------------------------
+
+    def test_the_daemon_start_gate_admits_a_scoped_record_and_refuses_a_scopeless_one(self):
+        # main() asks blocking_pipeline_incident(ctx.path, None) before
+        # daemon_loop: the repository-wide question alone.
+        self._write_incident("incident-a", issue=7)
+        self.assertIsNone(approve_issues.blocking_pipeline_incident(self.repo_path, None))
+        self._write_incident("incident-b")
+        self.assertEqual(
+            approve_issues.blocking_pipeline_incident(self.repo_path, None)["incident_id"],
+            "incident-b",
+        )
+
+    def _select_candidate_over(self, numbers):
+        issues = [
+            {
+                "number": number,
+                "title": f"Issue {number}",
+                "body": "<!-- issue-origin:claude -->",
+                "labels": [],
+            }
+            for number in numbers
+        ]
+        with mock.patch.object(approve_issues, "get_open_issues", return_value=issues):
+            with mock.patch.object(approve_issues, "get_comments", return_value=[]):
+                with mock.patch.object(approve_issues, "log") as logged:
+                    selected = approve_issues.select_candidate(
+                        self.ctx, legacy_policy="dual"
+                    )
+        messages = [call.args[0] for call in logged.call_args_list]
+        return selected, messages
+
+    def test_the_daemon_queue_skips_only_the_named_issue_and_logs_the_skip(self):
+        self._write_incident("incident-a", issue=7)
+        selected, messages = self._select_candidate_over([7, 8])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[0]["number"], 8)
+        self.assertEqual(
+            messages,
+            [
+                "Skipping issue #7: issue approval pipeline is halted for issue #7 "
+                "by open incident incident-a"
+            ],
+        )
+
+    def test_the_daemon_queue_skips_every_issue_for_a_scopeless_record(self):
+        self._write_incident("incident-a")
+        selected, messages = self._select_candidate_over([7, 8])
+        self.assertIsNone(selected)
+        self.assertEqual(len(messages), 2)
+
+    def test_the_daemon_queue_is_untouched_with_no_open_incident(self):
+        selected, messages = self._select_candidate_over([7, 8])
+        self.assertEqual(selected[0]["number"], 7)
+        self.assertEqual(messages, [])
+
+    # --- repository confinement ------------------------------------------
+
+    def test_a_scoped_incident_never_reaches_another_checkout(self):
+        self._write_incident("incident-a", issue=7, repo=self.other_repo)
+        self.assertTrue(self._check(7)["approved"])
+        self.assertEqual(
+            approve_issues.blocking_pipeline_incident(self.other_repo, 7)["incident_id"],
+            "incident-a",
+        )
+
+    def test_a_scopeless_incident_never_reaches_another_checkout(self):
+        self._write_incident("incident-a", repo=self.other_repo)
+        self.assertTrue(self._check(7)["approved"])
+        self.assertIsNone(approve_issues.blocking_pipeline_incident(self.repo_path, None))
 
 
 class ConfiguredLabelsTests(unittest.TestCase):
