@@ -920,6 +920,29 @@ def cleanup_step_description(obligation: Any) -> str | None:
     return f"unknown cleanup step {kind!r}"
 
 
+def pull_request_key(key: Any) -> int | None:
+    """The pull request a queue-state entry is filed under, or None when the
+    key names none.
+
+    Canonical and positive, because the projection is keyed by this number
+    and ordered on it: `remember_approved_head` files an entry under
+    `str(number)`, so `"012"` and `"0"` are not keys the drainer can have
+    written -- and accepting them would let one pull request appear twice in
+    the projection, inflating the sidebar's count, or appear as PR 0.
+    """
+    if not isinstance(key, str) or not key.isascii() or not key.isdigit():
+        return None
+    try:
+        number = int(key)
+    except ValueError:
+        # Python refuses to convert a digit string past its integer-string
+        # limit, and this read is the one that must never raise.
+        return None
+    if number <= 0 or str(number) != key:
+        return None
+    return number
+
+
 def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     """The post-merge debt this repository's queue state still records, or
     None when that state could not be read as one.
@@ -958,6 +981,9 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
         return None
     owed: list[dict[str, Any]] = []
     for key, entry in entries.items():
+        number = pull_request_key(key)
+        if number is None:
+            return None
         if not isinstance(entry, dict) or not isinstance(
             entry.get("approved_head"), str
         ):
@@ -967,22 +993,15 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
             continue
         if not isinstance(record, dict):
             return None
+        # Every value is validated before a record owing nothing is skipped.
+        # A discharged record is still a record, and one carrying a value this
+        # cannot read is a document that cannot be trusted about the debt of
+        # any pull request in it.
         pending = record.get("pending")
         if not isinstance(pending, list):
             return None
-        if not pending:
-            continue
         steps = [cleanup_step_description(item) for item in pending]
         if any(step is None for step in steps):
-            return None
-        if not (isinstance(key, str) and key.isascii() and key.isdigit()):
-            return None
-        try:
-            number = int(key)
-        except ValueError:
-            # Python refuses to convert a digit string past its integer-string
-            # limit, and a key no pull request could have must not be the one
-            # thing in this read that raises.
             return None
         failed_passes = record.get("failed_passes", 0)
         last_error = record.get("last_error")
@@ -990,6 +1009,8 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
             return None
         if last_error is not None and not isinstance(last_error, str):
             return None
+        if not steps:
+            continue
         owed.append(
             {
                 "pull_request": number,

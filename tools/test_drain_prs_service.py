@@ -1709,6 +1709,28 @@ class CleanupObligationTests(RedirectedControllerTestCase):
                 "a key that is no pull-request number",
                 {"PR-12": self.entry(self.cleanup([{"kind": "worktree"}]))},
             ),
+            (
+                "a key naming no pull request at all",
+                {"0": self.entry(self.cleanup([{"kind": "worktree"}]))},
+            ),
+            (
+                # `remember_approved_head` files entries under `str(number)`,
+                # so a padded key is not one the drainer wrote — and taking it
+                # would let one pull request owe twice in the same projection.
+                "a key no drainer would have written",
+                {"00012": self.entry(self.cleanup([{"kind": "worktree"}]))},
+            ),
+            (
+                # Discharged down to its last step, so nothing is owed, but
+                # the record itself is unreadable — and a record owing nothing
+                # is still a record.
+                "an unreadable value on a record owing nothing",
+                {"12": self.entry(self.cleanup([], failed_passes="many"))},
+            ),
+            (
+                "an unreadable error on a record owing nothing",
+                {"12": self.entry(self.cleanup([], last_error=3))},
+            ),
         ):
             with self.subTest(why=why):
                 self.assert_unknown(json.dumps({"version": 3, "prs": prs}), why)
