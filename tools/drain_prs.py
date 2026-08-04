@@ -1889,6 +1889,47 @@ def _restore_snapshot(
         )
 
 
+def _unmerged_index_paths(ctx: RepoContext) -> list[str]:
+    """The paths git itself reports as unmerged in the index, in index order.
+
+    Reads git's own stage entries rather than matching text in some failed
+    command's output, so it depends on neither the locale nor the wording of
+    a git error. `-z` keeps paths raw instead of quoting the unusual ones,
+    and each path carries a stage 1/2/3 entry, so duplicates are dropped.
+    """
+    proc = run(["git", "ls-files", "--unmerged", "-z"], cwd=ctx.path)
+    paths: list[str] = []
+    for record in (proc.stdout or "").split("\0"):
+        if not record:
+            continue
+        _, _, path = record.partition("\t")
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _require_merged_index(ctx: RepoContext) -> None:
+    # A conflicted autostash restore leaves unmerged entries in the index,
+    # and `git stash create` refuses to snapshot one. Left undetected, every
+    # later pass dies at the snapshot step and blames local changes for a
+    # state only a human can clear -- forever, at the polling interval.
+    #
+    # Like the operation-state check this refuses before anything changes:
+    # ahead of the fetch, the first --ff-only, the untracked relocation, the
+    # snapshot, the anchor, and the reset, so a wedged checkout is left
+    # exactly as the human left it -- the partial merge git computed in the
+    # working tree included.
+    paths = _unmerged_index_paths(ctx)
+    if not paths:
+        return
+    raise DrainError(
+        f"Refusing to fast-forward {ctx.default_branch}: the index in {ctx.path} holds "
+        "unmerged entries, so no snapshot of local changes can be taken. Local changes "
+        "are not what blocked this. Resolve these paths and `git add` them, and the "
+        "next ordinary pass discharges the fast-forward: " + ", ".join(paths)
+    )
+
+
 def fast_forward_default_branch(
     ctx: RepoContext,
     *,
@@ -1897,6 +1938,8 @@ def fast_forward_default_branch(
     log(f"Fast-forwarding local {ctx.default_branch}")
     if dry_run:
         return
+
+    _require_merged_index(ctx)
 
     run(["git", "fetch", "--quiet", ctx.remote_name], cwd=ctx.path)
 
