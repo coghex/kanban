@@ -1,8 +1,9 @@
 """Integration tests for drain_prs.fast_forward_default_branch()'s stash
-safety: a failed snapshot attempt must abort cleanly, and restoring local
+safety: a failed snapshot attempt must abort cleanly, restoring local
 changes afterward must never read or write the shared `refs/stash` reflog
-that a concurrent `git stash` in another terminal also uses -- against a
-real temporary Git repository.
+that a concurrent `git stash` in another terminal also uses, and the
+unmerged index a conflicted restore leaves behind must stop the next pass
+rather than wedge it -- against a real temporary Git repository.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
@@ -34,6 +35,18 @@ def run_git(args, *, cwd, check=True):
 def stash_shas(cwd):
     proc = run_git(["stash", "list", "--format=%H"], cwd=cwd)
     return [line for line in proc.stdout.strip().splitlines() if line]
+
+
+def index_entries(cwd):
+    return run_git(["ls-files", "--stage"], cwd=cwd).stdout
+
+
+def unmerged_entries(cwd):
+    return run_git(["ls-files", "--unmerged"], cwd=cwd).stdout
+
+
+def anchor_refs(cwd):
+    return run_git(["for-each-ref", "refs/drain-prs/autostash"], cwd=cwd).stdout
 
 
 class _FastForwardStashFixture(unittest.TestCase):
@@ -72,6 +85,16 @@ class _FastForwardStashFixture(unittest.TestCase):
         lines[0] = new_line1
         (clone_dir / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         run_git(["commit", "-q", "-am", "advance shared.txt"], cwd=clone_dir)
+        run_git(["push", "-q", "origin", "master"], cwd=clone_dir)
+
+    def _advance_origin_new_file(self, name, contents):
+        clone_dir = Path(tempfile.mkdtemp(dir=str(self.root)))
+        run_git(["clone", "-q", str(self.bare), str(clone_dir)], cwd=self.root)
+        run_git(["config", "user.email", "test@example.com"], cwd=clone_dir)
+        run_git(["config", "user.name", "Test"], cwd=clone_dir)
+        (clone_dir / name).write_text(contents, encoding="utf-8")
+        run_git(["add", name], cwd=clone_dir)
+        run_git(["commit", "-q", "-m", f"add {name}"], cwd=clone_dir)
         run_git(["push", "-q", "origin", "master"], cwd=clone_dir)
 
     def _seed_unrelated_stash(self):
@@ -273,6 +296,143 @@ class ConflictingRestoreTest(_FastForwardStashFixture):
         # itself is ever unavailable.
         anchor_refs = run_git(["for-each-ref", "refs/drain-prs/autostash"], cwd=self.main).stdout
         self.assertTrue(anchor_refs.strip())
+
+
+class UnmergedIndexRefusalTest(_FastForwardStashFixture):
+    """A conflicted restore leaves unmerged entries in the index, and
+    `git stash create` cannot snapshot one. Undetected, that wedges every
+    later pass at the snapshot step -- blaming local changes for a state
+    only a human can clear -- so the fast-forward refuses first instead.
+    """
+
+    def _wedge_on_conflicted_restore(self):
+        (self.main / "shared.txt").write_text(
+            "line1-local\nline2\nline3\n", encoding="utf-8"
+        )
+        self._advance_origin_line1("line1-remote")
+
+        with self.assertRaises(drain_prs.DrainError) as cm:
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+        self.assertIn("restoring local changes failed", str(cm.exception))
+        self.assertTrue(unmerged_entries(self.main))
+
+    def test_second_pass_refuses_naming_the_unmerged_index_and_changes_nothing(self):
+        user_stash_sha = self._seed_unrelated_stash()
+        self._wedge_on_conflicted_restore()
+
+        head_before = run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip()
+        index_before = index_entries(self.main)
+        tree_before = (self.main / "shared.txt").read_text(encoding="utf-8")
+        stashes_before = stash_shas(self.main)
+        anchors_before = anchor_refs(self.main)
+        self.assertIn(user_stash_sha, stashes_before)
+        self.assertTrue(anchors_before.strip())
+
+        real_run = drain_prs.run
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            with self.assertRaises(drain_prs.DrainError) as cm:
+                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        message = str(cm.exception)
+        self.assertIn("unmerged", message)
+        self.assertIn("shared.txt", message)
+        # The old diagnosis named the wrong cause; it must not be what an
+        # operator reads here.
+        self.assertNotIn("Local changes blocked fast-forward", message)
+
+        # Refused before every step that could move a ref or touch the tree,
+        # the fetch and the first --ff-only included.
+        self.assertEqual([c for c in calls if c[:2] == ["git", "fetch"]], [])
+        self.assertEqual([c for c in calls if c[:3] == ["git", "merge", "--ff-only"]], [])
+        self.assertEqual([c for c in calls if c[:3] == ["git", "stash", "create"]], [])
+
+        self.assertEqual(run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip(), head_before)
+        self.assertEqual(index_entries(self.main), index_before)
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"), tree_before
+        )
+        # The preserved snapshot stays reachable both ways it was left.
+        self.assertEqual(stash_shas(self.main), stashes_before)
+        self.assertEqual(anchor_refs(self.main), anchors_before)
+
+    def test_resolved_and_staged_paths_let_the_next_pass_fast_forward(self):
+        self._wedge_on_conflicted_restore()
+
+        # Exactly the recovery the observed incident used: resolve the
+        # conflicted path, `git add` it, and let the next ordinary pass run.
+        (self.main / "shared.txt").write_text(
+            "line1-resolved\nline2\nline3\n", encoding="utf-8"
+        )
+        run_git(["add", "shared.txt"], cwd=self.main)
+        self.assertEqual(unmerged_entries(self.main), "")
+
+        self._advance_origin_new_file("advanced.txt", "advanced\n")
+
+        drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        self.assertEqual(
+            run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip(),
+            run_git(["rev-parse", "origin/master"], cwd=self.main).stdout.strip(),
+        )
+        self.assertEqual(
+            (self.main / "advanced.txt").read_text(encoding="utf-8"), "advanced\n"
+        )
+        # The human's resolution survives the pass that discharged the debt.
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1-resolved\nline2\nline3\n",
+        )
+
+
+class DirtyButMergedIndexStillAutostashesTest(_FastForwardStashFixture):
+    """The refusal reads unmerged *stages*, not dirtiness. Ordinary staged
+    and unstaged work -- the common path, and the whole point of the
+    autostash -- must still be set aside, fast-forwarded through, and
+    restored exactly as before.
+    """
+
+    def test_dirty_checkout_with_no_unmerged_entries_is_unaffected(self):
+        user_stash_sha = self._seed_unrelated_stash()
+
+        (self.main / "staged.txt").write_text("alpha\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+        run_git(["commit", "-q", "-m", "add staged.txt"], cwd=self.main)
+        run_git(["push", "-q", "origin", "master"], cwd=self.main)
+
+        (self.main / "staged.txt").write_text("alpha-staged\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+        lines = (self.main / "shared.txt").read_text(encoding="utf-8").splitlines()
+        lines[2] = "line3-local"
+        (self.main / "shared.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (self.main / "new-untracked.txt").write_text("untracked\n", encoding="utf-8")
+
+        self._advance_origin_line1("line1-updated")
+        # Dirty in every way that matters, yet nothing is unmerged.
+        self.assertEqual(unmerged_entries(self.main), "")
+
+        drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1-updated\nline2\nline3-local\n",
+        )
+        self.assertEqual(
+            (self.main / "staged.txt").read_text(encoding="utf-8"), "alpha-staged\n"
+        )
+        self.assertIn(
+            "alpha-staged",
+            run_git(["diff", "--cached", "--", "staged.txt"], cwd=self.main).stdout,
+        )
+        self.assertEqual(
+            (self.main / "new-untracked.txt").read_text(encoding="utf-8"), "untracked\n"
+        )
+        self.assertEqual(stash_shas(self.main), [user_stash_sha])
 
 
 class ConcurrentStashDuringRestorationTest(_FastForwardStashFixture):
