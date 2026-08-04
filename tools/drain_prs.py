@@ -2174,8 +2174,8 @@ def advance_pending_cleanup(
     # Recorded unconditionally rather than only when this record names no
     # incident: recording is idempotent while one is open, and an id it still
     # names may belong to an incident that has since been resolved -- an
-    # intentional stop clears every open incident for the repository. Trusting
-    # the stored id would hide an outstanding debt for good.
+    # operator's `ack` dismisses an incident of any kind, this one included.
+    # Trusting the stored id would hide an outstanding debt for good.
     incident = drain_prs_service.record_cleanup_incident(
         repo_path=ctx.path,
         pull_request=number,
