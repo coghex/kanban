@@ -815,10 +815,20 @@ def current_gate_status(
     }
 
 
-def latest_open_pipeline_incident(repo_path: Path) -> dict[str, Any] | None:
+def open_pipeline_incidents(repo_path: Path) -> list[dict[str, Any]]:
+    """Every open incident recorded for this repository, newest first.
+
+    Gating consults all of them rather than only the newest: a scope-less
+    record must halt the repository whichever order the files sort in, and an
+    issue-scoped record must keep blocking the issue it names after a newer
+    incident names a different one. Repository confinement is unchanged --
+    only records whose `repo` resolves to this checkout are returned, so an
+    incident never reaches another checkout.
+    """
     canonical_repo = str(repo_path.resolve())
     if not PIPELINE_INCIDENT_DIR.exists():
-        return None
+        return []
+    incidents: list[dict[str, Any]] = []
     for path in sorted(PIPELINE_INCIDENT_DIR.glob("incident-*.json"), reverse=True):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -829,27 +839,108 @@ def latest_open_pipeline_incident(repo_path: Path) -> dict[str, Any] | None:
             and value.get("status") == "open"
             and value.get("repo") == canonical_repo
         ):
-            return {
-                "incident_id": value.get("incident_id"),
-                "kind": value.get("kind"),
-                "summary": value.get("summary"),
-                "path": str(path),
-            }
+            incidents.append(
+                {
+                    "incident_id": value.get("incident_id"),
+                    "kind": value.get("kind"),
+                    # The scope open_invalid_incident persists. Carrying it
+                    # here is what lets a halt name the issue it is confined
+                    # to instead of reading as repository-wide.
+                    "issue": value.get("issue"),
+                    "summary": value.get("summary"),
+                    "path": str(path),
+                }
+            )
+    return incidents
+
+
+def latest_open_pipeline_incident(repo_path: Path) -> dict[str, Any] | None:
+    """The newest open incident for this repository, scope included.
+
+    No longer the gate -- gating asks blocking_pipeline_incident, which
+    weighs every open record -- but kept as the single-incident accessor for
+    callers that just want to know whether this checkout has one.
+    """
+    incidents = open_pipeline_incidents(repo_path)
+    return incidents[0] if incidents else None
+
+
+def incident_issue_scope(incident: dict[str, Any]) -> int | None:
+    """The issue number an incident is confined to, or None when its scope is
+    indeterminate and it must halt the whole repository instead.
+
+    A determinate scope is a positive JSON integer. `bool` is an `int` in
+    Python but names no issue, and neither does a string, zero, a negative
+    number, or an absent field -- so every such record, including one written
+    before incidents carried a scope, keeps the repository-wide fail-closed
+    effect it has today.
+    """
+    issue_number = incident.get("issue")
+    if isinstance(issue_number, bool) or not isinstance(issue_number, int):
+        return None
+    return issue_number if issue_number > 0 else None
+
+
+def blocking_incident(
+    incidents: list[dict[str, Any]], issue_number: int | None
+) -> dict[str, Any] | None:
+    """The open incident that halts approval of `issue_number`, if any.
+
+    An incident of indeterminate scope outranks every scoped one whatever
+    their relative age: it is the fail-closed repository-wide halt, and file
+    ordering must not decide whether it applies. `issue_number` of None asks
+    the repository-wide question alone, which is what the daemon's start gate
+    needs -- a scoped incident does not stop the daemon, it only removes the
+    issue it names from the queue.
+    """
+    for incident in incidents:
+        if incident_issue_scope(incident) is None:
+            return incident
+    if issue_number is None:
+        return None
+    for incident in incidents:
+        if incident_issue_scope(incident) == issue_number:
+            return incident
     return None
 
 
+def blocking_pipeline_incident(
+    repo_path: Path, issue_number: int | None
+) -> dict[str, Any] | None:
+    return blocking_incident(open_pipeline_incidents(repo_path), issue_number)
+
+
+def pipeline_halt_reason(incident: dict[str, Any]) -> str:
+    """The halt sentence, naming what the incident is confined to so an
+    operator reading one issue's reasons can tell a halt about that issue
+    apart from a repository-wide one."""
+    scope = incident_issue_scope(incident)
+    target = f"issue #{scope}" if scope is not None else "this repository"
+    return (
+        f"issue approval pipeline is halted for {target} by open incident "
+        + str(incident.get("incident_id"))
+    )
+
+
+def pipeline_halt_error(incident: dict[str, Any]) -> ApproveError:
+    reason = pipeline_halt_reason(incident)
+    return ApproveError(reason[:1].upper() + reason[1:])
+
+
 def apply_pipeline_circuit_breaker(
-    status: dict[str, Any], repo_path: Path
+    status: dict[str, Any], repo_path: Path, *, issue_number: int | None
 ) -> dict[str, Any]:
-    incident = latest_open_pipeline_incident(repo_path)
+    """Fail the gate when an open incident covers `issue_number`.
+
+    `issue_number` is required rather than derived from `status`, so a caller
+    that forgets it fails loudly instead of silently asking the narrower
+    repository-wide question and letting a scoped halt through.
+    """
+    incident = blocking_pipeline_incident(repo_path, issue_number)
     status["pipeline_incident"] = incident
     if incident is not None:
         status["approved"] = False
-        status["reasons"].insert(
-            0,
-            "issue approval pipeline is halted by open incident "
-            + str(incident.get("incident_id")),
-        )
+        status["reasons"].insert(0, pipeline_halt_reason(incident))
     return status
 
 
@@ -858,7 +949,14 @@ def select_candidate(
     *,
     legacy_policy: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[Reviewer]] | None:
+    # Read once per pass: the daemon polls, and an incident-scoped skip must
+    # not cost a directory scan per open issue.
+    incidents = open_pipeline_incidents(ctx.path)
     for issue in get_open_issues(ctx):
+        halted_by = blocking_incident(incidents, issue["number"])
+        if halted_by is not None:
+            log(f"Skipping issue #{issue['number']}: {pipeline_halt_reason(halted_by)}")
+            continue
         comments = get_comments(ctx, issue["number"])
         origin = issue_origin(issue.get("body") or "")
         reviewers = reviewers_for_origin(origin, legacy_policy)
@@ -1503,12 +1601,9 @@ def review_one(
     *,
     legacy_policy: str,
 ) -> dict[str, Any]:
-    incident = latest_open_pipeline_incident(ctx.path)
+    incident = blocking_pipeline_incident(ctx.path, number)
     if incident is not None:
-        raise ApproveError(
-            "Issue approval pipeline is halted by open incident "
-            + str(incident.get("incident_id"))
-        )
+        raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="single", issue_number=number)
     try:
         ensure_verdict_labels(ctx)
@@ -1547,6 +1642,7 @@ def review_one(
                 refreshed, refreshed_comments, legacy_policy=legacy_policy
             ),
             ctx.path,
+            issue_number=number,
         )
     finally:
         release_lock(lock)
@@ -1558,12 +1654,9 @@ def rereview_one(
     *,
     legacy_policy: str,
 ) -> dict[str, Any]:
-    incident = latest_open_pipeline_incident(ctx.path)
+    incident = blocking_pipeline_incident(ctx.path, number)
     if incident is not None:
-        raise ApproveError(
-            "Issue approval pipeline is halted by open incident "
-            + str(incident.get("incident_id"))
-        )
+        raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="rereview", issue_number=number)
     try:
         ensure_verdict_labels(ctx)
@@ -1608,6 +1701,7 @@ def rereview_one(
                 refreshed, refreshed_comments, legacy_policy=legacy_policy
             ),
             ctx.path,
+            issue_number=number,
         )
     finally:
         release_lock(lock)
@@ -1649,18 +1743,36 @@ def notify_incident(ctx: RepoContext, incident: dict[str, Any]) -> None:
 def open_invalid_incident(
     ctx: RepoContext, issue_number: int, summary: str
 ) -> dict[str, Any]:
-    """Open (or return the existing) circuit-breaker incident for one repo.
+    """Open (or return the existing) circuit-breaker incident for one issue.
 
     This intentionally does not shell out to an external controller: it is
     the whole of "incident handling" for the supported --review/--rereview
     contract, self-contained so no personal Codex skill directory is ever
     required (docs/agent-workflow-contract.md §5).
+
+    Idempotence is per issue, not per repository. Now that a record only
+    halts the issue it names, reusing the first invalid issue's incident for
+    a second one would leave the second silently unblocked.
     """
-    existing = latest_open_pipeline_incident(ctx.path)
-    if existing is not None:
-        return existing
+    for existing in open_pipeline_incidents(ctx.path):
+        if incident_issue_scope(existing) == issue_number:
+            return existing
     PIPELINE_INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
-    incident_id = time.strftime("incident-%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
+    # Two issues recorded by one process in one second share a timestamp and
+    # a PID, so the issue number and an exclusive create -- not the clock --
+    # are what keep the second record from overwriting the first.
+    stamp = time.strftime("incident-%Y%m%dT%H%M%SZ", time.gmtime())
+    base_id = f"{stamp}-{os.getpid()}-issue{issue_number}"
+    attempt = 0
+    while True:
+        incident_id = base_id if attempt == 0 else f"{base_id}-{attempt}"
+        path = PIPELINE_INCIDENT_DIR / f"{incident_id}.json"
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            attempt += 1
+            continue
+        break
     incident = {
         "incident_id": incident_id,
         "status": "open",
@@ -1670,8 +1782,8 @@ def open_invalid_incident(
         "summary": summary,
         "repo": str(ctx.path.resolve()),
     }
-    path = PIPELINE_INCIDENT_DIR / f"{incident_id}.json"
-    path.write_text(json.dumps(incident, indent=2, sort_keys=True), encoding="utf-8")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(incident, indent=2, sort_keys=True))
     notify_incident(ctx, incident)
     return incident
 
@@ -1959,11 +2071,50 @@ def self_test() -> None:
             ),
             encoding="utf-8",
         )
+        # No `issue` field: an indeterminate scope still halts every issue in
+        # the matching repository, and never reaches the other checkout.
         blocked = apply_pipeline_circuit_breaker(
-            {"approved": True, "reasons": []}, matching_repo
+            {"approved": True, "reasons": []}, matching_repo, issue_number=7
         )
         assert not blocked["approved"]
         assert blocked["pipeline_incident"]["incident_id"] == "incident-test"
+        assert "halted for this repository" in blocked["reasons"][0]
+        assert (
+            apply_pipeline_circuit_breaker(
+                {"approved": True, "reasons": []}, other_repo, issue_number=7
+            )["pipeline_incident"]["incident_id"]
+            == "incident-other"
+        )
+    with tempfile.TemporaryDirectory(prefix="approve-issues-self-test-") as tmp:
+        PIPELINE_INCIDENT_DIR = Path(tmp)
+        scoped_repo = Path(tmp) / "scoped-repo"
+        (PIPELINE_INCIDENT_DIR / "incident-scoped.json").write_text(
+            json.dumps(
+                {
+                    "incident_id": "incident-scoped",
+                    "status": "open",
+                    "kind": "invalid-issue",
+                    "issue": 7,
+                    "repo": str(scoped_repo.resolve()),
+                    "summary": "issue #7 is invalid",
+                }
+            ),
+            encoding="utf-8",
+        )
+        halted = apply_pipeline_circuit_breaker(
+            {"approved": True, "reasons": []}, scoped_repo, issue_number=7
+        )
+        assert not halted["approved"]
+        assert "halted for issue #7" in halted["reasons"][0]
+        # The issue the incident does not name keeps its ordinary verdict.
+        unaffected = apply_pipeline_circuit_breaker(
+            {"approved": True, "reasons": []}, scoped_repo, issue_number=8
+        )
+        assert unaffected["approved"]
+        assert unaffected["reasons"] == []
+        assert unaffected["pipeline_incident"] is None
+        # And a scoped incident never stops the daemon from starting.
+        assert blocking_pipeline_incident(scoped_repo, None) is None
     PIPELINE_INCIDENT_DIR = original_incident_dir
     print("approve-issues.py self-test passed")
 
@@ -2114,6 +2265,7 @@ def main() -> None:
                     issue, comments, legacy_policy=args.legacy_policy
                 ),
                 ctx.path,
+                issue_number=args.check,
             )
             if args.json:
                 print(json.dumps(status, indent=2, sort_keys=True))
@@ -2144,12 +2296,12 @@ def main() -> None:
                 for reason in status["reasons"]:
                     print(f"- {reason}")
             return
-        incident = latest_open_pipeline_incident(ctx.path)
+        # None asks only the repository-wide question: an issue-scoped
+        # incident must not stop the daemon, it only removes the issue it
+        # names from select_candidate's queue.
+        incident = blocking_pipeline_incident(ctx.path, None)
         if incident is not None:
-            raise ApproveError(
-                "Issue approval pipeline is halted by open incident "
-                + str(incident.get("incident_id"))
-            )
+            raise pipeline_halt_error(incident)
         log(
             f"Watching {ctx.repo_slug} for issue specs "
             f"(default branch: {ctx.default_branch}, legacy={args.legacy_policy})"
