@@ -590,6 +590,65 @@ spec = do
         )
         `shouldBe` Right (Just [DrainerIncident "incident-B" "merge-conflict" Nothing (Just 42) Nothing Nothing])
 
+  describe "PR drainer post-merge cleanup obligations" $ do
+    let obligation number =
+          "{\"pull_request\":"
+            <> LazyByteString.pack (show (number :: Int))
+            <> ",\"steps\":[\"fast-forwarding the default branch\"],"
+            <> "\"failed_passes\":9,\"last_error\":\"exit code 1\"}"
+        owing numbers =
+          ",\"cleanup_obligations\":["
+            <> LazyByteString.intercalate "," (map obligation numbers)
+            <> "]"
+        conflict =
+          "{\"incident_id\":\"incident-B\",\"kind\":\"merge-conflict\","
+            <> "\"summary\":\"PR #42 has a merge conflict in README.\",\"pull_request\":42}"
+
+    it "adds a clause counting the pull requests that owe cleanup" $ do
+      -- Debt alone leaves the state — and so the button's colour — exactly
+      -- what the service state made it. Retrying obligations are ordinary
+      -- behavior; escalation stays the open incident's job.
+      decodedStatus ("{\"state\":\"stopped\"" <> owing [12] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerOff "off · 1 PR owes cleanup" DrainerServiceStopped Nothing)
+      decodedStatus ("{\"state\":\"stopped\"" <> owing [1079, 12] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerOff "off · 2 PRs owe cleanup" DrainerServiceStopped Nothing)
+      decodedStatus ("{\"state\":\"running\"" <> owing [1079, 12, 3] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerOn "on · 3 PRs owe cleanup" DrainerServiceRunning Nothing)
+
+    it "carries the clause on every state that can owe, not only a stopped one" $ do
+      -- A stop is when nothing discharges the debt, but every other state can
+      -- carry it too, and none of them may hide it.
+      decodedStatus ("{\"state\":\"starting\"" <> owing [12] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerStarting "starting… · 1 PR owes cleanup" DrainerServiceStarting Nothing)
+      decodedStatus ("{\"state\":\"external\"" <> owing [12] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerWarning "on outside launchd · 1 PR owes cleanup" DrainerServiceExternal Nothing)
+      decodedStatus ("{\"state\":\"mid_operation\",\"operation\":\"rebase\"" <> owing [12] <> "}")
+        `shouldBe` Right (DrainerStatus DrainerError "rebase in progress; finish or abort it · 1 PR owes cleanup" DrainerServiceBlocked Nothing)
+
+    it "follows an open incident's summary without displacing it" $
+      decodedStatus ("{\"state\":\"stopped\",\"open_incident\":" <> conflict <> owing [42] <> "}")
+        `shouldBe` Right
+          ( DrainerStatus
+              DrainerError
+              "stopped · unresolved incident · PR #42 has a merge conflict in README. · 1 PR owes cleanup"
+              DrainerServiceStopped
+              (Just "PR #42 has a merge conflict in README.")
+          )
+
+    it "says nothing for a verified-empty projection, an unknown one, or none at all" $ do
+      let settled = Right (DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing)
+      decodedStatus "{\"state\":\"stopped\",\"cleanup_obligations\":[]}" `shouldBe` settled
+      -- Unknown: the controller could not read the drainer's queue state.
+      decodedStatus "{\"state\":\"stopped\",\"cleanup_obligations\":null}" `shouldBe` settled
+      -- And a controller predating the projection looks exactly as it does today.
+      decodedStatus "{\"state\":\"stopped\"}" `shouldBe` settled
+
+    it "fails the whole observation on a member that names no pull request" $
+      -- The same fail-closed rule the incident set follows: a projection this
+      -- side cannot read is reported as unreadable, never counted as debt.
+      decodeDrainerStatus "{\"state\":\"stopped\",\"cleanup_obligations\":[{\"steps\":[]}]}"
+        `shouldSatisfy` either (Data.Text.isPrefixOf "could not decode PR drainer status") (const False)
+
   DirectMerge.examples
   where
     -- The sidebar projection every test above this file's incident group

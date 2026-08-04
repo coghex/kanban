@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import drain_prs
 import drain_prs_service
 
 
@@ -55,10 +56,12 @@ class RedirectedControllerTestCase(unittest.TestCase):
             patched.start()
             self.addCleanup(patched.stop)
 
-        # Scripted external state: which labels launchd has loaded, and what
-        # each checkout's remote answers.
+        # Scripted external state: which labels launchd has loaded, what each
+        # checkout's remote answers, and which git directory a checkout shares
+        # — the last of which is a linked worktree's primary checkout.
         self.loaded = set()
         self.remotes = {}
+        self.common_dirs = {}
         self.commands = []
         patched = mock.patch.object(
             drain_prs_service, "run_command", side_effect=self._run_command
@@ -82,6 +85,9 @@ class RedirectedControllerTestCase(unittest.TestCase):
             return _completed(0, stdout=url + "\n")
         if args[0] == "git" and args[3:] == ["rev-parse", "--absolute-git-dir"]:
             return _completed(0, stdout=str(Path(args[2]) / ".git") + "\n")
+        if args[0] == "git" and args[3:] == ["rev-parse", "--git-common-dir"]:
+            shared = self.common_dirs.get(args[2], str(Path(args[2]) / ".git"))
+            return _completed(0, stdout=shared + "\n")
         return _completed(0)
 
     def checkout(self, name, remote_url, **other_remotes):
@@ -1520,6 +1526,288 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
             self.job, "Cleared when the PR drainer was intentionally stopped."
         )
         self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
+
+
+class CleanupObligationTests(RedirectedControllerTestCase):
+    """The post-merge debt `status` projects out of the drainer's queue state.
+
+    Obligations are worked only from inside the polling loop, so a stopped
+    drainer neither discharges nor mentions them, and debt under
+    `CLEANUP_PASSES_BEFORE_INCIDENT` has raised no incident to be seen
+    through. This projection is the only surface that names it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        self.state_path = self.repo / ".git" / "drain_prs_state.json"
+
+    def write_state(self, document):
+        self.state_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def entry(self, cleanup):
+        return {"approved_head": "a" * 40, "cleanup": cleanup}
+
+    def cleanup(self, pending, *, failed_passes=0, last_error=None):
+        return {
+            "pr": {"number": 12, "headRefName": "issue-7", "headRefOid": "b" * 40},
+            "pending": pending,
+            "failed_passes": failed_passes,
+            "last_error": last_error,
+            "incident": None,
+        }
+
+    def state_with_debt(self):
+        # Keys deliberately out of numeric order, and one entry owing nothing.
+        return {
+            "version": drain_prs_service.DRAIN_STATE_VERSION,
+            "attempt_counter": 4,
+            "prs": {
+                "1079": self.entry(
+                    self.cleanup(
+                        [{"kind": "fast-forward"}],
+                        failed_passes=9,
+                        last_error="fast-forwarding the default branch: exit code 1",
+                    )
+                ),
+                "12": self.entry(
+                    self.cleanup(
+                        [
+                            {"kind": "issue", "repo": "acme/widgets", "number": 7},
+                            {"kind": "worktree"},
+                            {"kind": "local-branch", "branch": "issue-7"},
+                            {"kind": "remote-branch", "branch": "issue-7"},
+                        ]
+                    )
+                ),
+                "8": self.entry(None),
+            },
+        }
+
+    def assert_unknown(self, document, why):
+        """A state the projection cannot trust reports unknown, not empty."""
+        self.state_path.write_text(document, encoding="utf-8")
+        self.assertIsNone(drain_prs_service.cleanup_obligations(self.repo), why)
+
+    def test_names_every_outstanding_step_in_pull_request_order(self):
+        self.write_state(self.state_with_debt())
+
+        self.assertEqual(
+            drain_prs_service.cleanup_obligations(self.repo),
+            [
+                {
+                    "pull_request": 12,
+                    # The stored order, which is the order the drainer retries
+                    # them in: the worktree before the branch it holds.
+                    "steps": [
+                        "closing acme/widgets#7",
+                        "removing the matching worktree",
+                        "deleting local branch issue-7",
+                        "deleting remote branch issue-7",
+                    ],
+                    "failed_passes": 0,
+                    "last_error": None,
+                },
+                {
+                    "pull_request": 1079,
+                    "steps": ["fast-forwarding the default branch"],
+                    "failed_passes": 9,
+                    "last_error": "fast-forwarding the default branch: exit code 1",
+                },
+            ],
+        )
+
+    def test_a_state_owing_nothing_is_empty_and_an_absent_one_is_unknown(self):
+        # The distinction Kanban's sidebar needs: only the first of these is a
+        # verified-empty answer.
+        self.write_state(
+            {
+                "version": drain_prs_service.DRAIN_STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {
+                    "8": self.entry(None),
+                    # Discharged down to its last step and not yet dropped.
+                    "9": self.entry(self.cleanup([])),
+                },
+            }
+        )
+        self.assertEqual(drain_prs_service.cleanup_obligations(self.repo), [])
+
+        self.state_path.unlink()
+        self.assertIsNone(drain_prs_service.cleanup_obligations(self.repo))
+
+    def test_no_state_a_status_call_cannot_trust_reports_anything_but_unknown(self):
+        healthy = self.state_with_debt()
+        self.assert_unknown("{ not json", "malformed JSON")
+        self.assert_unknown(json.dumps([]), "a document that is not an object")
+        self.assert_unknown(json.dumps({**healthy, "version": 1}), "version 1")
+        self.assert_unknown(json.dumps({**healthy, "version": 2}), "version 2")
+        self.assert_unknown(
+            json.dumps({**healthy, "version": 99}), "an unknown future version"
+        )
+        self.assert_unknown(json.dumps({"version": 3}), "no prs table")
+        self.assert_unknown(json.dumps({"version": 3, "prs": []}), "a non-dict prs")
+        for why, prs in (
+            ("a non-dict entry", {"12": "merged"}),
+            ("a non-dict cleanup record", {"12": self.entry("done")}),
+            (
+                "a non-list pending",
+                {"12": self.entry(self.cleanup({"kind": "worktree"}))},
+            ),
+            ("a non-dict obligation", {"12": self.entry(self.cleanup(["worktree"]))}),
+            (
+                "an issue step naming no repository",
+                {"12": self.entry(self.cleanup([{"kind": "issue", "number": 7}]))},
+            ),
+            (
+                "a branch step naming no branch",
+                {"12": self.entry(self.cleanup([{"kind": "local-branch"}]))},
+            ),
+            (
+                "a non-integer failed_passes",
+                {
+                    "12": self.entry(
+                        self.cleanup([{"kind": "worktree"}], failed_passes="many")
+                    )
+                },
+            ),
+            (
+                "a non-string last_error",
+                {"12": self.entry(self.cleanup([{"kind": "worktree"}], last_error=3))},
+            ),
+            (
+                "a key that is no pull-request number",
+                {"PR-12": self.entry(self.cleanup([{"kind": "worktree"}]))},
+            ),
+        ):
+            with self.subTest(why=why):
+                self.assert_unknown(json.dumps({"version": 3, "prs": prs}), why)
+
+    def test_an_unreadable_state_file_reports_unknown(self):
+        # Stands for every OSError the read can raise: status is the
+        # diagnostic used when the repository is already in a bad state, so it
+        # answers unknown rather than failing.
+        self.state_path.mkdir()
+        self.assertIsNone(drain_prs_service.cleanup_obligations(self.repo))
+
+    def test_a_checkout_with_no_git_entry_reports_unknown(self):
+        self.assertIsNone(drain_prs_service.cleanup_obligations(self.root / "absent"))
+
+    def test_a_linked_worktree_reports_the_primary_checkouts_obligations(self):
+        # A linked worktree's `.git` is a *file*, so joining the state file's
+        # name onto it raises NotADirectoryError. The two checkouts share one
+        # git directory, and that is where the drainer's state lives.
+        self.write_state(self.state_with_debt())
+        linked = self.root / "linked"
+        linked.mkdir()
+        (linked / ".git").write_text(
+            f"gitdir: {self.repo / '.git' / 'worktrees' / 'issue-7'}\n",
+            encoding="utf-8",
+        )
+        self.common_dirs[str(linked)] = str(self.repo / ".git")
+
+        from_primary = drain_prs_service.cleanup_obligations(self.repo)
+        from_linked = drain_prs_service.cleanup_obligations(linked)
+
+        self.assertEqual(from_linked, from_primary)
+        # Not a false empty set, which is the other way this could fail.
+        self.assertEqual([item["pull_request"] for item in from_linked], [12, 1079])
+
+    def test_the_ordinary_checkout_runs_no_command_to_find_its_state(self):
+        # Status is polled every ten seconds, so the common path stays a
+        # single read: git is asked only by the linked-worktree case above.
+        self.write_state(self.state_with_debt())
+        self.commands.clear()
+        drain_prs_service.cleanup_obligations(self.repo)
+        self.assertEqual(self.commands, [])
+
+    def test_a_status_call_reports_the_projection_and_writes_nothing(self):
+        self.write_status(self.job, self.repo)
+        self.write_state(self.state_with_debt())
+        before = self.state_path.read_bytes()
+        listing = sorted(path.name for path in (self.repo / ".git").iterdir())
+
+        snapshot = drain_prs_service.status_snapshot(self.job)
+
+        self.assertEqual(
+            [item["pull_request"] for item in snapshot["cleanup_obligations"]],
+            [12, 1079],
+        )
+        # Strictly read-only: no lock is taken, and nothing is migrated or
+        # repaired — not the document, and not a temporary file beside it.
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in (self.repo / ".git").iterdir()), listing
+        )
+
+    def test_a_malformed_state_leaves_every_other_status_field_alone(self):
+        self.write_status(self.job, self.repo)
+        self.write_state(self.state_with_debt())
+        healthy = drain_prs_service.status_snapshot(self.job)
+        self.state_path.write_text("{ not json", encoding="utf-8")
+
+        degraded = drain_prs_service.status_snapshot(self.job)
+
+        self.assertIsNotNone(healthy["cleanup_obligations"])
+        self.assertIsNone(degraded["cleanup_obligations"])
+        self.assertEqual(
+            {key: value for key, value in degraded.items() if key != "cleanup_obligations"},
+            {key: value for key, value in healthy.items() if key != "cleanup_obligations"},
+        )
+
+
+class MirroredCleanupVocabularyTests(unittest.TestCase):
+    """The controller restates the drainer's state version and step wording
+    rather than importing them, exactly as `in_progress_operation` restates
+    its checkout check. These hold the two sides equal."""
+
+    def test_the_state_version_matches_the_drainers(self):
+        self.assertEqual(
+            drain_prs_service.DRAIN_STATE_VERSION, drain_prs.STATE_VERSION
+        )
+
+    def test_every_step_is_worded_exactly_as_the_drainer_words_it(self):
+        for obligation in (
+            {"kind": "issue", "repo": "acme/widgets", "number": 7},
+            {"kind": "worktree"},
+            {"kind": "local-branch", "branch": "issue-7"},
+            {"kind": "remote-branch", "branch": "issue-7"},
+            {"kind": "fast-forward"},
+            {"kind": "invented-later"},
+        ):
+            with self.subTest(kind=obligation["kind"]):
+                self.assertEqual(
+                    drain_prs_service.cleanup_step_description(obligation),
+                    drain_prs.describe_cleanup_obligation(obligation),
+                )
+
+    def test_every_step_the_drainer_plans_can_be_described(self):
+        # A new obligation kind must reach the status projection as its own
+        # wording rather than as "unknown cleanup step".
+        planned = drain_prs.plan_cleanup(
+            {
+                "number": 12,
+                "headRefName": "issue-7",
+                "headRefOid": "b" * 40,
+                "closingIssuesReferences": [
+                    {
+                        "number": 7,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                ],
+            }
+        )["pending"]
+
+        described = [
+            drain_prs_service.cleanup_step_description(item) for item in planned
+        ]
+        self.assertEqual(
+            described,
+            [drain_prs.describe_cleanup_obligation(item) for item in planned],
+        )
+        for step in described:
+            self.assertNotIn("unknown cleanup step", step)
 
 
 if __name__ == "__main__":

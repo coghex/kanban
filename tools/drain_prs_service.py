@@ -40,6 +40,10 @@ import kanban_config
 # allowed to start.
 LABEL_PREFIX = "com.coghex.drain-prs"
 LEGACY_LABEL = LABEL_PREFIX
+# The queue-state document version `cleanup_obligations` below understands,
+# mirrored from `drain_prs.STATE_VERSION` because the controller reads that
+# state directly rather than importing the drainer. A test holds them equal.
+DRAIN_STATE_VERSION = 3
 HOME = Path.home()
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
@@ -827,6 +831,157 @@ def stored_repo_path(stored: dict[str, Any]) -> Path | None:
     return None
 
 
+def drain_state_path(repo_path: Path) -> Path | None:
+    """Where `drain_prs.py` keeps this repository's queue state, or None when
+    this checkout cannot name it.
+
+    The drainer writes it inside its checkout's git directory. A linked
+    worktree's `.git` is a *file* pointing into the primary checkout, so
+    joining the name onto it blindly raises NotADirectoryError from a
+    dashboard or a shell run out of one. Git is asked for the shared directory
+    only in that case, which leaves the ordinary checkout's read free of any
+    subprocess -- status is polled every ten seconds.
+    """
+    entry = repo_path / ".git"
+    try:
+        if entry.is_dir():
+            return entry / "drain_prs_state.json"
+        if not entry.exists():
+            return None
+    except OSError:
+        return None
+    # The *common* directory, not `--absolute-git-dir`: the latter answers a
+    # linked worktree's own `.git/worktrees/<name>`, while the state file the
+    # drainer wrote from the primary checkout lives in the directory both
+    # share.
+    proc = run_command(
+        ["git", "-C", str(repo_path), "rev-parse", "--git-common-dir"], check=False
+    )
+    if proc.returncode != 0:
+        return None
+    answer = (proc.stdout or "").strip()
+    if not answer:
+        return None
+    common = Path(answer)
+    if not common.is_absolute():
+        # Git answers relative to the directory it ran in, which `-C` made
+        # this checkout.
+        common = repo_path / common
+    return common / "drain_prs_state.json"
+
+
+def is_plain_integer(value: Any) -> bool:
+    # bool is a subclass of int, and `true` is neither a pull-request number
+    # nor a count of passes.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def cleanup_step_description(obligation: Any) -> str | None:
+    """One outstanding post-merge cleanup step, worded as the drainer words it
+    for an incident, or None when the record cannot be described at all.
+
+    Mirrors `drain_prs.describe_cleanup_obligation` for the same reason
+    `in_progress_operation` above mirrors the drainer's own check: the
+    controller answers `status` by reading this repository directly, without
+    importing or running the drainer. The one difference is that this
+    validates where the drainer indexes -- the drainer describes a record it
+    has just written, while this describes whatever is on disk, and a
+    malformed one has to be reported rather than raised out of a status call.
+    A test holds the two wordings equal.
+    """
+    if not isinstance(obligation, dict):
+        return None
+    kind = obligation.get("kind")
+    if kind == "issue":
+        repo = obligation.get("repo")
+        number = obligation.get("number")
+        if not isinstance(repo, str) or not is_plain_integer(number):
+            return None
+        return f"closing {repo}#{number}"
+    if kind == "worktree":
+        return "removing the matching worktree"
+    if kind == "local-branch":
+        branch = obligation.get("branch")
+        if not isinstance(branch, str):
+            return None
+        return f"deleting local branch {branch}"
+    if kind == "remote-branch":
+        branch = obligation.get("branch")
+        if not isinstance(branch, str):
+            return None
+        return f"deleting remote branch {branch}"
+    if kind == "fast-forward":
+        return "fast-forwarding the default branch"
+    # Not a failure: the drainer names an unrecognised step this way too, and
+    # a step it cannot run is exactly the debt worth showing.
+    return f"unknown cleanup step {kind!r}"
+
+
+def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
+    """The post-merge debt this repository's queue state still records, or
+    None when that state could not be read as one.
+
+    Read-only and lock-free by contract. `save_drain_state` writes through a
+    temporary file and a rename, so a reader holding no lock sees one whole
+    version or the previous one; and nothing here writes, migrates, or repairs
+    what it reads, because status is the diagnostic used when the repository
+    is already in a bad state.
+
+    None means unknown, never "nothing owed". An absent, unreadable,
+    malformed, or wrong-version document reports unknown, and so does one
+    carrying a cleanup record that cannot be described: a partial list would
+    read as a complete one. Versions 1 and 2 are unknown rather than empty
+    because they predate durable cleanup records, so an entry either left
+    behind can be a merged pull request whose obligations have not been
+    reconstructed yet.
+    """
+    path = drain_state_path(repo_path)
+    if path is None:
+        return None
+    state = read_json(path)
+    if state is None or state.get("version") != DRAIN_STATE_VERSION:
+        return None
+    entries = state.get("prs")
+    if not isinstance(entries, dict):
+        return None
+    owed: list[dict[str, Any]] = []
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            return None
+        record = entry.get("cleanup")
+        if record is None:
+            continue
+        if not isinstance(record, dict):
+            return None
+        pending = record.get("pending")
+        if not isinstance(pending, list):
+            return None
+        if not pending:
+            continue
+        steps = [cleanup_step_description(item) for item in pending]
+        if any(step is None for step in steps):
+            return None
+        if not (isinstance(key, str) and key.isascii() and key.isdigit()):
+            return None
+        failed_passes = record.get("failed_passes", 0)
+        last_error = record.get("last_error")
+        if not is_plain_integer(failed_passes):
+            return None
+        if last_error is not None and not isinstance(last_error, str):
+            return None
+        owed.append(
+            {
+                "pull_request": int(key),
+                "steps": steps,
+                "failed_passes": failed_passes,
+                "last_error": last_error,
+            }
+        )
+    # Sorted numerically rather than left in the document's key order, so a
+    # caller polling unchanged state gets the same answer every time.
+    return sorted(owed, key=lambda item: item["pull_request"])
+
+
 def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     """This repository's drainer state, read from this repository's own status
     file.
@@ -892,6 +1047,12 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         "last_activity": log_tail[0] if log_tail else None,
         "open_incident": latest_incident,
         "open_incidents": open_incidents,
+        # Debt the drainer still owes a merged pull request, which no other
+        # field reports: obligations are worked only from inside the polling
+        # loop, so a stopped drainer neither discharges nor mentions them, and
+        # debt under CLEANUP_PASSES_BEFORE_INCIDENT has raised no incident to
+        # be seen through. Null is unknown, `[]` is verified-empty.
+        "cleanup_obligations": cleanup_obligations(job.repo_path),
     }
 
 

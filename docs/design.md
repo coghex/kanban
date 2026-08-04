@@ -1116,6 +1116,25 @@ a countdown.
   A second checkout of the same repository is that repository's own drainer,
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
+- The status response also projects the post-merge cleanup a merged pull
+  request still owes, which no other surface reports: obligations are worked
+  only from inside the drainer's polling loop, so a stopped drainer neither
+  discharges nor mentions them, and debt below the incident threshold has
+  raised no incident to be seen through. The projection names each owing pull
+  request, its outstanding steps in the wording the drainer uses for an
+  incident, its failed-pass count, and its last error, ordered by pull-request
+  number so an unchanged state answers identically every poll. It distinguishes
+  three answers, on the same rule the open incident set follows: a set, a
+  verified-empty set, and unknown for a queue state that is absent, unreadable,
+  malformed, or of an unsupported version. Reading it is strictly read-only —
+  no lock, no migration, no repair — and can never fail a status call, which is
+  the diagnostic used when the repository is already in a bad state.
+- The sidebar folds that projection into its single drainer detail line as a
+  clause counting the pull requests that owe, on every state that can carry
+  debt. Unknown renders nothing, so a controller predating the projection looks
+  exactly as it did. Debt alone changes neither the drainer's color nor the
+  incidents panel: obligations under retry are ordinary behavior, and
+  escalating them stays the open incident's job.
 - A controller invocation runs as its own process group, and ownership of that
   group is established while the controller is known alive rather than at
   cleanup time, so a timeout can terminate what the controller started even
@@ -1538,7 +1557,9 @@ repository, whose label is derived from that repository's normalized identity.
   re-pointing it at another repository.
 - Decode the managed wrapper's structured status and incident data, including
   the complete repository-scoped set of open incidents the incidents panel
-  lists alongside the newest-only summary the sidebar renders.
+  lists alongside the newest-only summary the sidebar renders, and the
+  outstanding post-merge cleanup obligations that same response projects out of
+  the drainer's queue state.
 - Refresh local status every ten seconds without network traffic.
 - Render the bottom-left ASCII button with off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.
