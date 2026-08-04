@@ -537,6 +537,18 @@ commands need.
   self-contained and never shells out to it. It may still be used by
   separate, unpackaged Codex-side daemon tooling outside this repository's
   contract; Kanban does not track or depend on that tooling.
+  Its blast radius is one issue. An `invalid-issue` incident blocks the
+  issue its `issue` field names — `--check`, `--review` and `--rereview`
+  for that number, and that number alone in the polling daemon's queue —
+  while every other issue in the repository keeps its ordinary verdict and
+  the daemon keeps running and approving them. An incident whose scope is
+  indeterminate — the field absent, null, or anything but a positive
+  integer, which is every record written before incidents carried a scope —
+  instead halts the whole repository and refuses the daemon's start, as all
+  incidents once did. Incidents are matched on the resolved repository path
+  and so never reach another checkout, and acknowledgement remains external
+  to the backend: it has no resolve path, and a record stops applying when
+  its JSON file is edited or removed.
 
 ## 4. Dependency manifest
 
