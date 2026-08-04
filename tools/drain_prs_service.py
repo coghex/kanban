@@ -612,9 +612,12 @@ def write_discovery_record(job: DrainerJob) -> Path:
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
+    # UnicodeDecodeError alongside the rest: it is a ValueError, not an
+    # OSError, so bytes that are not UTF-8 would otherwise escape a reader
+    # every caller expects to answer "nothing readable here".
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError, OSError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -934,6 +937,10 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     because they predate durable cleanup records, so an entry either left
     behind can be a merged pull request whose obligations have not been
     reconstructed yet.
+
+    A document the drainer's own `migrate_drain_state` would refuse is
+    unknown too, checked here in the same order and never by calling it: that
+    function repairs what it reads, and this must leave the file alone.
     """
     path = drain_state_path(repo_path)
     if path is None:
@@ -944,9 +951,16 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     entries = state.get("prs")
     if not isinstance(entries, dict):
         return None
+    # `migrate_drain_state` defaults an absent counter to 0 and refuses any
+    # other non-integer, so a document carrying one is not a drain state at
+    # all -- whatever its `prs` table appears to say about debt.
+    if not is_plain_integer(state.get("attempt_counter", 0)):
+        return None
     owed: list[dict[str, Any]] = []
     for key, entry in entries.items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("approved_head"), str
+        ):
             return None
         record = entry.get("cleanup")
         if record is None:
@@ -963,6 +977,13 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
             return None
         if not (isinstance(key, str) and key.isascii() and key.isdigit()):
             return None
+        try:
+            number = int(key)
+        except ValueError:
+            # Python refuses to convert a digit string past its integer-string
+            # limit, and a key no pull request could have must not be the one
+            # thing in this read that raises.
+            return None
         failed_passes = record.get("failed_passes", 0)
         last_error = record.get("last_error")
         if not is_plain_integer(failed_passes):
@@ -971,7 +992,7 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
             return None
         owed.append(
             {
-                "pull_request": int(key),
+                "pull_request": number,
                 "steps": steps,
                 "failed_passes": failed_passes,
                 "last_error": last_error,
@@ -1048,8 +1069,9 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         "open_incident": latest_incident,
         "open_incidents": open_incidents,
         # Debt the drainer still owes a merged pull request, which no other
-        # field reports: obligations are worked only from inside the polling
-        # loop, so a stopped drainer neither discharges nor mentions them, and
+        # field reports: a merge attempts its own cleanup immediately, but
+        # what that leaves outstanding is retried only by the polling loop's
+        # sweep, so a stopped drainer neither discharges nor mentions it, and
         # debt under CLEANUP_PASSES_BEFORE_INCIDENT has raised no incident to
         # be seen through. Null is unknown, `[]` is verified-empty.
         "cleanup_obligations": cleanup_obligations(job.repo_path),

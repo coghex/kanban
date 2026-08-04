@@ -1531,8 +1531,9 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
 class CleanupObligationTests(RedirectedControllerTestCase):
     """The post-merge debt `status` projects out of the drainer's queue state.
 
-    Obligations are worked only from inside the polling loop, so a stopped
-    drainer neither discharges nor mentions them, and debt under
+    A merge attempts its own cleanup immediately, but what that leaves
+    outstanding is retried only by the polling loop's sweep, so a stopped
+    drainer neither discharges nor mentions it, and debt under
     `CLEANUP_PASSES_BEFORE_INCIDENT` has raised no incident to be seen
     through. This projection is the only surface that names it.
     """
@@ -1648,8 +1649,36 @@ class CleanupObligationTests(RedirectedControllerTestCase):
         )
         self.assert_unknown(json.dumps({"version": 3}), "no prs table")
         self.assert_unknown(json.dumps({"version": 3, "prs": []}), "a non-dict prs")
+        # Everything `migrate_drain_state` refuses for the current version is
+        # refused here too, whatever the prs table appears to say about debt.
+        self.assert_unknown(
+            json.dumps({**healthy, "attempt_counter": True}), "a boolean counter"
+        )
+        self.assert_unknown(
+            json.dumps({**healthy, "attempt_counter": "4"}), "a string counter"
+        )
         for why, prs in (
             ("a non-dict entry", {"12": "merged"}),
+            (
+                "an entry naming no approved head",
+                {"12": {"cleanup": self.cleanup([{"kind": "worktree"}])}},
+            ),
+            (
+                "an entry whose approved head is not a string",
+                {
+                    "12": {
+                        "approved_head": 7,
+                        "cleanup": self.cleanup([{"kind": "worktree"}]),
+                    }
+                },
+            ),
+            (
+                # Digits alone, so it passes every cheap check, but past
+                # Python's integer-string limit `int()` refuses it — and this
+                # read is the one that must never raise.
+                "a key too long for Python to convert",
+                {"1" * 5000: self.entry(self.cleanup([{"kind": "worktree"}]))},
+            ),
             ("a non-dict cleanup record", {"12": self.entry("done")}),
             (
                 "a non-list pending",
@@ -1685,11 +1714,24 @@ class CleanupObligationTests(RedirectedControllerTestCase):
                 self.assert_unknown(json.dumps({"version": 3, "prs": prs}), why)
 
     def test_an_unreadable_state_file_reports_unknown(self):
-        # Stands for every OSError the read can raise: status is the
-        # diagnostic used when the repository is already in a bad state, so it
-        # answers unknown rather than failing.
+        # Bytes that are not UTF-8 raise a UnicodeDecodeError, which is a
+        # ValueError rather than an OSError and so escapes the obvious guard.
+        self.state_path.write_bytes(b'{"version": 3, "prs": {"\xff": {}}}')
+        self.assertIsNone(drain_prs_service.cleanup_obligations(self.repo))
+
+        # A directory in the file's place stands for every OSError: status is
+        # the diagnostic used when the repository is already in a bad state,
+        # so it answers unknown rather than failing.
+        self.state_path.unlink()
         self.state_path.mkdir()
         self.assertIsNone(drain_prs_service.cleanup_obligations(self.repo))
+
+    def test_a_status_call_survives_a_state_file_that_is_not_text(self):
+        self.write_status(self.job, self.repo)
+        self.state_path.write_bytes(b"\xff\xfe\x00")
+        self.assertIsNone(
+            drain_prs_service.status_snapshot(self.job)["cleanup_obligations"]
+        )
 
     def test_a_checkout_with_no_git_entry_reports_unknown(self):
         self.assertIsNone(drain_prs_service.cleanup_obligations(self.root / "absent"))

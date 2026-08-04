@@ -1117,10 +1117,11 @@ a countdown.
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
 - The status response also projects the post-merge cleanup a merged pull
-  request still owes, which no other surface reports: obligations are worked
-  only from inside the drainer's polling loop, so a stopped drainer neither
-  discharges nor mentions them, and debt below the incident threshold has
-  raised no incident to be seen through. The projection names each owing pull
+  request still owes, which no other surface reports: a merge attempts its own
+  cleanup immediately, but what that attempt leaves outstanding is retried only
+  by the polling loop's sweep, so a stopped drainer neither discharges nor
+  mentions it, and debt below the incident threshold has raised no incident to
+  be seen through. The projection names each owing pull
   request, its outstanding steps in the wording the drainer uses for an
   incident, its failed-pass count, and its last error, ordered by pull-request
   number so an unchanged state answers identically every poll. It distinguishes

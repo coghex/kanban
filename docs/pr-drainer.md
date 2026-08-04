@@ -361,6 +361,9 @@ any of them, and drops the record only once every one of them is done.
   incident, which Kanban shows in the sidebar. The drainer keeps retrying them
   and keeps draining every other approved pull request; the incident resolves
   itself once the last obligation succeeds.
+- A merge attempts its own obligations immediately, including a single
+  pull-request run; what it leaves outstanding is retried by the polling loop's
+  sweep, so a stopped drainer discharges nothing it still owes.
 - Outstanding obligations are visible in `status` before any of that: its
   `cleanup_obligations` field names every pull request that still owes, its
   remaining steps, how many passes have failed, and the last error — whether or
