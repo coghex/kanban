@@ -113,10 +113,19 @@ issueColumn issue
 -- 'trackerCompleted' instead of staying a permanently unreachable, always-
 -- pending entry -- an off-board reference counts as done, not as blocking
 -- progress forever.
+--
+-- That completion adjustment belongs to checklist membership alone. A
+-- natively-sourced tracker's counts are GitHub's own summary over every
+-- sub-issue it has, so a closed or cross-repository child is already counted
+-- there; adding it again here would drift the displayed progress above the
+-- number GitHub reported. Both sources still lose their non-visible children
+-- from 'trackerChildren', so neither renders a card it cannot reach.
 pruneOffBoardChildren :: Set.Set Int -> Tracker -> Tracker
 pruneOffBoardChildren visibleChildNumbers tracker =
   tracker
-    { trackerCompleted = tracker.trackerCompleted + newlyCompleted,
+    { trackerCompleted = case tracker.trackerSource of
+        ChecklistMembership -> tracker.trackerCompleted + newlyCompleted
+        NativeMembership -> tracker.trackerCompleted,
       trackerChildren = Map.filter isVisible tracker.trackerChildren
     }
   where

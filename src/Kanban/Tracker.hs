@@ -25,20 +25,96 @@ data ParseState = ParseState
     parseDiagnostics :: [TrackerDiagnostic]
   }
 
+-- | Resolves §12's ordered membership sources for one issue.
+--
+-- The checklist is authoritative whenever it yields a child, and that test is
+-- made on what 'parseTrackerBody' read out of the body -- not on the children
+-- that survive later visibility pruning, which can empty a checklist tracker
+-- entirely and would otherwise flip it to native membership.
+--
+-- Only a tracker whose checklist yields nothing falls back to GitHub's native
+-- sub-issues, and only a native answer GitHub positively reported as empty
+-- lets the existing empty-child-list diagnostics stand: an answer that never
+-- arrived is an unverified absence, and one that did arrive is the second
+-- source rather than a missing checklist to warn about.
 trackerFromIssue :: WorkflowConfig -> Issue -> Maybe Tracker
 trackerFromIssue config issue
   | not (isTrackerIssue config issue) = Nothing
-  | otherwise =
-      let (children, diagnostics) = parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody
-          childMap = Map.fromList [(child.trackerChildIssueNumber, child) | child <- children]
-       in Just
-            Tracker
-              { trackerIssue = issue,
-                trackerCompleted = length (filter (.trackerChildComplete) children),
-                trackerTotal = length children,
-                trackerChildren = childMap,
-                trackerDiagnostics = diagnostics
-              }
+  | not (null checklistChildren) = Just (checklistTracker diagnostics)
+  | otherwise = Just $ case issue.issueSubIssues of
+      SubIssuesReported relationships
+        | nativeMembershipPresent relationships -> nativeTracker relationships
+        | otherwise -> checklistTracker diagnostics
+      SubIssuesUnreported -> checklistTracker (filter (not . isEmptyChildListDiagnostic) diagnostics)
+      SubIssuesNotRequested -> checklistTracker diagnostics
+  where
+    (checklistChildren, diagnostics) = parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody
+    childMap children = Map.fromList [(child.trackerChildIssueNumber, child) | child <- children]
+    checklistTracker trackerDiagnostics =
+      Tracker
+        { trackerIssue = issue,
+          trackerSource = ChecklistMembership,
+          trackerCompleted = length (filter (.trackerChildComplete) checklistChildren),
+          trackerTotal = length checklistChildren,
+          trackerChildren = childMap checklistChildren,
+          trackerDiagnostics = trackerDiagnostics
+        }
+    -- Progress is GitHub's own summary rather than a count of the children
+    -- below, which is what keeps requirement 6 true when a child is closed or
+    -- lives in another repository: such a child is counted once, by GitHub,
+    -- and never again here.
+    nativeTracker relationships =
+      Tracker
+        { trackerIssue = issue,
+          trackerSource = NativeMembership,
+          trackerCompleted = relationships.subIssuesCompleted,
+          trackerTotal = relationships.subIssuesTotal,
+          trackerChildren = childMap (nativeChildren relationships),
+          trackerDiagnostics = filter (not . isEmptyChildListDiagnostic) diagnostics
+        }
+
+-- | Whether GitHub reported any native sub-issue relationship at all. A
+-- tracker with none has neither §12 source and keeps its ordinary
+-- empty-child-list diagnostics; one whose only children are closed or foreign
+-- still has native membership, and says so through GitHub's counts instead.
+nativeMembershipPresent :: SubIssueRelationships -> Bool
+nativeMembershipPresent relationships =
+  not (null relationships.subIssuesChildren)
+    || relationships.subIssuesOmitted > 0
+    || relationships.subIssuesTotal > 0
+
+-- | The children a native tracker can actually render: this repository's own,
+-- in the order GitHub returned them.
+--
+-- Native children carry no implementation key -- inventing one from a title is
+-- out of scope -- so their position in GitHub's list becomes the
+-- checklist-order fallback 'implementationSortKey' sorts on, and the same
+-- positional @step N@ label a keyless checklist child already gets. A child in
+-- another repository is dropped before the numbering, because it can never be
+-- a card here and is not a step of this repository's list.
+nativeChildren :: SubIssueRelationships -> [TrackerChild]
+nativeChildren relationships =
+  [ TrackerChild
+      { trackerChildIssueNumber = link.subIssueNumber,
+        trackerChildImplementationKey = Nothing,
+        trackerChildChecklistOrder = order,
+        trackerChildComplete = link.subIssueClosed
+      }
+    | (order, link) <- zip [0 ..] (filter ownedHere relationships.subIssuesChildren)
+  ]
+  where
+    ownedHere link = link.subIssueRepository == relationships.subIssuesRepository
+
+-- | The two diagnostics that say a tracker has no child list at all, as
+-- opposed to the row-level ones that report malformed checklist content.
+-- Native membership and an unverified native answer both suppress these and
+-- neither suppresses the others.
+isEmptyChildListDiagnostic :: TrackerDiagnostic -> Bool
+isEmptyChildListDiagnostic TrackerSectionMissing = True
+isEmptyChildListDiagnostic TrackerChildrenMissing = True
+isEmptyChildListDiagnostic (TrackerMalformedCheckbox _) = False
+isEmptyChildListDiagnostic (TrackerIssueReferenceMissing _) = False
+isEmptyChildListDiagnostic (TrackerDuplicateChild _ _) = False
 
 parseTrackerChildren :: [Text] -> Text -> [TrackerChild]
 parseTrackerChildren additionalHeadings = fst . parseTrackerBody additionalHeadings
@@ -314,10 +390,16 @@ hasTrackerTitleHint title =
   where
     normalized = Text.toCaseFold (Text.stripStart title)
 
+-- | The diagnostics every surface outside 'deriveBoard' asks for: the refresh
+-- banner's malformed-tracker count, a card's inline rows, the details overlay,
+-- and the amber problem styling that decides a card's border.
+--
+-- It resolves membership through 'trackerFromIssue' rather than re-parsing the
+-- body, so all four agree with the header the board drew -- and a tracker whose
+-- membership is native is not warned at any of them merely for having no
+-- checklist.
 trackerDiagnosticsForIssue :: WorkflowConfig -> Issue -> [TrackerDiagnostic]
-trackerDiagnosticsForIssue config issue
-  | isTrackerIssue config issue = snd (parseTrackerBody config.additionalTrackerSectionHeadings issue.issueBody)
-  | otherwise = []
+trackerDiagnosticsForIssue config issue = maybe [] (.trackerDiagnostics) (trackerFromIssue config issue)
 
 renderTrackerDiagnostic :: TrackerDiagnostic -> Text
 renderTrackerDiagnostic TrackerSectionMissing = "missing a Children or Phase section"

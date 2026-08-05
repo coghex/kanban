@@ -43,7 +43,12 @@ data Connection item = Connection
   deriving stock (Eq, Show)
 
 data GitHubPage = GitHubPage
-  { pageIssues :: Maybe (Connection Issue),
+  { -- | GitHub's own @owner\/name@ for the repository the page was fetched
+    -- from. Native sub-issue membership is decided against this rather than
+    -- against the locally configured owner and name, so a repository reached
+    -- through a rename redirect still recognizes its own children.
+    pageRepository :: Maybe Text,
+    pageIssues :: Maybe (Connection Issue),
     pagePullRequests :: Maybe (Connection PullRequest),
     -- | The messages from the response's GraphQL @errors@ array, in the order
     -- GitHub reported them. GraphQL answers a partly-resolvable query with
@@ -123,9 +128,10 @@ instance FromJSON GitHubPage where
         dataObject <- maybe (fail "GitHub GraphQL response contained no data") pure dataValue
         repositoryValue <- dataObject .:? "repository"
         repositoryObject <- maybe (fail "GitHub repository was not found") pure repositoryValue
-        flip (withObject "repository") repositoryObject $ \repository ->
-          GitHubPage
-            <$> parseOptionalConnection parseIssue repository "issues"
+        flip (withObject "repository") repositoryObject $ \repository -> do
+          identity <- repository .:? "nameWithOwner"
+          GitHubPage identity
+            <$> parseOptionalConnection (parseIssue identity) repository "issues"
             <*> parseOptionalConnection parsePullRequest repository "pullRequests"
             <*> pure errors
 
@@ -156,10 +162,11 @@ parseLabel = withObject "label" $ \object ->
 parseAssignee :: Value -> Parser Assignee
 parseAssignee = withObject "assignee" $ \object -> Assignee <$> object .: "login"
 
-parseIssue :: Value -> Parser Issue
-parseIssue = withObject "issue" $ \object -> do
+parseIssue :: Maybe Text -> Value -> Parser Issue
+parseIssue repositoryIdentity = withObject "issue" $ \object -> do
   (labels, labelOverflow, labelGaps) <- parseNodes parseLabel object "labels" LabelsUnavailable
   (assignees, assigneeOverflow, assigneeGaps) <- parseNodes parseAssignee object "assignees" AssigneesUnavailable
+  (subIssues, subIssueGaps) <- parseSubIssues repositoryIdentity object
   Issue
     <$> object .: "number"
     <*> object .: "title"
@@ -171,7 +178,8 @@ parseIssue = withObject "issue" $ \object -> do
     <*> object .: "updatedAt"
     <*> pure labelOverflow
     <*> pure assigneeOverflow
-    <*> pure (labelGaps <> assigneeGaps)
+    <*> pure subIssues
+    <*> pure (labelGaps <> assigneeGaps <> subIssueGaps)
 
 parsePullRequest :: Value -> Parser PullRequest
 parsePullRequest = withObject "pull request" $ \object -> do
@@ -224,6 +232,50 @@ parseNodes itemParser object fieldName gap = do
       if totalCount < length nodes
         then fail "nested connection totalCount was smaller than its node list"
         else pure (nodes, totalCount - length nodes, [])
+
+-- | An issue's native sub-issue relationships, plus the 'DataGap' to record
+-- when GitHub's answer cannot be trusted as complete.
+--
+-- Membership can only be decided against the repository the page belongs to,
+-- so a response that did not carry that identity fails closed to
+-- 'SubIssuesUnreported' rather than guessing which children are local. So
+-- does an absent or null @subIssues@ or @subIssuesSummary@ -- the shape a
+-- partial-error response nulls a field into -- and so does a connection whose
+-- @totalCount@ exceeds the children it delivered: each of those is an
+-- unverified absence, never a tracker GitHub said has no children.
+--
+-- A connection that is present stays strict in the same places
+-- 'parseNodes' is: a missing @totalCount@, a malformed child, and a
+-- @totalCount@ below the node list all still fail the decode.
+parseSubIssues :: Maybe Text -> Object -> Parser (NativeSubIssues, [DataGap])
+parseSubIssues repositoryIdentity object = do
+  connection <- object .:? "subIssues"
+  summary <- object .:? "subIssuesSummary"
+  case (repositoryIdentity, connection, summary) of
+    (Just identity, Just connectionValue, Just summaryValue) -> do
+      (children, omitted) <- withObject "sub-issue connection" parseChildren connectionValue
+      (completed, total) <- withObject "sub-issue summary" parseSummary summaryValue
+      pure
+        ( SubIssuesReported (SubIssueRelationships identity children omitted completed total),
+          [SubIssuesUnavailable | omitted > 0]
+        )
+    _ -> pure (SubIssuesUnreported, [SubIssuesUnavailable])
+  where
+    parseChildren connection = do
+      nodeValues <- connection .:? "nodes" .!= []
+      totalCount <- connection .: "totalCount"
+      children <- traverse parseSubIssueLink nodeValues
+      if totalCount < length children
+        then fail "sub-issue connection totalCount was smaller than its node list"
+        else pure (children, totalCount - length children)
+    parseSummary summary = (,) <$> summary .: "completed" <*> summary .: "total"
+
+parseSubIssueLink :: Value -> Parser SubIssueLink
+parseSubIssueLink = withObject "sub-issue" $ \child -> do
+  number <- child .: "number"
+  state <- child .: "state"
+  repository <- withObject "sub-issue repository" (.: "nameWithOwner") =<< child .: "repository"
+  pure (SubIssueLink number repository ((state :: Text) == "CLOSED"))
 
 parseIssueNumber :: Value -> Parser Int
 parseIssueNumber = withObject "issue reference" (.: "number")

@@ -150,6 +150,58 @@ spec = do
                 githubResult.githubSnapshot.snapshotPullRequests `shouldBe` []
               other -> expectationFailure ("expected a decoded snapshot, got " <> show other)
 
+    -- §12's sub-issue fields are validated against the schema before the
+    -- query runs, so a deployment without them answers no data at all --
+    -- which would fail every refresh, for every repository, including ones
+    -- that use no sub-issues. The refresh drops the selection once and
+    -- carries on with checklist-only membership, saying so in the banner.
+    it "degrades to checklist-only membership when GitHub does not know the sub-issue fields" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let attempts = temporaryRoot </> "gh.attempts"
+        withFakeGh
+          temporaryRoot
+          [ ByteString.pack ("printf 'x' >> " <> attempts),
+            -- The query is one argument, so the whole argv is searched for
+            -- the selection rather than a fixed position in it.
+            "if printf '%s' \"$*\" | grep -q subIssues; then",
+            "  printf '%s\\n' \"gh: Field 'subIssues' doesn't exist on type 'Issue'\" >&2",
+            "  exit 1",
+            "fi",
+            "printf '%s' '" <> emptyGraphqlPage <> "'"
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right githubResult) -> do
+                githubResult.githubSnapshot.snapshotIssues `shouldBe` []
+                githubResult.githubWarnings
+                  `shouldSatisfy` any (Data.Text.isInfixOf "did not recognize native sub-issue fields")
+              other -> expectationFailure ("expected the refresh to degrade rather than fail, got " <> show other)
+            -- Exactly one retry: the rejected attempt and the one that
+            -- succeeded without the selection.
+            readFile attempts `shouldReturn` "xx"
+
+    -- Only GitHub's validation vocabulary for a field it does not have earns
+    -- the retry. An ordinary failure that happens to quote the query must
+    -- still reach the board as a failure, or a transient error would silently
+    -- switch native membership off for the rest of the refresh.
+    it "does not retry without sub-issues for an ordinary failure that merely quotes the query" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let attempts = temporaryRoot </> "gh.attempts"
+        withFakeGh
+          temporaryRoot
+          [ ByteString.pack ("printf 'x' >> " <> attempts),
+            "printf '%s\\n' 'gh: Something went wrong while executing your query: subIssues' >&2",
+            "exit 1"
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Left providerError) ->
+                providerError.providerErrorKind `shouldBe` RequestFailed
+              other -> expectationFailure ("expected the failure to reach the board, got " <> show other)
+            readFile attempts `shouldReturn` "x"
+
     -- The stderr is gh 2.83.1's own text for a token it was given and the
     -- API rejected, so the refresh is reporting a failure gh can really
     -- produce rather than one shaped to match the classifier.
@@ -209,7 +261,7 @@ spec = do
                 Nothing
                 [issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]]
                 [pullRequestNodeJson 10 [emptyLabelsJson, emptyClosingIssuesJson]]
-            initialState = FetchState [] [] Nothing Nothing True True False False []
+            initialState = FetchState [] [] Nothing Nothing True True False False True []
         decodedFirstPage <- case eitherDecode (LazyByteString.pack firstPage) of
           Left message -> fail ("undecodable fixture page: " <> message)
           Right page -> pure page

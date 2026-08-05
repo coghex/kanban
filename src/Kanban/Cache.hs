@@ -120,10 +120,16 @@ instance ToJSON UsageCacheEnvelope where
 -- Version 4 added the per-item 'Kanban.Domain.DataGap' list. Reusing a
 -- version 3 entry would restore a card as though every field had arrived,
 -- dropping the amber marker and the warning that explain what is missing.
--- Either older file is treated as absent -- the §16 contract for an unknown
--- schema version -- and the next refresh rebuilds it.
+--
+-- Version 5 added the native sub-issue relationships §12 resolves fallback
+-- tracker membership from. A version 4 entry carries no answer at all, and
+-- restoring one as though GitHub had reported no sub-issues would silently
+-- claim native membership was checked and absent -- turning a natively
+-- tracked epic back into a warned, childless header. Any older file is
+-- treated as absent -- the §16 contract for an unknown schema version -- and
+-- the next refresh rebuilds it.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
-repositoryCacheSchemaVersion = 4
+repositoryCacheSchemaVersion = 5
 usageCacheSchemaVersion = 1
 ghGroupRecordSchemaVersion = 1
 

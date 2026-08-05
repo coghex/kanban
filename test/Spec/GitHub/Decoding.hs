@@ -6,7 +6,7 @@ import Control.Monad (foldM)
 import Data.Aeson (eitherDecode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Foldable (for_)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Text
 import Kanban.Config
 import Kanban.Domain
@@ -32,6 +32,8 @@ import Spec.Support.Json
     emptyAssigneesJson,
     emptyClosingIssuesJson,
     emptyLabelsJson,
+    emptySubIssuesJson,
+    fixtureRepositoryIdentity,
     futureCheckContextJson,
     githubCappedChecksResponse,
     githubChecksResponse,
@@ -47,6 +49,9 @@ import Spec.Support.Json
     queuedCheckRunJson,
     rollupJson,
     statusContextJson,
+    subIssueConnectionJson,
+    subIssueNodeJson,
+    subIssuesJson,
     undatedCheckRunJson
   )
 import System.IO.Error
@@ -254,8 +259,8 @@ spec = do
     it "decodes an absent nested connection on an issue as a gap rather than as no assignees" $ do
       let response =
             githubPageWith
-              [ issueNodeJson 41 [emptyLabelsJson],
-                issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]
+              [ issueNodeJson 41 [emptyLabelsJson, emptySubIssuesJson],
+                issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]
               ]
               [pullRequestNodeJson 9 [emptyLabelsJson, "\"closingIssuesReferences\":null"]]
       case decodeGitHubItems (LazyByteString.pack response) of
@@ -269,6 +274,105 @@ spec = do
           pullRequest.pullRequestDataGaps `shouldBe` [LinkedIssuesUnavailable]
           let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [degraded, intact] [pullRequest] epoch False False)
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "Issue #41, PR #9: incomplete data")
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- §12's native membership source: the children in GitHub's order, each
+    -- with the repository that owns it, and the summary counts progress is
+    -- read from.
+    it "decodes native sub-issue relationships with their owning repositories" $ do
+      let response =
+            githubPageWith
+              [ issueNodeJson
+                  700
+                  [ emptyLabelsJson,
+                    emptyAssigneesJson,
+                    subIssuesJson
+                      0
+                      [ subIssueNodeJson 12 fixtureRepositoryIdentity False,
+                        subIssueNodeJson 11 "elsewhere/other" True
+                      ]
+                      1
+                      2
+                  ]
+              ]
+              []
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([issue], []) -> do
+          issue.issueSubIssues
+            `shouldBe` SubIssuesReported
+              ( SubIssueRelationships
+                  (Data.Text.pack fixtureRepositoryIdentity)
+                  [ SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False,
+                    SubIssueLink 11 "elsewhere/other" True
+                  ]
+                  0
+                  1
+                  2
+              )
+          issue.issueDataGaps `shouldBe` []
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Either half missing leaves nothing that can be read as "this tracker
+    -- has no children", so both fail closed to an unreported answer and the
+    -- item is marked incomplete rather than empty.
+    it "treats an absent, null, or incomplete sub-issue answer as unreported rather than empty" $ do
+      let issueWith connections = githubPageWith [issueNodeJson 700 ([emptyLabelsJson, emptyAssigneesJson] <> connections)] []
+          decodedGaps response = case decodeGitHubItems (LazyByteString.pack response) of
+            Left message -> Left message
+            Right ([issue], []) -> Right (issue.issueSubIssues, issue.issueDataGaps)
+            Right values -> Left ("unexpected decoded values: " <> show values)
+      -- Neither field requested back at all.
+      decodedGaps (issueWith []) `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
+      -- The shape a partial-error response nulls an errored field into.
+      decodedGaps (issueWith ["\"subIssues\":null", "\"subIssuesSummary\":{\"total\":0,\"completed\":0}"])
+        `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
+      decodedGaps (issueWith [subIssueConnectionJson 0 [], "\"subIssuesSummary\":null"])
+        `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
+      -- Delivered children, but fewer than GitHub says exist: what arrived is
+      -- kept, and the item still says the answer is not the whole story.
+      decodedGaps (issueWith [subIssuesJson 1 [subIssueNodeJson 12 fixtureRepositoryIdentity False] 0 2])
+        `shouldBe` Right
+          ( SubIssuesReported
+              ( SubIssueRelationships
+                  (Data.Text.pack fixtureRepositoryIdentity)
+                  [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False]
+                  1
+                  0
+                  2
+              ),
+            [SubIssuesUnavailable]
+          )
+      -- And a positively empty answer is neither incomplete nor a gap.
+      decodedGaps (issueWith [emptySubIssuesJson])
+        `shouldBe` Right (SubIssuesReported (SubIssueRelationships (Data.Text.pack fixtureRepositoryIdentity) [] 0 0 0), [])
+
+    -- A connection GitHub did deliver stays as strict as every other one.
+    it "still fails the page when a delivered sub-issue connection is malformed" $ do
+      let issueWith connections = LazyByteString.pack (githubPageWith [issueNodeJson 700 ([emptyLabelsJson, emptyAssigneesJson] <> connections)] [])
+      -- totalCount below the node list it came with
+      decodeGitHubItems (issueWith ["\"subIssues\":{\"totalCount\":0,\"nodes\":[" <> subIssueNodeJson 12 fixtureRepositoryIdentity False <> "]},\"subIssuesSummary\":{\"total\":1,\"completed\":0}"])
+        `shouldSatisfy` isLeft
+      -- a child with no owning repository, which membership cannot be decided without
+      decodeGitHubItems (issueWith ["\"subIssues\":{\"totalCount\":1,\"nodes\":[{\"number\":12,\"state\":\"OPEN\"}]},\"subIssuesSummary\":{\"total\":1,\"completed\":0}"])
+        `shouldSatisfy` isLeft
+      -- a summary missing a count progress is read from
+      decodeGitHubItems (issueWith [subIssueConnectionJson 0 [], "\"subIssuesSummary\":{\"total\":1}"])
+        `shouldSatisfy` isLeft
+
+    -- Without GitHub's own identity for the queried repository there is no
+    -- way to tell a local child from a foreign one, so no child may be
+    -- treated as local.
+    it "fails closed when the response never said which repository it is" $ do
+      let response =
+            "{\"data\":{\"repository\":{\"issues\":{\"nodes\":["
+              <> issueNodeJson 700 [emptyLabelsJson, emptyAssigneesJson, subIssuesJson 0 [subIssueNodeJson 12 fixtureRepositoryIdentity False] 0 1]
+              <> "],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([issue], []) -> do
+          issue.issueSubIssues `shouldBe` SubIssuesUnreported
+          issue.issueDataGaps `shouldBe` [SubIssuesUnavailable]
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
     -- The banner is one line, so many degraded items are named up to a limit
@@ -359,6 +463,7 @@ spec = do
               fetchMorePullRequests = True,
               issuesTruncated = False,
               pullRequestsTruncated = False,
+              fetchSubIssues = True,
               fetchWarnings = []
             }
 
@@ -382,6 +487,19 @@ spec = do
             map (.pullRequestNumber) state.fetchedPullRequests `shouldBe` [9]
             state.fetchWarnings
               `shouldBe` ["GitHub could not resolve part of this refresh: Could not resolve reviewDecision for pull request 9"]
+
+    -- The decoder cannot tell a field GitHub nulled from one nobody asked
+    -- for; the fetch can, and a board that stopped asking has no missing
+    -- answer to mark every card amber over.
+    it "downgrades an unreported sub-issue answer to unrequested once the fetch has stopped asking" $ do
+      let response = githubPageWith [issueNodeJson 41 [emptyLabelsJson, emptyAssigneesJson]] []
+          foldPage state = case eitherDecode (LazyByteString.pack response) of
+            Left message -> Left message
+            Right page -> case advanceState defaultLimitsConfig state page of
+              Left providerError -> Left (show providerError)
+              Right next -> Right [(issue.issueSubIssues, issue.issueDataGaps) | issue <- next.fetchedIssues]
+      foldPage initialFetchState `shouldBe` Right [(SubIssuesUnreported, [SubIssuesUnavailable])]
+      foldPage initialFetchState {fetchSubIssues = False} `shouldBe` Right [(SubIssuesNotRequested, [])]
 
     -- A refresh spans pages and only the last one builds the result, so a
     -- warning an earlier page raised has to survive the pages after it -- and
@@ -490,6 +608,7 @@ spec = do
               fetchMorePullRequests = True,
               issuesTruncated = False,
               pullRequestsTruncated = False,
+              fetchSubIssues = True,
               fetchWarnings = []
             }
         firstPageState = pagedState {issueCursor = Nothing, pullRequestCursor = Nothing}
@@ -518,6 +637,26 @@ spec = do
       let firstPageArguments = graphqlArguments defaultLimitsConfig numericRepository firstPageState
       flagForVariable "issueCursor" firstPageArguments `shouldBe` Nothing
       flagForVariable "pullRequestCursor" firstPageArguments `shouldBe` Nothing
+
+    -- §12's second membership source rides the one paged query rather than
+    -- adding a request per tracker, and it asks for GitHub's own identity for
+    -- the repository so a child's owner can be compared against something the
+    -- same response reported.
+    it "asks for native sub-issues and the repository identity inside the single page query" $ do
+      let query = concat [argument | argument <- pagedArguments, "query=" `isPrefixOf` argument]
+      length (filter ("query=" `isPrefixOf`) pagedArguments) `shouldBe` 1
+      query `shouldSatisfy` isInfixOf "subIssues(first: 100)"
+      query `shouldSatisfy` isInfixOf "repository { nameWithOwner }"
+      query `shouldSatisfy` isInfixOf "subIssuesSummary { total completed }"
+      query `shouldSatisfy` isInfixOf "nameWithOwner\n    issues("
+
+    -- A field the schema does not have is rejected at validation, so the only
+    -- way to keep refreshing such a deployment is to stop asking for it.
+    it "drops the sub-issue selection entirely once the fetch has stopped asking" $ do
+      let query = concat [argument | argument <- graphqlArguments defaultLimitsConfig numericRepository pagedState {fetchSubIssues = False}, "query=" `isPrefixOf` argument]
+      query `shouldSatisfy` not . isInfixOf "subIssues"
+      query `shouldSatisfy` isInfixOf "nameWithOwner"
+      query `shouldSatisfy` isInfixOf "assignees(first: 10)"
 
   -- NOT INSTALLED is a claim about the installation, so only a launch that
   -- failed because there was nothing runnable to launch may make it. The

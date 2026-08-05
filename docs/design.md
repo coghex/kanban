@@ -814,10 +814,44 @@ Parsing rules:
    currently open issues or PRs appear on this live board.
 
 Membership resolution is structured as ordered sources feeding one internal
-model. The checklist parser above is the first source; GitHub's native
-sub-issue relationships are a planned second source so repositories using
-first-class sub-issues work without checklist conventions. Only the checklist
-source ships in the first release.
+model. The checklist parser above is the first source, and GitHub's native
+sub-issue relationships are the second, so a repository using first-class
+sub-issues works without checklist conventions.
+
+Precedence between them:
+
+- A tracker whose body parses to at least one valid checklist child keeps the
+  checklist authoritative for membership, ordering, implementation keys, and
+  progress. That test is made on what the body parsed to, before children that
+  are not on the live board are pruned, so a checklist whose every child has
+  closed does not silently become a native tracker.
+- A tracker with no valid checklist child falls back to the native
+  relationships GitHub reported for it.
+- A tracker with neither keeps the empty-header diagnostics below. "Neither"
+  means GitHub positively reported no sub-issue relationships; an answer that
+  was absent, null, or incomplete is an unverified absence and follows §13's
+  incomplete-item contract instead.
+
+Native membership covers the tracker's immediate children only, up to
+GitHub's own limit of 100 per parent, and it never invents an implementation
+key from a child's title. A native child is therefore keyless, and its
+position in the order GitHub returned becomes the checklist-order fallback the
+sort uses — so it renders the same positional `step N` label a keyless
+checklist child already gets. Ordering stays subordinate to the
+`reviewed:revised` attention tier below.
+
+A sub-issue GitHub reports under another repository is never treated as this
+repository's issue of the same number: it contributes to progress through
+GitHub's summary and nothing else, and creates no card and no membership. The
+comparison uses GitHub's own identity for the queried repository as returned
+in the same response, so a repository reached through a rename redirect still
+recognizes its own children. A refresh that could not establish that identity
+treats the relationships as unreported rather than guessing.
+
+Native membership requires a GitHub deployment whose GraphQL schema exposes
+the sub-issue fields. One that does not rejects the query outright, so the
+refresh drops the selection, carries on with checklist-only membership, and
+says so once in the §17 banner rather than failing every refresh.
 
 ### Presentation across columns
 
@@ -837,12 +871,23 @@ keyboard focus target; `e` or a left click on its title expands or collapses
 that epic everywhere it appears across the board. Child cards rejoin the
 ordinary `j`/`k` focus order only while their epic is expanded.
 
-Tracker progress is derived from checklist marks in the authoritative tracker
-body: checked entries divided by total recognized child entries. It is labeled
-`complete`, not `closed` or `open`, because a checklist mark is tracker state
-and may briefly lag the linked issue's GitHub state. The details overlay warns
-when a visible open child is checked complete; otherwise the board does not add
+Tracker progress under checklist membership is derived from checklist marks in
+the authoritative tracker body: checked entries divided by total recognized
+child entries. It is labeled `complete`, not `closed` or `open`, because a
+checklist mark is tracker state and may briefly lag the linked issue's GitHub
+state. A checklist child that is not on the live board can never be rendered
+or interacted with, so it is dropped from the tracker's children and counted
+as complete rather than pending forever. The details overlay warns when a
+visible open child is checked complete; otherwise the board does not add
 network requests solely to reconcile progress text.
+
+Tracker progress under native membership is GitHub's own completed and total
+sub-issue counts, used as reported. GitHub already counts every sub-issue the
+tracker has, including the closed ones and any in another repository, so those
+are never counted again locally and the off-board completion adjustment above
+does not apply. Children that cannot be rendered are still dropped from the
+tracker's children, so a closed or cross-repository child contributes to the
+counts without becoming a card.
 
 The same tracker header may appear in more than one column when its children
 are split across Issues, Active, Reviewing, and Done. This repetition provides
@@ -858,6 +903,18 @@ having no children to expand to, `Enter` on it opens its own tracker issue's
 details, including the tracker warnings explaining why the child list is
 empty. `Enter` on a collapsed header that does have children still asks for
 `e` first.
+
+A tracker whose membership is native is not warned for having no `Children` or
+`Phase` checklist, at any of those surfaces — not in the refresh banner's
+malformed-tracker count, not in the card's inline diagnostic rows, not in the
+details overlay, and not in the amber styling that decides a card's border.
+Diagnostics reporting malformed checklist content — a broken checkbox, an item
+with no issue reference, a duplicated child — remain visible, because they
+describe something genuinely wrong in the body rather than the absence of a
+list. When native membership contributes no visible card at all, because every
+child is closed or belongs to another repository, the header shows GitHub's
+own progress counts and no diagnostic: nothing about the tracker is wrong, and
+the counts are the explanation.
 
 A PR inherits tracker membership from its explicitly linked child issues. If a
 PR links children from more than one tracker, it receives an amber
@@ -901,6 +958,12 @@ only the fields required by the board. Expected data includes:
   base/head branches, creation/update timestamps, closing issue references,
   mergeability, merge-state status, review decision, and status-check rollup.
 - Open tracker issue bodies so ordered checklist membership can be parsed.
+- Each open issue's immediate native sub-issues — number, state, and owning
+  repository — and GitHub's completed/total sub-issue summary, plus the
+  repository's own `nameWithOwner`, so §12's second membership source can be
+  resolved without a request per tracker. Tracker recognition happens after
+  decoding, so these are requested for every issue on the page and only the
+  tracker ones are consumed.
 
 One explicit refresh should perform one GraphQL operation when practical,
 including pagination. The initial display limits are 250 open issues and 100
@@ -909,9 +972,13 @@ the configured cap followed by `+` — by default `250+` for issues and `100+`
 for pull requests — and a visible truncation warning rather than silently
 presenting an incomplete board.
 
-Nested connections that return nodes — labels, assignees, and closing-issue
-references — carry explicit `first:` limits and request `totalCount`; cards and
-details show a `+N` overflow indicator when GitHub reports omitted nodes. The
+Nested connections that return nodes — labels, assignees, closing-issue
+references, and sub-issues — carry explicit `first:` limits and request
+`totalCount`; cards and details show a `+N` overflow indicator when GitHub
+reports omitted nodes. The sub-issue connection's limit is GitHub's own
+100-child maximum, so one page holds every immediate child; a `totalCount`
+above what arrived marks that item incomplete rather than presenting the
+partial list as the whole relationship. The
 status-check rollup requests up to 100 context nodes and deduplicates reruns by
 check app/name (or status creator/context), retaining the newest entry and
 breaking a tie in favor of the one GitHub listed last. A check run GitHub has
@@ -1484,12 +1551,12 @@ arbitrary GitHub repository; idle makes no network requests.
 
 ### Milestone 3 — Tracker hierarchy
 
-Checklist hierarchy and explicit malformed-tracker diagnostics are implemented.
-Native GitHub sub-issue membership remains a follow-up slice.
+Checklist hierarchy, explicit malformed-tracker diagnostics, and native GitHub
+sub-issue fallback membership are implemented.
 
 - Detect configured epic/tracker issues.
-- Structure membership resolution as ordered sources so native GitHub
-  sub-issues can be added later without rework.
+- Structure membership resolution as ordered sources, with GitHub's native
+  sub-issues as the second source behind the authoritative checklist.
 - Parse ordered phase/children checklists and implementation keys.
 - Group children within each workflow column.
 - Inherit tracker context through linked issues to PR cards.

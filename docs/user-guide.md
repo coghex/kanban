@@ -61,6 +61,10 @@ Issues and pull requests remain separate cards. An issue does not disappear just
 
 Issues labelled as epics can group related work. Press `e` to expand or collapse the selected epic.
 
+An epic's children come from one of two places. A `Children` or `Phase` checklist in the epic's body is authoritative: as long as it lists at least one issue, that list decides membership, order, implementation keys such as `A1`, and the `N/M complete` progress counted from its checked boxes. An epic with no such checklist falls back to GitHub's own sub-issues, so a repository that uses GitHub's Add sub-issue button needs no Markdown conventions at all. Native children have no implementation key, so they appear in the order GitHub lists them and are labelled `step 1`, `step 2`, and so on, and the progress counts are the ones GitHub reports rather than anything Kanban counts itself. Because GitHub counts every sub-issue, an epic can show progress like `2/5 complete` while fewer than five cards appear beneath it: closed sub-issues and sub-issues living in another repository count towards it but are not cards on this board.
+
+An epic that has neither a checklist nor sub-issues still shows as an empty header with an amber warning explaining what is missing. An epic using sub-issues is never warned for having no checklist, but a checklist that is present and malformed is still reported.
+
 Kanban loads its last saved board when it starts, then requests fresh data. It does not keep polling GitHub. Press `u` when you want another update.
 
 ## Keyboard controls

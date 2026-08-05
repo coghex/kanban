@@ -27,8 +27,8 @@ import Spec.Support.Env
     withTemporaryCacheRoot
   )
 import Spec.Support.Expect (isInvalidCache, isInvalidUsageCache)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch)
-import Spec.Support.Json (versionThreeCacheFile, versionTwoCacheFile)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, foreignSubIssue, localSubIssue, withSubIssues)
+import Spec.Support.Json (versionFourCacheFile, versionThreeCacheFile, versionTwoCacheFile)
 import System.Directory (createDirectory, createDirectoryIfMissing)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
@@ -77,6 +77,20 @@ spec = do
           writeRepositoryCache repository snapshot `shouldReturn` Right ()
           loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
 
+    -- A restored snapshot decides §12 membership again from what it carries,
+    -- so all three states have to survive the round trip: an answer GitHub
+    -- gave, one it did not, and a refresh that never asked.
+    it "round-trips every native sub-issue state" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+              reported =
+                withSubIssues [localSubIssue 11 False, foreignSubIssue 12 True] 1 2 (baseIssue 700 [])
+              unreported = (baseIssue 701 []) {issueSubIssues = SubIssuesUnreported, issueDataGaps = [SubIssuesUnavailable]}
+              snapshot = RepoSnapshot [reported, unreported, baseIssue 702 []] [] epoch False False
+          writeRepositoryCache repository snapshot `shouldReturn` Right ()
+          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
+
     -- §16: an unknown version is absent, not corruption. Meeting a file
     -- written by another version of the binary is the expected outcome of an
     -- upgrade or a downgrade, so it must start up exactly as it would with no
@@ -89,6 +103,25 @@ spec = do
           cachePath <- repositoryCachePath repository
           ByteString.writeFile cachePath (versionThreeCacheFile 999)
           loadRepositoryCache repository `shouldReturn` CacheAbsent
+
+    -- Version 4 knew nothing of native sub-issues, so restoring one of its
+    -- issues would present a tracker as though GitHub had been asked about
+    -- its relationships and reported none -- turning a natively tracked epic
+    -- back into a warned, childless header off a stale file.
+    it "treats a genuine version 4 file as absent rather than as malformed" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
+          cachePath <- repositoryCachePath repository
+          ByteString.writeFile cachePath (versionFourCacheFile 4)
+          loadRepositoryCache repository `shouldReturn` CacheAbsent
+          -- The version gate, not the decoder, is what turned it away:
+          -- relabelled as current, the same file fails on its missing
+          -- sub-issue field and keeps the warning a real corruption earns.
+          ByteString.writeFile cachePath (versionFourCacheFile repositoryCacheSchemaVersion)
+          relabeled <- loadRepositoryCache repository
+          relabeled `shouldSatisfy` isInvalidCache
 
     -- Version 3 knew nothing of those gaps, so reusing one of its entries
     -- would restore a card as though every field had arrived.

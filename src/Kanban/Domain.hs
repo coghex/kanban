@@ -18,14 +18,18 @@ module Kanban.Domain
     ItemId (..),
     Label (..),
     MergeState (..),
+    NativeSubIssues (..),
     PullRequest (..),
     RepoSnapshot (..),
     Repository (..),
     ReviewDecision (..),
+    SubIssueLink (..),
+    SubIssueRelationships (..),
     Tracker (..),
     TrackerChild (..),
     TrackerDiagnostic (..),
     TrackerMembership (..),
+    TrackerSource (..),
     TrackingContext (..),
     UsageProvider (..),
     UsageSnapshot (..),
@@ -83,7 +87,61 @@ data DataGap
   | AssigneesUnavailable
   | LinkedIssuesUnavailable
   | ChecksUndecodable
+  | SubIssuesUnavailable
   deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | One native GitHub sub-issue relationship, as GitHub reported it.
+--
+-- The owning repository travels with the number because 'trackerChildren' is
+-- keyed by issue number alone: without it, a sub-issue #12 belonging to
+-- another repository would be indistinguishable from this repository's #12
+-- and would silently claim that card (§12).
+data SubIssueLink = SubIssueLink
+  { subIssueNumber :: Int,
+    -- | @owner\/name@, exactly as GitHub returned it for the child.
+    subIssueRepository :: Text,
+    subIssueClosed :: Bool
+  }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | GitHub's answer about one issue's immediate native sub-issues: the
+-- children in the order returned, and the summary counts GitHub maintains
+-- over all of them, including any this board can never render.
+--
+-- 'subIssuesRepository' is GitHub's own identity for the repository the page
+-- was fetched from, taken from the same response rather than from the locally
+-- configured owner and name, so a repository reached through a rename
+-- redirect does not misclassify its own children as foreign.
+data SubIssueRelationships = SubIssueRelationships
+  { subIssuesRepository :: Text,
+    subIssuesChildren :: [SubIssueLink],
+    -- | Children GitHub said exist but did not deliver in the node list.
+    subIssuesOmitted :: Int,
+    subIssuesCompleted :: Int,
+    subIssuesTotal :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | What is known about an issue's native sub-issue relationships.
+--
+-- The three cases are deliberately distinct, because §12's fallback
+-- membership hinges on telling them apart: only a set GitHub positively
+-- reported as empty means a tracker really has no native children.
+data NativeSubIssues
+  = -- | This refresh never asked, because the GitHub deployment's schema does
+    -- not expose the sub-issue fields. Membership is checklist-only exactly
+    -- as it was before native membership existed, and the refresh says so
+    -- once in its banner rather than degrading every card.
+    SubIssuesNotRequested
+  | -- | Asked for and not delivered: absent, null, or incomplete. This is an
+    -- unverified absence, so it marks the item incomplete instead of standing
+    -- in for \"this tracker has no children\".
+    SubIssuesUnreported
+  | SubIssuesReported SubIssueRelationships
+  deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
 data Issue = Issue
@@ -97,6 +155,7 @@ data Issue = Issue
     issueUpdatedAt :: UTCTime,
     issueLabelOverflow :: Int,
     issueAssigneeOverflow :: Int,
+    issueSubIssues :: NativeSubIssues,
     issueDataGaps :: [DataGap]
   }
   deriving stock (Eq, Show, Generic)
@@ -189,8 +248,19 @@ data BoardColumn = Issues | Active | Reviewing | Done
   deriving stock (Eq, Ord, Enum, Bounded, Show, Generic)
   deriving anyclass (FromJSON, ToJSON, FromJSONKey, ToJSONKey)
 
+-- | Which of §12's ordered membership sources a tracker's children came from.
+--
+-- This is not presentation detail: progress means different things under the
+-- two sources. Checklist progress is counted from the marks in the body and
+-- is completed by off-board children, while native progress is GitHub's own
+-- completed/total pair and is never adjusted locally.
+data TrackerSource = ChecklistMembership | NativeMembership
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data Tracker = Tracker
   { trackerIssue :: Issue,
+    trackerSource :: TrackerSource,
     trackerCompleted :: Int,
     trackerTotal :: Int,
     trackerChildren :: Map Int TrackerChild,

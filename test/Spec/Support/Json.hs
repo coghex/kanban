@@ -13,6 +13,12 @@ module Spec.Support.Json
     emptyLabelsJson,
     emptyAssigneesJson,
     emptyClosingIssuesJson,
+    emptySubIssuesJson,
+    subIssuesJson,
+    subIssueConnectionJson,
+    subIssueSummaryJson,
+    subIssueNodeJson,
+    fixtureRepositoryIdentity,
     rollupJson,
     futureCheckContextJson,
     namelessCheckRunJson,
@@ -23,6 +29,7 @@ module Spec.Support.Json
     runningCheckRunJson,
     versionTwoCacheFile,
     versionThreeCacheFile,
+    versionFourCacheFile,
     checkRunJson,
     codexRateLimitResponse,
     codexWeeklyOnlyResponse,
@@ -37,11 +44,21 @@ import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text
 
+-- | GitHub's own @owner\/name@ for the repository every page fixture here is
+-- fetched from. Native sub-issue membership is decided against this, so a
+-- child node carrying it is local and one carrying anything else is foreign.
+fixtureRepositoryIdentity :: String
+fixtureRepositoryIdentity = "coghex/kanban"
+
 -- | The smallest GraphQL response the board fetch accepts: both requested
 -- connections present, both empty, neither paginated.
 emptyGraphqlPage :: ByteString.ByteString
 emptyGraphqlPage =
-  "{\"data\":{\"repository\":{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
+  ByteString.pack
+    ( "{\"data\":{\"repository\":{\"nameWithOwner\":\""
+        <> fixtureRepositoryIdentity
+        <> "\",\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
+    )
 
 githubResponse :: String
 githubResponse =
@@ -49,12 +66,14 @@ githubResponse =
     [ "{",
       "  \"data\": {",
       "    \"repository\": {",
+      "      \"nameWithOwner\": \"" <> fixtureRepositoryIdentity <> "\",",
       "      \"issues\": {",
       "        \"nodes\": [{",
       "          \"number\": 41, \"title\": \"Blocked issue\", \"body\": \"Details\",",
       "          \"url\": \"https://example.test/issues/41\",",
       "          \"labels\": {\"totalCount\": 3, \"nodes\": [{\"name\": \"blocked\", \"color\": \"d73a4a\"}]},",
       "          \"assignees\": {\"totalCount\": 2, \"nodes\": [{\"login\": \"worker\"}]},",
+      "          " <> emptySubIssuesJson <> ",",
       "          \"createdAt\": \"2026-01-01T00:00:00Z\", \"updatedAt\": \"2026-01-02T00:00:00Z\"",
       "        }],",
       "        \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}",
@@ -85,7 +104,7 @@ githubResponse =
 githubRerunResponse :: String
 githubRerunResponse =
   unlines
-    [ "{\"data\":{\"repository\":{",
+    [ "{\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
       "\"pullRequests\":{\"nodes\":[{",
       "\"number\":858,\"title\":\"Ready after rerun\",\"body\":\"Closes #844\",\"url\":\"https://example.test/pull/858\",",
@@ -132,7 +151,7 @@ githubCappedChecksResponse =
 githubChecksResponse :: Int -> [String] -> String
 githubChecksResponse totalCount nodes =
   unlines
-    [ "{\"data\":{\"repository\":{",
+    [ "{\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
       "\"pullRequests\":{\"nodes\":[{",
       "\"number\":860,\"title\":\"Mixed checks\",\"body\":\"Closes #36\",\"url\":\"https://example.test/pull/860\",",
@@ -154,7 +173,7 @@ githubChecksResponse totalCount nodes =
 githubPageWith :: [String] -> [String] -> String
 githubPageWith issueNodes pullRequestNodes =
   unlines
-    [ "{\"data\":{\"repository\":{",
+    [ "{\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[" <> intercalate "," issueNodes <> "],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
       "\"pullRequests\":{\"nodes\":[" <> intercalate "," pullRequestNodes <> "],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}",
       "}}}"
@@ -170,7 +189,7 @@ githubPageWithErrors :: [String] -> Maybe String -> [String] -> [String] -> Stri
 githubPageWithErrors messages nextCursor issueNodes pullRequestNodes =
   unlines
     [ "{\"errors\":[" <> intercalate "," (map errorObjectJson messages) <> "],",
-      "\"data\":{\"repository\":{",
+      "\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[" <> intercalate "," issueNodes <> "]," <> pageInfoJson <> "},",
       "\"pullRequests\":{\"nodes\":[" <> intercalate "," pullRequestNodes <> "]," <> pageInfoJson <> "}",
       "}}}"
@@ -238,6 +257,46 @@ emptyLabelsJson, emptyAssigneesJson, emptyClosingIssuesJson :: String
 emptyLabelsJson = "\"labels\":{\"totalCount\":0,\"nodes\":[]}"
 emptyAssigneesJson = "\"assignees\":{\"totalCount\":0,\"nodes\":[]}"
 emptyClosingIssuesJson = "\"closingIssuesReferences\":{\"totalCount\":0,\"nodes\":[]}"
+
+-- | The sub-issue relationship fields GitHub answers for an issue that has
+-- none: a positively empty connection and a zeroed summary.
+emptySubIssuesJson :: String
+emptySubIssuesJson = subIssuesJson 0 [] 0 0
+
+-- | Both sub-issue fields for a parent with children, which is how GitHub
+-- delivers them together.
+subIssuesJson :: Int -> [String] -> Int -> Int -> String
+subIssuesJson omitted children completed total =
+  subIssueConnectionJson omitted children <> "," <> subIssueSummaryJson completed total
+
+-- | The relationship connection alone. @omitted@ is what GitHub says exists
+-- beyond the delivered nodes, which is the incomplete-answer shape §12
+-- refuses to read as a verified empty set.
+subIssueConnectionJson :: Int -> [String] -> String
+subIssueConnectionJson omitted children =
+  "\"subIssues\":{\"totalCount\":"
+    <> show (length children + omitted)
+    <> ",\"nodes\":["
+    <> intercalate "," children
+    <> "]}"
+
+-- | The completion summary alone, so a test can null or truncate one half of
+-- GitHub's answer without repeating the other.
+subIssueSummaryJson :: Int -> Int -> String
+subIssueSummaryJson completed total =
+  "\"subIssuesSummary\":{\"total\":" <> show total <> ",\"completed\":" <> show completed <> "}"
+
+-- | One native sub-issue node, with the owning repository GitHub reports
+-- beside its number.
+subIssueNodeJson :: Int -> String -> Bool -> String
+subIssueNodeJson number repository closed =
+  "{\"number\":"
+    <> show number
+    <> ",\"state\":\""
+    <> (if closed then "CLOSED" else "OPEN")
+    <> "\",\"repository\":{\"nameWithOwner\":\""
+    <> repository
+    <> "\"}}"
 
 rollupJson :: Int -> [String] -> String
 rollupJson totalCount nodes =
@@ -356,6 +415,27 @@ versionThreeCacheFile version =
         <> "\"pullRequestMergeState\":\"MergeUnknown\",\"pullRequestNumber\":823,"
         <> "\"pullRequestReviewDecision\":\"ReviewRequired\",\"pullRequestTitle\":\"T\","
         <> "\"pullRequestUpdatedAt\":\"2026-01-01T00:00:00Z\",\"pullRequestUrl\":\"u\"}]}}"
+    )
+
+-- | A cache file exactly as version 4 wrote one: the current envelope,
+-- check-summary and gap shape, but with an issue that carries no native
+-- sub-issue answer. Everything else is the current encoder's own output, so
+-- the only thing that cannot decode under the current schema is the part
+-- version 5 actually added.
+versionFourCacheFile :: Int -> ByteString.ByteString
+versionFourCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{"
+        <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\",\"snapshotPullRequests\":[],"
+        <> "\"snapshotIssuesTruncated\":false,\"snapshotPullRequestsTruncated\":false,"
+        <> "\"snapshotIssues\":[{"
+        <> "\"issueAssigneeOverflow\":0,\"issueAssignees\":[],\"issueBody\":\"B\","
+        <> "\"issueCreatedAt\":\"2026-01-01T00:00:00Z\",\"issueDataGaps\":[],"
+        <> "\"issueLabelOverflow\":0,\"issueLabels\":[],\"issueNumber\":36,"
+        <> "\"issueTitle\":\"T\",\"issueUpdatedAt\":\"2026-01-01T00:00:00Z\","
+        <> "\"issueUrl\":\"u\"}]}}"
     )
 
 checkRunJson :: String -> String -> String -> String
