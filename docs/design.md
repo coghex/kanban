@@ -181,9 +181,9 @@ scrollable four-column board.
 ║ week     22% left   ║              ║              ║              ║              ║
 ║  resets  Fri 09:10  ║              ║              ║              ║              ║
 ║                     ║              ║              ║              ║              ║
-║ +--------------+    ║              ║              ║              ║              ║
-║ | drain_prs.py |    ║              ║              ║              ║              ║
-║ +--------------+    ║              ║              ║              ║              ║
+║ ┏━━━━━━━━━━━━━━┓    ║              ║              ║              ║              ║
+║ ┃ drain_prs.py ┃    ║              ║              ║              ║              ║
+║ ┗━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
  j/Down next  k/Up previous  x kill  h/l column  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  s settings  ? help  q quit
 ```
@@ -512,6 +512,11 @@ amber `UNLINKED` warning.
   drawing continuously.
 - Cards: rounded, `╭─╮│╰─╯`.
 - Tracker headers: heavy accent, for example `┏━┓┃┗━┛` or a compact `◆` row.
+- A nested sidebar control such as the drainer button draws with its panel's
+  inner-border style: heavy Unicode (`┏━┓┃┗━┛`) in the default and open-border
+  renderers, ASCII (`+-|`) under `--ascii`. Such a control draws its own box
+  rather than wrapping its label in a border widget, so every glyph keeps the
+  control's status color.
 - Avoid emoji and ambiguous-width decorative characters. Prefer stable
   single-cell symbols such as `✓`, `×`, `!`, `●`, `◐`, and `◆`.
 
