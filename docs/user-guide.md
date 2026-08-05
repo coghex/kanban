@@ -95,7 +95,7 @@ The footer in the application shows the main controls.
 ## Merging one pull request
 
 Press `m` on a card in Done to merge that pull request without waiting for the
-PR drainer's next rotation. It works from the board and from an open details
+PR drainer's next polling pass. It works from the board and from an open details
 window, and it hands the work to the drainer itself rather than merging on its
 own: the same checks are re-read immediately beforehand, and the linked issue,
 the worktree, and the branch are cleaned up afterwards.

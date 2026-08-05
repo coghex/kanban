@@ -1171,7 +1171,7 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
 class SinglePrIsolationTests(SinglePrCliFixture):
     """A single-PR run touches only the PR it was given."""
 
-    def test_no_other_pr_is_enumerated_recovered_or_moved_through_the_rotation(self):
+    def test_no_other_pr_is_enumerated_recovered_or_given_a_turn(self):
         before = {
             "version": drain_prs.STATE_VERSION,
             "attempt_counter": 17,
@@ -1196,9 +1196,10 @@ class SinglePrIsolationTests(SinglePrCliFixture):
         self.assertEqual(proc.returncode, drain_prs.EXIT_MERGED)
         self.assertEqual(result["reason"], "merged")
         after = json.loads(self.state_path.read_text(encoding="utf-8"))
-        # The other PRs' cooldowns and the shared fair-rotation counter are
-        # exactly as the polling service left them.
+        # The other PRs' cooldowns and the shared pass counter they are
+        # denominated in are exactly as the polling service left them.
         self.assertEqual(after["attempt_counter"], 17)
+        self.assertIsNone(after["active_pr"])
         self.assertEqual(after["prs"]["7"], before["prs"]["7"])
         self.assertEqual(after["prs"]["8"], before["prs"]["8"])
         # The queue's own listing and stale-approval sweep never ran.

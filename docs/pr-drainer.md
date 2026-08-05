@@ -241,8 +241,9 @@ python3 tools/drain_prs.py --path /path/to/project --pr 42
 This applies the same gates, guards, ordering and post-merge audit as a poll
 cycle — it runs the queue's own per-pull-request code, not a second copy of it
 — so it merges nothing the queue would refuse. It reads and touches only the
-named pull request: no other pull request is listed, recovered, or moved
-through the queue's fair rotation, and no failure cooldown is advanced.
+named pull request: no other pull request is listed or recovered, no pass
+counter moves, and neither the [queue order](#queue-order) nor its active
+candidate is consulted or changed.
 
 `--pr` and `--once` are mutually exclusive.
 
@@ -374,6 +375,68 @@ A repository can change or disable those check names with `.drain-prs.json`:
 ```
 
 A value of `null` disables that status-check requirement. It does not remove the approval-label requirement.
+
+## Queue order
+
+Each polling pass walks the approved queue in ascending pull-request number and
+advances **at most one** candidate. Nothing about a pull request's history
+reorders that: an earlier scheduler picked the least recently attempted
+candidate, which let a higher number overtake a lower one and — because every
+branch update starts CI — spread a queue's worth of workflow runs across pull
+requests that were nowhere near merging.
+
+A candidate's turn ends in one of three ways.
+
+- **A skip continues the pass.** The next-lowest candidate gets its turn in the
+  same pass. A candidate is skipped when nothing the drainer can do would
+  advance it and that says nothing about the pull requests behind it: it is
+  closed, a draft, targets another branch, lost its approval or gained
+  `reviewed:changes`, conflicts with the default branch (recorded as an
+  incident, as below), has a required check that failed with no automatic rerun
+  left to start, has moved to a head no review has cleared, or is still cooling
+  down after a failed attempt.
+- **A barrier ends the pass with nothing else touched.** A candidate whose
+  required CI or review check is missing, queued, pending, or in progress —
+  including the replacement checks a branch update or an automatic CI rerun
+  just started — is waiting, not blocked. No later pull request is updated,
+  rerun, or merged while it waits; the pass ends and the next ordinary poll
+  looks at that candidate again.
+- **An advance ends the pass too.** Updating a branch that is behind,
+  requesting an automatic CI rerun, and merging are each the whole of one pass.
+
+`--once` is exactly one such pass: it skips the blocked candidates, stops at
+the first advance or barrier, and exits.
+
+### The active candidate
+
+A candidate that reaches a barrier or takes an advance owns the queue's *active
+lane*, recorded in the queue state so it survives both polling iterations and a
+drainer restart. That candidate is examined first on later passes, so a pull
+request that becomes eligible while it waits cannot preempt it however much
+lower its number.
+
+The lane is released when the pull request merges or closes, loses its
+approval, gains `reviewed:changes`, develops a merge conflict, exhausts its
+automatic CI reruns, leaves the eligible queue for any other reason, or reaches
+any of the skips above. Selection then restarts at the lowest number — within
+the same pass, and no candidate is examined twice in one pass.
+
+An operational failure is none of those things. A `gh` call whose effect the
+drainer cannot establish ends the pass where it stands rather than moving on to
+another pull request, and leaves the lane as it found it.
+
+### When everything is blocked
+
+A pass in which every candidate is skipped merges nothing, updates nothing,
+reruns nothing, and returns to the normal polling wait. It does not probe a
+cooling candidate merely because it has nothing else to do. Failure cooldowns
+are denominated in passes rather than in attempts, so they expire on their own:
+an all-blocked queue does not have to advance some unrelated pull request first.
+
+Recording a merge-conflict incident is not an advance, so one pass can record
+more than one — it skips each conflicting candidate in turn. Marking an
+approved draft ready for review is likewise not an advance and still applies to
+every approved draft in the queue.
 
 ## Merge conflicts
 

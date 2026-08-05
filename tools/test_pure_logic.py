@@ -192,49 +192,207 @@ class FailureBackoffAttemptsTests(unittest.TestCase):
         )
 
 
-class ChooseNextPrTests(unittest.TestCase):
-    def _state(self, prs):
-        return {"attempt_counter": 10, "prs": prs}
+class PassCandidateOrderTests(unittest.TestCase):
+    """Issue #204: the queue is walked lowest pull-request number first, and
+    only a candidate already holding the active lane comes before that.
+    """
 
-    def test_empty_list_returns_none(self):
-        result, probing = drain_prs.choose_next_pr([], self._state({}))
-        self.assertIsNone(result)
-        self.assertFalse(probing)
+    def test_empty_queue_has_no_candidates(self):
+        self.assertEqual(drain_prs.pass_candidate_order([], None), [])
 
-    def test_picks_ready_pr_with_oldest_last_attempt(self):
-        approved = [{"number": 1}, {"number": 2}]
-        state = self._state(
-            {
-                "1": {"retry_after_attempt": 0, "last_attempt": 5},
-                "2": {"retry_after_attempt": 0, "last_attempt": 2},
-            }
+    def test_lowest_number_first_whatever_last_attempt_says(self):
+        # Fair rotation picked #2 here, because it had been attempted least
+        # recently. Nothing about attempt history may reorder the queue now.
+        approved = [
+            {"number": 5, "last_attempt": 1},
+            {"number": 2, "last_attempt": 9},
+            {"number": 3, "last_attempt": 4},
+        ]
+        self.assertEqual(drain_prs.pass_candidate_order(approved, None), [2, 3, 5])
+
+    def test_the_active_candidate_is_examined_before_a_lower_number(self):
+        approved = [{"number": 9}, {"number": 4}, {"number": 6}]
+        self.assertEqual(drain_prs.pass_candidate_order(approved, 6), [6, 4, 9])
+
+    def test_each_candidate_appears_exactly_once(self):
+        approved = [{"number": 4}, {"number": 4}, {"number": 2}]
+        self.assertEqual(drain_prs.pass_candidate_order(approved, 4), [4, 2])
+
+    def test_an_active_candidate_outside_the_queue_is_ignored(self):
+        approved = [{"number": 9}, {"number": 4}]
+        self.assertEqual(drain_prs.pass_candidate_order(approved, 7), [4, 9])
+
+
+class CandidateBlockReasonTests(unittest.TestCase):
+    """The two durable blocks a pass can see without reading GitHub. Both skip
+    that candidate alone, and both are keyed to the head they were recorded
+    against.
+    """
+
+    def _state(self, entry):
+        return {"attempt_counter": 10, "prs": {"7": entry}}
+
+    def _pr(self, head="a" * 40):
+        return {"number": 7, "headRefOid": head}
+
+    def test_unknown_pr_is_not_blocked(self):
+        self.assertIsNone(
+            drain_prs.candidate_block_reason(
+                self._pr(), {"attempt_counter": 10, "prs": {}}
+            )
         )
-        selected, probing = drain_prs.choose_next_pr(approved, state)
-        self.assertEqual(selected["number"], 2)
-        self.assertFalse(probing)
 
-    def test_ties_broken_by_pr_number(self):
-        approved = [{"number": 5}, {"number": 3}]
-        state = self._state(
-            {
-                "5": {"retry_after_attempt": 0, "last_attempt": 1},
-                "3": {"retry_after_attempt": 0, "last_attempt": 1},
-            }
-        )
-        selected, probing = drain_prs.choose_next_pr(approved, state)
-        self.assertEqual(selected["number"], 3)
+    def test_ready_pr_is_not_blocked(self):
+        state = self._state({"retry_after_attempt": 10})
+        self.assertIsNone(drain_prs.candidate_block_reason(self._pr(), state))
 
-    def test_all_cooling_down_probes_soonest_due(self):
-        approved = [{"number": 1}, {"number": 2}]
-        state = self._state(
-            {
-                "1": {"retry_after_attempt": 20, "last_attempt": 1},
-                "2": {"retry_after_attempt": 15, "last_attempt": 1},
-            }
+    def test_cooling_down_until_a_later_pass(self):
+        state = self._state({"retry_after_attempt": 11})
+        self.assertEqual(
+            drain_prs.candidate_block_reason(self._pr(), state), "cooling_down"
         )
-        selected, probing = drain_prs.choose_next_pr(approved, state)
-        self.assertEqual(selected["number"], 2)
-        self.assertTrue(probing)
+
+    def test_exhausted_ci_reruns_block_that_head(self):
+        state = self._state(
+            {"retry_after_attempt": 0, "ci_rerun_exhausted_head": "a" * 40}
+        )
+        self.assertEqual(
+            drain_prs.candidate_block_reason(self._pr(), state), "ci_rerun_exhausted"
+        )
+
+    def test_a_new_head_clears_the_rerun_quarantine(self):
+        state = self._state(
+            {"retry_after_attempt": 0, "ci_rerun_exhausted_head": "a" * 40}
+        )
+        self.assertIsNone(
+            drain_prs.candidate_block_reason(self._pr(head="b" * 40), state)
+        )
+
+
+class ClassifyPassOutcomeTests(unittest.TestCase):
+    """Every outcome process_pr() can record is classified exactly once, and
+    anything else ends the pass rather than reaching the next pull request.
+    """
+
+    def test_every_single_pr_no_action_reason_is_classified(self):
+        # The single-PR vocabulary and the queue's classification table are the
+        # same set of decisions; a reason added to one needs a class in the
+        # other, or the queue would fail closed on an ordinary refusal.
+        self.assertEqual(
+            set(drain_prs.NO_ACTION_REASONS) - set(drain_prs.PASS_OUTCOMES), set()
+        )
+
+    def test_skips_let_the_pass_continue(self):
+        for reason in (
+            "not_eligible",
+            "not_approved",
+            "changes_requested",
+            "merge_conflict",
+            "checks_failed",
+            "approved_head_changed",
+        ):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    drain_prs.classify_pass_outcome(reason, raised=False),
+                    drain_prs.PASS_SKIP,
+                )
+
+    def test_a_branch_update_holds_the_lane(self):
+        self.assertEqual(
+            drain_prs.classify_pass_outcome("behind_base", raised=False),
+            drain_prs.PASS_ADVANCE_HOLD,
+        )
+
+    def test_pending_work_is_a_barrier(self):
+        for reason in ("checks_pending", "mergeability_computing"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    drain_prs.classify_pass_outcome(reason, raised=False),
+                    drain_prs.PASS_BARRIER,
+                )
+
+    def test_a_merge_releases_the_lane(self):
+        for reason in ("merged", "would_merge", "post_merge_cleanup_failed"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    drain_prs.classify_pass_outcome(reason, raised=False),
+                    drain_prs.PASS_ADVANCE_DONE,
+                )
+
+    def test_a_classified_refusal_still_skips_when_it_was_raised(self):
+        # A wrong base branch and an exhausted failed check both leave
+        # process_pr() by raising, and both are candidate-specific.
+        for reason in ("not_eligible", "checks_failed"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    drain_prs.classify_pass_outcome(reason, raised=True),
+                    drain_prs.PASS_SKIP,
+                )
+
+    def test_a_raise_past_any_other_reason_ends_the_pass(self):
+        # A failed `gh` call inside a branch update or a merge leaves the
+        # reason at whatever preceded it; its effect on GitHub is unknown.
+        for reason in ("behind_base", "checks_pending", "merged", "operational_error"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    drain_prs.classify_pass_outcome(reason, raised=True),
+                    drain_prs.PASS_FAILURE,
+                )
+
+    def test_an_unclassified_reason_ends_the_pass(self):
+        self.assertEqual(
+            drain_prs.classify_pass_outcome("invented_later", raised=False),
+            drain_prs.PASS_FAILURE,
+        )
+
+
+class PassClockTests(unittest.TestCase):
+    """A failure cooldown is denominated in passes, so an all-blocked queue
+    still expires it: no other pull request has to be attempted first.
+    """
+
+    def _state(self):
+        return {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "active_pr": None,
+            "prs": {
+                "7": {
+                    "approved_head": "a" * 40,
+                    "consecutive_failures": drain_prs.FAILURES_BEFORE_BACKOFF - 1,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 0,
+                    "last_error": None,
+                }
+            },
+        }
+
+    def test_a_pass_advances_the_counter_by_one(self):
+        state = self._state()
+        self.assertEqual(drain_prs.begin_drain_pass(state), 1)
+        self.assertEqual(drain_prs.begin_drain_pass(state), 2)
+
+    def test_an_attempt_records_the_pass_without_advancing_it(self):
+        state = self._state()
+        drain_prs.begin_drain_pass(state)
+        self.assertEqual(drain_prs.begin_pr_attempt(state, 7), 1)
+        self.assertEqual(state["attempt_counter"], 1)
+        self.assertEqual(state["prs"]["7"]["last_attempt"], 1)
+
+    def test_a_cooldown_expires_over_passes_that_attempt_nothing(self):
+        state = self._state()
+        drain_prs.begin_drain_pass(state)
+        pr = {"number": 7, "headRefOid": "a" * 40}
+        cooldown = drain_prs.record_pr_failure(state, 7, "boom")
+        self.assertEqual(cooldown, 1)
+        # Skipped for exactly `cooldown` passes, and nothing but the passes
+        # themselves has to happen for it to come back.
+        drain_prs.begin_drain_pass(state)
+        self.assertEqual(
+            drain_prs.candidate_block_reason(pr, state), "cooling_down"
+        )
+        drain_prs.begin_drain_pass(state)
+        self.assertIsNone(drain_prs.candidate_block_reason(pr, state))
 
 
 class ParseReviewMarkerDetailsTests(unittest.TestCase):
@@ -321,6 +479,61 @@ class MigrateDrainStateTests(unittest.TestCase):
         self.assertEqual(migrated["attempt_counter"], 12)
         self.assertEqual(migrated["prs"]["42"]["last_attempt"], 11)
         self.assertIsNone(migrated["prs"]["42"]["cleanup"])
+
+    def test_v3_migrates_forward_owning_no_active_candidate(self):
+        # Issue #204: version 3 selected by fair rotation and recorded no lane,
+        # so the first pass after the upgrade starts at the lowest number --
+        # and everything version 3 did record survives the migration.
+        state = {
+            "version": 3,
+            "attempt_counter": 12,
+            "prs": {
+                "42": {
+                    "approved_head": "deadbeef",
+                    "consecutive_failures": 2,
+                    "retry_after_attempt": 19,
+                    "last_attempt": 11,
+                    "last_error": "boom",
+                    "ci_rerun_head": "deadbeef",
+                    "ci_rerun_attempts": 2,
+                    "ci_rerun_active": True,
+                    "cleanup": {"pending": [{"kind": "worktree"}]},
+                }
+            },
+        }
+        migrated = drain_prs.migrate_drain_state(state, source="test")
+        self.assertEqual(migrated["version"], drain_prs.STATE_VERSION)
+        self.assertIsNone(migrated["active_pr"])
+        entry = migrated["prs"]["42"]
+        self.assertEqual(entry["approved_head"], "deadbeef")
+        self.assertEqual(entry["consecutive_failures"], 2)
+        self.assertEqual(entry["retry_after_attempt"], 19)
+        self.assertEqual(entry["ci_rerun_attempts"], 2)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertEqual(entry["cleanup"], {"pending": [{"kind": "worktree"}]})
+
+    def test_a_recorded_active_candidate_is_kept(self):
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 3,
+            "active_pr": 42,
+            "prs": {"42": {"approved_head": "deadbeef"}},
+        }
+        self.assertEqual(
+            drain_prs.migrate_drain_state(state, source="test")["active_pr"], 42
+        )
+
+    def test_an_unreadable_active_candidate_raises(self):
+        for active in ("42", 0, -1, True, 4.5):
+            with self.subTest(active=active):
+                state = {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "active_pr": active,
+                    "prs": {},
+                }
+                with self.assertRaises(drain_prs.DrainError):
+                    drain_prs.migrate_drain_state(state, source="test")
 
     def test_unsupported_version_raises(self):
         state = {"version": 999, "prs": {}}
