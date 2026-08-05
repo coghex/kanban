@@ -193,6 +193,39 @@ snapshot itself is independent of all of this and unchanged: it stays reachable
 through `git stash list` and `refs/drain-prs/autostash/<sha>` whether or not the
 index is resolved first.
 
+#### The lifecycle of an autostash anchor
+
+The anchor at `refs/drain-prs/autostash/<sha>` exists so the snapshot commit is
+never reachable from no ref at all, and it is created before the reset that
+makes it the only copy. Its whole life:
+
+- **Created** ahead of the `reset --hard`, from the commit `git stash create`
+  produced.
+- **Released** by the same pass, as soon as `git stash apply --index` puts the
+  changes back — at that point the anchor has nothing left to protect.
+- **Kept** when that restore conflicts. The same pass also stores the snapshot
+  into `git stash list`, so two copies are deliberately left behind rather than
+  one, and neither is removed while the restore is unresolved.
+- **Reaped** by a later run, never the one that created it. Each drainer
+  process sweeps the namespace once at startup, before it can merge or
+  fast-forward anything, and deletes an anchor only when its exact commit is
+  one of the entries `git stash list` reports — including entries below
+  `stash@{0}`. Nothing else about the stash is read, written, or reordered, and
+  a `--dry-run` sweep reports without deleting.
+- **Listed** in the log for as long as it is not provably redundant, naming the
+  ref, its commit, that commit's date, and the command that restores it. An
+  anchor that outlives one startup and is still reported holds work that is in
+  no stash entry.
+
+Enumerate them yourself with:
+
+```console
+git for-each-ref refs/drain-prs/autostash
+```
+
+Every failure of the sweep — enumerating, reading the stash, or deleting a ref
+— is logged and stepped over. Merging never depends on it.
+
 ## Merging one pull request
 
 Besides the polling service, the drainer can process exactly one named pull

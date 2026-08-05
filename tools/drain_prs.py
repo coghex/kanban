@@ -1810,6 +1810,110 @@ def _release_snapshot_anchor(ctx: RepoContext, ref_name: str) -> None:
     run(["git", "update-ref", "-d", ref_name], cwd=ctx.path, check=False)
 
 
+def _list_snapshot_anchors(ctx: RepoContext) -> list[tuple[str, str, str]]:
+    """Every autostash anchor, as (ref, commit, commit date).
+
+    The pattern is the namespace prefix rather than `.../*`, so it matches
+    everything below `refs/drain-prs/autostash/` and no anchor can be missed.
+    Over-enumerating is harmless: what an anchor is deleted on is the stash
+    match below, not the shape of its name.
+    """
+    proc = run(
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname) %(objectname) %(committerdate:iso-strict)",
+            "refs/drain-prs/autostash",
+        ],
+        cwd=ctx.path,
+    )
+    anchors: list[tuple[str, str, str]] = []
+    # A ref name can hold no whitespace at all, so the first two fields split
+    # unambiguously; the date is whatever remains (empty for a ref pointing at
+    # something that is not a commit).
+    for line in (proc.stdout or "").splitlines():
+        ref, _, rest = line.strip().partition(" ")
+        sha, _, date = rest.partition(" ")
+        if ref and sha:
+            anchors.append((ref, sha, date.strip() or "date unknown"))
+    return anchors
+
+
+def _stash_entry_shas(ctx: RepoContext) -> set[str]:
+    """The commit of every `git stash list` entry, tip and non-tip alike.
+
+    Membership here is the whole redundancy test. `_preserve_unreachable_snapshot`
+    stores the snapshot commit itself, so a recovered anchor's object ID is
+    literally one of these -- while ancestry from the `refs/stash` tip answers
+    a different question, since the tip is only the newest entry and the
+    reflog below it holds the rest.
+    """
+    proc = run(["git", "stash", "list", "--format=%H"], cwd=ctx.path)
+    return {line.strip() for line in (proc.stdout or "").splitlines() if line.strip()}
+
+
+def sweep_snapshot_anchors(ctx: RepoContext, *, dry_run: bool) -> None:
+    """Reap autostash anchors whose snapshot is recoverable; report the rest.
+
+    Called once per process at startup, before any merge or fast-forward, and
+    never from inside fast_forward_default_branch() -- so it cannot run while
+    an autostash window is open, and can never see this process's own live
+    anchor. A conflicted restore therefore still keeps both its anchor and its
+    `git stash list` entry; only a later run reaps the redundancy.
+
+    Every failure mode is non-fatal and only logged. A ref sweep must never be
+    what stops a pull request from merging.
+    """
+    try:
+        anchors = _list_snapshot_anchors(ctx)
+    except (DrainError, OSError) as exc:
+        log(f"Could not enumerate autostash anchors; leaving them all in place: {exc}")
+        return
+    if not anchors:
+        return
+    try:
+        recoverable = _stash_entry_shas(ctx)
+    except (DrainError, OSError) as exc:
+        # Without the stash list nothing is provably redundant, so every
+        # anchor is kept and reported below rather than deleted on a guess.
+        log(f"Could not read `git stash list`; keeping every autostash anchor: {exc}")
+        recoverable = set()
+    for ref, sha, date in anchors:
+        restore = f"git stash apply --index {sha}"
+        if sha not in recoverable:
+            log(
+                f"Keeping autostash anchor {ref} (commit {sha}, {date}): its snapshot "
+                "is not in `git stash list`, so this ref may hold the only copy of "
+                f"local changes. Restore it with `{restore}`."
+            )
+            continue
+        if dry_run:
+            log(
+                f"Would delete redundant autostash anchor {ref} (commit {sha}, {date}): "
+                f"its snapshot is already recoverable with `{restore}`"
+            )
+            continue
+        # `-d <ref> <sha>` is a compare-and-swap, so an anchor that moved
+        # since enumeration is left alone instead of deleted on a stale
+        # reading. Only this ref is named: refs/stash, its reflog, and every
+        # stash entry are untouched.
+        try:
+            proc = run(["git", "update-ref", "-d", ref, sha], cwd=ctx.path, check=False)
+        except OSError as exc:
+            log(f"Could not delete redundant autostash anchor {ref}: {exc}")
+            continue
+        if proc.returncode != 0:
+            detail = (
+                proc.stderr or proc.stdout or f"exit code {proc.returncode}"
+            ).strip()
+            log(f"Could not delete redundant autostash anchor {ref}: {detail}")
+            continue
+        log(
+            f"Deleted redundant autostash anchor {ref} (commit {sha}, {date}): its "
+            f"snapshot stays recoverable with `{restore}`"
+        )
+
+
 def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:
     # May already be anchored under refs/drain-prs/autostash/<sha> from
     # earlier in the flow, or may not be (e.g. anchoring itself is what
@@ -3333,6 +3437,10 @@ def main() -> None:
             log(f"Logging to {active_log_path() or 'stderr only (dry run)'}")
             if args.dry_run:
                 log("Dry-run mode enabled; no changes will be made")
+            # Once per process, on the seam both modes pass through, and
+            # before either can merge or fast-forward: the sweep must never
+            # run while a fast-forward's own autostash window is open.
+            sweep_snapshot_anchors(ctx, dry_run=args.dry_run)
             if single:
                 emit_single_pr_result(
                     drain_one_pr(
