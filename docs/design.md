@@ -978,7 +978,18 @@ references, and sub-issues — carry explicit `first:` limits and request
 reports omitted nodes. The sub-issue connection's limit is GitHub's own
 100-child maximum, so one page holds every immediate child; a `totalCount`
 above what arrived marks that item incomplete rather than presenting the
-partial list as the whole relationship. The
+partial list as the whole relationship.
+
+A tracker renders its native progress verbatim from GitHub's sub-issue
+summary, so that summary is held to the same strictness as the connection it
+accompanies. A negative count, more completed sub-issues than exist, and a
+total below the relationships GitHub itself listed are all responses this
+build cannot reason about, and fail the refresh rather than reaching a header
+as `3/2 complete` or as `0/0 complete` above visible children. A total
+*above* the connection's own count is the one direction that is merely
+incomplete — a sub-issue in a repository the token cannot see is counted by
+GitHub and absent from the node list — so it is kept and counted among the
+children that did not arrive. The
 status-check rollup requests up to 100 context nodes and deduplicates reruns by
 check app/name (or status creator/context), retaining the newest entry and
 breaking a tie in favor of the one GitHub listed last. A check run GitHub has

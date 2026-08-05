@@ -246,15 +246,26 @@ parseNodes itemParser object fieldName gap = do
 --
 -- A connection that is present stays strict in the same places
 -- 'parseNodes' is: a missing @totalCount@, a malformed child, and a
--- @totalCount@ below the node list all still fail the decode.
+-- @totalCount@ below the node list all still fail the decode. The summary is
+-- held to the same standard, because a tracker's progress is rendered
+-- verbatim from it: a negative count, more completed than exist, or a total
+-- below the relationships GitHub itself listed are all responses this build
+-- cannot reason about, and would otherwise reach a header as @3/2 complete@
+-- or as @0/0 complete@ above two visible children.
+--
+-- A total /above/ the connection's own count is the one direction that is
+-- merely incomplete rather than impossible -- a sub-issue in a repository
+-- this token cannot see is counted by GitHub and absent from the node list --
+-- so it is kept, and counted among the children that did not arrive.
 parseSubIssues :: Maybe Text -> Object -> Parser (NativeSubIssues, [DataGap])
 parseSubIssues repositoryIdentity object = do
   connection <- object .:? "subIssues"
   summary <- object .:? "subIssuesSummary"
   case (repositoryIdentity, connection, summary) of
     (Just identity, Just connectionValue, Just summaryValue) -> do
-      (children, omitted) <- withObject "sub-issue connection" parseChildren connectionValue
-      (completed, total) <- withObject "sub-issue summary" parseSummary summaryValue
+      (children, connectionCount) <- withObject "sub-issue connection" parseChildren connectionValue
+      (completed, total) <- withObject "sub-issue summary" (parseSummary connectionCount) summaryValue
+      let omitted = max connectionCount total - length children
       pure
         ( SubIssuesReported (SubIssueRelationships identity children omitted completed total),
           [SubIssuesUnavailable | omitted > 0]
@@ -267,8 +278,21 @@ parseSubIssues repositoryIdentity object = do
       children <- traverse parseSubIssueLink nodeValues
       if totalCount < length children
         then fail "sub-issue connection totalCount was smaller than its node list"
-        else pure (children, totalCount - length children)
-    parseSummary summary = (,) <$> summary .: "completed" <*> summary .: "total"
+        else pure (children, totalCount)
+    parseSummary connectionCount summary = do
+      completed <- summary .: "completed"
+      total <- summary .: "total"
+      maybe (pure (completed, total)) fail (summaryFault connectionCount completed total)
+
+-- | Why a sub-issue summary cannot be believed, if it cannot. Each of these
+-- describes a pair of counts no consistent response can produce, as opposed
+-- to one that merely did not deliver everything.
+summaryFault :: Int -> Int -> Int -> Maybe String
+summaryFault connectionCount completed total
+  | completed < 0 || total < 0 = Just "sub-issue summary reported a negative count"
+  | completed > total = Just "sub-issue summary reported more completed sub-issues than it has"
+  | total < connectionCount = Just "sub-issue summary total was smaller than its relationship connection"
+  | otherwise = Nothing
 
 parseSubIssueLink :: Value -> Parser SubIssueLink
 parseSubIssueLink = withObject "sub-issue" $ \child -> do

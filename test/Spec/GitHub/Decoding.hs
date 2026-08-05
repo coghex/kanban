@@ -51,6 +51,7 @@ import Spec.Support.Json
     statusContextJson,
     subIssueConnectionJson,
     subIssueNodeJson,
+    subIssueSummaryJson,
     subIssuesJson,
     undatedCheckRunJson
   )
@@ -359,6 +360,54 @@ spec = do
       -- a summary missing a count progress is read from
       decodeGitHubItems (issueWith [subIssueConnectionJson 0 [], "\"subIssuesSummary\":{\"total\":1}"])
         `shouldSatisfy` isLeft
+
+    -- A tracker's progress is rendered verbatim from the summary, so counts
+    -- no consistent response can produce must not reach a header as "3/2
+    -- complete" or as "0/0 complete" above two visible children.
+    it "still fails the page when the sub-issue summary contradicts itself or its own connection" $ do
+      let issueWith connections = LazyByteString.pack (githubPageWith [issueNodeJson 700 ([emptyLabelsJson, emptyAssigneesJson] <> connections)] [])
+          child = subIssueNodeJson 12 fixtureRepositoryIdentity False
+          summarized completed total = issueWith [subIssueConnectionJson 0 [child], subIssueSummaryJson completed total]
+      -- more completed than exist
+      decodeGitHubItems (summarized 3 2) `shouldSatisfy` isLeft
+      -- negative counts, in either field
+      decodeGitHubItems (summarized (-1) 1) `shouldSatisfy` isLeft
+      decodeGitHubItems (summarized 0 (-1)) `shouldSatisfy` isLeft
+      -- a total below the relationships GitHub itself listed
+      decodeGitHubItems (summarized 0 0) `shouldSatisfy` isLeft
+      -- and the consistent pair those are measured against
+      decodeGitHubItems (summarized 0 1) `shouldSatisfy` (not . isLeft)
+
+    -- The one direction that is incomplete rather than impossible: a
+    -- sub-issue in a repository this token cannot see is counted by GitHub
+    -- and missing from the node list, so what arrived is kept and the item
+    -- says the answer is not the whole story.
+    it "keeps a summary that counts more sub-issues than the connection could show" $ do
+      let response =
+            githubPageWith
+              [ issueNodeJson
+                  700
+                  [ emptyLabelsJson,
+                    emptyAssigneesJson,
+                    subIssueConnectionJson 0 [subIssueNodeJson 12 fixtureRepositoryIdentity False],
+                    subIssueSummaryJson 1 3
+                  ]
+              ]
+              []
+      case decodeGitHubItems (LazyByteString.pack response) of
+        Left message -> expectationFailure message
+        Right ([issue], []) -> do
+          issue.issueSubIssues
+            `shouldBe` SubIssuesReported
+              ( SubIssueRelationships
+                  (Data.Text.pack fixtureRepositoryIdentity)
+                  [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False]
+                  2
+                  1
+                  3
+              )
+          issue.issueDataGaps `shouldBe` [SubIssuesUnavailable]
+        Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
     -- Without GitHub's own identity for the queried repository there is no
     -- way to tell a local child from a foreign one, so no child may be
