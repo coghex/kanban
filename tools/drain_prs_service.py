@@ -43,7 +43,12 @@ LEGACY_LABEL = LABEL_PREFIX
 # The queue-state document version `cleanup_obligations` below understands,
 # mirrored from `drain_prs.STATE_VERSION` because the controller reads that
 # state directly rather than importing the drainer. A test holds them equal.
-DRAIN_STATE_VERSION = 3
+DRAIN_STATE_VERSION = 4
+# The versions whose `prs` table carries cleanup records in this exact shape.
+# Version 4 only added the queue's active-candidate lane, which says nothing
+# about post-merge debt, so a version 3 file the upgraded drainer has not
+# rewritten yet still reports its obligations rather than reporting unknown.
+DRAIN_STATE_CLEANUP_VERSIONS = frozenset({3, DRAIN_STATE_VERSION})
 HOME = Path.home()
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
@@ -959,7 +964,8 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     read as a complete one. Versions 1 and 2 are unknown rather than empty
     because they predate durable cleanup records, so an entry either left
     behind can be a merged pull request whose obligations have not been
-    reconstructed yet.
+    reconstructed yet. Version 3 is read like version 4 because the two carry
+    the same records; see DRAIN_STATE_CLEANUP_VERSIONS.
 
     A document the drainer's own `migrate_drain_state` would refuse is
     unknown too, checked here in the same order and never by calling it: that
@@ -969,7 +975,7 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     if path is None:
         return None
     state = read_json(path)
-    if state is None or state.get("version") != DRAIN_STATE_VERSION:
+    if state is None or state.get("version") not in DRAIN_STATE_CLEANUP_VERSIONS:
         return None
     entries = state.get("prs")
     if not isinstance(entries, dict):

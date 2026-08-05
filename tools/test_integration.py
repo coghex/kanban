@@ -2048,7 +2048,9 @@ class PostMergeCleanupTests(ProcessPrFixture):
 
         final = self._read_state()
         self.assertEqual(final["version"], drain_prs.STATE_VERSION)
-        self.assertEqual(final["attempt_counter"], 4)
+        # The counter is the pass clock every cooldown is denominated in, so
+        # one pass advances it by exactly one whether or not it selected a PR.
+        self.assertEqual(final["attempt_counter"], 5)
         self.assertNotIn("42", final["prs"])
         # The in-flight merge was completed rather than forgotten...
         self.assertEqual(len(self._issue_close_calls(99)), 1)
@@ -2106,6 +2108,492 @@ class PostMergeCleanupTests(ProcessPrFixture):
 
         self.assertEqual(self.state_path.read_bytes(), before)
         self._assert_nothing_was_cleaned_up()
+
+
+class QueueOrderTests(ProcessPrFixture):
+    """Issue #204: one polling pass walks the approved queue lowest number
+    first and advances at most one candidate.
+
+    Fair rotation used to pick the least-recently-attempted pull request, so
+    every pass updated a different behind branch and started CI across the
+    whole queue before the first candidate was ready to merge. Here a durable
+    block on one candidate is skipped, and anything still in flight on it is a
+    barrier every later pull request waits behind.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.incident_dir = self.root / "incidents"
+        self.incident_dir.mkdir()
+        self.drainer_log_dir = self.root / "drainer-logs"
+        self.drainer_log_dir.mkdir()
+        self.state_path = drain_prs.drain_state_path(self.ctx)
+
+    @contextlib.contextmanager
+    def _drainer(self):
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+        ):
+            yield
+
+    def _gates(self):
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+    def _entry(self, head, **extra):
+        entry = {
+            "approved_head": head,
+            "last_rereviewed_head": None,
+            "consecutive_failures": 0,
+            "retry_after_attempt": 0,
+            "last_attempt": 0,
+            "last_error": None,
+            "ci_rerun_head": None,
+            "ci_rerun_attempts": 0,
+            "ci_rerun_active": False,
+            "ci_rerun_exhausted_head": None,
+            "cleanup": None,
+        }
+        entry.update(extra)
+        return entry
+
+    def _write_state(self, prs, *, attempt_counter=0, active_pr=None):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": attempt_counter,
+                    "active_pr": active_pr,
+                    "prs": prs,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _read_state(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def _run_loop(self, *, dry_run=False):
+        with self._drainer():
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=dry_run,
+                gates=self._gates(),
+            )
+
+    def _queued(self, number, head):
+        return {
+            "number": number,
+            "labels": [{"name": drain_prs.APPROVE_LABEL}],
+            "isDraft": False,
+            "headRefOid": head,
+        }
+
+    def _script_pr_list(self, *batches):
+        """One `gh pr list` response per polling pass, consumed in order."""
+        for batch in batches:
+            self.fake.script("gh", ["pr", "list"], stdout=json.dumps(batch))
+
+    def _other_pr_json(self, number, head, **overrides):
+        """An approved pull request that is not the fixture's mergeable #42.
+
+        It closes no issue, so a scenario that reached a merge here would be
+        obvious rather than quietly cleaning up #42's worktree a second time.
+        """
+        pr_json = self._base_pr_json()
+        pr_json.update(
+            {
+                "number": number,
+                "url": f"https://github.com/acme/widgets/pull/{number}",
+                "headRefOid": head,
+                "headRefName": f"issue-{number}-other",
+                "closingIssuesReferences": [],
+            }
+        )
+        pr_json.update(overrides)
+        return pr_json
+
+    def _script_pr(self, number, *snapshots):
+        for snapshot in snapshots:
+            self.fake.script(
+                "gh", ["pr", "view", str(number)], stdout=json.dumps(snapshot)
+            )
+
+    def _script_merge_of_42(self):
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+    def _pending_ci(self):
+        return [
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                "status": "IN_PROGRESS",
+                "conclusion": None,
+                "startedAt": "2026-07-18T00:00:00Z",
+            },
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:01Z",
+            },
+        ]
+
+    def _failed_ci(self):
+        return [
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "completedAt": "2026-07-18T00:00:00Z",
+                "detailsUrl": "https://github.com/acme/widgets/actions/runs/9911",
+            },
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:01Z",
+            },
+        ]
+
+    def _stale_approval_ok(self):
+        return self._base_pr_json()["statusCheckRollup"] + [
+            {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:02Z",
+            }
+        ]
+
+    def _views_of(self, number):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:3] == ["pr", "view", str(number)]
+        ]
+
+    def _advancing_gh_calls(self):
+        """Every call that moves a pull request towards merging.
+
+        Requirement 8 bounds a pass to one of these in total; requirement 4
+        forbids any of them for a pull request behind a barrier.
+        """
+        found = []
+        for call in self.fake.calls("gh"):
+            args = call["args"]
+            if args[:2] in (["pr", "merge"], ["pr", "edit"], ["pr", "ready"]):
+                found.append(args)
+            elif args[:2] == ["run", "rerun"]:
+                found.append(args)
+            elif args[:1] == ["api"] and any("update-branch" in arg for arg in args):
+                found.append(args)
+        return found
+
+    def _update_branch_calls(self):
+        return [
+            args
+            for args in self._advancing_gh_calls()
+            if args[:1] == ["api"] and any("update-branch" in arg for arg in args)
+        ]
+
+    def test_the_lowest_number_goes_first_whatever_last_attempt_says(self):
+        # Fair rotation would have taken #42: it was attempted least recently,
+        # and it is the one that would merge. Lowest-number-first stops at #7.
+        self._script_pr(7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, last_attempt=9),
+                "42": self._entry(self.head_sha, last_attempt=1),
+            },
+            attempt_counter=9,
+        )
+
+        self._run_loop()
+
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._read_state()["active_pr"], 7)
+
+    def test_a_pending_candidate_stops_the_pass_before_every_later_one(self):
+        self._script_pr(7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+
+        self._run_loop()
+
+        # #42 is green, mergeable, and never read at all: the pass ended at the
+        # barrier rather than walking past it.
+        self.assertEqual(self._views_of(42), [])
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._read_state()["active_pr"], 7)
+
+    def test_a_conflicting_lowest_candidate_is_skipped_and_the_next_merges(self):
+        self._script_pr(
+            7,
+            self._other_pr_json(
+                7, "b" * 40, mergeable="CONFLICTING", mergeStateStatus="DIRTY"
+            ),
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+
+        self._run_loop()
+
+        merges = [
+            call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
+        ]
+        self.assertEqual([call["args"][2] for call in merges], ["42"])
+        incidents = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.incident_dir.glob("incident-*.json"))
+        ]
+        self.assertEqual([incident["pull_request"] for incident in incidents], [7])
+        state = self._read_state()
+        self.assertIsNone(state["active_pr"])
+        # A skipped candidate is not a failed attempt, so it earns no cooldown.
+        self.assertEqual(state["prs"]["7"]["consecutive_failures"], 0)
+
+    def test_an_exhausted_failed_check_candidate_is_skipped_and_the_next_merges(self):
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._failed_ci())
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry(
+                    "b" * 40,
+                    ci_rerun_head="b" * 40,
+                    ci_rerun_attempts=drain_prs.MAX_CI_RERUN_ATTEMPTS,
+                ),
+                "42": self._entry(self.head_sha),
+            }
+        )
+
+        self._run_loop()
+
+        # No rerun was requested for #7, and #42 merged in the same pass.
+        self.assertEqual(
+            [args for args in self._advancing_gh_calls() if args[:2] == ["run", "rerun"]],
+            [],
+        )
+        merges = [
+            call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
+        ]
+        self.assertEqual([call["args"][2] for call in merges], ["42"])
+        self.assertEqual(self._read_state()["prs"]["7"]["ci_rerun_exhausted_head"], "b" * 40)
+
+    def test_an_ineligible_candidate_is_skipped_and_the_next_merges(self):
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, state="CLOSED")
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+
+        self._run_loop()
+
+        merges = [
+            call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
+        ]
+        self.assertEqual([call["args"][2] for call in merges], ["42"])
+
+    def test_a_requested_ci_rerun_is_a_barrier_like_a_pending_check(self):
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._failed_ci())
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+
+        self._run_loop()
+
+        self.assertEqual(
+            [args[:3] for args in self._advancing_gh_calls()],
+            [["run", "rerun", "9911"]],
+        )
+        self.assertEqual(self._views_of(42), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertTrue(state["prs"]["7"]["ci_rerun_active"])
+
+    def test_the_short_rerun_cadence_follows_the_active_candidate(self):
+        # A pass that ends on a requested rerun still polls again quickly. The
+        # cadence reads the lane owner rather than whichever candidate the pass
+        # happened to stop at, so it survives the queue walking several first.
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._failed_ci())
+        )
+        self.fake.script("gh", ["run", "rerun", "9911"], stdout="")
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        slept = []
+
+        def stop_after_one_pass(seconds):
+            slept.append(seconds)
+            raise KeyboardInterrupt
+
+        with self._drainer(), mock.patch("time.sleep", stop_after_one_pass):
+            with self.assertRaises(KeyboardInterrupt):
+                drain_prs.loop(
+                    self.ctx,
+                    interval=3600,
+                    once=False,
+                    dry_run=False,
+                    gates=self._gates(),
+                )
+
+        self.assertEqual(slept, [drain_prs.CI_RERUN_INTERVAL_SECONDS])
+
+    def test_a_branch_update_is_the_whole_pass_and_keeps_the_lane(self):
+        behind = self._other_pr_json(7, "b" * 40, mergeStateStatus="BEHIND")
+        updated = self._other_pr_json(
+            7, "c" * 40, statusCheckRollup=self._stale_approval_ok()
+        )
+        settled = self._other_pr_json(
+            7, "c" * 40, statusCheckRollup=self._pending_ci()
+        )
+        # In order: the pass's own read, the two reads the update's policy wait
+        # makes, then the re-read that records the new approved head. Every
+        # later read -- this pass's and the next two passes' -- repeats the
+        # last entry, a settled head whose replacement CI is still running.
+        self._script_pr(7, behind, updated, updated, settled)
+        self.fake.script(
+            "gh",
+            ["api", "-X", "PUT", "repos/acme/widgets/pulls/7/update-branch"],
+            stdout="",
+        )
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        settled_queue = [self._queued(7, "c" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, settled_queue, settled_queue)
+
+        for _ in range(3):
+            self._run_loop()
+
+        # One branch update in three passes, and nothing else advanced.
+        self.assertEqual(len(self._update_branch_calls()), 1)
+        self.assertEqual(len(self._advancing_gh_calls()), 1)
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["prs"]["7"]["approved_head"], "c" * 40)
+
+    def test_a_newly_eligible_lower_number_does_not_preempt_the_lane(self):
+        self._script_pr(7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_merge_of_42()
+        self._script_pr_list(
+            [self._queued(7, "b" * 40)],
+            [self._queued(5, "d" * 40), self._queued(7, "b" * 40)],
+        )
+
+        # Each loop() reloads the state file, so the second pass is exactly
+        # what a restarted drainer does.
+        self._run_loop()
+        self.assertEqual(self._read_state()["active_pr"], 7)
+        self._run_loop()
+
+        self.assertEqual(self._views_of(5), [])
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._read_state()["active_pr"], 7)
+
+    def test_releasing_a_blocked_lane_restarts_at_the_lowest_number(self):
+        self._script_pr(7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_pr(77, self._other_pr_json(77, "e" * 40, state="CLOSED"))
+        self._script_merge_of_42()
+        self._script_pr_list(
+            [
+                self._queued(7, "b" * 40),
+                self._queued(42, self.head_sha),
+                self._queued(77, "e" * 40),
+            ]
+        )
+        self._write_state(
+            {
+                "7": self._entry("b" * 40),
+                "42": self._entry(self.head_sha),
+                "77": self._entry("e" * 40),
+            },
+            active_pr=77,
+        )
+
+        self._run_loop()
+
+        # #77 held the lane, lost it by leaving the queue, and selection went
+        # back to the lowest number rather than on to #42.
+        examined = [
+            call["args"][2]
+            for call in self.fake.calls("gh")
+            if call["args"][:2] == ["pr", "view"]
+        ]
+        self.assertEqual(examined[-1], "7")
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._read_state()["active_pr"], 7)
+
+    def test_an_all_blocked_queue_mutates_nothing_and_waits_for_a_later_pass(self):
+        self._script_pr(7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue, queue)
+        # #7 is cooling down until pass 3 and #42's reruns are exhausted for
+        # its current head, so passes 1 and 2 have nothing they may touch.
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, consecutive_failures=2, retry_after_attempt=3),
+                "42": self._entry(self.head_sha, ci_rerun_exhausted_head=self.head_sha),
+            }
+        )
+
+        for _ in range(2):
+            self._run_loop()
+            state = self._read_state()
+            self.assertEqual(self._advancing_gh_calls(), [])
+            # `last_attempt` is stamped by the pass on each candidate it gives
+            # a turn to, so a zero means the pass gave none to anybody.
+            self.assertEqual(state["prs"]["7"]["last_attempt"], 0)
+            self.assertEqual(state["prs"]["42"]["last_attempt"], 0)
+            self.assertIsNone(state["active_pr"])
+
+        # The cooldown expired on the pass clock alone: no other pull request
+        # was attempted in the meantime, and none could have been.
+        self._run_loop()
+
+        state = self._read_state()
+        self.assertEqual(state["prs"]["7"]["last_attempt"], 3)
+        self.assertEqual(state["prs"]["42"]["last_attempt"], 0)
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(state["active_pr"], 7)
+
+    def test_a_dry_run_makes_the_same_decisions_and_mutates_nothing(self):
+        self._script_pr(
+            7,
+            self._other_pr_json(
+                7, "b" * 40, mergeable="CONFLICTING", mergeStateStatus="DIRTY"
+            ),
+        )
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+
+        self._run_loop(dry_run=True)
+
+        # #7 was skipped and #42 was reached and judged mergeable, with no
+        # merge, no incident, and no queue-state file written.
+        self.assertTrue(self._views_of(42))
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(list(self.incident_dir.glob("*.json")), [])
+        self.assertFalse(self.state_path.exists())
 
 
 if __name__ == "__main__":
