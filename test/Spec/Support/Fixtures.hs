@@ -5,6 +5,7 @@ module Spec.Support.Fixtures
     baseIssue,
     basePullRequest,
     withSubIssues,
+    withSubIssuesLackingSummary,
     nativeTrackerIssue,
     localSubIssue,
     foreignSubIssue,
@@ -50,12 +51,24 @@ baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
   Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0 SubIssuesNotRequested []
 
--- | The issue with GitHub's native sub-issue answer attached: the immediate
--- children in the order returned, and the summary counts GitHub keeps over
--- all of them.
+-- | The issue with GitHub's whole native sub-issue answer attached: the
+-- immediate children in the order returned, and the summary counts GitHub
+-- keeps over all of them.
 withSubIssues :: [SubIssueLink] -> Int -> Int -> Issue -> Issue
 withSubIssues children completed total issue =
-  issue {issueSubIssues = SubIssuesReported (SubIssueRelationships fixtureRepository children 0 completed total)}
+  issue
+    { issueSubIssues =
+        SubIssuesReported (SubIssueRelationships fixtureRepository (Just children) 0 (Just (SubIssueProgress completed total)))
+    }
+
+-- | The half-answer a partial-error response produces: the relationships
+-- arrived, GitHub's summary did not, and the item is marked incomplete.
+withSubIssuesLackingSummary :: [SubIssueLink] -> Issue -> Issue
+withSubIssuesLackingSummary children issue =
+  issue
+    { issueSubIssues = SubIssuesReported (SubIssueRelationships fixtureRepository (Just children) 0 Nothing),
+      issueDataGaps = issue.issueDataGaps <> [SubIssuesUnavailable]
+    }
 
 -- | A tracker issue whose only membership source is GitHub's native
 -- sub-issues: the @epic@ label, a body with no child list of any kind, and

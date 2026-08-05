@@ -32,6 +32,7 @@ import Spec.Support.Fixtures
     nativeTrackerIssue,
     testOptions,
     withSubIssues,
+    withSubIssuesLackingSummary,
     zeroChildDiagnostics,
     zeroChildTracker
   )
@@ -145,6 +146,28 @@ spec = do
     it "keeps the empty-child-list diagnostic only when GitHub reported no sub-issues at all" $ do
       trackerDiagnosticsForIssue defaultWorkflowConfig (nativeTrackerIssue 700 [] 0 0)
         `shouldBe` [TrackerSectionMissing]
+
+    -- A partial-error response can null the summary and leave the
+    -- relationships, and those children still belong under their tracker: the
+    -- alternative is scattering the group across the board over a missing
+    -- count. Progress falls back to the relationships that did arrive rather
+    -- than rendering 0/0 above visible children.
+    it "keeps native children whose summary never arrived, and counts them" $ do
+      let tracker =
+            withSubIssuesLackingSummary
+              [localSubIssue 10 False, localSubIssue 11 True]
+              (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "Background only, with no child list."}
+          entries = issueColumn (board [tracker, baseIssue 10 []] [])
+      map (itemNumber . entryItem) entries `shouldBe` [10]
+      case entries >>= maybe [] pure . trackerOf of
+        [rendered] -> do
+          rendered.trackerSource `shouldBe` NativeMembership
+          (rendered.trackerCompleted, rendered.trackerTotal) `shouldBe` (1, 2)
+          rendered.trackerDiagnostics `shouldBe` []
+        rendered -> expectationFailure ("unexpected trackers: " <> show rendered)
+      -- The card still says the answer was incomplete.
+      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch False False)
+        `shouldSatisfy` any (Data.Text.isInfixOf "Issue #700: incomplete data")
 
     -- An answer that never arrived is an unverified absence. Reporting it as
     -- a tracker with no child list would present a fetch failure as a

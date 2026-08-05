@@ -828,9 +828,18 @@ Precedence between them:
 - A tracker with no valid checklist child falls back to the native
   relationships GitHub reported for it.
 - A tracker with neither keeps the empty-header diagnostics below. "Neither"
-  means GitHub positively reported no sub-issue relationships; an answer that
-  was absent, null, or incomplete is an unverified absence and follows §13's
-  incomplete-item contract instead.
+  means GitHub positively reported no sub-issue relationships — a complete
+  answer of nothing, both the relationship list and the summary. An answer
+  that was absent, null, or incomplete is an unverified absence and follows
+  §13's incomplete-item contract instead.
+
+The relationship list and the summary are separate fields, and a
+partial-error response nulls exactly the ones that errored, so either can
+arrive without the other. Whichever half arrived is kept and used: children
+delivered without their summary still group under their tracker rather than
+scattering across the board, and a summary delivered without its children
+still reports the tracker's progress. The item is marked incomplete for the
+rest.
 
 Native membership covers the tracker's immediate children only, up to
 GitHub's own limit of 100 per parent, and it never invents an implementation
@@ -887,7 +896,11 @@ tracker has, including the closed ones and any in another repository, so those
 are never counted again locally and the off-board completion adjustment above
 does not apply. Children that cannot be rendered are still dropped from the
 tracker's children, so a closed or cross-repository child contributes to the
-counts without becoming a card.
+counts without becoming a card. When GitHub delivered the relationships but
+not the summary, progress falls back to counting the relationships that did
+arrive, so the header never reads `0/0 complete` above visible children; that
+item is marked incomplete and named in the §17 banner, which is what keeps the
+derived pair from being mistaken for GitHub's own.
 
 The same tracker header may appear in more than one column when its children
 are split across Issues, Active, Reviewing, and Done. This repetition provides

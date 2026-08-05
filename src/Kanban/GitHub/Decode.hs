@@ -239,10 +239,13 @@ parseNodes itemParser object fieldName gap = do
 -- Membership can only be decided against the repository the page belongs to,
 -- so a response that did not carry that identity fails closed to
 -- 'SubIssuesUnreported' rather than guessing which children are local. So
--- does an absent or null @subIssues@ or @subIssuesSummary@ -- the shape a
--- partial-error response nulls a field into -- and so does a connection whose
--- @totalCount@ exceeds the children it delivered: each of those is an
--- unverified absence, never a tracker GitHub said has no children.
+-- does a response in which neither the @subIssues@ connection nor the
+-- @subIssuesSummary@ arrived. Either half on its own is kept, because a
+-- partial-error response nulls exactly the fields that errored and discarding
+-- delivered children over a missing summary would scatter a tracker's group
+-- across the board; so is a connection whose @totalCount@ exceeds the
+-- children it delivered. Each of those marks the item incomplete, and none of
+-- them is ever a tracker GitHub said has no children.
 --
 -- A connection that is present stays strict in the same places
 -- 'parseNodes' is: a missing @totalCount@, a malformed child, and a
@@ -258,19 +261,22 @@ parseNodes itemParser object fieldName gap = do
 -- this token cannot see is counted by GitHub and absent from the node list --
 -- so it is kept, and counted among the children that did not arrive.
 parseSubIssues :: Maybe Text -> Object -> Parser (NativeSubIssues, [DataGap])
-parseSubIssues repositoryIdentity object = do
-  connection <- object .:? "subIssues"
-  summary <- object .:? "subIssuesSummary"
-  case (repositoryIdentity, connection, summary) of
-    (Just identity, Just connectionValue, Just summaryValue) -> do
-      (children, connectionCount) <- withObject "sub-issue connection" parseChildren connectionValue
-      (completed, total) <- withObject "sub-issue summary" (parseSummary connectionCount) summaryValue
-      let omitted = max connectionCount total - length children
-      pure
-        ( SubIssuesReported (SubIssueRelationships identity children omitted completed total),
-          [SubIssuesUnavailable | omitted > 0]
-        )
-    _ -> pure (SubIssuesUnreported, [SubIssuesUnavailable])
+parseSubIssues Nothing _ = pure (SubIssuesUnreported, [SubIssuesUnavailable])
+parseSubIssues (Just identity) object = do
+  connectionValue <- object .:? "subIssues"
+  summaryValue <- object .:? "subIssuesSummary"
+  connection <- traverse (withObject "sub-issue connection" parseChildren) connectionValue
+  let connectionCount = maybe 0 snd connection
+  progress <- traverse (withObject "sub-issue summary" (parseSummary connectionCount)) summaryValue
+  let delivered = maybe [] fst connection
+      omitted = max connectionCount (maybe 0 (.subIssuesTotal) progress) - length delivered
+      relationships = SubIssueRelationships identity (fmap fst connection) omitted progress
+      -- Anything short of both halves, in full, leaves the board holding less
+      -- than GitHub has.
+      answered = omitted == 0 && connection /= Nothing && progress /= Nothing
+  pure $ case (connection, progress) of
+    (Nothing, Nothing) -> (SubIssuesUnreported, [SubIssuesUnavailable])
+    _ -> (SubIssuesReported relationships, [SubIssuesUnavailable | not answered])
   where
     parseChildren connection = do
       nodeValues <- connection .:? "nodes" .!= []
@@ -282,7 +288,7 @@ parseSubIssues repositoryIdentity object = do
     parseSummary connectionCount summary = do
       completed <- summary .: "completed"
       total <- summary .: "total"
-      maybe (pure (completed, total)) fail (summaryFault connectionCount completed total)
+      maybe (pure (SubIssueProgress completed total)) fail (summaryFault connectionCount completed total)
 
 -- | Why a sub-issue summary cannot be believed, if it cannot. Each of these
 -- describes a pair of counts no consistent response can produce, as opposed

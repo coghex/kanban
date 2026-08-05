@@ -24,6 +24,7 @@ module Kanban.Domain
     Repository (..),
     ReviewDecision (..),
     SubIssueLink (..),
+    SubIssueProgress (..),
     SubIssueRelationships (..),
     Tracker (..),
     TrackerChild (..),
@@ -106,9 +107,23 @@ data SubIssueLink = SubIssueLink
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | GitHub's completed/total counts over every sub-issue an issue has,
+-- including the closed ones and any this board can never render.
+data SubIssueProgress = SubIssueProgress
+  { subIssuesCompleted :: Int,
+    subIssuesTotal :: Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 -- | GitHub's answer about one issue's immediate native sub-issues: the
--- children in the order returned, and the summary counts GitHub maintains
--- over all of them, including any this board can never render.
+-- children in the order returned, and the summary it keeps over all of them.
+--
+-- Either half can be absent on its own, because a partial-error response
+-- nulls exactly the fields that errored. Whatever did arrive is kept and used
+-- — dropping delivered children because their summary went missing would
+-- scatter a tracker's group across the board — and the item is marked
+-- incomplete for the rest.
 --
 -- 'subIssuesRepository' is GitHub's own identity for the repository the page
 -- was fetched from, taken from the same response rather than from the locally
@@ -116,11 +131,13 @@ data SubIssueLink = SubIssueLink
 -- redirect does not misclassify its own children as foreign.
 data SubIssueRelationships = SubIssueRelationships
   { subIssuesRepository :: Text,
-    subIssuesChildren :: [SubIssueLink],
+    -- | The immediate children in GitHub's order, or 'Nothing' when the
+    -- relationship connection itself did not arrive.
+    subIssuesChildren :: Maybe [SubIssueLink],
     -- | Children GitHub said exist but did not deliver in the node list.
     subIssuesOmitted :: Int,
-    subIssuesCompleted :: Int,
-    subIssuesTotal :: Int
+    -- | GitHub's own counts, or 'Nothing' when the summary did not arrive.
+    subIssuesProgress :: Maybe SubIssueProgress
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

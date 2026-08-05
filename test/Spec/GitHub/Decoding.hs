@@ -304,12 +304,13 @@ spec = do
             `shouldBe` SubIssuesReported
               ( SubIssueRelationships
                   (Data.Text.pack fixtureRepositoryIdentity)
-                  [ SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False,
-                    SubIssueLink 11 "elsewhere/other" True
-                  ]
+                  ( Just
+                      [ SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False,
+                        SubIssueLink 11 "elsewhere/other" True
+                      ]
+                  )
                   0
-                  1
-                  2
+                  (Just (SubIssueProgress 1 2))
               )
           issue.issueDataGaps `shouldBe` []
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
@@ -325,10 +326,7 @@ spec = do
             Right values -> Left ("unexpected decoded values: " <> show values)
       -- Neither field requested back at all.
       decodedGaps (issueWith []) `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
-      -- The shape a partial-error response nulls an errored field into.
-      decodedGaps (issueWith ["\"subIssues\":null", "\"subIssuesSummary\":{\"total\":0,\"completed\":0}"])
-        `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
-      decodedGaps (issueWith [subIssueConnectionJson 0 [], "\"subIssuesSummary\":null"])
+      decodedGaps (issueWith ["\"subIssues\":null", "\"subIssuesSummary\":null"])
         `shouldBe` Right (SubIssuesUnreported, [SubIssuesUnavailable])
       -- Delivered children, but fewer than GitHub says exist: what arrived is
       -- kept, and the item still says the answer is not the whole story.
@@ -337,16 +335,42 @@ spec = do
           ( SubIssuesReported
               ( SubIssueRelationships
                   (Data.Text.pack fixtureRepositoryIdentity)
-                  [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False]
+                  (Just [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False])
                   1
-                  0
-                  2
+                  (Just (SubIssueProgress 0 2))
               ),
             [SubIssuesUnavailable]
           )
       -- And a positively empty answer is neither incomplete nor a gap.
       decodedGaps (issueWith [emptySubIssuesJson])
-        `shouldBe` Right (SubIssuesReported (SubIssueRelationships (Data.Text.pack fixtureRepositoryIdentity) [] 0 0 0), [])
+        `shouldBe` Right (SubIssuesReported (SubIssueRelationships (Data.Text.pack fixtureRepositoryIdentity) (Just []) 0 (Just (SubIssueProgress 0 0))), [])
+
+    -- A partial-error response nulls exactly the fields that errored, so
+    -- either half can arrive without the other. Discarding delivered children
+    -- because their summary went missing would scatter a tracker's group
+    -- across the board, which is the opposite of degrading gracefully.
+    it "keeps whichever half of the sub-issue answer arrived" $ do
+      let issueWith connections = githubPageWith [issueNodeJson 700 ([emptyLabelsJson, emptyAssigneesJson] <> connections)] []
+          child = subIssueNodeJson 12 fixtureRepositoryIdentity False
+          localChild = SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False
+          decodedGaps response = case decodeGitHubItems (LazyByteString.pack response) of
+            Left message -> Left message
+            Right ([issue], []) -> Right (issue.issueSubIssues, issue.issueDataGaps)
+            Right values -> Left ("unexpected decoded values: " <> show values)
+      -- Relationships without a summary: the children are kept and progress
+      -- is left for the board to derive from them.
+      decodedGaps (issueWith [subIssueConnectionJson 0 [child], "\"subIssuesSummary\":null"])
+        `shouldBe` Right
+          ( SubIssuesReported (SubIssueRelationships (Data.Text.pack fixtureRepositoryIdentity) (Just [localChild]) 0 Nothing),
+            [SubIssuesUnavailable]
+          )
+      -- A summary without relationships: the counts are kept, and everything
+      -- GitHub says exists counts as a child that did not arrive.
+      decodedGaps (issueWith ["\"subIssues\":null", subIssueSummaryJson 1 2])
+        `shouldBe` Right
+          ( SubIssuesReported (SubIssueRelationships (Data.Text.pack fixtureRepositoryIdentity) Nothing 2 (Just (SubIssueProgress 1 2))),
+            [SubIssuesUnavailable]
+          )
 
     -- A connection GitHub did deliver stays as strict as every other one.
     it "still fails the page when a delivered sub-issue connection is malformed" $ do
@@ -401,10 +425,9 @@ spec = do
             `shouldBe` SubIssuesReported
               ( SubIssueRelationships
                   (Data.Text.pack fixtureRepositoryIdentity)
-                  [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False]
+                  (Just [SubIssueLink 12 (Data.Text.pack fixtureRepositoryIdentity) False])
                   2
-                  1
-                  3
+                  (Just (SubIssueProgress 1 3))
               )
           issue.issueDataGaps `shouldBe` [SubIssuesUnavailable]
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)

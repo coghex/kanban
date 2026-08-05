@@ -11,6 +11,7 @@ where
 
 import Data.Char (isAsciiUpper, isDigit, isSpace)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -43,8 +44,8 @@ trackerFromIssue config issue
   | not (null checklistChildren) = Just (checklistTracker diagnostics)
   | otherwise = Just $ case issue.issueSubIssues of
       SubIssuesReported relationships
-        | nativeMembershipPresent relationships -> nativeTracker relationships
-        | otherwise -> checklistTracker diagnostics
+        | nativeSetConfirmedEmpty relationships -> checklistTracker diagnostics
+        | otherwise -> nativeTracker relationships
       SubIssuesUnreported -> checklistTracker (filter (not . isEmptyChildListDiagnostic) diagnostics)
       SubIssuesNotRequested -> checklistTracker diagnostics
   where
@@ -59,29 +60,46 @@ trackerFromIssue config issue
           trackerChildren = childMap checklistChildren,
           trackerDiagnostics = trackerDiagnostics
         }
-    -- Progress is GitHub's own summary rather than a count of the children
-    -- below, which is what keeps requirement 6 true when a child is closed or
-    -- lives in another repository: such a child is counted once, by GitHub,
-    -- and never again here.
+    -- Progress comes from 'nativeProgress' rather than from the children
+    -- below, which is what keeps a closed or cross-repository child counted
+    -- once, by GitHub, and never again here.
     nativeTracker relationships =
       Tracker
         { trackerIssue = issue,
           trackerSource = NativeMembership,
-          trackerCompleted = relationships.subIssuesCompleted,
-          trackerTotal = relationships.subIssuesTotal,
+          trackerCompleted = fst (nativeProgress relationships),
+          trackerTotal = snd (nativeProgress relationships),
           trackerChildren = childMap (nativeChildren relationships),
           trackerDiagnostics = filter (not . isEmptyChildListDiagnostic) diagnostics
         }
 
--- | Whether GitHub reported any native sub-issue relationship at all. A
--- tracker with none has neither §12 source and keeps its ordinary
--- empty-child-list diagnostics; one whose only children are closed or foreign
--- still has native membership, and says so through GitHub's counts instead.
-nativeMembershipPresent :: SubIssueRelationships -> Bool
-nativeMembershipPresent relationships =
-  not (null relationships.subIssuesChildren)
-    || relationships.subIssuesOmitted > 0
-    || relationships.subIssuesTotal > 0
+-- | Whether GitHub gave a complete answer of "no sub-issues at all", which is
+-- the only thing that leaves a tracker with neither §12 source and so keeps
+-- its ordinary empty-child-list diagnostics.
+--
+-- Every other answer is native membership. A partial one confirms no absence
+-- and must not be reported as one, and a tracker whose only children are
+-- closed or in another repository does have children -- it says so through
+-- GitHub's counts rather than through a card.
+nativeSetConfirmedEmpty :: SubIssueRelationships -> Bool
+nativeSetConfirmedEmpty relationships =
+  relationships.subIssuesChildren == Just []
+    && relationships.subIssuesOmitted == 0
+    && relationships.subIssuesProgress == Just (SubIssueProgress 0 0)
+
+-- | A native tracker's completed/total pair: GitHub's own summary whenever it
+-- arrived, and otherwise the delivered relationships themselves.
+--
+-- The fallback exists so a tracker whose summary went missing still counts
+-- the children it is showing rather than rendering @0/0 complete@ above them.
+-- Such an item is already marked incomplete and named in the §17 banner, so
+-- the locally derived pair is never mistaken for GitHub's own.
+nativeProgress :: SubIssueRelationships -> (Int, Int)
+nativeProgress relationships = case relationships.subIssuesProgress of
+  Just progress -> (progress.subIssuesCompleted, progress.subIssuesTotal)
+  Nothing ->
+    let delivered = fromMaybe [] relationships.subIssuesChildren
+     in (length (filter (.subIssueClosed) delivered), length delivered)
 
 -- | The children a native tracker can actually render: this repository's own,
 -- in the order GitHub returned them.
@@ -100,7 +118,7 @@ nativeChildren relationships =
         trackerChildChecklistOrder = order,
         trackerChildComplete = link.subIssueClosed
       }
-    | (order, link) <- zip [0 ..] (filter ownedHere relationships.subIssuesChildren)
+    | (order, link) <- zip [0 ..] (filter ownedHere (fromMaybe [] relationships.subIssuesChildren))
   ]
   where
     ownedHere link = link.subIssueRepository == relationships.subIssuesRepository
