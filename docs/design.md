@@ -1435,6 +1435,29 @@ KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 - Terminal resize and narrow-layout behavior.
 - Clean terminal restoration after normal exit and exceptions.
 
+### Packaging tests
+
+One check does not fit the categories above, because what it validates is the
+build system's own output rather than Kanban's behavior: the source
+distribution has to be a complete checkout, and no amount of pure or fixture
+testing can observe what `cabal sdist` actually puts in the archive.
+`tools/test_source_distribution.py` therefore drives the local Haskell
+toolchain — it runs `cabal sdist all` into a temporary directory, unpacks the
+archive, and inspects the unpacked tree.
+
+Two properties keep it from becoming a list that rots. The expected inventory
+is derived from the repository's tracked file set rather than hand-maintained,
+so a tool, workflow asset, or document added later must reach the archive; and
+every tracked file outside the trees that ship whole carries a recorded in-or-out
+decision, so a new one cannot land without a stated intent. The archive is also
+checked for internal consistency: every repository-relative link in a packaged
+document resolves inside the archive, and every setup or installer path those
+documents name exists there.
+
+It reads `cabal` and Git metadata, both of which the required CI job has and an
+unpacked release does not, so it skips with a stated reason rather than failing
+when either is absent. It writes only outside the working tree.
+
 ### Manual checks
 
 - Common terminal emulators on supported platforms.
