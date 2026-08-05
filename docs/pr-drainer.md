@@ -387,6 +387,17 @@ any of them, and drops the record only once every one of them is done.
   itself once the last obligation succeeds. Stopping the drainer does not clear
   it: a stop completes no step, so the incident stands until the pass that
   discharges the debt does, or until it is dismissed with `ack`.
+- A merge attempts its own obligations immediately, including a single
+  pull-request run; what it leaves outstanding is retried by the polling loop's
+  sweep, so a stopped drainer discharges nothing it still owes.
+- Outstanding obligations are visible in `status` before any of that: its
+  `cleanup_obligations` field names every pull request that still owes, its
+  remaining steps, how many passes have failed, and the last error — whether or
+  not an incident has been raised, and whether or not the drainer is running.
+  Kanban's sidebar summarises the same field as a count beside the drainer
+  state. The field is `null` when the queue state could not be read at all,
+  which is not the same answer as the empty list a drainer owing nothing
+  reports. Reading it takes no lock and changes nothing.
 - If the drainer is restarted or the pull request merges without its cleanup
   being recorded, the next poll reads the merged pull request and finishes the
   outstanding work. A pull request closed *without* merging owes nothing: it is

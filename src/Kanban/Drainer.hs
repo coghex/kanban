@@ -45,7 +45,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Map.Strict (Map)
@@ -220,13 +220,31 @@ instance FromJSON DrainerIncident where
 crashIncidentKind :: Text
 crashIncidentKind = "drainer-exit"
 
+-- | One pull request the controller reported as still owing post-merge
+-- cleanup. Nothing is carried out of a member: the sidebar states how many
+-- pull requests owe, and the steps themselves belong to the controller's own
+-- output. It is still held to naming its pull request, exactly as
+-- 'DrainerIncident' is held to naming its incident — a member that does not
+-- is not a projection this side can report a count of.
+data RawObligation = RawObligation
+  deriving stock (Eq, Show)
+
+instance FromJSON RawObligation where
+  parseJSON = withObject "PR drainer cleanup obligation" $ \value ->
+    RawObligation <$ (value .: "pull_request" :: Parser Int)
+
 data RawStatus = RawStatus
   { rawState :: Text,
     -- | Which git operation a @mid_operation@ checkout is stopped part-way
     -- through, so the board can name what has to be finished.
     rawOperation :: Maybe Text,
     rawIncident :: Maybe RawIncident,
-    rawIncidents :: Maybe [DrainerIncident]
+    rawIncidents :: Maybe [DrainerIncident],
+    -- | The post-merge debt the controller read out of the drainer's queue
+    -- state. 'Nothing' is not an empty set: a controller predating the field,
+    -- or one that could not read that state, has said nothing about the debt,
+    -- and the sidebar then says nothing about it either.
+    rawObligations :: Maybe [RawObligation]
   }
   deriving stock (Eq, Show)
 
@@ -237,6 +255,7 @@ instance FromJSON RawStatus where
       <*> value .:? "operation"
       <*> value .:? "open_incident"
       <*> value .:? "open_incidents"
+      <*> value .:? "cleanup_obligations"
 
 -- | One controller response: the sidebar's status projection, and the
 -- complete repository-scoped set of open incidents behind it.
@@ -755,7 +774,18 @@ statusFromRaw rawStatus = case (rawStatus.rawState, incident) of
     incidentDetail = case incident of
       Just summary | not (Text.null summary) -> " · " <> summary
       _ -> ""
-    reported state activity detail = DrainerStatus state detail activity incident
+    reported state activity detail =
+      DrainerStatus state (detail <> obligationDetail) activity incident
+    -- Appended by every branch rather than by the two that mention an
+    -- incident: debt survives a stop, so it is owed in every state the
+    -- controller can report it from, and it is the state the drainer is *not*
+    -- running in that no longer discharges it.
+    obligationDetail = case rawStatus.rawObligations of
+      Just obligations | not (null obligations) -> " · " <> owingClause (length obligations)
+      _ -> ""
+    owingClause :: Int -> Text
+    owingClause 1 = "1 PR owes cleanup"
+    owingClause owing = Text.pack (show owing) <> " PRs owe cleanup"
 
 -- | Uncommitted work is no longer a reason the drainer will not start — its
 -- fast-forward stashes and restores it — so the one repository condition left
