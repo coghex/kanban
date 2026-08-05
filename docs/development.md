@@ -27,7 +27,7 @@ Run the Python drainer, controller, and installer suite:
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
-The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents.
+The Python tests use temporary repositories and fake command-line tools. They do not contact GitHub or modify the user's LaunchAgents. The one exception is the source-release check below, which runs the real `cabal` against this checkout; it still writes only to a temporary directory.
 
 The Haskell suite includes the golden-frame tests, which compare rendered
 terminal frames with the files checked in under `test/golden/`. A normal run
@@ -37,6 +37,29 @@ the explicit switch and read the resulting diff before committing it:
 ```console
 KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 ```
+
+## Source release
+
+The source distribution is meant to be a complete Kanban checkout, so that
+everything the packaged documentation advertises — the workflow setup command,
+the drainer installer, both provider bundles, and the test suites — is present
+after unpacking. Verify it with:
+
+```console
+cabal sdist all
+python3 -m unittest tools.test_source_distribution
+```
+
+That check builds the real archive into a temporary directory, unpacks it, and
+compares the result against the repository's tracked file set. Adding a tracked
+file under `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`, or
+`claude-plugin/` requires no manifest change only when an existing
+`kanban.cabal` glob already covers its extension; anything else — a new
+top-level file, a new document under `docs/`, a new file extension — fails the
+check until `kanban.cabal` declares it and `tools/test_source_distribution.py`
+records whether it belongs in a release. It runs in the required `build-test`
+job as part of the Python suite, and skips with a reason where `cabal` or the
+Git metadata is unavailable, such as inside an unpacked release.
 
 ## Source layout
 

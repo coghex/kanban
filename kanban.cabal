@@ -13,15 +13,41 @@ author:             coghex
 maintainer:         coghex
 category:           Development
 build-type:         Simple
+-- The source distribution is a complete Kanban checkout: everything needed to
+-- build, test, configure, and provision the advertised features from the
+-- unpacked archive. `tools/test_source_distribution.py` is the regression that
+-- keeps it that way, and records why each tracked root asset is in or out.
 extra-source-files:
+  cabal.project
   test/golden/*.attrs
   test/golden/*.txt
+  tools/**/*.py
+  codex-plugin/**/*.json
+  codex-plugin/**/*.md
+  codex-plugin/**/*.py
+  claude-plugin/**/*.json
+  claude-plugin/**/*.md
+  claude-plugin/**/*.py
+
+  -- The four files `plugin marketplace add` actually reads. Cabal 3.16's
+  -- recursive globs do reach them under their dot-prefixed directories, so
+  -- these lines are redundant today; they are kept because that is the one
+  -- glob-semantics detail whose silent change would strand both bundles
+  -- while every other bundle file still shipped.
+  codex-plugin/.agents/plugins/marketplace.json
+  codex-plugin/plugins/kanban/.codex-plugin/plugin.json
+  claude-plugin/.claude-plugin/marketplace.json
+  claude-plugin/plugins/kanban/.claude-plugin/plugin.json
 
 extra-doc-files:
+  CLAUDE.md
+  README.md
   config.toml.example
   docs/README.md
+  docs/agent-workflow-contract.md
   docs/development.md
   docs/design.md
+  docs/drafting-workflow-contract.md
   docs/pr-drainer.md
   docs/user-guide.md
   docs/workflow-setup.md
