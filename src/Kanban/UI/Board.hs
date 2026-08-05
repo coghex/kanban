@@ -18,7 +18,15 @@ where
 
 import Brick
 import Brick.Widgets.Border (borderWithLabel, hBorder, hBorderWithLabel, vBorder)
-import Brick.Widgets.Border.Style (unicodeBold)
+import Brick.Widgets.Border.Style
+  ( bsCornerBL,
+    bsCornerBR,
+    bsCornerTL,
+    bsCornerTR,
+    bsHorizontal,
+    bsVertical,
+    unicodeBold,
+  )
 import qualified Brick.Types as BrickTypes
 import Data.List (intersperse )
 import Data.Map.Strict (Map)
@@ -92,20 +100,36 @@ drawUsage state
           padTop Max (drawDrainerButton state)
         ]
 
+-- | The drainer control draws its own box out of 'innerBorderStyle' rather
+-- than wrapping the label in Brick's 'Brick.Widgets.Border.border'. That keeps
+-- one border policy for the sidebar in all three modes, and it keeps every
+-- glyph under 'drainerStatusAttr': Brick's border widgets draw their runs
+-- under @borderAttr@, which the theme does not name, so a bordered label would
+-- lose the status color on its edges.
 drawDrainerButton :: AppState -> Widget Name
 drawDrainerButton state =
   vBox
     [ clickable DrainerButton
         . withAttr (drainerStatusAttr status)
         . vBox
-        $ [ txt "+--------------+",
-            txt "| drain_prs.py |",
-            txt "+--------------+"
+        $ [ txt (edge boxStyle.bsCornerTL boxStyle.bsCornerTR),
+            txt (Text.singleton boxStyle.bsVertical <> drainerLabel <> Text.singleton boxStyle.bsVertical),
+            txt (edge boxStyle.bsCornerBL boxStyle.bsCornerBR)
           ],
       withAttr (drainerStatusAttr status) (txtWrap status.drainerDetail)
     ]
   where
     status = state.appDrainerStatus
+    boxStyle = innerBorderStyle state
+    edge leftCorner rightCorner =
+      Text.singleton leftCorner
+        <> Text.replicate (Text.length drainerLabel) (Text.singleton boxStyle.bsHorizontal)
+        <> Text.singleton rightCorner
+
+-- | The drainer control's interior row, padded so the control keeps its
+-- sixteen-column footprint.
+drainerLabel :: Text
+drainerLabel = " drain_prs.py "
 
 drawProvider :: AppState -> UsageProvider -> Widget Name
 drawProvider state provider =
