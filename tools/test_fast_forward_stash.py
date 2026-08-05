@@ -24,6 +24,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# `python3 -m unittest tools.test_fast_forward_stash` imports this module by
+# package path, which puts the repository root on sys.path rather than tools/
+# -- unlike `-m unittest discover -s tools`. Both invocations have to reach
+# the sibling module, so name the directory outright.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import drain_prs
 
 
@@ -744,6 +750,75 @@ class AnchorKeptWhenSnapshotIsNotInStashTest(_AnchorSweepFixture):
         # A user stash entry exists throughout: an anchor is redundant only
         # when *its own* commit is one of them.
         self.assertNotIn(sha, [user_stash_sha])
+
+
+class AnchorDeletionRevalidatedAcrossTheStashTest(_AnchorSweepFixture):
+    """The stash is the user's: `git stash drop` can land in the window
+    between the membership read and the deletion, and then the anchor would
+    be the last ref to a commit nothing else holds. What binds is the read
+    *after* the anchor is gone; anything short of a confirmation puts it back.
+    """
+
+    def test_a_stash_dropped_under_the_deletion_puts_the_anchor_back(self):
+        ref, sha = self._redundant_anchor("line3-recovered")
+        real_run = drain_prs.run
+
+        def fake_run(args, **kwargs):
+            proc = real_run(args, **kwargs)
+            if args[:3] == ["git", "update-ref", "-d"] and args[3] == ref:
+                # Exactly the losing window: the anchor is gone, and the
+                # user's `git stash drop` has already taken the other copy.
+                run_git(["stash", "drop", "-q"], cwd=self.main)
+            return proc
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+
+        self.assertEqual(self._anchor_ref_names(), [ref])
+        self.assertEqual(run_git(["rev-parse", ref], cwd=self.main).stdout.strip(), sha)
+        self.assertEqual(stash_shas(self.main), [])
+        restored = self._logged_containing("Restored autostash anchor")
+        self.assertEqual(len(restored), 1)
+        self.assertIn(ref, restored[0])
+        self.assertEqual(self._logged_containing("Deleted redundant"), [])
+
+    def test_an_unreadable_stash_after_the_deletion_puts_the_anchor_back(self):
+        ref, sha = self._redundant_anchor("line3-recovered")
+        stashes_before = stash_shas(self.main)
+        real_run = drain_prs.run
+        reads = []
+
+        def fake_run(args, **kwargs):
+            if args[:3] == ["git", "stash", "list"]:
+                reads.append(args)
+                # The classifying read succeeds; the one that would confirm
+                # the deletion does not.
+                if len(reads) > 1:
+                    raise drain_prs.DrainError("stash list is unavailable")
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(drain_prs, "run", side_effect=fake_run):
+            drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+
+        # Unprovable is not the same as proven redundant.
+        self.assertEqual(self._anchor_ref_names(), [ref])
+        self.assertEqual(run_git(["rev-parse", ref], cwd=self.main).stdout.strip(), sha)
+        self.assertEqual(stash_shas(self.main), stashes_before)
+        restored = self._logged_containing("Restored autostash anchor")
+        self.assertEqual(len(restored), 1)
+        self.assertIn("could not be read", restored[0])
+
+    def test_a_snapshot_still_in_the_stash_confirms_the_deletion(self):
+        ref, sha = self._redundant_anchor("line3-recovered")
+
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+
+        self.assertEqual(self._anchor_ref_names(), [])
+        self.assertEqual(stash_shas(self.main), [sha])
+        self.assertEqual(self._logged_containing("Restored autostash anchor"), [])
+        deleted = self._logged_containing("Deleted redundant autostash anchor")
+        self.assertEqual(len(deleted), 1)
+        self.assertIn(ref, deleted[0])
 
 
 class AnchorSweepDryRunTest(_AnchorSweepFixture):

@@ -1852,6 +1852,69 @@ def _stash_entry_shas(ctx: RepoContext) -> set[str]:
     return {line.strip() for line in (proc.stdout or "").splitlines() if line.strip()}
 
 
+def _reap_redundant_anchor(ctx: RepoContext, ref: str, sha: str, date: str) -> None:
+    """Delete one anchor the stash also holds, and prove it afterwards.
+
+    The stash belongs to the user, who can run `git stash drop` or `git stash
+    clear` at any moment -- so the membership read that classified this anchor
+    describes a moment already past, and deleting on that alone could take the
+    last ref to a commit no stash entry holds any more.
+
+    What binds instead is the read *after* the deletion. If the snapshot is
+    still a `git stash list` entry once the anchor is gone, it is reachable
+    now, which is the strongest claim available. Every other outcome -- the
+    entry dropped underneath, or the stash unreadable -- puts the anchor
+    straight back, so the ref is never what disappeared.
+    """
+    restore = f"git stash apply --index {sha}"
+    # `-d <ref> <sha>` is a compare-and-swap, so an anchor that moved since
+    # enumeration is left alone instead of deleted on a stale reading. Only
+    # this ref is named: refs/stash, its reflog, and every stash entry are
+    # untouched.
+    try:
+        proc = run(["git", "update-ref", "-d", ref, sha], cwd=ctx.path, check=False)
+    except OSError as exc:
+        log(f"Could not delete redundant autostash anchor {ref}: {exc}")
+        return
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        log(f"Could not delete redundant autostash anchor {ref}: {detail}")
+        return
+
+    try:
+        confirmed = sha in _stash_entry_shas(ctx)
+    except (DrainError, OSError) as exc:
+        confirmed = False
+        why = f"`git stash list` could not be read to confirm its snapshot survived: {exc}"
+    else:
+        why = "its snapshot is no longer a `git stash list` entry"
+    if confirmed:
+        log(
+            f"Deleted redundant autostash anchor {ref} (commit {sha}, {date}): its "
+            f"snapshot stays recoverable with `{restore}`"
+        )
+        return
+
+    try:
+        back = run(["git", "update-ref", ref, sha], cwd=ctx.path, check=False)
+        recreated = back.returncode == 0
+        detail = (back.stderr or back.stdout or f"exit code {back.returncode}").strip()
+    except OSError as exc:
+        recreated = False
+        detail = str(exc)
+    if recreated:
+        log(
+            f"Restored autostash anchor {ref} (commit {sha}, {date}) immediately "
+            f"after deleting it: {why}"
+        )
+        return
+    log(
+        f"Deleted autostash anchor {ref} (commit {sha}, {date}) and could not put "
+        f"it back ({detail}): {why}. That snapshot may now be referenced by "
+        f"nothing -- recover it immediately with `{restore}`."
+    )
+
+
 def sweep_snapshot_anchors(ctx: RepoContext, *, dry_run: bool) -> None:
     """Reap autostash anchors whose snapshot is recoverable; report the rest.
 
@@ -1893,25 +1956,7 @@ def sweep_snapshot_anchors(ctx: RepoContext, *, dry_run: bool) -> None:
                 f"its snapshot is already recoverable with `{restore}`"
             )
             continue
-        # `-d <ref> <sha>` is a compare-and-swap, so an anchor that moved
-        # since enumeration is left alone instead of deleted on a stale
-        # reading. Only this ref is named: refs/stash, its reflog, and every
-        # stash entry are untouched.
-        try:
-            proc = run(["git", "update-ref", "-d", ref, sha], cwd=ctx.path, check=False)
-        except OSError as exc:
-            log(f"Could not delete redundant autostash anchor {ref}: {exc}")
-            continue
-        if proc.returncode != 0:
-            detail = (
-                proc.stderr or proc.stdout or f"exit code {proc.returncode}"
-            ).strip()
-            log(f"Could not delete redundant autostash anchor {ref}: {detail}")
-            continue
-        log(
-            f"Deleted redundant autostash anchor {ref} (commit {sha}, {date}): its "
-            f"snapshot stays recoverable with `{restore}`"
-        )
+        _reap_redundant_anchor(ctx, ref, sha, date)
 
 
 def _preserve_unreachable_snapshot(ctx: RepoContext, tracked_sha: str, message: str) -> str:

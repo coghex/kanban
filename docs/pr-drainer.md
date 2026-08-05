@@ -210,8 +210,11 @@ makes it the only copy. Its whole life:
   process sweeps the namespace once at startup, before it can merge or
   fast-forward anything, and deletes an anchor only when its exact commit is
   one of the entries `git stash list` reports — including entries below
-  `stash@{0}`. Nothing else about the stash is read, written, or reordered, and
-  a `--dry-run` sweep reports without deleting.
+  `stash@{0}`. The stash is yours to drop or clear at any moment, so that
+  reading is confirmed again *after* the ref is gone: if the snapshot is not
+  still an entry then, or the stash cannot be read to say, the anchor goes
+  straight back. Nothing else about the stash is read, written, or reordered,
+  and a `--dry-run` sweep reports without deleting.
 - **Listed** in the log for as long as it is not provably redundant, naming the
   ref, its commit, that commit's date, and the command that restores it. An
   anchor that outlives one startup and is still reported holds work that is in
