@@ -37,9 +37,9 @@
                                 │ persistence contract      │     │ Make the fresh-install    │                                       │ master · updated 3h ago   │
                                 │  architecture             │     │ behavior explicit and     │                                       │ Reads the cache through   │
                                 │ unassigned · updated 4h   │     │ keep local state outside… │                                       │ the versioned envelope    │
- +--------------+               │ ago                       │     ╰───────────────────────────╯                                       │ and reports a truncated…  │
- | drain_prs.py |               │ Document root owners,     │                                                                         │ ◐ CI 9/12 · behind        │
- +--------------+               │ snapshot barriers, and    │                                                                         ╰───────────────────────────╯
+ ┏━━━━━━━━━━━━━━┓               │ ago                       │     ╰───────────────────────────╯                                       │ and reports a truncated…  │
+ ┃ drain_prs.py ┃               │ Document root owners,     │                                                                         │ ◐ CI 9/12 · behind        │
+ ┗━━━━━━━━━━━━━━┛               │ snapshot barriers, and    │                                                                         ╰───────────────────────────╯
  off                            │ the versioned envelope…   │
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p proc
