@@ -42,7 +42,7 @@ MAX_CI_RERUN_ATTEMPTS = 3
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
 MODEL_TIMEOUT_SECONDS = 60 * 60
-STATE_VERSION = 3
+STATE_VERSION = 4
 FAILURES_BEFORE_BACKOFF = 2
 CLEANUP_PASSES_BEFORE_INCIDENT = 3
 MAX_BACKOFF_ATTEMPTS = 16
@@ -103,6 +103,45 @@ ERROR_REASONS = frozenset(
         "operational_error",
     }
 )
+
+# What one candidate's turn did to the polling pass around it. The queue
+# advances one candidate at a time in ascending pull-request order, so every
+# turn has to say whether the pass may keep walking the queue.
+PASS_ADVANCE_HOLD = "advance_hold"
+PASS_ADVANCE_DONE = "advance_done"
+PASS_BARRIER = "barrier"
+PASS_SKIP = "skip"
+PASS_FAILURE = "pass_failure"
+# Every outcome process_pr() can record, classified exactly once. A reason
+# missing from this table -- a new one, or one recorded by something other than
+# the return it describes -- ends the pass rather than falling through to
+# another pull request, because a pass that cannot name what just happened
+# cannot know it is safe to mutate the next candidate.
+PASS_OUTCOMES: dict[str, str] = {
+    # Skips: nothing the drainer can do advances this candidate right now, and
+    # none of them says anything about the pull requests behind it.
+    "not_eligible": PASS_SKIP,
+    "not_approved": PASS_SKIP,
+    "changes_requested": PASS_SKIP,
+    "merge_conflict": PASS_SKIP,
+    "checks_failed": PASS_SKIP,
+    # Only a fresh review clears this one, so holding the lane for it would
+    # stall the queue on a pull request nothing the drainer does can help. It
+    # can follow a `gh pr merge` that GitHub refused on --match-head-commit;
+    # that attempt landed nothing, so it is not the pass's one merge.
+    "approved_head_changed": PASS_SKIP,
+    # Advances that keep the lane: the candidate now has work in flight on
+    # GitHub, and the pass is over until it settles.
+    "behind_base": PASS_ADVANCE_HOLD,
+    # Barriers: this candidate is mid-flight and every later one waits. A
+    # requested CI rerun reports checks_pending too, and wants the same thing.
+    "checks_pending": PASS_BARRIER,
+    "mergeability_computing": PASS_BARRIER,
+    # Advances that end the lane: the candidate left the queue.
+    "merged": PASS_ADVANCE_DONE,
+    "would_merge": PASS_ADVANCE_DONE,
+    "post_merge_cleanup_failed": PASS_ADVANCE_DONE,
+}
 
 
 class DrainError(RuntimeError):
@@ -508,12 +547,24 @@ def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
         # finished cleaning up. Nothing is invented for it here: recovery reads
         # the merged pull request itself and plans the obligations from it.
         version = 3
+    if version == 3:
+        # Version 3 selected by fair rotation and so recorded no active
+        # candidate. A file it wrote migrates forward owning no lane, and the
+        # first pass after the upgrade selects from the lowest PR number.
+        state["active_pr"] = None
+        version = 4
     if version != STATE_VERSION:
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     state["version"] = STATE_VERSION
     state.setdefault("attempt_counter", 0)
     if not isinstance(state["attempt_counter"], int) or isinstance(
         state["attempt_counter"], bool
+    ):
+        raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
+    state.setdefault("active_pr", None)
+    active = state["active_pr"]
+    if active is not None and (
+        not isinstance(active, int) or isinstance(active, bool) or active <= 0
     ):
         raise DrainError(f"Unsupported drain state in {source}; inspect or remove it.")
     for key, entry in state["prs"].items():
@@ -537,7 +588,12 @@ def migrate_drain_state(state: Any, *, source: str) -> dict[str, Any]:
 def load_drain_state(ctx: RepoContext) -> dict[str, Any]:
     path = drain_state_path(ctx)
     if not path.exists():
-        return {"version": STATE_VERSION, "attempt_counter": 0, "prs": {}}
+        return {
+            "version": STATE_VERSION,
+            "attempt_counter": 0,
+            "active_pr": None,
+            "prs": {},
+        }
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -596,8 +652,19 @@ def failure_backoff_attempts(consecutive_failures: int) -> int:
     return min(2**exponent, MAX_BACKOFF_ATTEMPTS)
 
 
-def begin_pr_attempt(state: dict[str, Any], number: int) -> int:
+def begin_drain_pass(state: dict[str, Any]) -> int:
+    """Open one polling pass and return its number.
+
+    The counter is denominated in passes rather than in per-PR attempts, which
+    is what makes a failure cooldown expire on its own. A pass that skips every
+    candidate attempts nothing, so a counter only the processing of some *other*
+    pull request advanced would freeze every cooldown in an all-blocked queue.
+    """
     state["attempt_counter"] += 1
+    return state["attempt_counter"]
+
+
+def begin_pr_attempt(state: dict[str, Any], number: int) -> int:
     attempt = state["attempt_counter"]
     state["prs"][str(number)]["last_attempt"] = attempt
     return attempt
@@ -617,73 +684,71 @@ def record_pr_failure(state: dict[str, Any], number: int, error: str) -> int:
     failures = int(entry.get("consecutive_failures", 0)) + 1
     cooldown = failure_backoff_attempts(failures)
     entry["consecutive_failures"] = failures
-    entry["retry_after_attempt"] = state["attempt_counter"] + cooldown
+    # The first pass allowed to look at this PR again, so a cooldown of N skips
+    # exactly N passes: the pass recording the failure is the current counter,
+    # and the next one is already counter + 1.
+    entry["retry_after_attempt"] = state["attempt_counter"] + cooldown + 1
     entry["last_error"] = error
     return cooldown
 
 
-def choose_next_pr(
-    approved: list[dict[str, Any]],
+def pass_candidate_order(
+    eligible: list[dict[str, Any]],
+    active: int | None,
+) -> list[int]:
+    """The order one polling pass examines its candidates in.
+
+    Lowest pull-request number first. Nothing about a pull request's history
+    enters this: an earlier scheduler ordered by `last_attempt`, which let a
+    higher-numbered pull request overtake a lower-numbered one and spread
+    branch updates -- and the CI they start -- across the whole queue.
+
+    The one exception is the candidate that already owns the active lane. It is
+    examined first so a pull request that becomes eligible while it waits on
+    its checks cannot preempt it, however much lower its number.
+    """
+    numbers = sorted({pr["number"] for pr in eligible})
+    if active is None or active not in numbers:
+        return numbers
+    return [active] + [number for number in numbers if number != active]
+
+
+def candidate_block_reason(
+    pr: dict[str, Any],
     state: dict[str, Any],
-) -> tuple[dict[str, Any] | None, bool]:
-    if not approved:
-        return None, False
+) -> str | None:
+    """Why this pass must skip a candidate without reading it from GitHub.
 
-    attempt_counter = state["attempt_counter"]
-    eligible = [
-        pr
-        for pr in approved
-        if not (
-            state["prs"][str(pr["number"])].get("ci_rerun_exhausted_head")
-            and state["prs"][str(pr["number"])].get("ci_rerun_exhausted_head")
-            == pr.get("headRefOid")
-        )
-    ]
-    if not eligible:
-        return None, False
+    Both blocks are durable and specific to one candidate, so the pass moves
+    on to the next-lowest number rather than ending. Both are keyed to the head
+    they were recorded against: a new reviewed head is a new candidate.
+    """
+    entry = state["prs"].get(str(pr["number"]))
+    if entry is None:
+        return None
+    exhausted_head = entry.get("ci_rerun_exhausted_head")
+    if exhausted_head and exhausted_head == pr.get("headRefOid"):
+        return "ci_rerun_exhausted"
+    if int(entry.get("retry_after_attempt") or 0) > int(state["attempt_counter"]):
+        return "cooling_down"
+    return None
 
-    active = [
-        pr
-        for pr in eligible
-        if state["prs"][str(pr["number"])].get("ci_rerun_active")
-        and state["prs"][str(pr["number"])].get("ci_rerun_head")
-        == pr.get("headRefOid")
-    ]
-    if active:
-        eligible = active
 
-    ready = [
-        pr
-        for pr in eligible
-        if state["prs"][str(pr["number"])].get("retry_after_attempt", 0)
-        <= attempt_counter
-    ]
-    if ready:
-        return (
-            min(
-                ready,
-                key=lambda pr: (
-                    state["prs"][str(pr["number"])]["last_attempt"],
-                    pr["number"],
-                ),
-            ),
-            False,
-        )
+def classify_pass_outcome(reason: str, *, raised: bool) -> str:
+    """What a finished candidate turn allows the pass around it to do next.
 
-    # Every remaining PR is cooling down. Probe the one due soonest rather
-    # than idling forever; repeated failures rotate naturally as each retry
-    # pushes that PR's next-attempt counter farther out.
-    return (
-        min(
-            eligible,
-            key=lambda pr: (
-                state["prs"][str(pr["number"])]["retry_after_attempt"],
-                state["prs"][str(pr["number"])]["last_attempt"],
-                pr["number"],
-            ),
-        ),
-        True,
-    )
+    Fails closed twice over. An unclassified reason ends the pass, and so does
+    any DrainError other than the refusals process_pr() classifies on its way
+    out -- a failed `gh` call inside a branch update or a merge leaves the
+    reason at whatever preceded it, and its effect on GitHub is exactly what
+    this run could not establish.
+    """
+    outcome = PASS_OUTCOMES.get(reason)
+    if outcome is None:
+        return PASS_FAILURE
+    if raised and outcome != PASS_SKIP:
+        return PASS_FAILURE
+    return outcome
 
 
 def get_pr(ctx: RepoContext, number: int) -> dict[str, Any]:
@@ -2872,6 +2937,125 @@ def acquire_lock(
         raise
 
 
+def attempt_candidate(
+    ctx: RepoContext,
+    number: int,
+    *,
+    state: dict[str, Any],
+    gates: GateConfig,
+    dry_run: bool,
+) -> str:
+    """Give one candidate its turn and classify what it did to the pass.
+
+    The report is the same one a single-PR run fills in, so the queue reads its
+    decisions off process_pr()'s own vocabulary rather than re-deriving them
+    from a bare True/False that cannot tell a skippable block from a merge.
+    """
+    report = new_single_pr_report(number)
+    raised = False
+    try:
+        process_pr(
+            ctx,
+            number,
+            dry_run=dry_run,
+            state=state,
+            gates=gates,
+            report=report,
+        )
+    except (ModelUnavailableError, PostMergeAuditError):
+        raise
+    except DrainError as exc:
+        raised = True
+        report["message"] = str(exc)
+    outcome = classify_pass_outcome(report["reason"], raised=raised)
+    if raised:
+        cooldown = record_pr_failure(state, number, report["message"])
+        failure_count = state["prs"][str(number)]["consecutive_failures"]
+        if cooldown:
+            log(
+                f"PR #{number}: attempt failed ({failure_count} consecutive); "
+                f"skipping it for {cooldown} more pass(es): {report['message']}"
+            )
+        else:
+            log(
+                f"PR #{number}: attempt failed ({failure_count} consecutive); "
+                f"the next pass looks at it again: {report['message']}"
+            )
+    else:
+        record_pr_success(state, number)
+    return outcome
+
+
+def run_drain_pass(
+    ctx: RepoContext,
+    eligible: list[dict[str, Any]],
+    *,
+    state: dict[str, Any],
+    gates: GateConfig,
+    dry_run: bool,
+) -> None:
+    """Advance at most one candidate, walking the queue lowest number first.
+
+    A candidate that cannot be advanced right now and says nothing about the
+    ones behind it is skipped, and the same pass continues. A candidate with
+    work in flight -- a branch update, a requested CI rerun, a check still
+    running -- is a barrier: it owns the active lane, and no later pull request
+    is updated, rerun, or merged until it releases it. Anything this pass
+    cannot classify ends it where it stands.
+    """
+    by_number = {pr["number"]: pr for pr in eligible}
+    active = state.get("active_pr")
+    if active is not None and active not in by_number:
+        log(
+            f"PR #{active}: no longer an eligible candidate; "
+            "releasing the active lane"
+        )
+        state["active_pr"] = None
+        active = None
+
+    for number in pass_candidate_order(eligible, active):
+        blocked = candidate_block_reason(by_number[number], state)
+        if blocked is not None:
+            entry = state["prs"][str(number)]
+            if blocked == "ci_rerun_exhausted":
+                log(
+                    f"PR #{number}: its required CI check stayed failed through "
+                    "every automatic rerun of this head; skipping it"
+                )
+            else:
+                log(
+                    f"PR #{number}: cooling down after "
+                    f"{entry.get('consecutive_failures', 0)} consecutive "
+                    f"failure(s) until pass {entry.get('retry_after_attempt')}; "
+                    "skipping it"
+                )
+            if state.get("active_pr") == number:
+                state["active_pr"] = None
+            continue
+
+        attempt = begin_pr_attempt(state, number)
+        log(f"Processing PR #{number} (pass {attempt})")
+        save_drain_state(ctx, state, dry_run=dry_run)
+        outcome = attempt_candidate(
+            ctx, number, state=state, gates=gates, dry_run=dry_run
+        )
+        if outcome == PASS_SKIP:
+            if state.get("active_pr") == number:
+                state["active_pr"] = None
+            save_drain_state(ctx, state, dry_run=dry_run)
+            continue
+        if outcome in (PASS_ADVANCE_HOLD, PASS_BARRIER):
+            state["active_pr"] = number
+        elif outcome == PASS_ADVANCE_DONE:
+            state["active_pr"] = None
+        # A pass failure leaves the lane exactly as it stands: nothing about it
+        # says the candidate holding it has been released.
+        save_drain_state(ctx, state, dry_run=dry_run)
+        return
+
+    save_drain_state(ctx, state, dry_run=dry_run)
+
+
 def loop(
     ctx: RepoContext,
     *,
@@ -2948,58 +3132,23 @@ def loop(
                 )
         save_drain_state(ctx, state, dry_run=dry_run)
 
-        selected, probing_cooldown = choose_next_pr(eligible, state)
-        if selected is not None and not recovered:
-            number = selected["number"]
-            attempt = begin_pr_attempt(state, number)
-            entry = state["prs"][str(number)]
-            failures = entry["consecutive_failures"]
-            if probing_cooldown:
-                log(
-                    f"All approved PRs are cooling down; probing PR #{number} "
-                    f"after {failures} consecutive failure(s)"
-                )
-            else:
-                log(f"Processing PR #{number} (queue attempt {attempt})")
+        # Advanced once per pass, including a pass that recovers or skips
+        # everything, because it is the clock every failure cooldown is
+        # denominated in.
+        begin_drain_pass(state)
+        if recovered:
             save_drain_state(ctx, state, dry_run=dry_run)
-            try:
-                process_pr(
-                    ctx,
-                    number,
-                    dry_run=dry_run,
-                    state=state,
-                    gates=gates,
-                )
-            except (ModelUnavailableError, PostMergeAuditError):
-                raise
-            except DrainError as exc:
-                cooldown = record_pr_failure(state, number, str(exc))
-                failure_count = state["prs"][str(number)][
-                    "consecutive_failures"
-                ]
-                if cooldown:
-                    log(
-                        f"PR #{number}: attempt failed ({failure_count} consecutive); "
-                        f"skipping it for {cooldown} other queue attempt(s): {exc}"
-                    )
-                else:
-                    log(
-                        f"PR #{number}: attempt failed ({failure_count} consecutive); "
-                        f"it remains in the fair rotation: {exc}"
-                    )
-            else:
-                record_pr_success(state, number)
-            save_drain_state(ctx, state, dry_run=dry_run)
+        else:
+            run_drain_pass(ctx, eligible, state=state, gates=gates, dry_run=dry_run)
         if once:
             return
-        retry_entry = (
-            state["prs"].get(str(selected["number"]))
-            if selected is not None
-            else None
-        )
+        # The short cadence follows the lane rather than the last candidate
+        # examined: a pass can end on a barrier owned by an earlier one.
+        active = state.get("active_pr")
+        active_entry = state["prs"].get(str(active)) if active is not None else None
         sleep_seconds = (
             CI_RERUN_INTERVAL_SECONDS
-            if retry_entry and retry_entry.get("ci_rerun_active")
+            if active_entry and active_entry.get("ci_rerun_active")
             else interval
         )
         time.sleep(sleep_seconds)
@@ -3063,7 +3212,8 @@ def prepare_single_pr(
     These live in the queue loop rather than in process_pr(), so a caller that
     went straight to process_pr() would merge things the queue would refuse.
     Only the named PR is read and only its own state entry is touched: no
-    other PR is enumerated, recovered, or moved through the fair rotation, so
+    other PR is enumerated or recovered, no pass counter moves, and neither the
+    queue's candidate order nor its active lane is consulted or changed, so
     polling order and per-PR failure cooldowns are exactly as the service left
     them.
     """
