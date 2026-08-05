@@ -1356,7 +1356,7 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
         time.sleep(0.25)
         current = status_snapshot(job)
         if current["state"] == "stopped":
-            cleared_incidents = resolve_open_incidents(
+            cleared_incidents = resolve_crash_incidents(
                 job,
                 "Cleared when the PR drainer was intentionally stopped.",
             )
@@ -1731,9 +1731,19 @@ def acknowledge_incident(
     return incident
 
 
-def resolve_open_incidents(job: DrainerJob, note: str) -> list[Path]:
+def resolve_crash_incidents(job: DrainerJob, note: str) -> list[Path]:
+    """Resolve this repository's open crash incidents, and only those.
+
+    An intentional stop ends the supervisor, so a `drainer-exit` incident --
+    including a legacy one predating the `kind` field, which `incident_kind`
+    reads as that kind -- is genuinely over. It discharges nothing else: a stop
+    makes no pull request mergeable and completes no post-merge step, so a
+    `merge-conflict` or `cleanup-pending` incident stays open for the poll that
+    can actually clear it. `acknowledge_incident` remains the operator's manual
+    dismissal, for an incident of any kind.
+    """
     resolved: list[Path] = []
-    for path in incident_files(job, open_only=True):
+    for path in incident_files(job, open_only=True, kind=CRASH_INCIDENT_KIND):
         incident = read_json(path)
         if incident is None:
             continue
@@ -1902,7 +1912,11 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("install", help="Install or refresh the launchd job.")
     subparsers.add_parser("start", help="Start the PR drainer.")
     subparsers.add_parser(
-        "stop", help="Stop the PR drainer and clear its open incidents."
+        "stop",
+        help=(
+            "Stop the PR drainer and clear its crash incidents. A merge-conflict "
+            "or cleanup incident stays open; clear it with `ack`."
+        ),
     )
     subparsers.add_parser("status", help="Show live state and the latest open incident.")
 

@@ -1729,11 +1729,11 @@ class PostMergeCleanupTests(ProcessPrFixture):
             [7],
         )
 
-    def test_an_intentional_stop_does_not_hide_a_still_failing_cleanup(self):
-        # Stopping the drainer resolves every open incident for the repository.
-        # A debt that is still outstanding must be reported again on the next
-        # poll rather than stay hidden behind the id of an incident that no
-        # longer exists.
+    def test_an_intentional_stop_leaves_a_still_failing_cleanup_incident_open(self):
+        # Stopping the drainer discharges no post-merge obligation, so the
+        # incident naming that debt survives the stop unchanged -- as the only
+        # incident there ever is for this pull request -- and clears through
+        # its own path, on the pass that finally succeeds.
         stuck = self._stuck_cleanup_record()
         stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT - 1
         self._write_state(
@@ -1749,6 +1749,7 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.fake.script(
             "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
         )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
         self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
 
         self._run_loop()
@@ -1756,25 +1757,29 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.assertEqual([entry["status"] for entry in first], ["open"])
 
         with self._drainer():
-            drain_prs_service.resolve_open_incidents(
+            drain_prs_service.resolve_crash_incidents(
                 drain_prs_service.incident_job(self.ctx.path),
-                "Drainer stopped intentionally.",
+                "Cleared when the PR drainer was intentionally stopped.",
             )
+        survived = self._incidents()
+        self.assertEqual(len(survived), 1)
+        self.assertEqual(survived[0]["incident_id"], first[0]["incident_id"])
+        self.assertEqual(survived[0]["status"], "open")
+        self.assertNotIn("resolved_at", survived[0])
+        self.assertNotIn("resolution", survived[0])
+        # The debt itself is untouched too, so the restarted drainer owes it.
         self.assertEqual(
-            [entry["status"] for entry in self._incidents()], ["resolved"]
+            self._read_state()["prs"]["7"]["cleanup"]["incident"],
+            first[0]["incident_id"],
         )
 
         self._run_loop()
 
         incidents = self._incidents()
-        self.assertEqual(len(incidents), 2)
-        opened = [entry for entry in incidents if entry["status"] == "open"]
-        self.assertEqual(len(opened), 1)
-        self.assertNotEqual(opened[0]["incident_id"], first[0]["incident_id"])
-        self.assertEqual(
-            self._read_state()["prs"]["7"]["cleanup"]["incident"],
-            opened[0]["incident_id"],
-        )
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_id"], first[0]["incident_id"])
+        self.assertEqual(incidents[0]["status"], "resolved")
+        self.assertNotIn("7", self._read_state()["prs"])
 
     def test_an_incident_the_record_never_learned_of_is_still_resolved(self):
         # An incident is written atomically before the state that remembers its

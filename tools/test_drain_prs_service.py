@@ -1181,36 +1181,190 @@ class IncidentSelectionTests(RedirectedControllerTestCase):
             drain_prs_service.incident_files(self.job, open_only=True), [matching]
         )
 
-    def test_intentional_stop_resolves_all_open_incidents_for_its_repository(self):
-        first = self.write_incident(
-            "incident-3.json", repository="acme/widgets", status="open"
-        )
-        second = self.write_incident(
-            "incident-2.json", repository="acme/widgets", status="open"
-        )
-        other = self.write_incident(
-            "incident-1.json", repository="acme/gadgets", status="open"
-        )
-        already = self.write_incident(
-            "incident-0.json", repository="acme/widgets", status="resolved"
-        )
-        resolved = drain_prs_service.resolve_open_incidents(
+    def _stop_fixture(self):
+        """One open incident of every kind for this repository, plus a foreign
+        crash and an already-resolved one, so a stop is judged against the two
+        it may clear and the three it may not touch."""
+        return {
+            "crash": self.write_incident(
+                "incident-5.json",
+                repository="acme/widgets",
+                status="open",
+                kind=drain_prs_service.CRASH_INCIDENT_KIND,
+            ),
+            # No `kind` at all: written before the field existed, and read as a
+            # crash by `incident_kind`.
+            "legacy": self.write_incident(
+                "incident-4.json", repository="acme/widgets", status="open"
+            ),
+            "conflict": self.write_incident(
+                "incident-3.json",
+                repository="acme/widgets",
+                status="open",
+                kind=drain_prs_service.CONFLICT_INCIDENT_KIND,
+                pull_request=42,
+            ),
+            "cleanup": self.write_incident(
+                "incident-2.json",
+                repository="acme/widgets",
+                status="open",
+                kind=drain_prs_service.CLEANUP_INCIDENT_KIND,
+                pull_request=43,
+            ),
+            "other": self.write_incident(
+                "incident-1.json",
+                repository="acme/gadgets",
+                status="open",
+                kind=drain_prs_service.CRASH_INCIDENT_KIND,
+            ),
+            "already": self.write_incident(
+                "incident-0.json",
+                repository="acme/widgets",
+                status="resolved",
+                kind=drain_prs_service.CRASH_INCIDENT_KIND,
+            ),
+        }
+
+    def _assert_untouched_by_the_stop(self, incidents):
+        for name in ("conflict", "cleanup", "other"):
+            incident = json.loads(incidents[name].read_text(encoding="utf-8"))
+            self.assertEqual(incident["status"], "open")
+            self.assertNotIn("resolved_at", incident)
+            self.assertNotIn("resolution", incident)
+
+    def test_intentional_stop_resolves_only_crash_incidents(self):
+        # A stop ends the supervisor, so a crash incident is genuinely over. It
+        # makes no pull request mergeable and completes no post-merge step, so
+        # a conflict or cleanup incident is still owed and stays open for the
+        # poll that can actually clear it.
+        incidents = self._stop_fixture()
+        resolved = drain_prs_service.resolve_crash_incidents(
             self.job, "Cleared when the PR drainer was intentionally stopped."
         )
-        self.assertEqual(set(resolved), {first, second})
-        for path in (first, second):
-            incident = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(set(resolved), {incidents["crash"], incidents["legacy"]})
+        for name in ("crash", "legacy"):
+            incident = json.loads(incidents[name].read_text(encoding="utf-8"))
             self.assertEqual(incident["status"], "resolved")
             self.assertIn("resolved_at", incident)
             self.assertEqual(
                 incident["resolution"],
                 "Cleared when the PR drainer was intentionally stopped.",
             )
+        self._assert_untouched_by_the_stop(incidents)
         self.assertEqual(
-            json.loads(other.read_text(encoding="utf-8"))["status"], "open"
+            json.loads(incidents["already"].read_text(encoding="utf-8"))["status"],
+            "resolved",
         )
+
+    def test_a_stop_reports_the_incidents_it_actually_resolved(self):
+        # The count is what the operator is told a stop did, so it has to be
+        # the two crashes it cleared rather than the four that were open.
+        incidents = self._stop_fixture()
+        running = {"state": "running", "active_repo": str(self.repo)}
+        stopped = {"state": "stopped", "active_repo": None}
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[running, stopped, stopped],
+            ),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+        ):
+            result = drain_prs_service.stop_service(self.job)
+
+        self.assertEqual(result["cleared_incidents"], 2)
+        self._assert_untouched_by_the_stop(incidents)
+
+    def test_acknowledgement_still_resolves_an_incident_of_any_kind(self):
+        # The stop path became kind-selective; the operator's manual dismissal
+        # did not, so `ack` remains the way to clear a conflict or cleanup
+        # incident a stop now leaves open.
+        kinds = (
+            drain_prs_service.CRASH_INCIDENT_KIND,
+            drain_prs_service.CONFLICT_INCIDENT_KIND,
+            drain_prs_service.CLEANUP_INCIDENT_KIND,
+        )
+        for index, kind in enumerate(kinds, start=1):
+            with self.subTest(kind=kind):
+                incident_id = f"incident-2026010{index}T000000Z-1"
+                path = self.write_incident(
+                    f"{incident_id}.json",
+                    incident_id=incident_id,
+                    kind=kind,
+                    status="open",
+                    repository="acme/widgets",
+                )
+                acknowledged = drain_prs_service.acknowledge_incident(
+                    self.job, incident_id, "handled by hand"
+                )
+                self.assertEqual(acknowledged["status"], "resolved")
+                self.assertEqual(acknowledged["resolution"], "handled by hand")
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(stored["status"], "resolved")
+                self.assertIn("resolved_at", stored)
+
+        # And the unnamed form, which takes the newest open incident whatever
+        # its kind rather than the newest crash.
+        newest = self.write_incident(
+            "incident-20270101T000000Z-1.json",
+            incident_id="incident-20270101T000000Z-1",
+            kind=drain_prs_service.CLEANUP_INCIDENT_KIND,
+            status="open",
+            repository="acme/widgets",
+        )
+        drain_prs_service.acknowledge_incident(self.job, None, None)
         self.assertEqual(
-            json.loads(already.read_text(encoding="utf-8"))["status"], "resolved"
+            json.loads(newest.read_text(encoding="utf-8"))["status"], "resolved"
+        )
+
+    def test_incidents_open_before_a_start_neither_gate_it_nor_look_new(self):
+        # A conflict or cleanup incident now survives an intentional stop, so
+        # the next start routinely finds one already open. Starting stays
+        # ungated on incidents, and the startup window must not mistake a
+        # survivor for a drainer that died on the way up.
+        for name, kind, number in (
+            ("incident-2.json", drain_prs_service.CONFLICT_INCIDENT_KIND, 42),
+            ("incident-1.json", drain_prs_service.CLEANUP_INCIDENT_KIND, 43),
+        ):
+            self.write_incident(
+                name,
+                incident_id=name.removesuffix(".json"),
+                repository="acme/widgets",
+                status="open",
+                kind=kind,
+                pull_request=number,
+                summary=f"PR #{number} still needs attention",
+            )
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        running = {
+            "state": "running",
+            "drainer_pid": 4242,
+            "active_repo": str(self.repo),
+        }
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "install_job"),
+            mock.patch.object(drain_prs_service, "START_STABILITY_SECONDS", 0),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[stopped, running, running],
+            ),
+        ):
+            result = drain_prs_service.start_service(self.job)
+
+        self.assertTrue(result["started"])
+        self.assertIn(
+            ["launchctl", "kickstart", drain_prs_service.launch_target(self.job)],
+            self.commands,
+        )
+        # A start resolves nothing either: both survivors are still open.
+        self.assertEqual(
+            len(drain_prs_service.incident_files(self.job, open_only=True)), 2
         )
 
     def test_conflict_incidents_are_keyed_per_pull_request(self):
@@ -1501,7 +1655,7 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         service_log.assert_called_once()
         write_incident.assert_not_called()
 
-    def test_stop_clears_incidents_after_the_drainer_has_stopped(self):
+    def test_stop_clears_crash_incidents_after_the_drainer_has_stopped(self):
         running = {"state": "running", "active_repo": str(self.repo)}
         stopped = {"state": "stopped", "active_repo": None}
         with (
@@ -1513,16 +1667,16 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
             mock.patch.object(drain_prs_service.time, "sleep"),
             mock.patch.object(
                 drain_prs_service,
-                "resolve_open_incidents",
+                "resolve_crash_incidents",
                 return_value=[Path("incident-1.json"), Path("incident-2.json")],
-            ) as resolve_open_incidents,
+            ) as resolve_crash_incidents,
         ):
             result = drain_prs_service.stop_service(self.job)
         self.assertIn(
             ["launchctl", "kill", "SIGTERM", drain_prs_service.launch_target(self.job)],
             self.commands,
         )
-        resolve_open_incidents.assert_called_once_with(
+        resolve_crash_incidents.assert_called_once_with(
             self.job, "Cleared when the PR drainer was intentionally stopped."
         )
         self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
