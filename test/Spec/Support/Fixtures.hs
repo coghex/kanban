@@ -4,6 +4,12 @@ module Spec.Support.Fixtures
     showText,
     baseIssue,
     basePullRequest,
+    withSubIssues,
+    withSubIssuesLackingSummary,
+    nativeTrackerIssue,
+    localSubIssue,
+    foreignSubIssue,
+    fixtureRepository,
     zeroChildTracker,
     zeroChildDiagnostics,
     isTrackerHeaderEntry,
@@ -39,10 +45,56 @@ import Kanban.CLI (BorderPolicy (..), ColorPolicy (..), Options (..))
 import Kanban.Config
 import Kanban.Domain
 import Kanban.Workflow (deriveBoard)
+import Spec.Support.Json (fixtureRepositoryIdentity)
 
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
-  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0 []
+  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0 SubIssuesNotRequested []
+
+-- | The issue with GitHub's whole native sub-issue answer attached: the
+-- immediate children in the order returned, and the summary counts GitHub
+-- keeps over all of them.
+withSubIssues :: [SubIssueLink] -> Int -> Int -> Issue -> Issue
+withSubIssues children completed total issue =
+  issue
+    { issueSubIssues =
+        SubIssuesReported (SubIssueRelationships fixtureRepository (Just children) 0 (Just (SubIssueProgress completed total)))
+    }
+
+-- | The half-answer a partial-error response produces: the relationships
+-- arrived, GitHub's summary did not, and the item is marked incomplete.
+withSubIssuesLackingSummary :: [SubIssueLink] -> Issue -> Issue
+withSubIssuesLackingSummary children issue =
+  issue
+    { issueSubIssues = SubIssuesReported (SubIssueRelationships fixtureRepository (Just children) 0 Nothing),
+      issueDataGaps = issue.issueDataGaps <> [SubIssuesUnavailable]
+    }
+
+-- | A tracker issue whose only membership source is GitHub's native
+-- sub-issues: the @epic@ label, a body with no child list of any kind, and
+-- the relationships GitHub reported for it.
+nativeTrackerIssue :: Int -> [SubIssueLink] -> Int -> Int -> Issue
+nativeTrackerIssue number children completed total =
+  withSubIssues
+    children
+    completed
+    total
+    (baseIssue number []) {issueLabels = [Label "epic" "5319e7"], issueBody = "Background only, with no child list."}
+
+-- | A native child of the dashboard's own repository.
+localSubIssue :: Int -> Bool -> SubIssueLink
+localSubIssue number closed = SubIssueLink number fixtureRepository closed
+
+-- | A native child GitHub reports under a different repository, which is the
+-- case that must never claim the same-numbered card on this board.
+foreignSubIssue :: Int -> Bool -> SubIssueLink
+foreignSubIssue number closed = SubIssueLink number "elsewhere/other" closed
+
+-- | GitHub's identity for the repository these fixtures are fetched from,
+-- shared with the raw page payloads so a link built here and one decoded from
+-- 'Spec.Support.Json' agree about which children are local.
+fixtureRepository :: Text
+fixtureRepository = Data.Text.pack fixtureRepositoryIdentity
 
 -- | A tracker whose child section is recognized but yields nothing usable:
 -- its single row is malformed, so it is diagnosed and dropped. The tracker
@@ -65,7 +117,7 @@ isTrackerHeaderEntry (TrackerHeader _) = True
 isTrackerHeaderEntry _ = False
 
 fixtureTracker :: Int -> Tracker
-fixtureTracker number = Tracker (baseIssue number []) 0 0 Map.empty []
+fixtureTracker number = Tracker (baseIssue number []) ChecklistMembership 0 0 Map.empty []
 
 fixtureMembership :: Int -> Int -> TrackerMembership
 fixtureMembership trackerNumber childNumber = TrackerMembership (fixtureTracker trackerNumber) (TrackerChild childNumber Nothing 0 False)
@@ -150,6 +202,7 @@ cardFixtureIssue =
       issueUpdatedAt = epoch,
       issueLabelOverflow = 2,
       issueAssigneeOverflow = 0,
+      issueSubIssues = SubIssuesNotRequested,
       issueDataGaps = []
     }
 

@@ -50,6 +50,12 @@ data FetchState = FetchState
     fetchMorePullRequests :: Bool,
     issuesTruncated :: Bool,
     pullRequestsTruncated :: Bool,
+    -- | Whether this refresh is still asking for native sub-issue
+    -- relationships. A deployment whose GraphQL schema has no such fields
+    -- rejects the whole query at validation time, which would fail every
+    -- refresh for every repository; the fetch drops the selection once and
+    -- carries on with checklist-only membership instead.
+    fetchSubIssues :: Bool,
     -- | One warning per page that arrived with GraphQL errors. A refresh spans
     -- several pages and only the last one builds the result, so a page's
     -- errors have to be carried here or they are lost with the state that
@@ -79,7 +85,7 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
   where
     reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
 
-    initialState = FetchState [] [] Nothing Nothing True True False False []
+    initialState = FetchState [] [] Nothing Nothing True True False False True []
 
     fetchPages state
       | not state.fetchMoreIssues && not state.fetchMorePullRequests = do
@@ -95,10 +101,38 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
       | otherwise = do
           pageResult <- fetchPage guard limits repository state
           case pageResult of
-            Left providerError -> pure (Left providerError)
+            Left providerError
+              | state.fetchSubIssues && subIssueSchemaUnsupported providerError.providerErrorMessage ->
+                  fetchPages
+                    state
+                      { fetchSubIssues = False,
+                        fetchWarnings = state.fetchWarnings <> [subIssuesUnsupportedWarning]
+                      }
+              | otherwise -> pure (Left providerError)
             Right page -> case advanceState limits state page of
               Left providerError -> pure (Left providerError)
               Right nextState -> fetchPages nextState
+
+-- | Whether a failed page is GitHub rejecting the sub-issue selection itself
+-- rather than failing the request for some other reason.
+--
+-- A field the schema does not have is a validation error, so GitHub answers
+-- with no @data@ at all and the refresh has no page to degrade: §12's
+-- second membership source has to be dropped from the query, not from the
+-- response. The match needs both halves -- one of the field names /and/ the
+-- vocabulary GraphQL validation uses for an unknown field -- so an ordinary
+-- server error that happens to quote the query cannot silently disable
+-- native membership for the rest of the refresh.
+subIssueSchemaUnsupported :: Text -> Bool
+subIssueSchemaUnsupported message =
+  any (`Text.isInfixOf` folded) ["subissues", "subissuessummary"]
+    && any (`Text.isInfixOf` folded) ["doesn't exist", "does not exist", "cannot query field", "unknown field", "undefined field"]
+  where
+    folded = Text.toCaseFold message
+
+subIssuesUnsupportedWarning :: Text
+subIssuesUnsupportedWarning =
+  "GitHub did not recognize native sub-issue fields; tracker membership uses checklists only"
 
 decodeGitHubItems :: LazyByteString.ByteString -> Either String ([Issue], [PullRequest])
 decodeGitHubItems input = do
@@ -166,7 +200,7 @@ advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError
 advanceState limits previous page = first explainStructuralFailure $ do
   issueConnection <- requireConnection "issues" previous.fetchMoreIssues page.pageIssues
   pullRequestConnection <- requireConnection "pull requests" previous.fetchMorePullRequests page.pagePullRequests
-  let newIssues = maybe [] (.connectionNodes) issueConnection
+  let newIssues = map (forgetSubIssueRequest previous.fetchSubIssues) (maybe [] (.connectionNodes) issueConnection)
       newPullRequests = maybe [] (.connectionNodes) pullRequestConnection
       allIssues = take issueLimit (previous.fetchedIssues <> newIssues)
       allPullRequests = take pullRequestLimit (previous.fetchedPullRequests <> newPullRequests)
@@ -184,6 +218,7 @@ advanceState limits previous page = first explainStructuralFailure $ do
         fetchMorePullRequests = morePullRequests,
         issuesTruncated = previous.issuesTruncated || truncatedIssues,
         pullRequestsTruncated = previous.pullRequestsTruncated || truncatedPullRequests,
+        fetchSubIssues = previous.fetchSubIssues,
         fetchWarnings = previous.fetchWarnings <> pageWarnings
       }
   where
@@ -194,6 +229,21 @@ advanceState limits previous page = first explainStructuralFailure $ do
       providerError
         { providerErrorMessage = withGraphQLErrors page.pageGraphQLErrors providerError.providerErrorMessage
         }
+
+-- | Separates \"GitHub was asked and did not answer\" from \"nobody asked\".
+--
+-- The decoder cannot tell the two apart: a page fetched without the sub-issue
+-- selection looks exactly like one whose fields GitHub nulled out. Only the
+-- fetch knows which query it sent, so it is the fetch that downgrades an
+-- unreported answer to an unrequested one -- and drops the gap with it, since
+-- a board that never asked has nothing missing to mark every card amber over.
+forgetSubIssueRequest :: Bool -> Issue -> Issue
+forgetSubIssueRequest True issue = issue
+forgetSubIssueRequest False issue =
+  issue
+    { issueSubIssues = SubIssuesNotRequested,
+      issueDataGaps = filter (/= SubIssuesUnavailable) issue.issueDataGaps
+    }
 
 requireConnection :: Text -> Bool -> Maybe (Connection item) -> Either ProviderError (Maybe (Connection item))
 requireConnection _ False connection = Right connection
@@ -251,7 +301,7 @@ graphqlArguments limits repository state =
   ]
     <> cursorArgument "issueCursor" state.issueCursor
     <> cursorArgument "pullRequestCursor" state.pullRequestCursor
-    <> ["-f", "query=" <> Text.unpack graphqlQuery]
+    <> ["-f", "query=" <> Text.unpack (graphqlQuery state.fetchSubIssues)]
   where
     issuePageSize = max 1 (min pageLimit (limits.limitsMaxOpenIssues - length state.fetchedIssues))
     pullRequestPageSize = max 1 (min pageLimit (limits.limitsMaxOpenPullRequests - length state.fetchedPullRequests))
@@ -268,8 +318,20 @@ boolText :: Bool -> String
 boolText True = "true"
 boolText False = "false"
 
-graphqlQuery :: Text
-graphqlQuery =
+-- | The page query, with or without §12's native sub-issue selection.
+--
+-- The selection is a plain part of the issue node rather than an
+-- @\@include@-guarded one, because a GraphQL directive still leaves the field
+-- to be validated against the schema: a deployment that does not have it
+-- rejects the query whatever the flag says. Two texts is what makes the
+-- fallback in 'fetchPages' possible at all.
+--
+-- Sub-issue relationships are requested for every issue on the page rather
+-- than only for trackers, since tracker recognition happens after decoding;
+-- only the tracker ones are ever consumed. @first: 100@ is GitHub's own
+-- per-parent sub-issue limit, so one page holds every immediate child.
+graphqlQuery :: Bool -> Text
+graphqlQuery withSubIssues =
   Text.unlines
     [ "query(",
       "  $owner: String!,",
@@ -282,34 +344,46 @@ graphqlQuery =
       "  $fetchPullRequests: Boolean!",
       ") {",
       "  repository(owner: $owner, name: $name) {",
+      "    nameWithOwner",
       "    issues(first: $issuePageSize, after: $issueCursor, states: OPEN) @include(if: $fetchIssues) {",
       "      nodes {",
       "        number title body url createdAt updatedAt",
       "        labels(first: 20) { totalCount nodes { name color } }",
-      "        assignees(first: 10) { totalCount nodes { login } }",
-      "      }",
-      "      pageInfo { hasNextPage endCursor }",
-      "    }",
-      "    pullRequests(first: $pullRequestPageSize, after: $pullRequestCursor, states: OPEN) @include(if: $fetchPullRequests) {",
-      "      nodes {",
-      "        number title body url createdAt updatedAt isDraft",
-      "        baseRefName headRefName author { login }",
-      "        labels(first: 20) { totalCount nodes { name color } }",
-      "        closingIssuesReferences(first: 20) { totalCount nodes { number } }",
-      "        reviewDecision mergeable mergeStateStatus",
-      "        statusCheckRollup {",
-      "          contexts(first: 100) {",
-      "            totalCount",
-      "            nodes {",
-      "              __typename",
-      "              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { slug } } }",
-      "              ... on StatusContext { context state createdAt creator { login } }",
-      "            }",
-      "          }",
-      "        }",
-      "      }",
-      "      pageInfo { hasNextPage endCursor }",
-      "    }",
-      "  }",
-      "}"
+      "        assignees(first: 10) { totalCount nodes { login } }"
     ]
+    <> subIssueSelection
+    <> Text.unlines
+      [ "      }",
+        "      pageInfo { hasNextPage endCursor }",
+        "    }",
+        "    pullRequests(first: $pullRequestPageSize, after: $pullRequestCursor, states: OPEN) @include(if: $fetchPullRequests) {",
+        "      nodes {",
+        "        number title body url createdAt updatedAt isDraft",
+        "        baseRefName headRefName author { login }",
+        "        labels(first: 20) { totalCount nodes { name color } }",
+        "        closingIssuesReferences(first: 20) { totalCount nodes { number } }",
+        "        reviewDecision mergeable mergeStateStatus",
+        "        statusCheckRollup {",
+        "          contexts(first: 100) {",
+        "            totalCount",
+        "            nodes {",
+        "              __typename",
+        "              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { slug } } }",
+        "              ... on StatusContext { context state createdAt creator { login } }",
+        "            }",
+        "          }",
+        "        }",
+        "      }",
+        "      pageInfo { hasNextPage endCursor }",
+        "    }",
+        "  }",
+        "}"
+      ]
+  where
+    subIssueSelection
+      | withSubIssues =
+          Text.unlines
+            [ "        subIssues(first: 100) { totalCount nodes { number state repository { nameWithOwner } } }",
+              "        subIssuesSummary { total completed }"
+            ]
+      | otherwise = ""

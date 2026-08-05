@@ -12,21 +12,31 @@ import Kanban.Tracker
   ( implementationSortKey,
     parseTrackerBody,
     parseTrackerChildren,
-    renderTrackerDiagnostic
+    renderTrackerDiagnostic,
+    trackerDiagnosticsForIssue
   )
 import Kanban.UI.Selection (normalizeCollapsedRow, refreshOverlay, visibleSelectionRows)
-import Kanban.UI.Theme (pendingAttr, trackerAttr, trackerHeaderAttribute)
+import Kanban.UI.Theme (itemHasAmberWarning, pendingAttr, trackerAttr, trackerHeaderAttribute)
 import Kanban.UI.Types (Overlay (..))
-import Kanban.Workflow (deriveBoard)
+import Kanban.Workflow (deriveBoard, entryItem)
 import Spec.Support.Fixtures
   ( baseIssue,
+    entryImplementationKey,
     epoch,
     fixtureTracker,
+    foreignSubIssue,
     isStandaloneIssue,
+    isTrackerHeaderEntry,
+    itemNumber,
+    localSubIssue,
+    nativeTrackerIssue,
+    testOptions,
+    withSubIssues,
+    withSubIssuesLackingSummary,
     zeroChildDiagnostics,
     zeroChildTracker
   )
-import Spec.Support.Render (detailsRows, renderDetails)
+import Spec.Support.Render (cardInterior, detailsRows, renderCard, renderDetails)
 import Test.Hspec
 
 spec :: Spec
@@ -63,6 +73,148 @@ spec = do
           board = deriveBoard config (RepoSnapshot [tracker] [] epoch False False)
       detailsRows (renderDetails board (IssueItem tracker)) "Tracker warnings"
         `shouldBe` map (("• " <>) . renderTrackerDiagnostic) zeroChildDiagnostics
+
+  -- §12's second membership source. It applies only where the checklist
+  -- yields nothing, and it changes what a tracker's progress counts, so the
+  -- assertions below are about those two boundaries and the diagnostics that
+  -- must stop being drawn once the second source answers.
+  describe "native sub-issue membership" $ do
+    let board issues pullRequests = deriveBoard defaultWorkflowConfig (RepoSnapshot issues pullRequests epoch False False)
+        issueColumn (Board columns) = Map.findWithDefault [] Issues columns
+        trackerOf (Tracked tracking _) = Just tracking.trackingPrimary.membershipTracker
+        trackerOf (TrackerHeader tracker) = Just tracker
+        trackerOf (Standalone _) = Nothing
+        firstTrackingRow entry = take 1 (map Data.Text.strip (cardInterior (renderCard testOptions False entry 46)))
+
+    it "renders a native-only tracker's local children in the order GitHub returned" $ do
+      let tracker = nativeTrackerIssue 700 [localSubIssue 12 False, localSubIssue 10 False, localSubIssue 11 False] 0 3
+          entries = issueColumn (board (tracker : [baseIssue number [] | number <- [10, 11, 12]]) [])
+      map (itemNumber . entryItem) entries `shouldBe` [12, 10, 11]
+      map entryImplementationKey entries `shouldBe` [Nothing, Nothing, Nothing]
+      trackerDiagnosticsForIssue defaultWorkflowConfig tracker `shouldBe` []
+
+    -- The positional label a keyless checklist child already gets. It is the
+    -- child's place in GitHub's list, not an implementation key inferred from
+    -- anything, which is what requirement 4 forbids.
+    it "labels native children by their position in GitHub's list" $ do
+      let tracker = nativeTrackerIssue 700 [localSubIssue 12 False, localSubIssue 10 False] 0 2
+          entries = issueColumn (board (tracker : [baseIssue number [] | number <- [10, 12]]) [])
+      concatMap firstTrackingRow entries `shouldBe` ["step 1 · tracker #700", "step 2 · tracker #700"]
+
+    -- Precedence is decided on what the body parsed to, not on the children
+    -- that survive visibility pruning: a checklist whose every child is off
+    -- the board is still a checklist, and must not silently become native.
+    it "keeps a checklist authoritative even once pruning has emptied it" $ do
+      let tracker =
+            withSubIssues
+              [localSubIssue 10 False]
+              0
+              1
+              (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "## Children\n- [ ] #99 — A1: Off the board"}
+          entries = issueColumn (board [tracker, baseIssue 10 []] [])
+      entries `shouldSatisfy` any (isStandaloneIssue 10)
+      case filter isTrackerHeaderEntry entries >>= maybe [] pure . trackerOf of
+        [rendered] -> do
+          rendered.trackerSource `shouldBe` ChecklistMembership
+          (rendered.trackerCompleted, rendered.trackerTotal) `shouldBe` (1, 1)
+        rendered -> expectationFailure ("unexpected tracker headers: " <> show rendered)
+
+    -- GitHub counts every sub-issue it has, including the closed and the
+    -- foreign ones, so the off-board completion adjustment checklist
+    -- membership needs would push the displayed progress past the number
+    -- GitHub reported.
+    it "takes native progress from GitHub's summary and never re-counts an off-board child" $ do
+      let tracker = nativeTrackerIssue 700 [localSubIssue 10 False, localSubIssue 11 False, localSubIssue 12 True] 1 3
+      case issueColumn (board [tracker, baseIssue 10 []] []) >>= maybe [] pure . trackerOf of
+        [rendered] -> do
+          rendered.trackerSource `shouldBe` NativeMembership
+          (rendered.trackerCompleted, rendered.trackerTotal) `shouldBe` (1, 3)
+          Map.keys rendered.trackerChildren `shouldBe` [10]
+        rendered -> expectationFailure ("unexpected trackers: " <> show rendered)
+
+    it "never lets a cross-repository child claim the same-numbered local issue" $ do
+      let tracker = nativeTrackerIssue 700 [foreignSubIssue 10 False] 0 1
+          entries = issueColumn (board [tracker, baseIssue 10 []] [])
+      entries `shouldSatisfy` any (isStandaloneIssue 10)
+      case filter isTrackerHeaderEntry entries >>= maybe [] pure . trackerOf of
+        [rendered] -> do
+          Map.keys rendered.trackerChildren `shouldBe` []
+          (rendered.trackerCompleted, rendered.trackerTotal) `shouldBe` (0, 1)
+          rendered.trackerDiagnostics `shouldBe` []
+        rendered -> expectationFailure ("unexpected tracker headers: " <> show rendered)
+
+    it "keeps the empty-child-list diagnostic only when GitHub reported no sub-issues at all" $ do
+      trackerDiagnosticsForIssue defaultWorkflowConfig (nativeTrackerIssue 700 [] 0 0)
+        `shouldBe` [TrackerSectionMissing]
+
+    -- A partial-error response can null the summary and leave the
+    -- relationships, and those children still belong under their tracker: the
+    -- alternative is scattering the group across the board over a missing
+    -- count. Progress falls back to the relationships that did arrive rather
+    -- than rendering 0/0 above visible children.
+    it "keeps native children whose summary never arrived, and counts them" $ do
+      let tracker =
+            withSubIssuesLackingSummary
+              [localSubIssue 10 False, localSubIssue 11 True]
+              (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "Background only, with no child list."}
+          entries = issueColumn (board [tracker, baseIssue 10 []] [])
+      map (itemNumber . entryItem) entries `shouldBe` [10]
+      case entries >>= maybe [] pure . trackerOf of
+        [rendered] -> do
+          rendered.trackerSource `shouldBe` NativeMembership
+          (rendered.trackerCompleted, rendered.trackerTotal) `shouldBe` (1, 2)
+          rendered.trackerDiagnostics `shouldBe` []
+        rendered -> expectationFailure ("unexpected trackers: " <> show rendered)
+      -- The card still says the answer was incomplete.
+      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch False False)
+        `shouldSatisfy` any (Data.Text.isInfixOf "Issue #700: incomplete data")
+
+    -- An answer that never arrived is an unverified absence. Reporting it as
+    -- a tracker with no child list would present a fetch failure as a
+    -- statement about the tracker's contents.
+    it "does not diagnose a missing child list when GitHub's answer never arrived" $ do
+      let tracker =
+            (nativeTrackerIssue 700 [] 0 0)
+              { issueSubIssues = SubIssuesUnreported,
+                issueDataGaps = [SubIssuesUnavailable]
+              }
+      trackerDiagnosticsForIssue defaultWorkflowConfig tracker `shouldBe` []
+      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+        `shouldSatisfy` any (Data.Text.isInfixOf "Issue #700: incomplete data")
+
+    -- Suppression is narrow: it removes the two diagnostics that say there is
+    -- no child list, and nothing that reports malformed checklist content.
+    it "keeps genuine malformed-checklist diagnostics under native membership" $ do
+      let tracker =
+            withSubIssues
+              [localSubIssue 10 False]
+              0
+              1
+              (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "## Children\n- [?] #3 — A1: Malformed"}
+      trackerDiagnosticsForIssue defaultWorkflowConfig tracker `shouldBe` [TrackerMalformedCheckbox 2]
+
+    -- 'trackerDiagnosticsForIssue' feeds four independent surfaces, so
+    -- suppression is asserted at all four rather than at whichever one is
+    -- easiest to reach.
+    it "stops warning at every diagnostic surface once native membership answers" $ do
+      let native = nativeTrackerIssue 700 [localSubIssue 10 False] 0 1
+          checklistless = (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "Background only, with no child list."}
+          bannerFor tracker = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch False False)
+          cardRowsFor tracker = cardInterior (renderCard testOptions False (Standalone (IssueItem tracker)) 46)
+          overlayRowsFor tracker = detailsRows (renderDetails (board [tracker, baseIssue 10 []] []) (IssueItem tracker)) "Tracker warnings"
+          missingChecklists = Data.Text.isInfixOf "malformed or missing child checklists"
+          trackerRow = Data.Text.isInfixOf "TRACKER ·"
+      -- The refresh banner, the card's inline rows, the details overlay, and
+      -- the amber styling, with the same tracker before and after GitHub's
+      -- relationships arrive.
+      bannerFor checklistless `shouldSatisfy` any missingChecklists
+      bannerFor native `shouldNotSatisfy` any missingChecklists
+      cardRowsFor checklistless `shouldSatisfy` any trackerRow
+      cardRowsFor native `shouldNotSatisfy` any trackerRow
+      overlayRowsFor checklistless `shouldSatisfy` not . null
+      overlayRowsFor native `shouldBe` []
+      itemHasAmberWarning defaultWorkflowConfig (IssueItem checklistless) `shouldBe` True
+      itemHasAmberWarning defaultWorkflowConfig (IssueItem native) `shouldBe` False
 
   describe "tracker checklist parsing" $ do
     let keysUnderChildren rows = map (.trackerChildImplementationKey) (parseTrackerChildren [] ("## Children\n" <> rows))

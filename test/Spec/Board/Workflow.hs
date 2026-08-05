@@ -21,12 +21,19 @@ import Spec.Support.Fixtures
     fixtureBoard,
     fixtureStandaloneEntry,
     fixtureTrackedEntry,
+    foreignSubIssue,
     isTrackerHeaderEntry,
     itemNumber,
+    localSubIssue,
+    nativeTrackerIssue,
     zeroChildDiagnostics,
     zeroChildTracker
   )
 import Test.Hspec
+
+isStandaloneEntry :: ColumnEntry -> Bool
+isStandaloneEntry (Standalone _) = True
+isStandaloneEntry _ = False
 
 spec :: Spec
 spec = do
@@ -123,7 +130,31 @@ spec = do
                 issueBody = "## Children\n- [ ] #2 — A1: Child outside the live board"
               }
           Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
-      Map.findWithDefault [] Issues columns `shouldBe` [TrackerHeader (Tracker tracker 1 1 Map.empty [])]
+      Map.findWithDefault [] Issues columns `shouldBe` [TrackerHeader (Tracker tracker ChecklistMembership 1 1 Map.empty [])]
+
+    -- Requirement 5: a pull request reaches its tracker through the child it
+    -- links, so a native child has to feed the same membership machinery a
+    -- checklist child does -- primary selection, MULTI-TRACKED and all.
+    it "gives a pull request the tracker memberships of the native child it links" $ do
+      let first = nativeTrackerIssue 700 [localSubIssue 10 False] 0 1
+          second = nativeTrackerIssue 701 [localSubIssue 10 False] 0 1
+          snapshot = RepoSnapshot [first, second, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      case Map.findWithDefault [] Reviewing columns of
+        [Tracked tracking item] -> do
+          itemNumber item `shouldBe` 20
+          tracking.trackingPrimary.membershipTracker.trackerIssue.issueNumber `shouldBe` 700
+          map (.membershipTracker.trackerIssue.issueNumber) tracking.trackingAdditional `shouldBe` [701]
+        entries -> expectationFailure ("unexpected reviewing entries: " <> show entries)
+
+    -- A cross-repository child is not this board's #10, so a pull request
+    -- linking the local #10 must not inherit the foreign parent's tracker.
+    it "keeps a pull request out of a tracker whose same-numbered child is another repository's" $ do
+      let elsewhere = nativeTrackerIssue 700 [foreignSubIssue 10 False] 0 1
+          snapshot = RepoSnapshot [elsewhere, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch False False
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [20]
+      Map.findWithDefault [] Reviewing columns `shouldSatisfy` all isStandaloneEntry
 
     it "sorts standalone issues awaiting rereview ahead of tracker groups and problems" $ do
       let tracker =

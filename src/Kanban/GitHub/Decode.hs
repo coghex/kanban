@@ -43,7 +43,12 @@ data Connection item = Connection
   deriving stock (Eq, Show)
 
 data GitHubPage = GitHubPage
-  { pageIssues :: Maybe (Connection Issue),
+  { -- | GitHub's own @owner\/name@ for the repository the page was fetched
+    -- from. Native sub-issue membership is decided against this rather than
+    -- against the locally configured owner and name, so a repository reached
+    -- through a rename redirect still recognizes its own children.
+    pageRepository :: Maybe Text,
+    pageIssues :: Maybe (Connection Issue),
     pagePullRequests :: Maybe (Connection PullRequest),
     -- | The messages from the response's GraphQL @errors@ array, in the order
     -- GitHub reported them. GraphQL answers a partly-resolvable query with
@@ -123,9 +128,10 @@ instance FromJSON GitHubPage where
         dataObject <- maybe (fail "GitHub GraphQL response contained no data") pure dataValue
         repositoryValue <- dataObject .:? "repository"
         repositoryObject <- maybe (fail "GitHub repository was not found") pure repositoryValue
-        flip (withObject "repository") repositoryObject $ \repository ->
-          GitHubPage
-            <$> parseOptionalConnection parseIssue repository "issues"
+        flip (withObject "repository") repositoryObject $ \repository -> do
+          identity <- repository .:? "nameWithOwner"
+          GitHubPage identity
+            <$> parseOptionalConnection (parseIssue identity) repository "issues"
             <*> parseOptionalConnection parsePullRequest repository "pullRequests"
             <*> pure errors
 
@@ -156,10 +162,11 @@ parseLabel = withObject "label" $ \object ->
 parseAssignee :: Value -> Parser Assignee
 parseAssignee = withObject "assignee" $ \object -> Assignee <$> object .: "login"
 
-parseIssue :: Value -> Parser Issue
-parseIssue = withObject "issue" $ \object -> do
+parseIssue :: Maybe Text -> Value -> Parser Issue
+parseIssue repositoryIdentity = withObject "issue" $ \object -> do
   (labels, labelOverflow, labelGaps) <- parseNodes parseLabel object "labels" LabelsUnavailable
   (assignees, assigneeOverflow, assigneeGaps) <- parseNodes parseAssignee object "assignees" AssigneesUnavailable
+  (subIssues, subIssueGaps) <- parseSubIssues repositoryIdentity object
   Issue
     <$> object .: "number"
     <*> object .: "title"
@@ -171,7 +178,8 @@ parseIssue = withObject "issue" $ \object -> do
     <*> object .: "updatedAt"
     <*> pure labelOverflow
     <*> pure assigneeOverflow
-    <*> pure (labelGaps <> assigneeGaps)
+    <*> pure subIssues
+    <*> pure (labelGaps <> assigneeGaps <> subIssueGaps)
 
 parsePullRequest :: Value -> Parser PullRequest
 parsePullRequest = withObject "pull request" $ \object -> do
@@ -224,6 +232,80 @@ parseNodes itemParser object fieldName gap = do
       if totalCount < length nodes
         then fail "nested connection totalCount was smaller than its node list"
         else pure (nodes, totalCount - length nodes, [])
+
+-- | An issue's native sub-issue relationships, plus the 'DataGap' to record
+-- when GitHub's answer cannot be trusted as complete.
+--
+-- Membership can only be decided against the repository the page belongs to,
+-- so a response that did not carry that identity fails closed to
+-- 'SubIssuesUnreported' rather than guessing which children are local. So
+-- does a response in which neither the @subIssues@ connection nor the
+-- @subIssuesSummary@ arrived. Either half on its own is kept, because a
+-- partial-error response nulls exactly the fields that errored and discarding
+-- delivered children over a missing summary would scatter a tracker's group
+-- across the board; so is a connection whose @totalCount@ exceeds the
+-- children it delivered. Each of those marks the item incomplete, and none of
+-- them is ever a tracker GitHub said has no children.
+--
+-- A connection that is present stays strict in the same places
+-- 'parseNodes' is: a missing @totalCount@, a malformed child, and a
+-- @totalCount@ below the node list all still fail the decode. The summary is
+-- held to the same standard, because a tracker's progress is rendered
+-- verbatim from it: a negative count, more completed than exist, or a total
+-- below the relationships GitHub itself listed are all responses this build
+-- cannot reason about, and would otherwise reach a header as @3/2 complete@
+-- or as @0/0 complete@ above two visible children.
+--
+-- A total /above/ the connection's own count is the one direction that is
+-- merely incomplete rather than impossible -- a sub-issue in a repository
+-- this token cannot see is counted by GitHub and absent from the node list --
+-- so it is kept, and counted among the children that did not arrive.
+parseSubIssues :: Maybe Text -> Object -> Parser (NativeSubIssues, [DataGap])
+parseSubIssues Nothing _ = pure (SubIssuesUnreported, [SubIssuesUnavailable])
+parseSubIssues (Just identity) object = do
+  connectionValue <- object .:? "subIssues"
+  summaryValue <- object .:? "subIssuesSummary"
+  connection <- traverse (withObject "sub-issue connection" parseChildren) connectionValue
+  let connectionCount = maybe 0 snd connection
+  progress <- traverse (withObject "sub-issue summary" (parseSummary connectionCount)) summaryValue
+  let delivered = maybe [] fst connection
+      omitted = max connectionCount (maybe 0 (.subIssuesTotal) progress) - length delivered
+      relationships = SubIssueRelationships identity (fmap fst connection) omitted progress
+      -- Anything short of both halves, in full, leaves the board holding less
+      -- than GitHub has.
+      answered = omitted == 0 && connection /= Nothing && progress /= Nothing
+  pure $ case (connection, progress) of
+    (Nothing, Nothing) -> (SubIssuesUnreported, [SubIssuesUnavailable])
+    _ -> (SubIssuesReported relationships, [SubIssuesUnavailable | not answered])
+  where
+    parseChildren connection = do
+      nodeValues <- connection .:? "nodes" .!= []
+      totalCount <- connection .: "totalCount"
+      children <- traverse parseSubIssueLink nodeValues
+      if totalCount < length children
+        then fail "sub-issue connection totalCount was smaller than its node list"
+        else pure (children, totalCount)
+    parseSummary connectionCount summary = do
+      completed <- summary .: "completed"
+      total <- summary .: "total"
+      maybe (pure (SubIssueProgress completed total)) fail (summaryFault connectionCount completed total)
+
+-- | Why a sub-issue summary cannot be believed, if it cannot. Each of these
+-- describes a pair of counts no consistent response can produce, as opposed
+-- to one that merely did not deliver everything.
+summaryFault :: Int -> Int -> Int -> Maybe String
+summaryFault connectionCount completed total
+  | completed < 0 || total < 0 = Just "sub-issue summary reported a negative count"
+  | completed > total = Just "sub-issue summary reported more completed sub-issues than it has"
+  | total < connectionCount = Just "sub-issue summary total was smaller than its relationship connection"
+  | otherwise = Nothing
+
+parseSubIssueLink :: Value -> Parser SubIssueLink
+parseSubIssueLink = withObject "sub-issue" $ \child -> do
+  number <- child .: "number"
+  state <- child .: "state"
+  repository <- withObject "sub-issue repository" (.: "nameWithOwner") =<< child .: "repository"
+  pure (SubIssueLink number repository ((state :: Text) == "CLOSED"))
 
 parseIssueNumber :: Value -> Parser Int
 parseIssueNumber = withObject "issue reference" (.: "number")

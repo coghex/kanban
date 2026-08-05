@@ -90,6 +90,7 @@ issue number title body labels assignees =
       issueUpdatedAt = at 10 (number `mod` 60),
       issueLabelOverflow = 0,
       issueAssigneeOverflow = 0,
+      issueSubIssues = SubIssuesNotRequested,
       issueDataGaps = []
     }
 
