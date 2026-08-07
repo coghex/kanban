@@ -211,18 +211,18 @@ Findings 2 and 3 were not refiled. Both had open issues predating this audit:
 Worth knowing before either is picked up: `UI.hs` has grown from the 4,340 lines
 #50 cites to 5,706, so every approximate line range in that issue is stale.
 
-### Wave 2 — deferred
+### Wave 2 — resolved deferrals
 
-Findings **4 and 7** remain, each marked `[deferred]` with a note stating precisely
-what has to happen before it can be filed. Two distinct reasons:
+Findings **4 and 7** were the last two deferrals. Both preconditions cleared, and
+both are now closed as `[no-issue]`:
 
-- **Blocked on sequencing** (4) — evidence is adequate, but it would be a fourth
-  conflicting change to `tools/drain_prs.py` and `tools/drain_prs_service.py`.
-  File after #147 lands.
-- **Premise unverified** (7) — rests on something not yet checked that could
-  materially shrink or invalidate it: whether `tools/kanban_config.py`'s
-  repositories table already provides the per-target configuration the finding
-  says is missing.
+- **Blocked on sequencing** (4) — #147 landed, so the file could be re-read in
+  its new shape. The read confirmed a phase-ordered module below the ~5,000-line
+  Python threshold recorded by #159, with no demonstrated defect that a package
+  split would prevent.
+- **Premise unverified** (7) — verification showed that `.drain-prs.json` is
+  already loaded from each target repository's root. The shared repositories
+  table does not duplicate those drainer settings, but it does not need to.
 
 Findings **2, 3, 5, 5a, and 8** have all left this wave, and how they left is worth
 recording, because deferral earned its keep in three different ways:
@@ -238,8 +238,9 @@ recording, because deferral earned its keep in three different ways:
   two of its supporting claims did not. It is closed as an accepted risk, not as a
   refuted finding — see its Disposition note.
 
-Findings **5a, 8, and 10** are closed as `[no-issue]`; each carries a Disposition
-note giving the reason and the consequence of leaving the code unchanged.
+Findings **4, 5a, 7, 8, and 10** are closed as `[no-issue]`; each carries a
+Disposition note giving the reason and the consequence of leaving the code
+unchanged.
 
 ---
 
@@ -428,13 +429,15 @@ predicates collapse into one function over `AgentSlot`.
 > It is 3,967 today, still below that bar. The re-read this deferral
 > asked for supports that decision rather than overturning it: the file is
 > phase-ordered, and its strongest candidate seam — the autostash and fast-forward
-> block at `tools/drain_prs.py:1781-2205` — has exactly two external entry points
-> (`fast_forward_default_branch` at 2306, `sweep_snapshot_anchors` at 3638) and its
-> own 1,069-line test file. That is the `Review.hs` outcome, not the `UI.hs` one.
+> cluster from `_relocate_untracked_files` through `_require_merged_index` — has
+> exactly two non-private entry points, `sweep_snapshot_anchors` and
+> `fast_forward_default_branch`, and its own 1,193-line
+> `tools/test_fast_forward_stash.py`. That is the `Review.hs` outcome, not the
+> `UI.hs` one.
 > The stated fix shape is costlier than written: `tools/` uses flat sibling
 > imports, so promoting it to a package would repoint `DRAINER_PATH`, the
-> `SCRIPT_MODULES` vendoring fixture at `tools/test_single_pr_drain.py:40`, and
-> nine test modules, preventing no demonstrated defect. Revisit if the file
+> `SCRIPT_MODULES` vendoring fixture in `tools/test_single_pr_drain.py`, and
+> multiple test modules, preventing no demonstrated defect. Revisit if the file
 > crosses the ~5,000-line bar #159 set.
 
 **Severity: High** — this is the component that merges pull requests, and it is
