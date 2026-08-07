@@ -483,12 +483,40 @@ any of them, and drops the record only once every one of them is done.
 - Obligations still outstanding after three passes are recorded as an open
   incident, which Kanban shows in the sidebar. The drainer keeps retrying them
   and keeps draining every other approved pull request; the incident resolves
-  itself once the last obligation succeeds. Stopping the drainer does not clear
-  it: a stop completes no step, so the incident stands until the pass that
-  discharges the debt does, or until it is dismissed with `ack`.
+  itself once the last obligation succeeds — including when the obligation that
+  finishes it is discharged by the final pass of a stop. Stopping the drainer
+  never clears an incident whose debt survives the stop: that one stands until
+  a later pass discharges it, or until it is dismissed with `ack`.
 - A merge attempts its own obligations immediately, including a single
   pull-request run; what it leaves outstanding is retried by the polling loop's
-  sweep, so a stopped drainer discharges nothing it still owes.
+  sweep and by one final pass on the way out of an intentional stop.
+- That final pass is what keeps a stop from walking away from recorded debt.
+  The drainer holds the repository run lock for its whole lifetime, so nothing
+  else can work these obligations while it is alive, and nothing works them at
+  all once it exits — the next start may be days away. So the stop spends a
+  bounded slice of its own shutdown on them:
+  - Only already-recorded obligations. The pass starts no new per-pull-request
+    work: no branch update, no merge, no rereview, and no pull-request read. A
+    queue entry with no recorded cleanup is left entirely alone.
+  - Eight seconds, and no obligation starts after them — not the next pull
+    request's, and not the next step of the one in flight. Every command inside
+    the pass is bounded by the same deadline, so an obligation that wedges is
+    left outstanding rather than holding the stop open. A fast-forward stopped
+    that way keeps the recovery contract above: tracked changes stay
+    recoverable from the autostash anchor or `git stash list`, untracked files
+    stay in their holding directory, and the fast-forward stays owed.
+  - A step the budget left unattempted is not a failed pass. It has resisted
+    nothing, so it moves no failed-pass counter and escalates no incident; it
+    is simply still owed.
+  - Whatever the pass does not discharge stays outstanding and visible —
+    recorded in the queue state, reported by `status`, and under whatever
+    incident it had raised. Nothing on the stop path clears it.
+  - `stop` reports `cleanup_discharged` and `cleanup_outstanding`, both read
+    off the persisted state either side of the stop, and both `null` when that
+    state could not be read. A stop that could not discharge everything still
+    succeeds: outstanding debt is a debt to retry, not a failed stop.
+  - A stop with nothing recorded runs no command and writes no state, so it
+    costs exactly what it did before.
 - Outstanding obligations are visible in `status` before any of that: its
   `cleanup_obligations` field names every pull request that still owes, its
   remaining steps, how many passes have failed, and the last error — whether or

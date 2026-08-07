@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import plistlib
+import re
 import subprocess
 import tempfile
 import threading
@@ -1679,15 +1680,101 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         resolve_crash_incidents.assert_called_once_with(
             self.job, "Cleared when the PR drainer was intentionally stopped."
         )
-        self.assertEqual(result, {"stopped": True, "cleared_incidents": 2, **stopped})
+        self.assertEqual(
+            result,
+            {
+                "stopped": True,
+                "cleared_incidents": 2,
+                # Snapshots carrying no projection at all: unknown debt, which
+                # is never reported as nothing owed.
+                "cleanup_discharged": None,
+                "cleanup_outstanding": None,
+                **stopped,
+            },
+        )
+
+    def _owing(self, *counts):
+        """A `cleanup_obligations` projection: one pull request per count,
+        owing that many steps."""
+        return [
+            {
+                "pull_request": 40 + index,
+                "steps": ["closing acme/widgets#7"] * count,
+                "failed_passes": 0,
+                "last_error": None,
+            }
+            for index, count in enumerate(counts)
+        ]
+
+    def _stop_reporting(self, before, after):
+        """Stop a running drainer whose persisted debt reads `before` at the
+        signal and `after` once it has exited."""
+        running = {
+            "state": "running",
+            "active_repo": str(self.repo),
+            "cleanup_obligations": before,
+        }
+        stopped = {
+            "state": "stopped",
+            "active_repo": None,
+            "cleanup_obligations": after,
+        }
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[running, stopped, stopped],
+            ),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service, "resolve_crash_incidents", return_value=[]
+            ),
+        ):
+            return drain_prs_service.stop_service(self.job)
+
+    def test_stop_reports_the_obligations_its_final_pass_discharged(self):
+        # Two pull requests owing five steps between them at the signal; one
+        # step left on disk once the drainer has exited.
+        result = self._stop_reporting(self._owing(3, 2), self._owing(1))
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["cleanup_discharged"], 4)
+        self.assertEqual(result["cleanup_outstanding"], 1)
+
+    def test_a_stop_that_discharged_nothing_still_succeeds_and_says_so(self):
+        result = self._stop_reporting(self._owing(2), self._owing(2))
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["cleanup_discharged"], 0)
+        self.assertEqual(result["cleanup_outstanding"], 2)
+
+    def test_a_stop_owing_nothing_reports_nothing_discharged_or_outstanding(self):
+        result = self._stop_reporting([], [])
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["cleanup_discharged"], 0)
+        self.assertEqual(result["cleanup_outstanding"], 0)
+
+    def test_unreadable_queue_state_reports_unknown_rather_than_nothing_owed(self):
+        # Either end being unknown makes the difference unknowable; reporting
+        # zero discharged would claim the stop had verified something.
+        self.assertIsNone(self._stop_reporting(None, self._owing(1))["cleanup_discharged"])
+        result = self._stop_reporting(self._owing(1), None)
+        self.assertIsNone(result["cleanup_discharged"])
+        self.assertIsNone(result["cleanup_outstanding"])
+
+    def test_debt_recorded_during_the_stop_is_not_counted_against_it(self):
+        # A merge that landed between the two reads records new obligations.
+        # The stop failed to discharge none of them.
+        result = self._stop_reporting(self._owing(1), self._owing(3))
+        self.assertEqual(result["cleanup_discharged"], 0)
+        self.assertEqual(result["cleanup_outstanding"], 3)
 
 
 class CleanupObligationTests(RedirectedControllerTestCase):
     """The post-merge debt `status` projects out of the drainer's queue state.
 
     A merge attempts its own cleanup immediately, but what that leaves
-    outstanding is retried only by the polling loop's sweep, so a stopped
-    drainer neither discharges nor mentions it, and debt under
+    outstanding is retried only by the polling loop's sweep and by the bounded
+    pass a stop makes on its way out, so debt outliving both is owed by a
+    drainer no longer working it, and debt under
     `CLEANUP_PASSES_BEFORE_INCIDENT` has raised no incident to be seen
     through. This projection is the only surface that names it.
     """
@@ -2026,6 +2113,40 @@ class MirroredCleanupVocabularyTests(unittest.TestCase):
         )
         for step in described:
             self.assertNotIn("unknown cleanup step", step)
+
+
+class StopBudgetFitsTheTransitionTests(unittest.TestCase):
+    """Issue #216 requirement 5: signal, final cleanup pass, and confirmed exit
+    all have to fit inside the timeout Kanban gives a drainer transition, so
+    pressing `d` never reports a timeout for a stop whose pass ran.
+
+    Three separately-declared numbers, in two languages, that only hold
+    together as a chain. These pin the chain rather than any one of them.
+    """
+
+    def _kanban_transition_timeout(self):
+        source = (
+            Path(__file__).resolve().parent.parent / "src" / "Kanban" / "Drainer.hs"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r"^transitionTimeoutSeconds\s*=\s*(\d+)$", source, re.MULTILINE
+        )
+        self.assertIsNotNone(match, "Drainer.hs no longer declares this literally")
+        return int(match.group(1))
+
+    def test_the_pass_leaves_the_stop_room_to_confirm_the_exit(self):
+        # The pass is only part of the stop: the signal still has to reach the
+        # drainer and its exit still has to be observed, both inside the same
+        # STOP_TIMEOUT_SECONDS window.
+        self.assertLess(
+            drain_prs.SHUTDOWN_CLEANUP_BUDGET_SECONDS,
+            drain_prs_service.STOP_TIMEOUT_SECONDS / 2,
+        )
+
+    def test_the_whole_stop_fits_the_timeout_kanban_gives_a_transition(self):
+        self.assertLess(
+            drain_prs_service.STOP_TIMEOUT_SECONDS, self._kanban_transition_timeout()
+        )
 
 
 if __name__ == "__main__":

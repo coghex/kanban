@@ -1344,11 +1344,41 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
     raise ServiceError("Timed out waiting for the PR drainer to start.")
 
 
+def obligation_count(obligations: list[dict[str, Any]] | None) -> int | None:
+    """How many individual cleanup steps a `cleanup_obligations` projection
+    names, or None when the queue state could not be read as one.
+
+    Unknown is never zero, on the same rule the projection itself follows: a
+    state nobody could read is not a state owing nothing.
+    """
+    if obligations is None:
+        return None
+    return sum(len(entry["steps"]) for entry in obligations)
+
+
+def discharged_between(before: int | None, after: int | None) -> int | None:
+    """What a stop's final cleanup pass discharged, from the debt recorded
+    before the signal and the debt recorded after the exit.
+
+    Read off the persisted state at both ends rather than reported by the
+    stopping process: the debt the stop is answerable for is the debt on disk,
+    and a pass whose own write failed did not discharge what it attempted.
+    Never negative -- a merge that landed between the two reads records new
+    debt, which is not something this stop failed to discharge.
+    """
+    if before is None or after is None:
+        return None
+    return max(0, before - after)
+
+
 def stop_service(job: DrainerJob) -> dict[str, Any]:
     snapshot = status_snapshot(job)
     state = snapshot["state"]
     if state == "stopped":
         return {"stopped": False, "message": "PR drainer is already stopped", **snapshot}
+    # Sampled before the signal, because the drainer discharges what it can on
+    # its way out and this is the last reading taken before it does.
+    owed_before = obligation_count(snapshot.get("cleanup_obligations"))
     if state == "external":
         pid = snapshot["drainer_pid"]
         if not isinstance(pid, int):
@@ -1366,10 +1396,17 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
                 job,
                 "Cleared when the PR drainer was intentionally stopped.",
             )
+            final = status_snapshot(job)
+            owed_after = obligation_count(final.get("cleanup_obligations"))
+            # A stop that could not discharge everything still succeeded: the
+            # remainder is reported here and stays recorded, projected, and
+            # under whatever incident it raised, for the next start to retry.
             return {
                 "stopped": True,
                 "cleared_incidents": len(cleared_incidents),
-                **status_snapshot(job),
+                "cleanup_discharged": discharged_between(owed_before, owed_after),
+                "cleanup_outstanding": owed_after,
+                **final,
             }
     raise ServiceError("Timed out waiting for the PR drainer to stop.")
 

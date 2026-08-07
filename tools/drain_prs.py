@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -45,6 +47,19 @@ MODEL_TIMEOUT_SECONDS = 60 * 60
 STATE_VERSION = 4
 FAILURES_BEFORE_BACKOFF = 2
 CLEANUP_PASSES_BEFORE_INCIDENT = 3
+# What an intentional stop gives the final post-merge cleanup pass. The service
+# allows a stop `STOP_TIMEOUT_SECONDS` (20) to signal, let this process
+# discharge what it can, and confirm the exit, and Kanban gives the whole
+# controller invocation 30. Under half the inner budget leaves the rest for the
+# in-flight command the floor below still allows, process teardown, and the
+# controller's confirmation polling.
+SHUTDOWN_CLEANUP_BUDGET_SECONDS = 8.0
+# No obligation *starts* once the budget is spent, but one already in flight
+# still needs a bound of its own. The floor is what keeps that bound usable:
+# the restoration a timed-out fast-forward runs on its way out is a path back
+# to a user's local changes, and handing it a zero-length timeout would fail it
+# by construction.
+SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS = 1.0
 MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
 FINALIZE_MODEL = "gpt-5.6-terra"
@@ -71,6 +86,11 @@ LOG_DIR: Path | None = None
 # Single-PR runs own stdout for their one JSON result, so the human log lines
 # go to stderr instead. Never true for the polling service.
 LOG_TO_STDERR = False
+# When set, the `time.monotonic()` reading past which no command may still be
+# running. Only the shutdown pass sets it, through command_deadline(): every
+# other caller of run() is under the polling loop's own cadence and must keep
+# waiting as long as it takes.
+COMMAND_DEADLINE: float | None = None
 
 SINGLE_PR_SCHEMA = "drain-prs-single-pr"
 SINGLE_PR_SCHEMA_VERSION = 1
@@ -249,6 +269,50 @@ def fail(message: str) -> "NoReturn":
     raise SystemExit(1)
 
 
+@contextlib.contextmanager
+def command_deadline(deadline: float) -> Iterator[None]:
+    """Bound every command run inside the block by one `time.monotonic()` mark.
+
+    A deadline rather than a per-command timeout because the caller's promise
+    is about total elapsed time, not about any single command: an obligation
+    that runs six commands must not get six times the budget. Restored on the
+    way out so nothing outside the block inherits a bound it never asked for.
+    """
+    global COMMAND_DEADLINE
+    previous = COMMAND_DEADLINE
+    COMMAND_DEADLINE = deadline
+    try:
+        yield
+    finally:
+        COMMAND_DEADLINE = previous
+
+
+def command_deadline_expired() -> bool:
+    """Whether an active deadline has passed.
+
+    False whenever none is set, so only a caller that asked to be bounded ever
+    declines work for want of time.
+    """
+    return COMMAND_DEADLINE is not None and time.monotonic() >= COMMAND_DEADLINE
+
+
+def effective_timeout(timeout: float | None) -> float | None:
+    """The bound one command actually gets, narrowed by any active deadline.
+
+    Never below SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS even when the deadline is
+    already spent: a command reached after it is one an in-flight obligation
+    still has to run, and the overrun that floor allows is bounded by the few
+    commands one obligation has left, while a zero-length timeout would fail
+    them all -- including the ones that restore a user's local changes.
+    """
+    if COMMAND_DEADLINE is None:
+        return timeout
+    remaining = max(
+        SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS, COMMAND_DEADLINE - time.monotonic()
+    )
+    return remaining if timeout is None else min(timeout, remaining)
+
+
 def run(
     args: list[str],
     *,
@@ -256,8 +320,9 @@ def run(
     check: bool = True,
     capture_output: bool = True,
     input_text: str | None = None,
-    timeout: int | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    timeout = effective_timeout(timeout)
     try:
         proc = subprocess.run(
             args,
@@ -2318,12 +2383,24 @@ def run_cleanup_pass(
 
     One failing step never skips the ones after it: each is attempted, and the
     record is narrowed to exactly those that are still outstanding. Returns one
-    message per step that failed, empty when the record is fully discharged.
+    message per step that failed -- which is not the same as the record being
+    discharged, since a caller running under a deadline can leave steps it
+    never started; `record["pending"]` is what says what is still owed.
     """
     number = record["pr"]["number"]
     remaining: list[dict[str, Any]] = []
     errors: list[str] = []
     for obligation in record["pending"]:
+        if command_deadline_expired():
+            # A bounded pass starts nothing more once its budget is spent.
+            # Untouched rather than attempted-and-failed: nothing was learned
+            # about this step, so it is neither an error nor a failed pass.
+            remaining.append(obligation)
+            log(
+                f"PR #{number}: out of time before "
+                f"{describe_cleanup_obligation(obligation)}; still outstanding"
+            )
+            continue
         try:
             run_cleanup_obligation(ctx, record, obligation, dry_run=dry_run)
         # OSError alongside DrainError so the never-raises contract holds for
@@ -2354,7 +2431,10 @@ def advance_pending_cleanup(
     """
     number = record["pr"]["number"]
     errors = run_cleanup_pass(ctx, record, dry_run=dry_run)
-    if not errors:
+    # What is left in the record, never merely what failed: a pass bounded by a
+    # deadline can end with nothing failed and steps still owed, and treating
+    # that as finished would drop obligations nothing ever attempted.
+    if not record["pending"]:
         record["failed_passes"] = 0
         record["last_error"] = None
         record["incident"] = None
@@ -2374,6 +2454,16 @@ def advance_pending_cleanup(
                     f"{resolved['incident_id']}"
                 )
         return True
+
+    if not errors:
+        # Nothing failed; the pass ran out of budget before starting the rest.
+        # No counter moves and nothing escalates -- an obligation nobody
+        # attempted has not resisted anything, and the next pass starts it.
+        log(
+            f"PR #{number}: {len(record['pending'])} post-merge cleanup step(s) "
+            "left unattempted for want of time; will retry"
+        )
+        return False
 
     record["failed_passes"] = int(record.get("failed_passes", 0)) + 1
     record["last_error"] = "; ".join(errors)
@@ -2434,6 +2524,129 @@ def complete_pending_cleanup(
         log(f"PR #{number}: post-merge cleanup complete")
         return True
     return False
+
+
+def recorded_cleanup_prs(state: dict[str, Any]) -> list[int]:
+    """The pull requests this queue state records outstanding cleanup for.
+
+    The recorded obligations are the whole selection: an entry with no
+    `cleanup` value is a pull request whose standing would have to be read
+    from GitHub to learn anything about it, and reading it is exactly what a
+    caller working only recorded debt must not do.
+
+    A key that is not a pull-request number names nothing that can be worked,
+    so it is left where it is rather than raised over: the debt under it stays
+    recorded and projected, which is what an unworkable obligation gets.
+    """
+    owing: list[int] = []
+    for key, entry in state["prs"].items():
+        if not isinstance(entry, dict) or entry.get("cleanup") is None:
+            continue
+        try:
+            owing.append(int(key))
+        except (TypeError, ValueError):
+            log(f"Queue state records cleanup under an unusable key {key!r}; skipping it")
+    return sorted(owing)
+
+
+def outstanding_obligations(state: dict[str, Any], number: int) -> int:
+    """How many obligations one entry still records, counting anything it
+    cannot read as none: this is arithmetic for a report, never a decision
+    about what is owed."""
+    entry = state["prs"].get(str(number))
+    record = entry.get("cleanup") if isinstance(entry, dict) else None
+    pending = record.get("pending") if isinstance(record, dict) else None
+    return len(pending) if isinstance(pending, list) else 0
+
+
+def discharge_recorded_cleanup(
+    ctx: RepoContext,
+    *,
+    dry_run: bool,
+    budget_seconds: float = SHUTDOWN_CLEANUP_BUDGET_SECONDS,
+) -> int:
+    """Work the cleanup already recorded in the queue state once, under a
+    budget, and report how many obligations that discharged.
+
+    The shutdown counterpart to the polling loop's sweep. This process holds
+    the repository run lock for its whole lifetime, so it is the only thing
+    that can work these obligations while it is alive -- and once it exits,
+    nothing works them until the next start, which may be days away. So an
+    intentional stop spends a bounded slice of its own shutdown on them.
+
+    Bounded twice over, because either bound alone leaves a stop that hangs.
+    No obligation starts once the budget is spent, and every command inside
+    the pass is bounded by the same deadline, so an obligation that wedges
+    stops the pass instead of the stop.
+
+    Never raises, and never widens its own remit: it starts no per-pull-request
+    work of any kind, reads no pull request, and leaves everything it could not
+    discharge exactly as it found it -- still recorded, still projected by
+    `status`, and still under whatever incident it had raised. Outstanding debt
+    is a debt to retry, not a reason to fail a stop.
+    """
+    try:
+        state = load_drain_state(ctx)
+    except DrainError as exc:
+        log(f"Could not read the queue state for a final cleanup pass: {exc}")
+        return 0
+    owing = recorded_cleanup_prs(state)
+    if not owing:
+        # Nothing recorded is the common case, and it must cost a stop
+        # nothing: no command, no state write, and no state file where the
+        # repository had none.
+        return 0
+
+    deadline = time.monotonic() + budget_seconds
+    log(
+        f"Stopping: {len(owing)} pull request(s) still owe post-merge cleanup; "
+        f"attempting them for up to {budget_seconds:g}s"
+    )
+    discharged = 0
+    try:
+        with command_deadline(deadline):
+            for number in owing:
+                if time.monotonic() >= deadline:
+                    log(
+                        "Final cleanup pass ran out of time; "
+                        f"PR #{number} and any after it were not attempted"
+                    )
+                    break
+                before = outstanding_obligations(state, number)
+                try:
+                    if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
+                        forget_pr(state, number)
+                        discharged += before
+                        continue
+                except (DrainError, OSError) as exc:
+                    # advance_pending_cleanup() absorbs a failing obligation
+                    # itself; this covers the bookkeeping around it -- writing
+                    # an incident, say -- so one unwritable path cannot cost
+                    # the pull requests after this one their attempt.
+                    log(f"PR #{number}: final cleanup pass failed: {exc}")
+                discharged += before - outstanding_obligations(state, number)
+    # A shutdown pass that raised would take the stop with it, and on the
+    # single-pull-request path it would take the caller's result document too.
+    except Exception as exc:
+        log(f"Final cleanup pass failed unexpectedly: {exc!r}")
+    except KeyboardInterrupt:
+        log("Final cleanup pass interrupted; leaving the rest outstanding")
+
+    try:
+        # Written once, after the pass: what it discharged must be durable
+        # before this process releases the run lock, and what it did not is
+        # what the next start has to retry.
+        save_drain_state(ctx, state, dry_run=dry_run)
+    except OSError as exc:
+        # The pass still happened; only the record of it is lost, which leaves
+        # discharged obligations to be re-verified as already done.
+        log(f"Could not persist the final cleanup pass: {exc}")
+    still_owed = sum(outstanding_obligations(state, number) for number in owing)
+    log(
+        f"Final cleanup pass discharged {discharged} obligation(s); "
+        f"{still_owed} still outstanding"
+    )
+    return discharged
 
 
 def fetch_pr_head(ctx: RepoContext, pr: dict[str, Any]) -> bool:
@@ -3593,6 +3806,10 @@ def main() -> None:
     # log directory either.
     LOG_DIR = None if args.dry_run else Path(args.log_dir).expanduser().resolve()
     lock_handle = None
+    # Bound before the try so the interrupt handler can tell a repository this
+    # run never resolved from one it did: only the latter has a run lock held
+    # and a queue state worth a final pass.
+    ctx: RepoContext | None = None
     # Built before anything can fail, and handed to drain_one_pr() rather than
     # created inside it, so every handler below reports what was already known.
     report = new_single_pr_report(number)
@@ -3690,6 +3907,15 @@ def main() -> None:
                 )
             fail(f"drain_prs.py error: {exc}")
         except KeyboardInterrupt:
+            # The intentional-stop path, for both modes: the launchd runner
+            # forwards SIGINT to this process group, and `stop_service` sends
+            # the same signal straight to an unmanaged drainer. The run lock is
+            # still held here, so this is the last moment anything can work
+            # what a merge already recorded -- and the first thing after it is
+            # the caller's own result document, which the pass must never
+            # write to or displace, so it goes first and speaks only to stderr.
+            if ctx is not None:
+                discharge_recorded_cleanup(ctx, dry_run=args.dry_run)
             if single:
                 emit_single_pr_result(
                     single_pr_result(

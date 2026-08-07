@@ -1215,9 +1215,10 @@ a countdown.
 - The status response also projects the post-merge cleanup a merged pull
   request still owes, which no other surface reports: a merge attempts its own
   cleanup immediately, but what that attempt leaves outstanding is retried only
-  by the polling loop's sweep, so a stopped drainer neither discharges nor
-  mentions it, and debt below the incident threshold has raised no incident to
-  be seen through. The projection names each owing pull
+  by the polling loop's sweep and by one bounded pass on the way out of an
+  intentional stop, so debt that outlives both is owed by a drainer that is no
+  longer working it, and debt below the incident threshold has raised no
+  incident to be seen through. The projection names each owing pull
   request, its outstanding steps in the wording the drainer uses for an
   incident, its failed-pass count, and its last error, ordered by pull-request
   number so an unchanged state answers identically every poll. It distinguishes
@@ -1232,6 +1233,21 @@ a countdown.
   exactly as it did. Debt alone changes neither the drainer's color nor the
   incidents panel: obligations under retry are ordinary behavior, and
   escalating them stays the open incident's job.
+- An intentional stop discharges what it can of that debt before it completes.
+  The drainer holds the repository run lock for its whole lifetime, so the stop
+  is the last moment anything can work these obligations before the next start,
+  and it spends a bounded slice of its shutdown doing so — only obligations
+  already recorded, never a new merge, branch update, rereview, or
+  pull-request read. The budget is small enough that the whole transition —
+  signal, final pass, and confirmed exit — still fits inside the timeout `d`
+  gives a controller invocation, and an obligation that wedges is left
+  outstanding rather than holding the stop open past it. What the pass does not
+  discharge stays recorded, stays in the projection above, and stays under
+  whatever incident it raised; what the pass finishes resolves that incident on
+  the same self-clearing path any other completing pass uses. The stop reports
+  how many obligations it discharged and how many remain, both read off the
+  persisted state either side of it, and succeeds either way: outstanding debt
+  is a debt to retry, not a failed stop.
 - A controller invocation runs as its own process group, and ownership of that
   group is established while the controller is known alive rather than at
   cleanup time, so a timeout can terminate what the controller started even

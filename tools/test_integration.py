@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1399,10 +1400,10 @@ class MergeConflictIncidentTests(ProcessPrFixture):
         )
 
 
-class PostMergeCleanupTests(ProcessPrFixture):
-    """Issue #23: a successful merge is durably recorded before its cleanup is
-    attempted, so a cleanup failure is a debt the queue retries rather than a
-    silent leak of the linked issues, the branches and the worktree.
+class PostMergeCleanupFixture(ProcessPrFixture):
+    """Scaffolding for the durable post-merge cleanup record: a real temporary
+    repository whose queue state can be written and read back, drainer
+    incidents redirected into it, and a scriptable fake `gh`.
     """
 
     def setUp(self):
@@ -1501,6 +1502,13 @@ class PostMergeCleanupTests(ProcessPrFixture):
         self.fake.script(
             "gh", ["issue", "close", "99"], stderr="gh: server error", exit_code=1
         )
+
+
+class PostMergeCleanupTests(PostMergeCleanupFixture):
+    """Issue #23: a successful merge is durably recorded before its cleanup is
+    attempted, so a cleanup failure is a debt the queue retries rather than a
+    silent leak of the linked issues, the branches and the worktree.
+    """
 
     def test_a_failed_issue_close_does_not_skip_the_rest_of_the_pass(self):
         self._script_pr_view()
@@ -2108,6 +2116,314 @@ class PostMergeCleanupTests(ProcessPrFixture):
 
         self.assertEqual(self.state_path.read_bytes(), before)
         self._assert_nothing_was_cleaned_up()
+
+
+class StopCleanupPassTests(PostMergeCleanupFixture):
+    """Issue #216: an intentional stop works the recorded post-merge cleanup
+    one last time, under a budget, before it lets the process go.
+
+    The drainer holds the repository run lock for its whole lifetime, so it is
+    the only thing that can discharge these obligations while it is alive, and
+    nothing discharges them once it exits -- the next start may be days away.
+    So the stop spends a bounded slice of its own shutdown on exactly the debt
+    already recorded, and leaves whatever it cannot finish recorded, projected
+    and escalated exactly as it found it.
+    """
+
+    def _full_cleanup_record(self):
+        """PR #42 owing all five obligations: the linked issue, the worktree,
+        both head branches, and the fast-forward."""
+        return drain_prs.plan_cleanup(
+            {
+                "number": 42,
+                "headRefName": "issue-99-demo",
+                "headRefOid": self.head_sha,
+                "closingIssuesReferences": [
+                    {
+                        "number": 99,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                ],
+            }
+        )
+
+    def _state_owing(self, **entries):
+        self._write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": entries,
+            }
+        )
+
+    def _stop(self, **kwargs):
+        with self._drainer():
+            return drain_prs.discharge_recorded_cleanup(
+                self.ctx, dry_run=False, **kwargs
+            )
+
+    def _gh_calls(self, *prefix):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][: len(prefix)] == list(prefix)
+        ]
+
+    def test_a_stop_discharges_the_recorded_debt_and_drops_the_record(self):
+        self._state_owing(
+            **{"42": self._entry(self.head_sha, cleanup=self._full_cleanup_record())}
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        discharged = self._stop()
+
+        self.assertEqual(discharged, 5)
+        self.assertEqual(len(self._issue_close_calls(99)), 1)
+        self.assertFalse(self.feature_wt.exists())
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertFalse(git_ref_exists(self.bare, "refs/heads/issue-99-demo"))
+        self.assertEqual(
+            run_git(["rev-parse", "master"], cwd=self.main), self.merge_commit_sha
+        )
+        # The record is the only thing that says these are owed, so a fully
+        # discharged one is dropped -- durably, before the lock is released.
+        self.assertNotIn("42", self._read_state()["prs"])
+
+    def test_the_pass_never_reads_a_pull_request_to_find_work(self):
+        self._state_owing(
+            **{"42": self._entry(self.head_sha, cleanup=self._full_cleanup_record())}
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        self._stop()
+
+        # Not `gh pr view`, and not the queue refresh either: a stop discharges
+        # what a merge recorded, and starts no new per-pull-request work.
+        self.assertEqual(self._gh_calls("pr", "view"), [])
+        self.assertEqual(self._gh_calls("pr", "list"), [])
+        self.assertEqual(self._gh_calls("pr", "merge"), [])
+
+    def test_an_entry_owing_nothing_is_left_entirely_alone(self):
+        # An approved pull request still in the queue with no recorded
+        # cleanup: learning anything about it means reading it, which is the
+        # per-pull-request work a stop must not start.
+        self._state_owing(**{"42": self._entry(self.head_sha)})
+        before = self.state_path.read_bytes()
+
+        self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.fake.calls("gh"), [])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_stop_owing_nothing_costs_the_repository_nothing(self):
+        # No queue state at all, as a repository that has never merged has.
+        self.assertFalse(self.state_path.exists())
+
+        self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.fake.calls("gh"), [])
+        # Not created either: a stop owing nothing leaves the repository
+        # exactly as it found it.
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_failed_pass_keeps_the_debt_its_incident_and_the_stop(self):
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT
+        with self._drainer():
+            incident = drain_prs_service.record_cleanup_incident(
+                repo_path=self.ctx.path,
+                pull_request=7,
+                steps=["closing acme/widgets#7"],
+                error="gh: server error",
+            )
+        stuck["incident"] = incident["incident_id"]
+        self._state_owing(**{"7": self._entry("b" * 40, cleanup=stuck)})
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script(
+            "gh", ["issue", "close", "7"], stderr="gh: server error", exit_code=1
+        )
+
+        # A stop that cannot discharge everything is still a successful stop.
+        self.assertEqual(self._stop(), 0)
+
+        record = self._read_state()["prs"]["7"]["cleanup"]
+        self.assertEqual(
+            record["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 7}],
+        )
+        self.assertIn("acme/widgets#7", record["last_error"])
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["status"], "open")
+
+    def test_the_pass_that_finishes_the_debt_resolves_its_incident(self):
+        stuck = self._stuck_cleanup_record()
+        stuck["failed_passes"] = drain_prs.CLEANUP_PASSES_BEFORE_INCIDENT
+        with self._drainer():
+            incident = drain_prs_service.record_cleanup_incident(
+                repo_path=self.ctx.path,
+                pull_request=7,
+                steps=["closing acme/widgets#7"],
+                error="gh: server error",
+            )
+        stuck["incident"] = incident["incident_id"]
+        self._state_owing(**{"7": self._entry("b" * 40, cleanup=stuck)})
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+
+        self.assertEqual(self._stop(), 1)
+
+        self.assertNotIn("7", self._read_state()["prs"])
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        # Self-clearing on the same path any other completing pass uses: an
+        # incident outliving the debt would be a stop that lied about it.
+        self.assertEqual(incidents[0]["status"], "resolved")
+
+    def test_an_already_satisfied_obligation_counts_as_discharged(self):
+        # The linked issue is already closed, by GitHub's own closing keyword
+        # or by hand. Verifying that is discharging it, and the stop says so.
+        record = self._full_cleanup_record()
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        self._state_owing(**{"42": self._entry(self.head_sha, cleanup=record)})
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "CLOSED"})
+        )
+
+        self.assertEqual(self._stop(), 1)
+
+        self.assertEqual(self._issue_close_calls(99), [])
+        self.assertNotIn("42", self._read_state()["prs"])
+
+    def test_a_wedged_command_leaves_its_obligation_rather_than_the_stop(self):
+        record = self._full_cleanup_record()
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        self._state_owing(**{"42": self._entry(self.head_sha, cleanup=record)})
+        # Far longer than any budget a stop could give it: only a caller that
+        # bounds the command itself returns from this.
+        self.fake.script(
+            "gh",
+            ["issue", "view", "99"],
+            stdout=json.dumps({"state": "OPEN"}),
+            sleep_seconds=60,
+        )
+
+        with mock.patch.object(
+            drain_prs, "SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS", 0.25
+        ):
+            started = time.monotonic()
+            discharged = self._stop(budget_seconds=0.25)
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(discharged, 0)
+        self.assertLess(elapsed, 20)
+        # Outstanding, not lost: the next start retries exactly this.
+        self.assertEqual(
+            self._read_state()["prs"]["42"]["cleanup"]["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 99}],
+        )
+        self.assertIn("timed out", self._read_state()["prs"]["42"]["cleanup"]["last_error"])
+
+    def test_a_spent_budget_stops_the_obligations_of_one_pull_request_too(self):
+        # The bound is on obligations, not on pull requests: the steps after
+        # the one that burned the budget must not be started either, however
+        # briefly each would take to time out.
+        record = self._stuck_cleanup_record(7, 5)
+        self._state_owing(**{"7": self._entry("b" * 40, cleanup=record)})
+        self.fake.script(
+            "gh",
+            ["issue", "view", "7"],
+            stdout=json.dumps({"state": "OPEN"}),
+            sleep_seconds=60,
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "5"], stdout=json.dumps({"state": "OPEN"})
+        )
+
+        with mock.patch.object(
+            drain_prs, "SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS", 0.25
+        ):
+            self.assertEqual(self._stop(budget_seconds=0.25), 0)
+
+        self.assertEqual(self._gh_calls("issue", "view", "5"), [])
+        # Both are still owed, in their original order.
+        self.assertEqual(
+            [item["number"] for item in self._read_state()["prs"]["7"]["cleanup"]["pending"]],
+            [7, 5],
+        )
+
+    def test_an_unattempted_obligation_is_not_counted_as_a_failed_pass(self):
+        # A step nothing started has resisted nothing, so it must not push the
+        # record toward the incident threshold.
+        record = self._stuck_cleanup_record(7, 5)
+        record["pending"] = [record["pending"][1]]
+        self._state_owing(**{"7": self._entry("b" * 40, cleanup=record)})
+        self.fake.script(
+            "gh", ["issue", "view", "5"], stdout=json.dumps({"state": "OPEN"})
+        )
+
+        with self._drainer():
+            with drain_prs.command_deadline(time.monotonic() - 1):
+                finished = drain_prs.advance_pending_cleanup(
+                    self.ctx, record, dry_run=False
+                )
+
+        self.assertFalse(finished)
+        self.assertEqual(self.fake.calls("gh"), [])
+        self.assertEqual(record["failed_passes"], 0)
+        self.assertIsNone(record["last_error"])
+        self.assertIsNone(record["incident"])
+        self.assertEqual(self._incidents(), [])
+
+    def test_a_spent_budget_starts_no_further_obligation(self):
+        first = self._stuck_cleanup_record()
+        second = self._full_cleanup_record()
+        second["pending"] = [
+            item for item in second["pending"] if item["kind"] == "issue"
+        ]
+        self._state_owing(
+            **{
+                "7": self._entry("b" * 40, cleanup=first),
+                "42": self._entry(self.head_sha, cleanup=second),
+            }
+        )
+        self.fake.script(
+            "gh",
+            ["issue", "view", "7"],
+            stdout=json.dumps({"state": "OPEN"}),
+            sleep_seconds=60,
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        with mock.patch.object(
+            drain_prs, "SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS", 0.25
+        ):
+            self.assertEqual(self._stop(budget_seconds=0.25), 0)
+
+        # PR #7 burned the whole budget, so PR #42's obligation was never
+        # started -- it stays owed rather than being attempted past the bound.
+        self.assertEqual(self._gh_calls("issue", "view", "99"), [])
+        self.assertEqual(
+            self._read_state()["prs"]["42"]["cleanup"]["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 99}],
+        )
 
 
 class QueueOrderTests(ProcessPrFixture):

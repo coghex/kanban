@@ -1036,12 +1036,17 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
             "KANBAN_DRAINER_INSTALL_DIR": str(self.install_dir),
         }
         stdout = io.StringIO()
+        stderr = io.StringIO()
         with mock.patch.object(sys, "argv", argv), mock.patch.dict(
             os.environ, env
-        ), contextlib.redirect_stdout(stdout):
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as raised:
                 drain_prs.main()
-        return json.loads(stdout.getvalue().strip()), raised.exception.code
+        # Kept for the tests that assert *where* a diagnostic went, not only
+        # that the result document survived.
+        self.raw_stdout = stdout.getvalue()
+        self.raw_stderr = stderr.getvalue()
+        return json.loads(self.raw_stdout.strip()), raised.exception.code
 
     def test_an_interrupt_before_the_pull_request_is_read_still_reports(self):
         with mock.patch.object(drain_prs, "repo_root", side_effect=KeyboardInterrupt):
@@ -1112,6 +1117,57 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         self.assertEqual(code, drain_prs.EXIT_ERROR)
         self.assertEqual(result["outcome"], "error")
         self.assertTrue(result["merged"])
+
+    def test_the_shutdown_cleanup_pass_never_reaches_the_callers_stdout(self):
+        # A `--pr` run shares the interrupt path with the polling service, so
+        # it runs the same final cleanup pass -- and stdout is the caller's,
+        # for one JSON document and nothing else.
+        record = drain_prs.plan_cleanup(
+            {
+                "number": 7,
+                "headRefName": "issue-7-departed",
+                "headRefOid": "b" * 40,
+                "closingIssuesReferences": [
+                    {
+                        "number": 7,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                ],
+            }
+        )
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        entry = self.state_entry("b" * 40)
+        entry["cleanup"] = record
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": entry},
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+
+        with mock.patch.object(
+            drain_prs, "drain_one_pr", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        # The debt was discharged on the way out, from the record alone.
+        self.assertEqual(len(self.gh_calls("issue", "close", "7")), 1)
+        self.assertNotIn(
+            "7", json.loads(self.state_path.read_text(encoding="utf-8"))["prs"]
+        )
+        # And stdout still carries exactly one document: the caller's result.
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(self.raw_stdout.strip()), result)
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertNotIn("cleanup", self.raw_stdout)
+        self.assertIn("post-merge cleanup", self.raw_stderr)
 
     def test_valid_json_that_is_not_a_valid_queue_state_is_reported(self):
         # These decode cleanly and used to blow up as AttributeError or

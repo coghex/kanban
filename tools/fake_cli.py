@@ -14,6 +14,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -73,6 +74,11 @@ def run_as(binary: str, argv: list[str]) -> int:
     counts[key] = index + 1
     counts_path.write_text(json.dumps(counts), encoding="utf-8")
 
+    # Before any output, so a caller that times this command out sees exactly
+    # what it would see from a wedged real one: nothing, and no exit.
+    sleep_seconds = entry.get("sleep_seconds", 0)
+    if sleep_seconds:
+        time.sleep(sleep_seconds)
     sys.stdout.write(entry.get("stdout", ""))
     sys.stderr.write(entry.get("stderr", ""))
     return entry.get("exit_code", 0)
@@ -119,12 +125,17 @@ class FakeCli:
         stdout: str = "",
         stderr: str = "",
         exit_code: int = 0,
+        sleep_seconds: float = 0,
     ) -> None:
+        """Queue one response. `sleep_seconds` stalls before answering, which
+        is how a scenario stands in for a command that has wedged: long enough
+        that only a caller bounding the command can get past it."""
         entry = {
             "match": match,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
+            "sleep_seconds": sleep_seconds,
         }
         with _responses_path(self.state_dir, binary).open(
             "a", encoding="utf-8"
