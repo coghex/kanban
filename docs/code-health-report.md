@@ -443,24 +443,25 @@ predicates collapse into one function over `AgentSlot`.
 **Severity: High** — this is the component that merges pull requests, and it is
 the least structured code in the repository.
 
-`tools/` is flat: `drain_prs.py` (3,170), `approve_issues.py` (2,138), and
-`drain_prs_service.py` (1,048) are single-module programs sharing only
-`kanban_config.py` (493). The drainer owns the one irreversible action in the
+**Original finding rationale, retained for context with current measurements:**
+`tools/` is flat: `drain_prs.py` (3,967), `approve_issues.py` (2,344), and
+`drain_prs_service.py` (2,049) are single-module programs sharing
+`kanban_config.py` (702). The drainer owns the one irreversible action in the
 whole pipeline — merging — and it has already produced at least one recorded
 deadlock (it stripped the very label its own wait loop depended on, causing
 spurious `reviewed:changes` and 3-of-3 failures).
 
-A 3,000-line flat script is arguably a poor host for that logic: there is no module
-boundary between "decide whether this PR is eligible", "repair a conflicted
-branch", "wait for a check", and "merge", so a state-machine bug in one shows up
-as a mystery in another.
+A 3,967-line flat script is arguably a poor host for that logic: there is no
+module boundary between "decide whether this PR is eligible", "repair a
+conflicted branch", "wait for a check", and "merge", so a state-machine bug in
+one shows up as a mystery in another.
 
 **Fix shape:** promote `tools/` to a package (`tools/kanban_tools/` or similar)
 and split the drainer along its actual phases — eligibility, conflict repair,
 check-waiting, merge, incident reporting — with the merge step as the smallest,
 most-tested module of the set. The Python suite is already large enough
-(`test_integration.py` at 2,038 lines, plus eight other `test_*.py`) to support
-this refactor safely.
+(`test_integration.py` at 2,916 lines and `test_fast_forward_stash.py` at 1,193,
+plus the other focused `test_*.py` modules) to support this refactor safely.
 
 ### [#153] 5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
 
