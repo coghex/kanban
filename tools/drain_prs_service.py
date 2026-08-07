@@ -1673,7 +1673,18 @@ def record_cleanup_incident(
             "The merge already landed; only its cleanup is outstanding.",
             "The drainer is still running, keeps retrying these steps, and "
             "keeps draining every other approved PR.",
-            "This incident clears itself once every outstanding step succeeds.",
+            # The summary names the failing step; only the recorded error says
+            # why it fails, and whether it is the kind that retrying alone can
+            # never clear. `error` is free-form text with no structured
+            # human-action flag, so the note is qualified for every cleanup
+            # failure rather than by guessing at its wording.
+            *(
+                [f"Last recorded failure: {error.strip()}"]
+                if error and error.strip()
+                else []
+            ),
+            "This incident clears itself once any operator action that failure "
+            "calls for is done and every outstanding step succeeds.",
         ],
         title="PR drainer cannot finish post-merge cleanup",
         tags="warning,broom",

@@ -735,8 +735,34 @@ response carrying no set at all is an unanswered source, not an empty one.
 
 Each row states what it concerns — the issue or pull-request number, with its
 title where the board knows it — what happened, and which source it came
-from. Every title, summary, activity, and source label passes through the
-external-text sanitization contract above before it is rendered or reported.
+from. Every title, summary, activity, source label, and recorded failure
+passes through the external-text sanitization contract above before it is
+rendered or reported.
+
+A drainer row states what happened from the fields its kind is defined to
+carry, and from those only:
+
+- a supervisor crash adds the last activity it recorded and the last pull
+  request its log mentioned, marked as diagnostic rather than a navigation
+  target;
+- a post-merge cleanup incident adds the failure the drainer recorded on the
+  pass that last kept the cleanup from finishing — the blocker, and the action
+  that clears it wherever the recorded refusal names one — so the row says why
+  the step is stuck and not only which step it is. The text comes from the
+  incident document the status response already carries, at no extra
+  controller invocation or polling cost. It is projected to a single row:
+  sanitized, wrapped to one line, and elided with a visible ellipsis only
+  where content was dropped, so a long or multi-line failure leaves the
+  panel's row count and column behavior unchanged at every supported width. A
+  recorded failure that is absent, empty, whitespace-only, or emptied by
+  sanitization adds nothing — no separator, no placeholder — and a row of any
+  other kind is unchanged whatever its document carries.
+
+The one notification the drainer publishes when it opens a cleanup incident
+carries that same recorded failure, and says the incident clears once any
+operator action the failure calls for is done and every outstanding step
+succeeds. Later passes refresh the open incident's recorded failure in place
+without publishing a second notification.
 
 Rows carry stable source-qualified identities: the service-provided incident
 ID for a drainer row, the existing agent session reference for a session row.

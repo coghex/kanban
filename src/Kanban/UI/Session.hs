@@ -43,11 +43,13 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, diffUTCTime )
+import Kanban.Card (boundedLines)
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerIncident (..),
     DrainerState (..),
     DrainerStatus (..),
+    cleanupIncidentKind,
     crashIncidentKind
     )
 import Kanban.PullRequestFlow
@@ -352,6 +354,38 @@ drainerIncidentEntry state incident =
              | Just number <- [incident.incidentLastPullRequest],
                incident.incidentKind == crashIncidentKind
            ]
+        <> [ "recorded failure: " <> line
+             | incident.incidentKind == cleanupIncidentKind,
+               Just recorded <- [incident.incidentError],
+               line <- boundedLines incidentErrorWidth 1 (sanitizeText recorded)
+           ]
+
+-- | The recorded cleanup failure as the single row-sized fragment the panel
+-- shows.
+--
+-- The summary names the step that is stuck; this names why, and — since #200
+-- words the refusal that way — the action that clears it. It is read only
+-- for 'cleanupIncidentKind': every other kind's document is rendered from
+-- the fields it is defined to carry, so a stray @last_error@ on a crash or
+-- conflict incident changes nothing.
+--
+-- 'boundedLines' does the whole projection, and its shape is what makes the
+-- absent cases free: 'sanitizeText' preserves logical newlines while the row
+-- is a single 'txt', so the text is wrapped to one line — collapsing every
+-- run of whitespace — and elided with a visible ellipsis only where content
+-- was dropped. Text that is missing, empty, whitespace-only, or emptied by
+-- sanitization yields no line at all, so no separator and no placeholder
+-- reach the row.
+--
+-- The bound is a cap on what the row carries, not a fit to the panel: the
+-- panel is a fixed 100 cells wide and clips each row to one line, so what is
+-- actually shown is decided there, exactly as it already is for a long
+-- summary. The cap is set above the length of the refusal #200 words —
+-- naming the branch, the checkout, the blocker, and the paths to @git add@ —
+-- so an ordinary recorded failure is carried whole and only a runaway one is
+-- elided.
+incidentErrorWidth :: Int
+incidentErrorWidth = 240
 
 -- | "PR #42 — Fix the thing", or just "PR #42" when no title is known.
 workSubject :: Text -> Int -> Text -> Text
