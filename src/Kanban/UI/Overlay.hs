@@ -19,6 +19,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
+import Kanban.Card (boundedLines)
 import Kanban.Domain
 import Kanban.Review
   ( ReviewApproval (..),
@@ -246,8 +247,25 @@ drawIncidents state =
               <> entry.incidentEntryDetail
               <> " · "
               <> incidentSourceLabel entry.incidentEntrySource
-          widget = clickable (IncidentTarget entry.incidentEntryRef) (withAttr attribute (txt line))
+          widget = clickable (IncidentTarget entry.incidentEntryRef) (withAttr attribute (elidedLine line))
        in if selected then visible widget else widget
+
+-- | One row's text, elided to the width the panel actually gives it.
+--
+-- The panel is a fixed-width overlay, so a row longer than it is cropped by
+-- the viewport. Cropping alone is silent: it takes the tail of the line away
+-- with nothing to say it did, which reads as a row that simply ends there.
+-- Measuring at render time instead keeps the §11 promise that an ellipsis
+-- appears wherever text was dropped, and it is the width the panel really
+-- has rather than a constant restated here.
+--
+-- Still exactly one row: 'boundedLines' at one line either returns the whole
+-- line or its elided head, and an empty line yields no row rather than a
+-- blank one.
+elidedLine :: Text -> Widget Name
+elidedLine line = Widget Fixed Fixed $ do
+  context <- getContext
+  render (txt (Text.concat (boundedLines (availWidth context) 1 line)))
 
 -- | The overall "nothing needs attention" claim is only ever made from a
 -- drainer observation that reported no incidents. With the source still

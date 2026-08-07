@@ -14,7 +14,7 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
-import Kanban.UI.Overlay (drawIncidents)
+import Kanban.UI.Overlay (drawIncidents, drawOverlay)
 import Kanban.UI.Session
   ( BoardWorkLocation (..),
     drainerSourceState,
@@ -547,6 +547,40 @@ spec = do
       panelLinesAt 200 (opened loaded)
         `shouldSatisfy` any (Data.Text.isInfixOf "recorded failure: fast-forwarding")
 
+    it "elides a row the real fixed-width panel cannot fit, rather than cropping it silently" $ do
+      -- The panel is a fixed-width overlay, so the width a row actually gets
+      -- is the overlay's, not the terminal's. Drawing through drawIncidents
+      -- alone bypasses that limit; this goes through drawOverlay, where a
+      -- real cleanup summary already overruns the panel before any recorded
+      -- failure is added to it.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recordedRefusal
+              }
+          ]
+      let opened = applyIncidentsAction OpenIncidentsPanel state
+      for_ [200, 164] $ \width -> do
+        case filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAt width opened) of
+          [row] -> do
+            -- Dropped text is announced, and the row still fits the panel the
+            -- overlay draws rather than running past its border.
+            row `shouldSatisfy` Data.Text.isSuffixOf "…"
+            Data.Text.length row `shouldSatisfy` (<= incidentsPanelWidth)
+          rows -> expectationFailure ("expected one cleanup row, got " <> show (length rows))
+
+      -- A row the panel does fit keeps every character, and gains no ellipsis.
+      short <- reportingState [conflictIncident 42]
+      case filter (Data.Text.isInfixOf "PR #42") (overlayLinesAt 200 (applyIncidentsAction OpenIncidentsPanel short)) of
+        [row] -> do
+          row `shouldSatisfy` Data.Text.isSuffixOf "pr drainer"
+          row `shouldSatisfy` not . Data.Text.isInfixOf "…"
+        rows -> expectationFailure ("expected one conflict row, got " <> show (length rows))
+
     it "scrolls a list longer than the panel, keeping the selected row shown" $ do
       state <- reportingState [conflictIncident number | number <- [1 .. 40]]
       let opened = applyIncidentsAction OpenIncidentsPanel state
@@ -614,6 +648,18 @@ spec = do
     panelLines = panelLinesAt 96
 
     panelLinesAt width state = renderWidgetLines (themeFor testOptions) width (drawIncidents state)
+
+    -- Through the real overlay, which is where the panel's fixed width and
+    -- its border and padding are applied. The frame the overlay draws around
+    -- each row is stripped so what is left is the row's own cells.
+    overlayLinesAt width state =
+      map
+        (Data.Text.dropAround (`elem` (" │┃|" :: String)))
+        (renderWidgetLines (themeFor testOptions) width (drawOverlay state IncidentsOverlay))
+
+    -- The interior the fixed-width incidents overlay leaves a row: its
+    -- hLimit less the border it draws and the padding inside that.
+    incidentsPanelWidth = 96
 
     -- The detail of the single row an incident produces, which is what the
     -- kind-specific assertions above are about.

@@ -758,6 +758,13 @@ carry, and from those only:
   sanitization adds nothing — no separator, no placeholder — and a row of any
   other kind is unchanged whatever its document carries.
 
+The panel is a fixed-width overlay, so a row is measured against the width
+that overlay gives it rather than the terminal's. A row longer than the panel
+is elided with a visible ellipsis at that measured width, never cropped
+silently: §11's promise that an ellipsis appears wherever text was dropped
+holds for a row whatever made it long — a recorded failure, a long title, or a
+summary that already overran the panel on its own.
+
 The one notification the drainer publishes when it opens a cleanup incident
 carries that same recorded failure, and says the incident clears once any
 operator action the failure calls for is done and every outstanding step
