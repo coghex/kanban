@@ -760,9 +760,16 @@ The continuation is sanitized, collapsed to one logical line, then wrapped to
 the width the panel has, indented and marked so it reads as belonging to the
 row above. It is part of that row's clickable region, so clicking it selects
 the incident it belongs to, and selection and activation still resolve by
-incident identity rather than by any line count. It is bounded in height as
-well as width — the panel's rows are shared, so a runaway failure is capped
-and ends with a visible ellipsis rather than pushing other incidents out. A
+incident identity rather than by any line count.
+
+It is bounded in height as well as width — the panel's rows are shared, so a
+runaway failure cannot push other incidents out of the panel. What a bound
+gives up is the *middle*, never the tail: the recorded value opens by
+restating the failing step around the checkout's absolute path and closes
+with the blocker, the remedy, and the paths to act on, so trimming the end
+would discard exactly what the operator needs and would do so more surely the
+deeper the checkout. Both ends are kept and the gap between them carries a
+visible ellipsis. A
 recorded failure that is absent, empty, whitespace-only, or emptied by
 sanitization adds nothing — no line, no separator, no placeholder — and a row
 of any other kind is unchanged whatever its document carries.

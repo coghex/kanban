@@ -238,11 +238,20 @@ spec = do
       hostileNote `shouldSatisfy` Data.Text.all (/= '\n')
       hostileNote `shouldBe` "cleanup failed: fast-forward refused on branch"
 
-      -- Over-long text is bounded, and the ellipsis appears only because
-      -- content was dropped -- the case above kept every word without one.
-      longNote `shouldSatisfy` Data.Text.isSuffixOf "…"
-      hostileNote `shouldSatisfy` not . Data.Text.isSuffixOf "…"
-      Data.Text.length longNote `shouldSatisfy` (< Data.Text.length overLong)
+      -- Ordinary length is carried whole -- what the row can show is decided
+      -- when it is drawn, not by trimming here.
+      hostileNote `shouldSatisfy` not . Data.Text.isInfixOf "…"
+      longNote `shouldBe` Data.Text.strip overLong
+
+      -- A pathological value is capped, and what a cap gives up is the
+      -- middle: both ends survive, because the drainer puts the remedy at the
+      -- end and a tail-trimming bound would throw exactly it away.
+      let runaway = "OPENING. " <> Data.Text.replicate 400 "filler filler filler. " <> "CLOSING."
+      capped <- rowNote ((cleanupIncident 1079) {incidentError = Just runaway})
+      Data.Text.length capped `shouldSatisfy` (< Data.Text.length runaway)
+      capped `shouldSatisfy` Data.Text.isPrefixOf "OPENING."
+      capped `shouldSatisfy` Data.Text.isSuffixOf "CLOSING."
+      capped `shouldSatisfy` Data.Text.isInfixOf "…"
 
     it "leaves a crash or conflict incident unchanged whatever its document carries" $ do
       -- The field belongs to the cleanup kind's contract. A crash or conflict
@@ -554,6 +563,40 @@ spec = do
       marked `shouldSatisfy` all (not . Data.Text.isInfixOf "src/Kanban/UI.hs")
       map Data.Text.length marked `shouldSatisfy` all (<= incidentsPanelWidth)
 
+    it "keeps the blocker and remedy of a production-shaped error under a deep checkout" $ do
+      -- Exactly what the drainer records: advance_pending_cleanup prefixes the
+      -- failing step, and _require_merged_index's refusal restates the failure
+      -- around the checkout's absolute path before it reaches the actionable
+      -- half. A deep path pushes that half further out, which is precisely
+      -- where a tail-trimming bound would drop it.
+      let checkout = "/Users/vincentcoghlan/worktrees/coghex/kanban/issue-217-cleanup-incident-cause"
+          recorded =
+            "fast-forwarding the default branch: Refusing to fast-forward master: the index in "
+              <> checkout
+              <> " holds unmerged entries, so no snapshot of local changes can be taken. \
+                 \Local changes are not what blocked this. Resolve these paths and `git add` \
+                 \them, and the next ordinary pass discharges the fast-forward: \
+                 \docs/code_health_findings.md, docs/pipeline-hardening.md"
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recorded
+              }
+          ]
+      let rendered = Data.Text.unwords (overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state))
+      -- The actionable half survives: what to do, and to which paths.
+      rendered `shouldSatisfy` Data.Text.isInfixOf "blocked this"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "Resolve these paths and `git add` them"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "docs/code_health_findings.md"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "docs/pipeline-hardening.md"
+      -- What it gave up to fit is the middle, and it says so.
+      rendered `shouldSatisfy` Data.Text.isInfixOf "…"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "fast-forwarding the default branch:"
+
     it "gives a note no more of the shared panel than its allowance" $ do
       -- The panel's height belongs to every incident. A runaway recorded
       -- failure is capped and says so rather than pushing other rows out.
@@ -566,7 +609,7 @@ spec = do
       let rendered = overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state)
           noteRows = filter (Data.Text.isInfixOf "fast-forwarding") rendered
       length noteRows `shouldSatisfy` (<= 3)
-      Data.Text.concat noteRows `shouldSatisfy` Data.Text.isSuffixOf "…"
+      Data.Text.concat noteRows `shouldSatisfy` Data.Text.isInfixOf "…"
 
     it "adds only its own lines, leaving every other row alone at any supported width" $ do
       -- The three widths the golden frames pin: wide, board minimum, and

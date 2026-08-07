@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
-import Kanban.Card (boundedLines)
+import Kanban.Card (boundedLines, elide, wrappedLines)
 import Kanban.Domain
 import Kanban.Review
   ( ReviewApproval (..),
@@ -263,10 +263,13 @@ drawIncidents state =
 -- above rather than as an entry of its own, and it is part of the same
 -- clickable widget, so clicking it selects the incident it belongs to.
 --
--- Bounded in height as well as width. A note is one incident's detail, and
--- the panel's rows are shared: 'boundedLines' caps it at
--- 'incidentNoteLines', ending the last kept line with an ellipsis when
--- anything was dropped.
+-- Bounded in height as well as width. A note is one incident's detail while
+-- the panel's rows are shared, so it may take at most 'incidentNoteLines'.
+-- What is dropped to fit is the /middle/: a drainer's recorded failure opens
+-- by restating what failed and closes with the blocker, the remedy and the
+-- paths to act on, so trimming the tail would keep only the part the row
+-- already said. The first line and the last are kept, and the gap between
+-- them is marked.
 noteLines :: AppState -> Text -> [Widget Name]
 noteLines state note = [withAttr dimAttr (Widget Fixed Fixed draw)]
   where
@@ -278,12 +281,17 @@ noteLines state note = [withAttr dimAttr (Widget Fixed Fixed draw)]
     draw = do
       context <- getContext
       let body = max 1 (availWidth context - Text.length indent - Text.length marker)
-          rows = boundedLines body incidentNoteLines note
+          rows = keepEnds body (wrappedLines body note)
       render (vBox [txt (indent <> prefix <> row) | (prefix, row) <- zip (marker : repeat continuation) rows])
+    keepEnds body rows
+      | length rows <= incidentNoteLines = rows
+      | otherwise = case rows of
+          first : _ -> elide body first : drop (length rows - (incidentNoteLines - 1)) rows
+          [] -> []
 
--- | How many continuation lines one note may take before it is elided. A
--- note belongs to a single incident while the panel's height is shared, so
--- three lines is the whole allowance.
+-- | How many continuation lines one note may take. A note belongs to a
+-- single incident while the panel's height is shared, so three lines is the
+-- whole allowance.
 incidentNoteLines :: Int
 incidentNoteLines = 3
 

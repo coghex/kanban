@@ -43,7 +43,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, diffUTCTime )
-import Kanban.Card (boundedLines)
+import Kanban.Card (middleExcerpt)
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerIncident (..),
@@ -382,16 +382,27 @@ recordedFailure incident
   | incident.incidentKind /= cleanupIncidentKind = Nothing
   | otherwise = do
       recorded <- incident.incidentError
-      case boundedLines incidentErrorWidth 1 (sanitizeText recorded) of
-        [line] -> Just line
-        _ -> Nothing
+      -- Collapsed to one logical line first, and only then bounded. Bounding
+      -- a value that still holds the line breaks 'sanitizeText' preserves
+      -- would measure the wrong thing, and bounding before the collapse is
+      -- how a tail gets trimmed off before anything can choose to keep it.
+      case Text.unwords (Text.words (sanitizeText recorded)) of
+        "" -> Nothing
+        collapsed -> Just (middleExcerpt incidentErrorWidth collapsed)
 
--- | The cap on a recorded failure's carried text. Set above the length of
--- the refusal #200 words — naming the branch, the checkout, the blocker, and
--- the paths to @git add@ — so an ordinary one is carried whole, while a
--- runaway error cannot take the panel's height from every other incident.
+-- | The cap on a recorded failure's carried text.
+--
+-- Generous, and applied by dropping the middle rather than the tail. The
+-- value the drainer records is a step prefix followed by the whole refusal
+-- text, which restates what failed at arbitrary length — it embeds the
+-- checkout's absolute path — before reaching "Local changes are not what
+-- blocked this", the @git add@ remedy, and the paths to act on. A cap that
+-- trimmed the tail would therefore discard exactly the part this row exists
+-- to show, and the more deeply nested the checkout the more certainly it
+-- would. The cap keeps a pathological error finite; it never decides which
+-- end matters.
 incidentErrorWidth :: Int
-incidentErrorWidth = 240
+incidentErrorWidth = 4000
 
 -- | "PR #42 — Fix the thing", or just "PR #42" when no title is known.
 workSubject :: Text -> Int -> Text -> Text
