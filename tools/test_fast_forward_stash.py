@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1063,6 +1064,129 @@ class StartupSweepSeamTest(_FastForwardStashFixture):
         self.assertEqual(events, ["sweep", "loop"])
         self.assertEqual(self._anchor_ref_names(), [ref])
         self.assertEqual(stash_shas(self.main), [sha])
+
+
+class FastForwardUnderStopDeadlineTest(_FastForwardStashFixture):
+    """Issue #216: the final cleanup pass of an intentional stop bounds every
+    command it runs, and the fast-forward is the obligation with a window in
+    which the user's local changes live only in a snapshot commit.
+
+    A command that wedges inside that window ends the obligation, so what has
+    to hold is what holds for a crash there: the tracked changes stay
+    recoverable through the anchor or the stash, the untracked ones stay in
+    their holding directory, and the fast-forward stays owed.
+    """
+
+    def _dirty_the_checkout(self):
+        (self.main / "shared.txt").write_text(
+            "line1\nline2\nline3-local\n", encoding="utf-8"
+        )
+        (self.main / "untracked.txt").write_text("local-untracked\n", encoding="utf-8")
+
+    def _wedging(self, command, *, occurrence=1):
+        """Substitute a command that never returns for the `occurrence`th call
+        matching `command`, so only a caller bounding it gets past."""
+        real_run = drain_prs.run
+        seen = []
+
+        def fake_run(args, **kwargs):
+            seen.append(list(args))
+            matches = [call for call in seen if call[: len(command)] == list(command)]
+            if list(args[: len(command)]) == list(command) and len(matches) == occurrence:
+                return real_run(["sh", "-c", "sleep 60"], **kwargs)
+            return real_run(args, **kwargs)
+
+        return mock.patch.object(drain_prs, "run", side_effect=fake_run)
+
+    @contextlib.contextmanager
+    def _spent_budget(self, seconds=0.5):
+        with mock.patch.object(
+            drain_prs, "SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS", seconds
+        ):
+            with drain_prs.command_deadline(time.monotonic() + seconds):
+                yield
+
+    def _fast_forward_obligation(self):
+        return {
+            "pr": {"number": 42},
+            "pending": [{"kind": "fast-forward"}],
+            "failed_passes": 0,
+            "last_error": None,
+            "incident": None,
+        }
+
+    def test_a_wedged_retry_restores_the_changes_and_leaves_the_ff_owed(self):
+        head_before = run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip()
+        self._dirty_the_checkout()
+        self._advance_origin_line1("line1-remote")
+        record = self._fast_forward_obligation()
+
+        # The `--ff-only` retry after the reset: the changes exist only in the
+        # anchored snapshot at this point.
+        with self._spent_budget(), self._wedging(
+            ["git", "merge", "--ff-only"], occurrence=2
+        ):
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("timed out", errors[0])
+        # Restoration still ran, under the per-command floor that exists for
+        # exactly this: the changes are back in the working tree.
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1\nline2\nline3-local\n",
+        )
+        self.assertEqual(
+            (self.main / "untracked.txt").read_text(encoding="utf-8"),
+            "local-untracked\n",
+        )
+        self.assertEqual(anchor_refs(self.main).strip(), "")
+        self.assertEqual(list((self.main / ".git").glob("autostash-*")), [])
+        # The fast-forward did not happen, and is still owed.
+        self.assertEqual(
+            run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip(), head_before
+        )
+        self.assertEqual(record["pending"], [{"kind": "fast-forward"}])
+
+    def test_a_wedged_restore_still_leaves_every_change_recoverable(self):
+        self._dirty_the_checkout()
+        self._advance_origin_line1("line1-remote")
+        record = self._fast_forward_obligation()
+
+        # The harshest point of all: the restore itself is what wedges, after
+        # `reset --hard` has already cleared the working tree.
+        with self._spent_budget(), self._wedging(["git", "stash", "apply"]):
+            errors = drain_prs.run_cleanup_pass(self.ctx, record, dry_run=False)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("timed out", errors[0])
+        anchors = [
+            line.split()[0] for line in anchor_refs(self.main).strip().splitlines()
+        ]
+        self.assertEqual(len(anchors), 1)
+        # The anchor is a real recovery path, not just a surviving ref.
+        run_git(["stash", "apply", "--index", anchors[0]], cwd=self.main)
+        self.assertEqual(
+            (self.main / "shared.txt").read_text(encoding="utf-8"),
+            "line1-remote\nline2\nline3-local\n",
+        )
+        holding = list((self.main / ".git").glob("autostash-*"))
+        self.assertEqual(len(holding), 1)
+        self.assertEqual(
+            (holding[0] / "untracked.txt").read_text(encoding="utf-8"),
+            "local-untracked\n",
+        )
+        # The ref moved, but the obligation did not complete: it stays owed,
+        # and the retry that finds nothing to fast-forward discharges it.
+        self.assertEqual(record["pending"], [{"kind": "fast-forward"}])
+
+    def test_the_deadline_does_not_outlive_the_block_that_set_it(self):
+        # Every other caller of run() is under the polling loop's own cadence
+        # and must keep waiting as long as it takes.
+        with self._spent_budget():
+            self.assertIsNotNone(drain_prs.effective_timeout(None))
+        self.assertIsNone(drain_prs.effective_timeout(None))
+        self.assertIsNone(drain_prs.COMMAND_DEADLINE)
 
 
 if __name__ == "__main__":
