@@ -10,7 +10,9 @@ module Kanban.Card
     boundedLines,
     chipWidth,
     displayWidth,
+    elide,
     labelChipRows,
+    middleExcerpt,
     overflowChipText,
     wrappedLines,
   )
@@ -61,6 +63,34 @@ boundedLines width maxLines value
 -- Only called with @width >= 1@, so the ellipsis itself always has room.
 elide :: Int -> Text -> Text
 elide width value = Text.stripEnd (fst (splitAtWidth (width - 1) value)) <> ellipsis
+
+-- | Bound a line to @limit@ cells by dropping its /middle/ rather than its
+-- tail, marking the gap with an ellipsis.
+--
+-- For diagnostic text whose beginning says what failed and whose end says
+-- what to do about it, trimming the tail throws away the only actionable
+-- part. Keeping both ends and dropping the restatement between them is what
+-- lets a bound stay finite without deciding the reader does not need the
+-- remedy.
+middleExcerpt :: Int -> Text -> Text
+middleExcerpt limit value
+  | limit <= 0 = ""
+  | displayWidth value <= limit = value
+  | limit <= displayWidth ellipsis = ellipsis
+  | otherwise = Text.stripEnd headPart <> ellipsis <> Text.stripStart tailPart
+  where
+    budget = limit - displayWidth ellipsis
+    headPart = fst (splitAtWidth (budget - budget `div` 2) value)
+    tailPart = takeEndWidth (budget `div` 2) value
+
+-- | The longest suffix fitting @limit@ cells.
+takeEndWidth :: Int -> Text -> Text
+takeEndWidth limit value = Text.pack (go 0 [] (reverse (Text.unpack value)))
+  where
+    go _used acc [] = acc
+    go used acc (character : rest)
+      | used + Width.safeWcwidth character > limit = acc
+      | otherwise = go (used + Width.safeWcwidth character) (character : acc) rest
 
 -- | Split at the longest prefix fitting @limit@ cells.
 splitAtWidth :: Int -> Text -> (Text, Text)

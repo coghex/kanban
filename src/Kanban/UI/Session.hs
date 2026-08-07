@@ -43,11 +43,13 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, diffUTCTime )
+import Kanban.Card (middleExcerpt)
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerIncident (..),
     DrainerState (..),
     DrainerStatus (..),
+    cleanupIncidentKind,
     crashIncidentKind
     )
 import Kanban.PullRequestFlow
@@ -307,7 +309,8 @@ incidentEntries state = drainerEntries <> solveEntries <> pullRequestEntries <> 
           incidentEntryWork = Just work,
           incidentEntrySession = Just reference,
           incidentEntrySubject = subject,
-          incidentEntryDetail = status <> " · " <> sanitizeText activity
+          incidentEntryDetail = status <> " · " <> sanitizeText activity,
+          incidentEntryNote = Nothing
         }
 
 -- | One drainer incident as a row. The session is looked up rather than
@@ -323,7 +326,8 @@ drainerIncidentEntry state incident =
       incidentEntryWork = work,
       incidentEntrySession = session,
       incidentEntrySubject = subject,
-      incidentEntryDetail = Text.intercalate " · " (summary : diagnostics)
+      incidentEntryDetail = Text.intercalate " · " (summary : diagnostics),
+      incidentEntryNote = recordedFailure incident
     }
   where
     -- Only the authoritative field. 'incidentLastPullRequest' is inferred by
@@ -352,6 +356,53 @@ drainerIncidentEntry state incident =
              | Just number <- [incident.incidentLastPullRequest],
                incident.incidentKind == crashIncidentKind
            ]
+
+-- | The failure the drainer recorded for a stuck post-merge cleanup, as the
+-- one logical line the panel wraps beneath that incident's row.
+--
+-- The row's own line states the step that is stuck; this states why, and —
+-- since #200 words the refusal that way — the action that clears it. The
+-- panel is a fixed 100 cells and a cleanup summary alone already overruns
+-- it, so on the row itself this text would always be elided away before its
+-- first word: a blocker and a remedy an operator can never read are not
+-- stated at all. It is given its own wrapped line instead.
+--
+-- Read only for 'cleanupIncidentKind'. Every other kind's row is built from
+-- the fields it is defined to carry, so a stray @last_error@ on a crash or
+-- conflict incident changes nothing.
+--
+-- 'boundedLines' at one line does the whole projection, and its shape is
+-- what makes the absent cases free: 'sanitizeText' preserves logical
+-- newlines, so collapsing to a single line here is what lets the renderer
+-- wrap to the width it actually has. Text that is missing, empty,
+-- whitespace-only, or emptied by sanitization yields no line at all, hence
+-- no note, and the row renders exactly as it did before the field existed.
+recordedFailure :: DrainerIncident -> Maybe Text
+recordedFailure incident
+  | incident.incidentKind /= cleanupIncidentKind = Nothing
+  | otherwise = do
+      recorded <- incident.incidentError
+      -- Collapsed to one logical line first, and only then bounded. Bounding
+      -- a value that still holds the line breaks 'sanitizeText' preserves
+      -- would measure the wrong thing, and bounding before the collapse is
+      -- how a tail gets trimmed off before anything can choose to keep it.
+      case Text.unwords (Text.words (sanitizeText recorded)) of
+        "" -> Nothing
+        collapsed -> Just (middleExcerpt incidentErrorWidth collapsed)
+
+-- | The cap on a recorded failure's carried text.
+--
+-- Generous, and applied by dropping the middle rather than the tail. The
+-- value the drainer records is a step prefix followed by the whole refusal
+-- text, which restates what failed at arbitrary length — it embeds the
+-- checkout's absolute path — before reaching "Local changes are not what
+-- blocked this", the @git add@ remedy, and the paths to act on. A cap that
+-- trimmed the tail would therefore discard exactly the part this row exists
+-- to show, and the more deeply nested the checkout the more certainly it
+-- would. The cap keeps a pathological error finite; it never decides which
+-- end matters.
+incidentErrorWidth :: Int
+incidentErrorWidth = 4000
 
 -- | "PR #42 — Fix the thing", or just "PR #42" when no title is known.
 workSubject :: Text -> Int -> Text -> Text

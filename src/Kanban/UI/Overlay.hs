@@ -19,6 +19,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.CLI (Options (..))
+import Kanban.Card (boundedLines, elide, wrappedLines)
 import Kanban.Domain
 import Kanban.Review
   ( ReviewApproval (..),
@@ -246,8 +247,70 @@ drawIncidents state =
               <> entry.incidentEntryDetail
               <> " · "
               <> incidentSourceLabel entry.incidentEntrySource
-          widget = clickable (IncidentTarget entry.incidentEntryRef) (withAttr attribute (txt line))
+          note = maybe [] (noteLines state) entry.incidentEntryNote
+          widget =
+            clickable
+              (IncidentTarget entry.incidentEntryRef)
+              (vBox (withAttr attribute (elidedLine line) : note))
        in if selected then visible widget else widget
+
+-- | An entry's note as the continuation lines drawn under its row.
+--
+-- Wrapped rather than elided: the note exists because the text is worth
+-- reading whole, and a row that has already spent the panel's width on its
+-- subject and summary would elide it away before its first word. The
+-- continuation is indented and marked so it reads as belonging to the row
+-- above rather than as an entry of its own, and it is part of the same
+-- clickable widget, so clicking it selects the incident it belongs to.
+--
+-- Bounded in height as well as width. A note is one incident's detail while
+-- the panel's rows are shared, so it may take at most 'incidentNoteLines'.
+-- What is dropped to fit is the /middle/: a drainer's recorded failure opens
+-- by restating what failed and closes with the blocker, the remedy and the
+-- paths to act on, so trimming the tail would keep only the part the row
+-- already said. The first line and the last are kept, and the gap between
+-- them is marked.
+noteLines :: AppState -> Text -> [Widget Name]
+noteLines state note = [withAttr dimAttr (Widget Fixed Fixed draw)]
+  where
+    marker = if state.appOptions.optionAscii then "-> " else "↳ "
+    indent = "    "
+    -- The marker sits on the first line only; later lines align under its
+    -- text rather than repeating it.
+    continuation = Text.replicate (Text.length marker) " "
+    draw = do
+      context <- getContext
+      let body = max 1 (availWidth context - Text.length indent - Text.length marker)
+          rows = keepEnds body (wrappedLines body note)
+      render (vBox [txt (indent <> prefix <> row) | (prefix, row) <- zip (marker : repeat continuation) rows])
+    keepEnds body rows
+      | length rows <= incidentNoteLines = rows
+      | otherwise = case rows of
+          first : _ -> elide body first : drop (length rows - (incidentNoteLines - 1)) rows
+          [] -> []
+
+-- | How many continuation lines one note may take. A note belongs to a
+-- single incident while the panel's height is shared, so three lines is the
+-- whole allowance.
+incidentNoteLines :: Int
+incidentNoteLines = 3
+
+-- | One row's text, elided to the width the panel actually gives it.
+--
+-- The panel is a fixed-width overlay, so a row longer than it is cropped by
+-- the viewport. Cropping alone is silent: it takes the tail of the line away
+-- with nothing to say it did, which reads as a row that simply ends there.
+-- Measuring at render time instead keeps the §11 promise that an ellipsis
+-- appears wherever text was dropped, and it is the width the panel really
+-- has rather than a constant restated here.
+--
+-- Still exactly one row: 'boundedLines' at one line either returns the whole
+-- line or its elided head, and an empty line yields no row rather than a
+-- blank one.
+elidedLine :: Text -> Widget Name
+elidedLine line = Widget Fixed Fixed $ do
+  context <- getContext
+  render (txt (Text.concat (boundedLines (availWidth context) 1 line)))
 
 -- | The overall "nothing needs attention" claim is only ever made from a
 -- drainer observation that reported no incidents. With the source still

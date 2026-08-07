@@ -11,6 +11,7 @@ module Kanban.Drainer
     DrainerState (..),
     DrainerStatus (..),
     DrainerToggle (..),
+    cleanupIncidentKind,
     controllerFromProgramArguments,
     crashIncidentKind,
     decodeDirectMergeResult,
@@ -201,7 +202,13 @@ data DrainerIncident = DrainerIncident
     incidentSummary :: Maybe Text,
     incidentPullRequest :: Maybe Int,
     incidentLastPullRequest :: Maybe Int,
-    incidentActivity :: Maybe Text
+    incidentActivity :: Maybe Text,
+    -- | The failure the drainer recorded on the pass that last kept a
+    -- post-merge cleanup from finishing. Written by the service for a
+    -- cleanup incident only, refreshed in place on every later pass, and
+    -- absent from a document written before the field existed — so this
+    -- stays a 'Maybe' and no reader may assume a cleanup incident has one.
+    incidentError :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -214,11 +221,18 @@ instance FromJSON DrainerIncident where
       <*> value .:? "pull_request"
       <*> value .:? "last_pr"
       <*> value .:? "last_activity"
+      <*> value .:? "last_error"
 
 -- | The kind the service gives an incident written before the field existed,
 -- mirrored here so both sides classify a legacy incident the same way.
 crashIncidentKind :: Text
 crashIncidentKind = "drainer-exit"
+
+-- | The kind the service gives a merged pull request whose post-merge
+-- cleanup keeps failing. It is the only kind that records a failure the
+-- operator can act on, so it is the only one whose 'incidentError' is read.
+cleanupIncidentKind :: Text
+cleanupIncidentKind = "cleanup-pending"
 
 -- | One pull request the controller reported as still owing post-merge
 -- cleanup. Nothing is carried out of a member: the sidebar states how many
