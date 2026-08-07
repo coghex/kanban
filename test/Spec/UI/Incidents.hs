@@ -4,6 +4,7 @@
 module Spec.UI.Incidents (spec) where
 
 import Brick (BrickEvent (..), Location (..))
+import Data.Foldable (for_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -13,7 +14,7 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerIncident (..), DrainerState (..), DrainerStatus (..))
 import Kanban.UI.Events (IncidentsAction (..), applyIncidentsAction, incidentsAction)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
-import Kanban.UI.Overlay (drawIncidents)
+import Kanban.UI.Overlay (drawIncidents, drawOverlay)
 import Kanban.UI.Session
   ( BoardWorkLocation (..),
     drainerSourceState,
@@ -195,6 +196,72 @@ spec = do
       mapM_
         (\entry -> incidentSourceLabel entry.incidentEntrySource `shouldSatisfy` Data.Text.all safeCharacter)
         (incidentEntries state)
+
+    it "carries the failure a stuck cleanup recorded, leaving the row stating the step" $ do
+      state <- reportingState [(cleanupIncident 1079) {incidentError = Just recordedRefusal}]
+      case incidentEntries state of
+        [entry] -> do
+          -- The row keeps saying which step is stuck, unchanged...
+          entry.incidentEntryDetail `shouldBe` "PR #1079 merged but its cleanup keeps failing."
+          -- ...and why it is stuck travels as the note the panel wraps below
+          -- it, where it has the width to be read.
+          entry.incidentEntryNote `shouldBe` Just recordedRefusal
+        entries -> expectationFailure ("expected one cleanup row, got " <> show (length entries))
+
+    it "adds nothing at all for a cleanup incident with no usable recorded failure" $ do
+      -- Missing, explicit null (both decode to Nothing), empty, whitespace
+      -- only, and emptied by sanitization. Each renders exactly as a cleanup
+      -- incident does today: no note, no separator, no placeholder.
+      let bare = "PR #1079 merged but its cleanup keeps failing."
+      entries <-
+        traverse
+          (fmap incidentEntries . reportingState . pure)
+          [ cleanupIncident 1079,
+            (cleanupIncident 1079) {incidentError = Just ""},
+            (cleanupIncident 1079) {incidentError = Just "   \n\t  "},
+            (cleanupIncident 1079) {incidentError = Just "\ESC[31m\ESC[0m\x202E\x202C"}
+          ]
+      map (map (.incidentEntryDetail)) entries `shouldBe` replicate 4 [bare]
+      map (map (.incidentEntryNote)) entries `shouldBe` replicate 4 [Nothing]
+
+    it "projects a hostile or over-long recorded failure onto one sanitized logical line" $ do
+      let hostile = "cleanup failed:\ESC]0;title\BEL\n\n\x200E\&fast-forward\trefused\r\non branch\n"
+          overLong = Data.Text.replicate 40 "fast-forwarding the default branch refused. "
+      hostileNote <- rowNote ((cleanupIncident 1079) {incidentError = Just hostile})
+      longNote <- rowNote ((cleanupIncident 1079) {incidentError = Just overLong})
+
+      -- §11: nothing reaching the terminal carries an escape sequence, a
+      -- bidirectional override, or a format control, and the logical line
+      -- breaks sanitizeText preserves are collapsed so the renderer wraps to
+      -- the width it has rather than to breaks in the drainer's text.
+      hostileNote `shouldSatisfy` Data.Text.all safeCharacter
+      hostileNote `shouldSatisfy` Data.Text.all (/= '\n')
+      hostileNote `shouldBe` "cleanup failed: fast-forward refused on branch"
+
+      -- Ordinary length is carried whole -- what the row can show is decided
+      -- when it is drawn, not by trimming here.
+      hostileNote `shouldSatisfy` not . Data.Text.isInfixOf "…"
+      longNote `shouldBe` Data.Text.strip overLong
+
+      -- A pathological value is capped, and what a cap gives up is the
+      -- middle: both ends survive, because the drainer puts the remedy at the
+      -- end and a tail-trimming bound would throw exactly it away.
+      let runaway = "OPENING. " <> Data.Text.replicate 400 "filler filler filler. " <> "CLOSING."
+      capped <- rowNote ((cleanupIncident 1079) {incidentError = Just runaway})
+      Data.Text.length capped `shouldSatisfy` (< Data.Text.length runaway)
+      capped `shouldSatisfy` Data.Text.isPrefixOf "OPENING."
+      capped `shouldSatisfy` Data.Text.isSuffixOf "CLOSING."
+      capped `shouldSatisfy` Data.Text.isInfixOf "…"
+
+    it "leaves a crash or conflict incident unchanged whatever its document carries" $ do
+      -- The field belongs to the cleanup kind's contract. A crash or conflict
+      -- document that unexpectedly carries one is rendered from the fields its
+      -- own kind defines, exactly as before, and earns no note.
+      crash <- rowEntry crashIncident {incidentError = Just recordedRefusal}
+      conflict <- rowEntry ((conflictIncident 42) {incidentError = Just recordedRefusal})
+      crash.incidentEntryDetail `shouldBe` crashDetail
+      conflict.incidentEntryDetail `shouldBe` "PR #42 has a merge conflict in README."
+      map (.incidentEntryNote) [crash, conflict] `shouldBe` [Nothing, Nothing]
 
     it "renders a supervisor crash from its real diagnostic fields" $ do
       state <- reportingState [crashIncident]
@@ -462,6 +529,151 @@ spec = do
       rendered
         `shouldSatisfy` any (Data.Text.isInfixOf "issue #10 — Issue 10 · failed · solve activity · kanban session")
 
+    it "shows the recorded cause and remedy through the real fixed-width panel" $ do
+      -- The point of the whole change. A real cleanup summary already
+      -- overruns the 96-cell panel interior on its own, so on the row itself
+      -- this text would be elided away before its first word. Through
+      -- drawOverlay -- the fixed width an operator actually gets -- the
+      -- blocker and the action that clears it are both readable.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recordedRefusal
+              }
+          ]
+      let rendered = overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state)
+          continuation = Data.Text.unwords (filter (Data.Text.isInfixOf "↳") rendered <> noteTail rendered)
+          noteTail = filter (\row -> Data.Text.isInfixOf "git add" row || Data.Text.isInfixOf "fast-forward:" row)
+
+      -- The row still states the step that is stuck.
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "post-merge cleanup keeps failing")
+      -- And the note states the blocker and the remedy, both reachable.
+      continuation `shouldSatisfy` Data.Text.isInfixOf "Local changes are not what blocked this"
+      continuation `shouldSatisfy` Data.Text.isInfixOf "`git add` them"
+      continuation `shouldSatisfy` Data.Text.isInfixOf "src/Kanban/UI.hs"
+      -- The note wrapped to the panel rather than being emitted as one line
+      -- wider than it: the marked first line stops short of the path, which
+      -- a later line carries.
+      let marked = filter (Data.Text.isInfixOf "↳") rendered
+      marked `shouldSatisfy` ((== 1) . length)
+      marked `shouldSatisfy` all (not . Data.Text.isInfixOf "src/Kanban/UI.hs")
+      map Data.Text.length marked `shouldSatisfy` all (<= incidentsPanelWidth)
+
+    it "keeps the blocker and remedy of a production-shaped error under a deep checkout" $ do
+      -- Exactly what the drainer records: advance_pending_cleanup prefixes the
+      -- failing step, and _require_merged_index's refusal restates the failure
+      -- around the checkout's absolute path before it reaches the actionable
+      -- half. A deep path pushes that half further out, which is precisely
+      -- where a tail-trimming bound would drop it.
+      let checkout = "/Users/vincentcoghlan/worktrees/coghex/kanban/issue-217-cleanup-incident-cause"
+          recorded =
+            "fast-forwarding the default branch: Refusing to fast-forward master: the index in "
+              <> checkout
+              <> " holds unmerged entries, so no snapshot of local changes can be taken. \
+                 \Local changes are not what blocked this. Resolve these paths and `git add` \
+                 \them, and the next ordinary pass discharges the fast-forward: \
+                 \docs/code_health_findings.md, docs/pipeline-hardening.md"
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recorded
+              }
+          ]
+      let rendered = Data.Text.unwords (overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state))
+      -- The actionable half survives: what to do, and to which paths.
+      rendered `shouldSatisfy` Data.Text.isInfixOf "blocked this"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "Resolve these paths and `git add` them"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "docs/code_health_findings.md"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "docs/pipeline-hardening.md"
+      -- What it gave up to fit is the middle, and it says so.
+      rendered `shouldSatisfy` Data.Text.isInfixOf "…"
+      rendered `shouldSatisfy` Data.Text.isInfixOf "fast-forwarding the default branch:"
+
+    it "gives a note no more of the shared panel than its allowance" $ do
+      -- The panel's height belongs to every incident. A runaway recorded
+      -- failure is capped and says so rather than pushing other rows out.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentError = Just (Data.Text.replicate 40 "fast-forwarding the default branch refused. ")
+              }
+          ]
+      let rendered = overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state)
+          noteRows = filter (Data.Text.isInfixOf "fast-forwarding") rendered
+      length noteRows `shouldSatisfy` (<= 3)
+      Data.Text.concat noteRows `shouldSatisfy` Data.Text.isInfixOf "…"
+
+    it "adds only its own lines, leaving every other row alone at any supported width" $ do
+      -- The three widths the golden frames pin: wide, board minimum, and
+      -- narrow. A note takes the lines it wraps to and nothing else: no other
+      -- entry's row may move, change, or re-wrap because one incident gained
+      -- a recorded failure.
+      bare <- solveSessionOn <$> reportingState [cleanupIncident 1079, crashIncident]
+      loaded <-
+        solveSessionOn
+          <$> reportingState
+            [ (cleanupIncident 1079) {incidentError = Just recordedRefusal},
+              crashIncident
+            ]
+      let opened = applyIncidentsAction OpenIncidentsPanel
+          -- The panel is a fixed-height viewport, so a note spends one of its
+          -- blank rows. Comparing the rows that carry text is what isolates
+          -- "the note added its own lines" from "the padding shrank by one".
+          written = filter (not . Data.Text.null)
+          isNote = Data.Text.isPrefixOf "  "
+      for_ [200, 164, 36] $ \width -> do
+        let without = panelLinesAt width (opened bare)
+            with = panelLinesAt width (opened loaded)
+        -- Nothing overruns the width it was given.
+        map Data.Text.length with `shouldSatisfy` all (<= width)
+        -- Dropping the lines the note introduced leaves exactly the panel
+        -- that was there before it: same rows, same order, same wrapping.
+        written (filter (not . isNote) with) `shouldBe` written without
+        -- The note is additive, never a replacement.
+        length (written with) `shouldSatisfy` (> length (written without))
+
+    it "elides a row the real fixed-width panel cannot fit, rather than cropping it silently" $ do
+      -- The panel is a fixed-width overlay, so the width a row actually gets
+      -- is the overlay's, not the terminal's. Drawing through drawIncidents
+      -- alone bypasses that limit; this goes through drawOverlay, where a
+      -- real cleanup summary already overruns the panel before any recorded
+      -- failure is added to it.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recordedRefusal
+              }
+          ]
+      let opened = applyIncidentsAction OpenIncidentsPanel state
+      for_ [200, 164] $ \width -> do
+        case filter (Data.Text.isInfixOf "PR #1079") (overlayLinesAt width opened) of
+          [row] -> do
+            -- Dropped text is announced, and the row still fits the panel the
+            -- overlay draws rather than running past its border.
+            row `shouldSatisfy` Data.Text.isSuffixOf "…"
+            Data.Text.length row `shouldSatisfy` (<= incidentsPanelWidth)
+          rows -> expectationFailure ("expected one cleanup row, got " <> show (length rows))
+
+      -- A row the panel does fit keeps every character, and gains no ellipsis.
+      short <- reportingState [conflictIncident 42]
+      case filter (Data.Text.isInfixOf "PR #42") (overlayLinesAt 200 (applyIncidentsAction OpenIncidentsPanel short)) of
+        [row] -> do
+          row `shouldSatisfy` Data.Text.isSuffixOf "pr drainer"
+          row `shouldSatisfy` not . Data.Text.isInfixOf "…"
+        rows -> expectationFailure ("expected one conflict row, got " <> show (length rows))
+
     it "scrolls a list longer than the panel, keeping the selected row shown" $ do
       state <- reportingState [conflictIncident number | number <- [1 .. 40]]
       let opened = applyIncidentsAction OpenIncidentsPanel state
@@ -526,7 +738,39 @@ spec = do
         ActivateSelectedIncident
         state {appIncidentSelection = IncidentSelection (Just reference) 0}
 
-    panelLines state = renderWidgetLines (themeFor testOptions) 96 (drawIncidents state)
+    panelLines = panelLinesAt 96
+
+    panelLinesAt width state = renderWidgetLines (themeFor testOptions) width (drawIncidents state)
+
+    -- Through the real overlay, which is where the panel's fixed width and
+    -- its border and padding are applied. The frame the overlay draws around
+    -- each row is stripped so what is left is the row's own cells.
+    overlayLinesAt width state =
+      map
+        (Data.Text.dropAround (`elem` (" │┃|" :: String)))
+        (renderWidgetLines (themeFor testOptions) width (drawOverlay state IncidentsOverlay))
+
+    -- The interior the fixed-width incidents overlay leaves a row: its
+    -- hLimit less the border it draws and the padding inside that.
+    incidentsPanelWidth = 96
+
+    -- The single row an incident produces, which is what the kind-specific
+    -- assertions above are about.
+    rowEntry incident = do
+      state <- reportingState [incident]
+      case incidentEntries state of
+        [entry] -> pure entry
+        entries -> do
+          expectationFailure ("expected one row, got " <> show (length entries))
+          pure (entryNamed "unreachable")
+
+    rowNote incident = do
+      entry <- rowEntry incident
+      case entry.incidentEntryNote of
+        Just note -> pure note
+        Nothing -> do
+          expectationFailure "expected the row to carry a recorded failure"
+          pure ""
 
     safeCharacter character = character `notElem` ("\ESC\BEL\x202E\x202C\x200E\x061C" :: String)
 
@@ -540,7 +784,8 @@ spec = do
           incidentEntryWork = Nothing,
           incidentEntrySession = Nothing,
           incidentEntrySubject = "drainer supervisor",
-          incidentEntryDetail = "incident " <> name
+          incidentEntryDetail = "incident " <> name,
+          incidentEntryNote = Nothing
         }
 
     conflictIncident number =
@@ -550,7 +795,8 @@ spec = do
           incidentSummary = Just ("PR #" <> showNumber number <> " has a merge conflict in README."),
           incidentPullRequest = Just number,
           incidentLastPullRequest = Nothing,
-          incidentActivity = Nothing
+          incidentActivity = Nothing,
+          incidentError = Nothing
         }
 
     cleanupIncident number =
@@ -560,6 +806,12 @@ spec = do
           incidentSummary = Just ("PR #" <> showNumber number <> " merged but its cleanup keeps failing.")
         }
 
+    -- The refusal #200 words, which is the whole point of showing the field:
+    -- it names the blocker and the action that clears it.
+    recordedRefusal =
+      "Local changes are not what blocked this. Resolve these paths and `git add` \
+      \them, and the next ordinary pass discharges the fast-forward: src/Kanban/UI.hs"
+
     crashIncident =
       DrainerIncident
         { incidentId = "incident-crash",
@@ -567,7 +819,8 @@ spec = do
           incidentSummary = Just "drain_prs.py exited unexpectedly with code 1",
           incidentPullRequest = Nothing,
           incidentLastPullRequest = Just 7,
-          incidentActivity = Just "merging PR #7"
+          incidentActivity = Just "merging PR #7",
+          incidentError = Nothing
         }
 
     crashDetail =

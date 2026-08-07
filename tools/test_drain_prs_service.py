@@ -1392,6 +1392,93 @@ class IncidentSelectionTests(RedirectedControllerTestCase):
         self.assertIn("README", first["summary"])
         self.assertNotIn("exit_code", first)
 
+    def _record_cleanup(self, *, pull_request, steps, error):
+        """Record one cleanup incident, capturing what it would have pushed."""
+        published = []
+
+        def capture(message, **kwargs):
+            published.append((message, kwargs))
+            return {"configured": False, "delivered": False}
+
+        with mock.patch.object(drain_prs_service, "publish_ntfy", side_effect=capture):
+            incident = drain_prs_service.record_cleanup_incident(
+                repo_path=self.repo,
+                pull_request=pull_request,
+                steps=steps,
+                error=error,
+            )
+        return incident, published
+
+    def test_the_cleanup_notification_carries_the_failure_the_drainer_recorded(self):
+        # The summary names the failing step; only the recorded error says why
+        # it fails and what clears it, so the one push an operator receives
+        # must not be purely generic.
+        refusal = (
+            "Refusing to fast-forward master: the index in /repo holds unmerged "
+            "entries, so no snapshot of local changes can be taken. Local changes "
+            "are not what blocked this. Resolve these paths and `git add` them, and "
+            "the next ordinary pass discharges the fast-forward: src/Kanban/UI.hs"
+        )
+        incident, published = self._record_cleanup(
+            pull_request=1079,
+            steps=["fast-forwarding the default branch"],
+            error=refusal,
+        )
+        self.assertEqual(len(published), 1)
+        message, kwargs = published[0]
+
+        self.assertEqual(incident["last_error"], refusal)
+        self.assertIn(refusal, message)
+        self.assertIn(incident["incident_id"], message)
+        self.assertIn("fast-forwarding the default branch", message)
+        self.assertEqual(kwargs["title"], "PR drainer cannot finish post-merge cleanup")
+
+        # The self-clearing claim is qualified: this failure mode needs a human
+        # before any amount of retrying can discharge the step.
+        self.assertIn(
+            "clears itself once any operator action that failure calls for is "
+            "done and every outstanding step succeeds",
+            message,
+        )
+        self.assertNotIn("clears itself once every outstanding step succeeds", message)
+
+    def test_a_cleanup_notification_without_a_recorded_failure_says_nothing_of_one(self):
+        # No error to report is not an error reading "None". The absent case
+        # sends exactly the notification it sent before the field was carried.
+        for error in (None, "", "   "):
+            with self.subTest(error=error):
+                drain_prs_service.resolve_cleanup_incident(self.repo, 1079, "done")
+                _, published = self._record_cleanup(
+                    pull_request=1079,
+                    steps=["fast-forwarding the default branch"],
+                    error=error,
+                )
+                message = published[0][0]
+                self.assertNotIn("Last recorded failure", message)
+                self.assertNotIn("None", message)
+
+    def test_refreshing_an_open_cleanup_incident_publishes_no_second_notification(self):
+        # Every later pass refreshes the open incident's recorded error in
+        # place. The incident keeps its id and its one notification.
+        first, published = self._record_cleanup(
+            pull_request=1079,
+            steps=["fast-forwarding the default branch", "pruning the branch"],
+            error="exit code 1",
+        )
+        refreshed, again = self._record_cleanup(
+            pull_request=1079,
+            steps=["fast-forwarding the default branch"],
+            error="a different failure entirely",
+        )
+
+        self.assertEqual(len(published), 1)
+        self.assertEqual(again, [])
+        self.assertEqual(refreshed["incident_id"], first["incident_id"])
+        # The document is up to date even though nothing was pushed again.
+        self.assertEqual(refreshed["last_error"], "a different failure entirely")
+        self.assertEqual(refreshed["steps"], ["fast-forwarding the default branch"])
+        self.assertNotIn("a different failure entirely", published[0][0])
+
     def test_conflict_resolution_leaves_other_open_incidents_alone(self):
         crash = self.write_incident(
             "incident-20260101T000000Z-1.json",

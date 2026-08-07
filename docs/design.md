@@ -735,8 +735,57 @@ response carrying no set at all is an unanswered source, not an empty one.
 
 Each row states what it concerns — the issue or pull-request number, with its
 title where the board knows it — what happened, and which source it came
-from. Every title, summary, activity, and source label passes through the
-external-text sanitization contract above before it is rendered or reported.
+from. Every title, summary, activity, source label, and recorded failure
+passes through the external-text sanitization contract above before it is
+rendered or reported.
+
+A drainer row states what happened from the fields its kind is defined to
+carry, and from those only:
+
+- a supervisor crash adds the last activity it recorded and the last pull
+  request its log mentioned, marked as diagnostic rather than a navigation
+  target;
+- a post-merge cleanup incident adds the failure the drainer recorded on the
+  pass that last kept the cleanup from finishing — the blocker, and the action
+  that clears it wherever the recorded refusal names one — so the panel says
+  why the step is stuck and not only which step it is. The text comes from the
+  incident document the status response already carries, at no extra
+  controller invocation or polling cost.
+
+A recorded failure is stated on its own continuation lines beneath the row,
+not on the row itself. A cleanup summary already fills the panel's width
+alone, so on the row this text would be elided away before its first word,
+and a blocker and a remedy the operator can never read are not stated at all.
+The continuation is sanitized, collapsed to one logical line, then wrapped to
+the width the panel has, indented and marked so it reads as belonging to the
+row above. It is part of that row's clickable region, so clicking it selects
+the incident it belongs to, and selection and activation still resolve by
+incident identity rather than by any line count.
+
+It is bounded in height as well as width — the panel's rows are shared, so a
+runaway failure cannot push other incidents out of the panel. What a bound
+gives up is the *middle*, never the tail: the recorded value opens by
+restating the failing step around the checkout's absolute path and closes
+with the blocker, the remedy, and the paths to act on, so trimming the end
+would discard exactly what the operator needs and would do so more surely the
+deeper the checkout. Both ends are kept and the gap between them carries a
+visible ellipsis. A
+recorded failure that is absent, empty, whitespace-only, or emptied by
+sanitization adds nothing — no line, no separator, no placeholder — and a row
+of any other kind is unchanged whatever its document carries.
+
+The panel is a fixed-width overlay, so a row is measured against the width
+that overlay gives it rather than the terminal's. A row longer than the panel
+is elided with a visible ellipsis at that measured width, never cropped
+silently: §11's promise that an ellipsis appears wherever text was dropped
+holds for a row whatever made it long — a recorded failure, a long title, or a
+summary that already overran the panel on its own.
+
+The one notification the drainer publishes when it opens a cleanup incident
+carries that same recorded failure, and says the incident clears once any
+operator action the failure calls for is done and every outstanding step
+succeeds. Later passes refresh the open incident's recorded failure in place
+without publishing a second notification.
 
 Rows carry stable source-qualified identities: the service-provided incident
 ID for a drainer row, the existing agent session reference for a session row.

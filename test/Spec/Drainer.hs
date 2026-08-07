@@ -534,7 +534,8 @@ spec = do
                     incidentSummary = Just "drain_prs.py exited unexpectedly with code 1",
                     incidentPullRequest = Nothing,
                     incidentLastPullRequest = Just 7,
-                    incidentActivity = Just "merging PR #7"
+                    incidentActivity = Just "merging PR #7",
+                    incidentError = Nothing
                   },
                 DrainerIncident
                   { incidentId = "incident-B",
@@ -542,10 +543,38 @@ spec = do
                     incidentSummary = Just "PR #42 has a merge conflict in README.",
                     incidentPullRequest = Just 42,
                     incidentLastPullRequest = Nothing,
-                    incidentActivity = Nothing
+                    incidentActivity = Nothing,
+                    incidentError = Nothing
                   }
               ]
           )
+
+    it "carries a cleanup incident's recorded failure, and distinguishes every way it can be absent" $ do
+      -- The four shapes the service and its own history produce: the field
+      -- present with the refusal #200 words, a document written before the
+      -- field existed, an explicit null from a pass that recorded no error,
+      -- and an empty string. Only the first is a failure the panel can state,
+      -- and the decoder must not collapse the other three into it.
+      let cleanup recorded =
+            "{\"state\":\"running\",\"open_incidents\":[{\"incident_id\":\"incident-D\","
+              <> "\"kind\":\"cleanup-pending\",\"pull_request\":1079,"
+              <> "\"summary\":\"PR #1079 merged, but its post-merge cleanup keeps failing: "
+              <> "fast-forwarding the default branch.\""
+              <> recorded
+              <> "}]}"
+          decoded recorded =
+            fmap (fmap (map (.incidentError))) (incidents (cleanup recorded))
+      decoded ",\"last_error\":\"Local changes are not what blocked this. Resolve these paths and `git add` them: src/Kanban/UI.hs\""
+        `shouldBe` Right
+          ( Just
+              [ Just
+                  "Local changes are not what blocked this. Resolve these paths and \
+                  \`git add` them: src/Kanban/UI.hs"
+              ]
+          )
+      decoded "" `shouldBe` Right (Just [Nothing])
+      decoded ",\"last_error\":null" `shouldBe` Right (Just [Nothing])
+      decoded ",\"last_error\":\"\"" `shouldBe` Right (Just [Just ""])
 
     it "tells a controller that reported no incidents apart from one that reported no set" $ do
       -- The distinction the incidents panel needs: only the first of these is
@@ -564,7 +593,8 @@ spec = do
                     incidentSummary = Nothing,
                     incidentPullRequest = Nothing,
                     incidentLastPullRequest = Nothing,
-                    incidentActivity = Nothing
+                    incidentActivity = Nothing,
+                    incidentError = Nothing
                   }
               ]
           )
@@ -588,7 +618,7 @@ spec = do
             "{\"state\":\"stopped\",\"open_incidents\":[{\"incident_id\":\"incident-B\",\"kind\":\"merge-conflict\",\"pull_request\":42}]}"
             ""
         )
-        `shouldBe` Right (Just [DrainerIncident "incident-B" "merge-conflict" Nothing (Just 42) Nothing Nothing])
+        `shouldBe` Right (Just [DrainerIncident "incident-B" "merge-conflict" Nothing (Just 42) Nothing Nothing Nothing])
 
   describe "PR drainer post-merge cleanup obligations" $ do
     let obligation number =
