@@ -3644,6 +3644,10 @@ def new_single_pr_report(number: int | None) -> dict[str, Any]:
         "reason": "operational_error",
         "message": f"PR #{number}: the run ended without recording an outcome.",
         "merged": False,
+        # An interrupt this run swallowed to keep its result document. It is
+        # recorded rather than inferred from the message, because it is what
+        # tells main() a stop happened and still owes its final cleanup pass.
+        "interrupted": False,
     }
 
 
@@ -3694,7 +3698,10 @@ def drain_one_pr(
     except KeyboardInterrupt:
         # Swallowed rather than propagated so the caller still gets its one
         # JSON result. Whatever was already recorded stands -- above all a
-        # merge that landed before the interrupt arrived.
+        # merge that landed before the interrupt arrived. Swallowing it also
+        # means main()'s interrupt handler never sees this stop, so it is
+        # recorded here for the caller that owes the final cleanup pass.
+        report["interrupted"] = True
         report["reason"] = "operational_error"
         report["message"] = f"PR #{number}: interrupted before the run finished."
 
@@ -3710,6 +3717,7 @@ def drain_one_pr(
                     f"PR #{number}: could not persist the drainer queue state: {exc}"
                 )
         except KeyboardInterrupt:
+            report["interrupted"] = True
             if report["reason"] not in ERROR_REASONS:
                 report["reason"] = "operational_error"
                 report["message"] = (
@@ -3854,15 +3862,21 @@ def main() -> None:
             # run while a fast-forward's own autostash window is open.
             sweep_snapshot_anchors(ctx, dry_run=args.dry_run)
             if single:
-                emit_single_pr_result(
-                    drain_one_pr(
-                        ctx,
-                        number,
-                        dry_run=args.dry_run,
-                        gates=gates,
-                        report=report,
-                    )
+                result = drain_one_pr(
+                    ctx,
+                    number,
+                    dry_run=args.dry_run,
+                    gates=gates,
+                    report=report,
                 )
+                if report["interrupted"]:
+                    # A real interrupt during a `--pr` run is caught inside
+                    # drain_one_pr(), so the handler below never sees it --
+                    # but the stop it signals owes the same final pass. Run it
+                    # here, still holding the run lock, and still before the
+                    # caller's one document reaches stdout.
+                    discharge_recorded_cleanup(ctx, dry_run=args.dry_run)
+                emit_single_pr_result(result)
             loop(
                 ctx,
                 interval=args.interval,

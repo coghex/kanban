@@ -21,9 +21,11 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1118,10 +1120,9 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         self.assertEqual(result["outcome"], "error")
         self.assertTrue(result["merged"])
 
-    def test_the_shutdown_cleanup_pass_never_reaches_the_callers_stdout(self):
-        # A `--pr` run shares the interrupt path with the polling service, so
-        # it runs the same final cleanup pass -- and stdout is the caller's,
-        # for one JSON document and nothing else.
+    def _state_owing_one_issue_close(self):
+        """Queue state recording a merged PR #7 that still owes one issue
+        close, as a merge whose cleanup did not finish leaves behind."""
         record = drain_prs.plan_cleanup(
             {
                 "number": 7,
@@ -1152,22 +1153,47 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         )
         self.fake.script("gh", ["issue", "close", "7"], stdout="")
 
+    def _assert_debt_discharged(self):
+        self.assertEqual(len(self.gh_calls("issue", "close", "7")), 1)
+        self.assertNotIn(
+            "7", json.loads(self.state_path.read_text(encoding="utf-8"))["prs"]
+        )
+
+    def test_an_interrupt_inside_the_run_still_discharges_recorded_cleanup(self):
+        # drain_one_pr() swallows the interrupt to keep this caller's one
+        # result document, so main()'s own handler never sees it. The stop it
+        # signals still owes the final pass, and the pass must still run.
+        self._state_owing_one_issue_close()
+
+        with mock.patch.object(
+            drain_prs, "prepare_single_pr", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self._assert_debt_discharged()
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["reason"], "operational_error")
+        # And stdout still carries exactly one document: the caller's result.
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(self.raw_stdout.strip()), result)
+        self.assertNotIn("cleanup", self.raw_stdout)
+        self.assertIn("post-merge cleanup", self.raw_stderr)
+
+    def test_an_interrupt_escaping_the_run_discharges_it_too(self):
+        # The other half of the same shutdown boundary: an interrupt that
+        # reaches main()'s handler instead, as one arriving outside
+        # drain_one_pr()'s own try does.
+        self._state_owing_one_issue_close()
+
         with mock.patch.object(
             drain_prs, "drain_one_pr", side_effect=KeyboardInterrupt
         ):
             result, code = self.run_main("--pr", "42")
 
-        # The debt was discharged on the way out, from the record alone.
-        self.assertEqual(len(self.gh_calls("issue", "close", "7")), 1)
-        self.assertNotIn(
-            "7", json.loads(self.state_path.read_text(encoding="utf-8"))["prs"]
-        )
-        # And stdout still carries exactly one document: the caller's result.
+        self._assert_debt_discharged()
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
         self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
         self.assertEqual(json.loads(self.raw_stdout.strip()), result)
-        self.assertEqual(code, drain_prs.EXIT_ERROR)
-        self.assertNotIn("cleanup", self.raw_stdout)
-        self.assertIn("post-merge cleanup", self.raw_stderr)
 
     def test_valid_json_that_is_not_a_valid_queue_state_is_reported(self):
         # These decode cleanly and used to blow up as AttributeError or
@@ -1430,6 +1456,126 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
         self.assertEqual(self.fake.calls("gh"), [])
         # Taking the lock is the only thing it did, and that rewrote nothing.
         self.assertEqual(snapshot_tree(self.main), before)
+
+class SinglePrRealInterruptTests(SinglePrCliFixture):
+    """A real SIGINT delivered to the real script, mid-`gh` call.
+
+    `stop_service` sends SIGINT straight to an unmanaged drainer, and the
+    launchd runner forwards SIGINT to a managed one's process group, so this
+    is the signal an intentional stop actually delivers -- arriving where the
+    run happens to be rather than at a seam a test chose to raise from.
+    """
+
+    def _popen_cli(self, *extra):
+        env = dict(os.environ)
+        env.update(self.fake.environ_overrides())
+        env["KANBAN_DRAINER_INSTALL_DIR"] = str(self.install_dir)
+        for name in ("KANBAN_DRAINER_NTFY_URL", "DRAIN_PRS_MANAGED"):
+            env.pop(name, None)
+        return subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--path",
+                str(self.main),
+                "--config",
+                str(self.absent_config),
+                "--log-dir",
+                str(self.log_dir),
+                *extra,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+
+    def _await_gh_call(self, proc, *prefix, timeout=60):
+        """Block until the run invokes a command, or say why it never will.
+
+        A run that has already exited is reported with its own output rather
+        than as a bare timeout: the interesting failure -- a lock it could not
+        take, a checkout it refused -- is in there, and waiting out the
+        deadline for it would hide it behind the clock.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.gh_calls(*prefix):
+                return
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                self.fail(
+                    f"the run exited ({proc.returncode}) before `gh "
+                    f"{' '.join(prefix)}`:\n{stdout}\n{stderr}"
+                )
+            time.sleep(0.05)
+        self.fail(f"the run never reached `gh {' '.join(prefix)}`")
+
+    def test_a_real_sigint_discharges_recorded_cleanup_and_still_reports(self):
+        # A merge that did not finish its cleanup, exactly as the queue state
+        # records it.
+        record = drain_prs.plan_cleanup(
+            {
+                "number": 7,
+                "headRefName": "issue-7-departed",
+                "headRefOid": "b" * 40,
+                "closingIssuesReferences": [
+                    {
+                        "number": 7,
+                        "repository": {"owner": {"login": "acme"}, "name": "widgets"},
+                    }
+                ],
+            }
+        )
+        record["pending"] = [
+            item for item in record["pending"] if item["kind"] == "issue"
+        ]
+        entry = self.state_entry("b" * 40)
+        entry["cleanup"] = record
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "prs": {"7": entry},
+            }
+        )
+        # The run blocks here, so the signal lands inside a command it is
+        # waiting on rather than between two of them.
+        self.fake.script(
+            "gh",
+            ["pr", "view", "42"],
+            stdout=json.dumps(self.base_pr_json()),
+            sleep_seconds=60,
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+
+        proc = self._popen_cli("--pr", "42")
+        try:
+            self._await_gh_call(proc, "pr", "view", "42")
+            proc.send_signal(signal.SIGINT)
+            stdout, stderr = proc.communicate(timeout=120)
+        except BaseException:
+            proc.kill()
+            raise
+
+        # The recorded debt was discharged on the way out, from the record
+        # alone -- no second read of any pull request.
+        self.assertEqual(len(self.gh_calls("issue", "close", "7")), 1)
+        self.assertNotIn(
+            "7", json.loads(self.state_path.read_text(encoding="utf-8"))["prs"]
+        )
+        # And the caller still got exactly one JSON document on stdout.
+        self.assertEqual(len(stdout.strip().splitlines()), 1, stdout)
+        result = json.loads(stdout.strip())
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertFalse(result["merged"])
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertNotIn("cleanup", stdout)
+        self.assertIn("post-merge cleanup", stderr)
 
 
 if __name__ == "__main__":
