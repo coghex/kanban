@@ -42,6 +42,24 @@ cabal update
 cabal build all
 ```
 
+## Install
+
+From a source checkout, install the executable into Cabal's user binary
+directory:
+
+```console
+cabal install exe:kanban
+kanban --version
+```
+
+If `kanban` is not found after installation, add Cabal's user binary directory
+(normally `~/.local/bin`, or the path named in Cabal's installation warning) to
+your `PATH`.
+
+The executable runs the board on its own. Keep the source checkout if you use
+the optional AI workflows or PR drainer: their setup commands install the
+tracked scripts and plugin bundles from that checkout.
+
 ## Run
 
 Open the board for the current repository:
@@ -50,10 +68,22 @@ Open the board for the current repository:
 cabal run kanban
 ```
 
+After installing the executable, the equivalent command is:
+
+```console
+kanban
+```
+
 Open another local repository:
 
 ```console
 cabal run kanban -- --path /path/to/project
+```
+
+With the installed executable:
+
+```console
+kanban --path /path/to/project
 ```
 
 Kanban reads the repository's GitHub remote and uses your existing GitHub CLI login.

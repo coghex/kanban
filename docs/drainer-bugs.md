@@ -7,13 +7,13 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 
 ## Status
 
-- [ ] DR-1. Queue-wide branch updates fan out CI after a merge
+- [x] DR-1. Queue-wide branch updates fan out CI after a merge — [#204]
 
 ---
 
 ## Chapter 1 — Queue scheduling and branch updates
 
-### DR-1. Queue-wide branch updates fan out CI after a merge
+### [#204] DR-1. Queue-wide branch updates fan out CI after a merge
 
 > **Captured note:** when the pr drainer merges a pr, it fast forwards and triggers ci on every single open pr. this isnt right, it should only fast forward a pr when it is about to attemp the merge, when i have a dozen or so prs in the queue, it puts a heavy load on the remote docker ci, it should naturally only be doing a single pr at a time
 

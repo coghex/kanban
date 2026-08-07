@@ -58,7 +58,7 @@ report still owes.
 - [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
 - [x] 2. `UI.hs` is a god-module — [#50]
 - [x] 3. `AppState` has seven parallel session tables — [#51]
-- [ ] 4. `drain_prs.py` is 3,170 lines — [deferred]: after #147 lands; premise unverified
+- [x] 4. `drain_prs.py` is 3,967 lines — [no-issue]
 - [x] 5. `Worker.hs` threads fifteen mutable cells positionally — [#153]
 - [x] 5a. `Review.hs` exceeds 2,000 lines — [no-issue]
 - [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
@@ -74,9 +74,7 @@ report still owes.
 - [x] 13. Repository override key matched exactly and silently — [#150]
 - [x] 14. `bug`, `ui`, and `input` compiled into the theme — [#152]
 
-**17 of 18 resolved. 1 deferred, 0 unprocessed.** Every finding has been processed.
-The one that remains, 4, is blocked on sequencing rather than evidence: it clears
-when #147 merges.
+**18 of 18 resolved. 0 deferred, 0 unprocessed.** Every finding has been processed.
 
 Findings 2 and 3 were cleared by reading `src/Kanban/UI.hs` end to end. Both were
 already owned by open issues (#50, #51), so neither was refiled; the read produced
@@ -422,27 +420,22 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### [deferred] 4. `tools/drain_prs.py` is a 3,170-line script
+### [no-issue] 4. `tools/drain_prs.py` is a 3,967-line script
 
-> **Deferred:** Blocked on sequencing rather than evidence. #145 has since merged,
-> but #146 and #147 remain open with no PR in flight, and #147 — giving each
-> repository its own drainer — threads repository identity through config
-> resolution, the service, and the durable state files, so it will touch
-> `tools/drain_prs.py` broadly. A split specified now would be invalidated by it.
-> **Clears when #147 merges** (verified open, 2026-07-26).
->
-> **Verify the premise before filing, do not inherit it.** Roughly 250 of 3,170
-> lines have been read. This is a size-based finding, and every other size-based
-> finding in this report has failed on contact: 5's stated premise was wrong, 5a
-> and 7 closed as no-issue. The structural evidence here already argues for
-> caution — 107 top-level definitions across 3,170 lines is about 30 lines each,
-> which is many small functions in one flat file rather than the god-module shape
-> the text below implies, and is the same shape `Review.hs` had before its finding
-> closed. Of the phases proposed below, `check` (10 functions), `merge` (4),
-> `conflict` (3), and `incident` (1) exist as recognisable clusters, while
-> "eligibility" and "repair" appear as no named function at all. Read the file
-> after #147 lands, then decide whether a split is warranted and where — rather
-> than filing the fix shape below as written.
+> **Disposition:** No issue — #159 considered this exact file and decided against
+> it: "Python is out of scope entirely. Scripts are held to ~5,000 lines instead,
+> and nothing currently exceeds it — `tools/drain_prs.py` is the largest at 3,170."
+> It is 3,967 today, still below that bar. The re-read this deferral
+> asked for supports that decision rather than overturning it: the file is
+> phase-ordered, and its strongest candidate seam — the autostash and fast-forward
+> block at `tools/drain_prs.py:1781-2205` — has exactly two external entry points
+> (`fast_forward_default_branch` at 2306, `sweep_snapshot_anchors` at 3638) and its
+> own 1,069-line test file. That is the `Review.hs` outcome, not the `UI.hs` one.
+> The stated fix shape is costlier than written: `tools/` uses flat sibling
+> imports, so promoting it to a package would repoint `DRAINER_PATH`, the
+> `SCRIPT_MODULES` vendoring fixture at `tools/test_single_pr_drain.py:40`, and
+> nine test modules, preventing no demonstrated defect. Revisit if the file
+> crosses the ~5,000-line bar #159 set.
 
 **Severity: High** — this is the component that merges pull requests, and it is
 the least structured code in the repository.
