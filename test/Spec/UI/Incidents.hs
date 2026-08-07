@@ -197,60 +197,62 @@ spec = do
         (\entry -> incidentSourceLabel entry.incidentEntrySource `shouldSatisfy` Data.Text.all safeCharacter)
         (incidentEntries state)
 
-    it "states the failure a stuck cleanup recorded, alongside the step that is stuck" $ do
+    it "carries the failure a stuck cleanup recorded, leaving the row stating the step" $ do
       state <- reportingState [(cleanupIncident 1079) {incidentError = Just recordedRefusal}]
       case incidentEntries state of
-        [entry] ->
-          entry.incidentEntryDetail
-            `shouldBe` "PR #1079 merged but its cleanup keeps failing. · recorded failure: "
-              <> recordedRefusal
+        [entry] -> do
+          -- The row keeps saying which step is stuck, unchanged...
+          entry.incidentEntryDetail `shouldBe` "PR #1079 merged but its cleanup keeps failing."
+          -- ...and why it is stuck travels as the note the panel wraps below
+          -- it, where it has the width to be read.
+          entry.incidentEntryNote `shouldBe` Just recordedRefusal
         entries -> expectationFailure ("expected one cleanup row, got " <> show (length entries))
 
     it "adds nothing at all for a cleanup incident with no usable recorded failure" $ do
       -- Missing, explicit null (both decode to Nothing), empty, whitespace
       -- only, and emptied by sanitization. Each renders exactly as a cleanup
-      -- incident does today: no separator, no placeholder, no empty label.
+      -- incident does today: no note, no separator, no placeholder.
       let bare = "PR #1079 merged but its cleanup keeps failing."
-      details <-
+      entries <-
         traverse
-          (fmap (map (.incidentEntryDetail) . incidentEntries) . reportingState . pure)
+          (fmap incidentEntries . reportingState . pure)
           [ cleanupIncident 1079,
             (cleanupIncident 1079) {incidentError = Just ""},
             (cleanupIncident 1079) {incidentError = Just "   \n\t  "},
             (cleanupIncident 1079) {incidentError = Just "\ESC[31m\ESC[0m\x202E\x202C"}
           ]
-      details `shouldBe` replicate 4 [bare]
+      map (map (.incidentEntryDetail)) entries `shouldBe` replicate 4 [bare]
+      map (map (.incidentEntryNote)) entries `shouldBe` replicate 4 [Nothing]
 
-    it "projects a hostile or over-long recorded failure onto one sanitized row" $ do
+    it "projects a hostile or over-long recorded failure onto one sanitized logical line" $ do
       let hostile = "cleanup failed:\ESC]0;title\BEL\n\n\x200E\&fast-forward\trefused\r\non branch\n"
           overLong = Data.Text.replicate 40 "fast-forwarding the default branch refused. "
-      hostileDetail <- rowDetail ((cleanupIncident 1079) {incidentError = Just hostile})
-      longDetail <- rowDetail ((cleanupIncident 1079) {incidentError = Just overLong})
+      hostileNote <- rowNote ((cleanupIncident 1079) {incidentError = Just hostile})
+      longNote <- rowNote ((cleanupIncident 1079) {incidentError = Just overLong})
 
       -- §11: nothing reaching the terminal carries an escape sequence, a
       -- bidirectional override, or a format control, and the logical line
-      -- breaks sanitizeText preserves are collapsed so the row stays one row.
-      hostileDetail `shouldSatisfy` Data.Text.all safeCharacter
-      hostileDetail `shouldSatisfy` Data.Text.all (/= '\n')
-      hostileDetail
-        `shouldBe` "PR #1079 merged but its cleanup keeps failing. · recorded failure: \
-                   \cleanup failed: fast-forward refused on branch"
+      -- breaks sanitizeText preserves are collapsed so the renderer wraps to
+      -- the width it has rather than to breaks in the drainer's text.
+      hostileNote `shouldSatisfy` Data.Text.all safeCharacter
+      hostileNote `shouldSatisfy` Data.Text.all (/= '\n')
+      hostileNote `shouldBe` "cleanup failed: fast-forward refused on branch"
 
       -- Over-long text is bounded, and the ellipsis appears only because
       -- content was dropped -- the case above kept every word without one.
-      longDetail `shouldSatisfy` Data.Text.isSuffixOf "…"
-      hostileDetail `shouldSatisfy` not . Data.Text.isSuffixOf "…"
-      longDetail `shouldSatisfy` Data.Text.isInfixOf "recorded failure: fast-forwarding"
-      Data.Text.length longDetail `shouldSatisfy` (< Data.Text.length overLong)
+      longNote `shouldSatisfy` Data.Text.isSuffixOf "…"
+      hostileNote `shouldSatisfy` not . Data.Text.isSuffixOf "…"
+      Data.Text.length longNote `shouldSatisfy` (< Data.Text.length overLong)
 
     it "leaves a crash or conflict incident unchanged whatever its document carries" $ do
       -- The field belongs to the cleanup kind's contract. A crash or conflict
       -- document that unexpectedly carries one is rendered from the fields its
-      -- own kind defines, exactly as before.
-      crash <- rowDetail crashIncident {incidentError = Just recordedRefusal}
-      conflict <- rowDetail ((conflictIncident 42) {incidentError = Just recordedRefusal})
-      crash `shouldBe` crashDetail
-      conflict `shouldBe` "PR #42 has a merge conflict in README."
+      -- own kind defines, exactly as before, and earns no note.
+      crash <- rowEntry crashIncident {incidentError = Just recordedRefusal}
+      conflict <- rowEntry ((conflictIncident 42) {incidentError = Just recordedRefusal})
+      crash.incidentEntryDetail `shouldBe` crashDetail
+      conflict.incidentEntryDetail `shouldBe` "PR #42 has a merge conflict in README."
+      map (.incidentEntryNote) [crash, conflict] `shouldBe` [Nothing, Nothing]
 
     it "renders a supervisor crash from its real diagnostic fields" $ do
       state <- reportingState [crashIncident]
@@ -518,34 +520,82 @@ spec = do
       rendered
         `shouldSatisfy` any (Data.Text.isInfixOf "issue #10 — Issue 10 · failed · solve activity · kanban session")
 
-    it "shows the recorded failure without disturbing the panel at any supported width" $ do
+    it "shows the recorded cause and remedy through the real fixed-width panel" $ do
+      -- The point of the whole change. A real cleanup summary already
+      -- overruns the 96-cell panel interior on its own, so on the row itself
+      -- this text would be elided away before its first word. Through
+      -- drawOverlay -- the fixed width an operator actually gets -- the
+      -- blocker and the action that clears it are both readable.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentSummary =
+                  Just
+                    "PR #1079 merged, but its post-merge cleanup keeps failing: \
+                    \fast-forwarding the default branch.",
+                incidentError = Just recordedRefusal
+              }
+          ]
+      let rendered = overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state)
+          continuation = Data.Text.unwords (filter (Data.Text.isInfixOf "↳") rendered <> noteTail rendered)
+          noteTail = filter (\row -> Data.Text.isInfixOf "git add" row || Data.Text.isInfixOf "fast-forward:" row)
+
+      -- The row still states the step that is stuck.
+      rendered `shouldSatisfy` any (Data.Text.isInfixOf "post-merge cleanup keeps failing")
+      -- And the note states the blocker and the remedy, both reachable.
+      continuation `shouldSatisfy` Data.Text.isInfixOf "Local changes are not what blocked this"
+      continuation `shouldSatisfy` Data.Text.isInfixOf "`git add` them"
+      continuation `shouldSatisfy` Data.Text.isInfixOf "src/Kanban/UI.hs"
+      -- The note wrapped to the panel rather than being emitted as one line
+      -- wider than it: the marked first line stops short of the path, which
+      -- a later line carries.
+      let marked = filter (Data.Text.isInfixOf "↳") rendered
+      marked `shouldSatisfy` ((== 1) . length)
+      marked `shouldSatisfy` all (not . Data.Text.isInfixOf "src/Kanban/UI.hs")
+      map Data.Text.length marked `shouldSatisfy` all (<= incidentsPanelWidth)
+
+    it "gives a note no more of the shared panel than its allowance" $ do
+      -- The panel's height belongs to every incident. A runaway recorded
+      -- failure is capped and says so rather than pushing other rows out.
+      state <-
+        reportingState
+          [ (cleanupIncident 1079)
+              { incidentError = Just (Data.Text.replicate 40 "fast-forwarding the default branch refused. ")
+              }
+          ]
+      let rendered = overlayLinesAt 164 (applyIncidentsAction OpenIncidentsPanel state)
+          noteRows = filter (Data.Text.isInfixOf "fast-forwarding") rendered
+      length noteRows `shouldSatisfy` (<= 3)
+      Data.Text.concat noteRows `shouldSatisfy` Data.Text.isSuffixOf "…"
+
+    it "adds only its own lines, leaving every other row alone at any supported width" $ do
       -- The three widths the golden frames pin: wide, board minimum, and
-      -- narrow. Rows are single-line, so an over-long recorded failure must
-      -- change neither the row count nor the wrapping of anything around it.
-      bare <- solveSessionOn <$> reportingState [cleanupIncident 1079]
+      -- narrow. A note takes the lines it wraps to and nothing else: no other
+      -- entry's row may move, change, or re-wrap because one incident gained
+      -- a recorded failure.
+      bare <- solveSessionOn <$> reportingState [cleanupIncident 1079, crashIncident]
       loaded <-
         solveSessionOn
           <$> reportingState
-            [ (cleanupIncident 1079)
-                { incidentError = Just (Data.Text.replicate 40 "fast-forwarding the default branch refused. ")
-                }
+            [ (cleanupIncident 1079) {incidentError = Just recordedRefusal},
+              crashIncident
             ]
       let opened = applyIncidentsAction OpenIncidentsPanel
-          besidesCleanupRow = filter (not . Data.Text.isInfixOf "PR #1079")
+          -- The panel is a fixed-height viewport, so a note spends one of its
+          -- blank rows. Comparing the rows that carry text is what isolates
+          -- "the note added its own lines" from "the padding shrank by one".
+          written = filter (not . Data.Text.null)
+          isNote = Data.Text.isPrefixOf "  "
       for_ [200, 164, 36] $ \width -> do
         let without = panelLinesAt width (opened bare)
             with = panelLinesAt width (opened loaded)
-        -- One row before, one row after: the recorded failure is clipped to
-        -- the row it belongs to rather than wrapping onto another.
-        length with `shouldBe` length without
+        -- Nothing overruns the width it was given.
         map Data.Text.length with `shouldSatisfy` all (<= width)
-        -- And every other row -- the source summary, the session row, the
-        -- footer -- is byte-for-byte what it was.
-        besidesCleanupRow with `shouldBe` besidesCleanupRow without
-
-      -- And at a width with room for it, the failure really is on the row.
-      panelLinesAt 200 (opened loaded)
-        `shouldSatisfy` any (Data.Text.isInfixOf "recorded failure: fast-forwarding")
+        -- Dropping the lines the note introduced leaves exactly the panel
+        -- that was there before it: same rows, same order, same wrapping.
+        written (filter (not . isNote) with) `shouldBe` written without
+        -- The note is additive, never a replacement.
+        length (written with) `shouldSatisfy` (> length (written without))
 
     it "elides a row the real fixed-width panel cannot fit, rather than cropping it silently" $ do
       -- The panel is a fixed-width overlay, so the width a row actually gets
@@ -661,14 +711,22 @@ spec = do
     -- hLimit less the border it draws and the padding inside that.
     incidentsPanelWidth = 96
 
-    -- The detail of the single row an incident produces, which is what the
-    -- kind-specific assertions above are about.
-    rowDetail incident = do
+    -- The single row an incident produces, which is what the kind-specific
+    -- assertions above are about.
+    rowEntry incident = do
       state <- reportingState [incident]
       case incidentEntries state of
-        [entry] -> pure entry.incidentEntryDetail
+        [entry] -> pure entry
         entries -> do
           expectationFailure ("expected one row, got " <> show (length entries))
+          pure (entryNamed "unreachable")
+
+    rowNote incident = do
+      entry <- rowEntry incident
+      case entry.incidentEntryNote of
+        Just note -> pure note
+        Nothing -> do
+          expectationFailure "expected the row to carry a recorded failure"
           pure ""
 
     safeCharacter character = character `notElem` ("\ESC\BEL\x202E\x202C\x200E\x061C" :: String)
@@ -683,7 +741,8 @@ spec = do
           incidentEntryWork = Nothing,
           incidentEntrySession = Nothing,
           incidentEntrySubject = "drainer supervisor",
-          incidentEntryDetail = "incident " <> name
+          incidentEntryDetail = "incident " <> name,
+          incidentEntryNote = Nothing
         }
 
     conflictIncident number =

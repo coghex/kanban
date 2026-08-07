@@ -247,8 +247,45 @@ drawIncidents state =
               <> entry.incidentEntryDetail
               <> " · "
               <> incidentSourceLabel entry.incidentEntrySource
-          widget = clickable (IncidentTarget entry.incidentEntryRef) (withAttr attribute (elidedLine line))
+          note = maybe [] (noteLines state) entry.incidentEntryNote
+          widget =
+            clickable
+              (IncidentTarget entry.incidentEntryRef)
+              (vBox (withAttr attribute (elidedLine line) : note))
        in if selected then visible widget else widget
+
+-- | An entry's note as the continuation lines drawn under its row.
+--
+-- Wrapped rather than elided: the note exists because the text is worth
+-- reading whole, and a row that has already spent the panel's width on its
+-- subject and summary would elide it away before its first word. The
+-- continuation is indented and marked so it reads as belonging to the row
+-- above rather than as an entry of its own, and it is part of the same
+-- clickable widget, so clicking it selects the incident it belongs to.
+--
+-- Bounded in height as well as width. A note is one incident's detail, and
+-- the panel's rows are shared: 'boundedLines' caps it at
+-- 'incidentNoteLines', ending the last kept line with an ellipsis when
+-- anything was dropped.
+noteLines :: AppState -> Text -> [Widget Name]
+noteLines state note = [withAttr dimAttr (Widget Fixed Fixed draw)]
+  where
+    marker = if state.appOptions.optionAscii then "-> " else "↳ "
+    indent = "    "
+    -- The marker sits on the first line only; later lines align under its
+    -- text rather than repeating it.
+    continuation = Text.replicate (Text.length marker) " "
+    draw = do
+      context <- getContext
+      let body = max 1 (availWidth context - Text.length indent - Text.length marker)
+          rows = boundedLines body incidentNoteLines note
+      render (vBox [txt (indent <> prefix <> row) | (prefix, row) <- zip (marker : repeat continuation) rows])
+
+-- | How many continuation lines one note may take before it is elided. A
+-- note belongs to a single incident while the panel's height is shared, so
+-- three lines is the whole allowance.
+incidentNoteLines :: Int
+incidentNoteLines = 3
 
 -- | One row's text, elided to the width the panel actually gives it.
 --

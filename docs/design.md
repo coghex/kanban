@@ -747,16 +747,25 @@ carry, and from those only:
   target;
 - a post-merge cleanup incident adds the failure the drainer recorded on the
   pass that last kept the cleanup from finishing — the blocker, and the action
-  that clears it wherever the recorded refusal names one — so the row says why
-  the step is stuck and not only which step it is. The text comes from the
+  that clears it wherever the recorded refusal names one — so the panel says
+  why the step is stuck and not only which step it is. The text comes from the
   incident document the status response already carries, at no extra
-  controller invocation or polling cost. It is projected to a single row:
-  sanitized, wrapped to one line, and elided with a visible ellipsis only
-  where content was dropped, so a long or multi-line failure leaves the
-  panel's row count and column behavior unchanged at every supported width. A
-  recorded failure that is absent, empty, whitespace-only, or emptied by
-  sanitization adds nothing — no separator, no placeholder — and a row of any
-  other kind is unchanged whatever its document carries.
+  controller invocation or polling cost.
+
+A recorded failure is stated on its own continuation lines beneath the row,
+not on the row itself. A cleanup summary already fills the panel's width
+alone, so on the row this text would be elided away before its first word,
+and a blocker and a remedy the operator can never read are not stated at all.
+The continuation is sanitized, collapsed to one logical line, then wrapped to
+the width the panel has, indented and marked so it reads as belonging to the
+row above. It is part of that row's clickable region, so clicking it selects
+the incident it belongs to, and selection and activation still resolve by
+incident identity rather than by any line count. It is bounded in height as
+well as width — the panel's rows are shared, so a runaway failure is capped
+and ends with a visible ellipsis rather than pushing other incidents out. A
+recorded failure that is absent, empty, whitespace-only, or emptied by
+sanitization adds nothing — no line, no separator, no placeholder — and a row
+of any other kind is unchanged whatever its document carries.
 
 The panel is a fixed-width overlay, so a row is measured against the width
 that overlay gives it rather than the terminal's. A row longer than the panel

@@ -347,7 +347,12 @@ data IncidentEntry = IncidentEntry
     -- truncated off the board still has an overlay worth opening.
     incidentEntrySession :: Maybe AgentSessionRef,
     incidentEntrySubject :: Text,
-    incidentEntryDetail :: Text
+    incidentEntryDetail :: Text,
+    -- | Text too long for the row to state, which the panel wraps beneath it
+    -- rather than eliding away. Only what an operator has to act on earns
+    -- this: a row's own line is the summary, and a continuation line costs
+    -- panel height every other entry shares.
+    incidentEntryNote :: Maybe Text
   }
   deriving stock (Eq, Show)
 

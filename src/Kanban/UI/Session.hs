@@ -309,7 +309,8 @@ incidentEntries state = drainerEntries <> solveEntries <> pullRequestEntries <> 
           incidentEntryWork = Just work,
           incidentEntrySession = Just reference,
           incidentEntrySubject = subject,
-          incidentEntryDetail = status <> " · " <> sanitizeText activity
+          incidentEntryDetail = status <> " · " <> sanitizeText activity,
+          incidentEntryNote = Nothing
         }
 
 -- | One drainer incident as a row. The session is looked up rather than
@@ -325,7 +326,8 @@ drainerIncidentEntry state incident =
       incidentEntryWork = work,
       incidentEntrySession = session,
       incidentEntrySubject = subject,
-      incidentEntryDetail = Text.intercalate " · " (summary : diagnostics)
+      incidentEntryDetail = Text.intercalate " · " (summary : diagnostics),
+      incidentEntryNote = recordedFailure incident
     }
   where
     -- Only the authoritative field. 'incidentLastPullRequest' is inferred by
@@ -354,36 +356,40 @@ drainerIncidentEntry state incident =
              | Just number <- [incident.incidentLastPullRequest],
                incident.incidentKind == crashIncidentKind
            ]
-        <> [ "recorded failure: " <> line
-             | incident.incidentKind == cleanupIncidentKind,
-               Just recorded <- [incident.incidentError],
-               line <- boundedLines incidentErrorWidth 1 (sanitizeText recorded)
-           ]
 
--- | The recorded cleanup failure as the single row-sized fragment the panel
--- shows.
+-- | The failure the drainer recorded for a stuck post-merge cleanup, as the
+-- one logical line the panel wraps beneath that incident's row.
 --
--- The summary names the step that is stuck; this names why, and — since #200
--- words the refusal that way — the action that clears it. It is read only
--- for 'cleanupIncidentKind': every other kind's document is rendered from
+-- The row's own line states the step that is stuck; this states why, and —
+-- since #200 words the refusal that way — the action that clears it. The
+-- panel is a fixed 100 cells and a cleanup summary alone already overruns
+-- it, so on the row itself this text would always be elided away before its
+-- first word: a blocker and a remedy an operator can never read are not
+-- stated at all. It is given its own wrapped line instead.
+--
+-- Read only for 'cleanupIncidentKind'. Every other kind's row is built from
 -- the fields it is defined to carry, so a stray @last_error@ on a crash or
 -- conflict incident changes nothing.
 --
--- 'boundedLines' does the whole projection, and its shape is what makes the
--- absent cases free: 'sanitizeText' preserves logical newlines while the row
--- is a single 'txt', so the text is wrapped to one line — collapsing every
--- run of whitespace — and elided with a visible ellipsis only where content
--- was dropped. Text that is missing, empty, whitespace-only, or emptied by
--- sanitization yields no line at all, so no separator and no placeholder
--- reach the row.
---
--- The bound is a cap on what the row carries, not a fit to the panel: the
--- panel is a fixed 100 cells wide and clips each row to one line, so what is
--- actually shown is decided there, exactly as it already is for a long
--- summary. The cap is set above the length of the refusal #200 words —
--- naming the branch, the checkout, the blocker, and the paths to @git add@ —
--- so an ordinary recorded failure is carried whole and only a runaway one is
--- elided.
+-- 'boundedLines' at one line does the whole projection, and its shape is
+-- what makes the absent cases free: 'sanitizeText' preserves logical
+-- newlines, so collapsing to a single line here is what lets the renderer
+-- wrap to the width it actually has. Text that is missing, empty,
+-- whitespace-only, or emptied by sanitization yields no line at all, hence
+-- no note, and the row renders exactly as it did before the field existed.
+recordedFailure :: DrainerIncident -> Maybe Text
+recordedFailure incident
+  | incident.incidentKind /= cleanupIncidentKind = Nothing
+  | otherwise = do
+      recorded <- incident.incidentError
+      case boundedLines incidentErrorWidth 1 (sanitizeText recorded) of
+        [line] -> Just line
+        _ -> Nothing
+
+-- | The cap on a recorded failure's carried text. Set above the length of
+-- the refusal #200 words — naming the branch, the checkout, the blocker, and
+-- the paths to @git add@ — so an ordinary one is carried whole, while a
+-- runaway error cannot take the panel's height from every other incident.
 incidentErrorWidth :: Int
 incidentErrorWidth = 240
 
