@@ -17,26 +17,26 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 > incident (6), the autostash anchor's lifecycle (7), and where a fix lives
 > versus where it runs (8).
 >
-> Two dependencies constrain filing order: chapter 2's PH-3 is specified
-> against the rule PH-1 settles, and chapter 8's PH-12 is resolved by the
-> migration PH-6 describes. Chapter 4 blocks nothing, but PH-6 governs
-> whether the fixes recorded under PH-4 and PH-5 execute on a machine still
-> running the pre-Kanban launcher.
+> Two dependencies constrained filing order: chapter 2's PH-3 was specified
+> against the rule PH-1 settled, and chapter 8's PH-12 was resolved by the
+> migration PH-6 describes. Chapter 4 blocked nothing, but PH-6 governed
+> whether the fixes recorded under PH-4 and PH-5 executed on a machine still
+> running the pre-Kanban launcher. That migration is now complete.
 
 ## Status
 
-- [ ] PH-1. Stopping the drainer clears incidents whose cause outlives the process
-- [ ] PH-2. Drainer status cannot see outstanding obligations
-- [ ] PH-3. An intentional stop abandons outstanding post-merge cleanup
+- [x] PH-1. Stopping the drainer clears incidents whose cause outlives the process — [#198]
+- [x] PH-2. Drainer status cannot see outstanding obligations — [#199]
+- [x] PH-3. An intentional stop abandons outstanding post-merge cleanup — [#216]
 - [x] PH-4. The canonical issue-review backend accepts pull-request numbers — [no-issue]
 - [x] PH-5. Pull-request tools reject issue numbers only incidentally, and unintelligibly — [no-issue]
-- [ ] PH-6. The issue-review half of the pipeline runs an untracked pre-Kanban generation
-- [ ] PH-7. The issue-review daemon controller is untracked, unlike the drainer's
-- [ ] PH-8. A conflicted autostash restore permanently wedges every later fast-forward
-- [ ] PH-9. The wedge reports a misleading cause and never names its remedy
-- [ ] PH-10. A malformed issue halts approval for every issue in the repository
-- [ ] PH-11. Autostash anchor refs leak and are never reaped
-- [ ] PH-12. The only executing pull-request guard is an untracked local edit
+- [x] PH-6. The issue-review half of the pipeline ran an untracked pre-Kanban generation — [no-issue]
+- [x] PH-7. The issue-review daemon controller is untracked, unlike the drainer's — [no-issue]
+- [x] PH-8. A conflicted autostash restore permanently wedges every later fast-forward — [#200]
+- [x] PH-9. The wedge reports a misleading cause and never names its remedy — [#217]
+- [x] PH-10. A malformed issue halts approval for every issue in the repository — [#201]
+- [x] PH-11. Autostash anchor refs leak and are never reaped — [#202]
+- [x] PH-12. The only executing pull-request guard was an untracked local edit — [no-issue]
 
 ---
 
@@ -46,7 +46,7 @@ Both findings here are about the drainer's own account of itself: what a stop
 claims to have resolved, and what `status` is able to see. Neither changes what
 the drainer *does*, so both are independently landable.
 
-### PH-1. Stopping the drainer clears incidents whose cause outlives the process
+### [#198] PH-1. Stopping the drainer clears incidents whose cause outlives the process
 
 > **Captured note:** when i tell the daemon to stop, it should run a quick
 > cleanup first, so as not to break the pipeline when i stop the script
@@ -116,7 +116,7 @@ three kinds document their own self-clearing contract, and a stop violates both.
   a line recording that a stop occurred while it was open, so an operator
   reading it later can tell the drainer was down rather than failing.
 
-### PH-2. Drainer status cannot see outstanding obligations
+### [#199] PH-2. Drainer status cannot see outstanding obligations
 
 **Verification:** Verified — `status_snapshot` never reads
 `.git/drain_prs_state.json`, so outstanding post-merge debt is absent from
@@ -171,7 +171,7 @@ hard-code the current indiscriminate clearing.
 **Precondition for filing:** PH-1 has landed, so a stop's incident-handling
 rule is fixed and PH-3 can be specified against it.
 
-### PH-3. An intentional stop abandons outstanding post-merge cleanup
+### [#216] PH-3. An intentional stop abandons outstanding post-merge cleanup
 
 > **Captured note:** when i tell the daemon to stop, it should run a quick
 > cleanup first, so as not to break the pipeline when i stop the script
@@ -231,8 +231,8 @@ were handed. Independent of chapters 1-2.
 > and by `PullRequestRejectionTests` in `tools/test_approve_issues.py`.
 > Verified live against the canonical backend: `--check` on a pull request
 > exits 1 having modified nothing, while a genuine issue proceeds to real
-> gate evaluation. PH-6 still governs whether the machine executes this
-> file; the fix is in the tracked backend regardless.
+> gate evaluation. Before migration, PH-6 governed whether the machine executed
+> this file; the completed migration now makes the tracked fix live.
 
 > **Captured note:** im also thinking about updating my other commands to not
 > get prs and issues confused. solve shouldnt work on a pr for example
@@ -300,15 +300,17 @@ and the `/solve` message in particular is unchanged:
   launcher at `~/work/approve-issues.py` protects only that machine and is
   invisible to `tools/test_approve_issues.py`.
 - **Reference implementation:** A working guard was written into the untracked
-  pre-Kanban launcher on 2026-08-03 and can be lifted directly. It adds an
+  pre-Kanban launcher on 2026-08-03 and was later lifted into the canonical
+  backend. It adds an
   `issue_is_pull_request` predicate comparing the `url` path segment, enforces
   it at the end of `get_issue`, and covers both directions plus the
   repository-named-`pull` case and missing/short URLs in `--self-test`. It was
   mutation-checked (a deliberately wrong std140-style constant made the
   assertions fail) and confirmed live: `--check`, `--review` and `--rereview`
   against `coghex/synarchy#1080` all exited 1 having modified no label, posted
-  no comment, and opened no incident. It is not in the repository, and per PH-6
-  it is not in the file that executes.
+  no comment, and opened no incident. At the time it was not in the repository
+  or in the canonical file; the tracked implementation and PH-6 migration have
+  since resolved both gaps.
 - **Remaining uncertainty:** Whether `/solve`'s rejection message should
   distinguish "this is a pull request" from "this issue is unreviewed" itself,
   or rely entirely on the backend's message reaching the operator.
@@ -375,23 +377,46 @@ constraints on any future change:
 
 ## Chapter 4 — Two generations of the issue-review pipeline
 
-The drainer half of the pipeline runs Kanban's tracked assets through a managed
-install. The issue-review half still runs a pre-Kanban generation that predates
-it: an untracked backend, an untracked launcher command, and an untracked
-daemon controller, none of which the repository's tests, review, or install
-machinery reach.
+Before the 2026-08-07 migration, the drainer half of the pipeline ran Kanban's
+tracked assets through a managed install while the issue-review half still ran
+a pre-Kanban generation: an untracked backend, an untracked launcher command,
+and an untracked daemon controller that repository tests, review, and install
+machinery did not reach. PH-6 records that former state and the completed
+operational migration; PH-7 records why the daemon controller itself remains
+outside the repository contract.
 
-This chapter does not block filing PH-4, whose fix is correct regardless. It
-determines whether that fix has any *effect*: a guard added to
-`tools/approve_issues.py` changes nothing on a machine still executing the
-pre-Kanban launcher.
+This chapter did not block filing PH-4, whose fix was correct regardless. It
+determined whether that fix had any *effect*: a guard added to
+`tools/approve_issues.py` changed nothing while the machine still executed the
+pre-Kanban launcher. The completed migration now makes that tracked guard live.
 
-### PH-6. The issue-review half of the pipeline runs an untracked pre-Kanban generation
+### [no-issue] PH-6. The issue-review half of the pipeline ran an untracked pre-Kanban generation
 
-**Verification:** Verified on this machine, and the divergence is substantial —
-the canonical backend is 2137 lines and actively maintained, the launcher it is
-supposed to have replaced is 2036 lines and frozen. The migration that
-reconciles them is fully built and tested, and has never been run.
+> **Disposition:** No issue — machine configuration, not repository state. Every
+> repository-side obligation is already delivered and tested: the tracked backend
+> and its identity marker, `tools/install_issue_review.py --migrate-legacy-launcher`
+> (`plan_legacy_launcher`, covered by `tools/test_install_issue_review.py`),
+> preflight's `probeReviewBackend`/`isManagedAsset` detection of exactly this
+> unmigrated state, and `docs/agent-workflow-contract.md:522-533` declaring
+> `~/work/approve-issues.py` a purely optional compatibility launcher nothing in
+> Kanban resolves.
+>
+> **Operational follow-through (2026-08-07):** Completed. The managed backend is
+> installed under `~/Library/Application Support/kanban/issue-review`;
+> `~/work/approve-issues.py` is now a symlink to it, with the former ordinary file
+> preserved as `approve-issues.py.pre-kanban-backup`; `kanban@kanban` is installed
+> and enabled for Claude at user scope; and the five legacy
+> `~/.claude/commands/*.md` copies that referenced the old launcher were moved to
+> `~/Library/Application Support/kanban/legacy-claude-commands-2026-08-07/`.
+> A dry run of `tools/setup_workflows.py --all --scope user` now reports every
+> component unchanged with `needs_attention: false`, and `kanban --doctor`
+> reports no blocking problems.
+
+**Verification:** Verified on this machine before migration, and the divergence
+was substantial — the canonical backend was 2137 lines and actively maintained,
+while the launcher it replaced was 2036 lines and frozen. The operational
+follow-through above then exercised the tracked migration and verified its
+result.
 
 **Evidence:**
 
@@ -400,37 +425,40 @@ reconciles them is fully built and tested, and has never been run.
   `tools/approve_issues.py` backend" and "optionally migrates the pre-Kanban
   compatibility launcher at `~/work/approve-issues.py`".
 - `tools/install_issue_review.py:41` — `DEFAULT_LEGACY_PATH = Path.home() /
-  "work" / "approve-issues.py"`, the launcher still in use.
-- Observed: `~/work/approve-issues.py` is an ordinary 2036-line file, not a
+  "work" / "approve-issues.py"`, the compatibility path the old launcher used.
+- Observed before migration: `~/work/approve-issues.py` was an ordinary
+  2036-line file, not a
   symlink. `tools/approve_issues.py` is 2137 lines; a diff reports 333 changed
   lines. The tracked file carries `import kanban_config`, the
   `KANBAN_MANAGED_ASSET` identity marker (`tools/approve_issues.py:30`), and
   Kanban-owned runtime paths; the untracked one still hardcodes an ntfy URL.
-- Observed: `~/Library/Application Support/kanban/issue-review/` does not
+- Observed before migration:
+  `~/Library/Application Support/kanban/issue-review/` did not
   exist. There is no managed link and no install record, so nothing that
   resolves the backend canonically can find one.
 - `claude-plugin/plugins/kanban/commands/solve.md:14-40` — the tracked `/solve`
   resolves `$BACKEND` through that install record, falling back to
-  `record.parent / "approve_issues.py"`. On this machine every branch of that
-  resolution names a path that does not exist.
-- Observed: an untracked `~/.claude/commands/solve.md` (dated 2026-07-18)
+  `record.parent / "approve_issues.py"`. Before migration, every branch of that
+  resolution named a path that did not exist.
+- Observed before migration: an untracked `~/.claude/commands/solve.md` (dated
+  2026-07-18)
   hardcodes `python3 "$HOME/work/approve-issues.py" ... --check`. Both
   generations of the command are installed simultaneously — the Kanban plugin
   is registered as `kanban@kanban`, project scope, 2026-07-21 — and the legacy
   user-scope command is the one that fires: a `/solve 1072` run on 2026-08-03
   in `coghex/synarchy` executed the hardcoded legacy path.
-- Consequence for the repository: `tools/test_approve_issues.py` exercises a
-  file that is not the one serving reviews, and any fix landed in
-  `tools/approve_issues.py` — PH-4's included — is inert until the migration
-  runs.
+- Consequence before migration: `tools/test_approve_issues.py` exercised a file
+  that was not the one serving reviews, and any fix landed in
+  `tools/approve_issues.py` — PH-4's included — was inert until the migration
+  ran.
 
 **Handoff context:**
 
-- **Current behavior:** Reviews are served by an untracked fork. Repository
-  tests and repository fixes apply to a file nothing executes.
-- **Expected behavior:** The issue-review half is installed the same way the
-  drainer half already is, so the executed backend is the tracked one and the
-  repository's tests describe reality.
+- **Current behavior:** Reviews resolve through the Kanban-managed backend, and
+  both provider bundles are installed and enabled at user scope. The legacy
+  launcher remains only as a compatibility symlink.
+- **Expected behavior:** Satisfied — the executing backend is the tracked one,
+  so repository tests and repository fixes describe reality.
 - **Scope and constraints:** The migration path exists and is bounded —
   `tools/install_issue_review.py:192` `plan_legacy_launcher`, invoked with
   `--migrate-legacy-launcher` (`:497`), backs the ordinary file up to
@@ -440,13 +468,27 @@ reconciles them is fully built and tested, and has never been run.
   pull-request guard added there on 2026-08-03 is one such edit. The duplicate
   untracked `~/.claude/commands/*.md` generation should be retired in the same
   pass, or the legacy command will keep shadowing the plugin's.
-- **Remaining uncertainty:** Whether the Kanban plugin's project scope is why
-  the legacy user-scope command wins outside the kanban checkout, and therefore
-  whether retiring the legacy commands is sufficient or the plugin also needs a
-  wider scope. This is machine configuration rather than repository state, so
-  the disposition may be an operational task rather than an issue.
+- **Remaining uncertainty:** None for the recorded machine-state defect. The
+  backup and archived commands remain available for recovery but are inert.
 
-### PH-7. The issue-review daemon controller is untracked, unlike the drainer's
+### [no-issue] PH-7. The issue-review daemon controller is untracked, unlike the drainer's
+
+> **Disposition:** No issue — deliberately outside the contract, by a recorded
+> decision the repository enforces. `docs/agent-workflow-contract.md:534-540`
+> places the Codex-side daemon tooling "outside this repository's contract"
+> and states Kanban "does not track or depend on" it; closed #75 scoped the
+> vendoring to what its *supported commands* need and put an approval daemon
+> out of scope; and the §4 manifest reconciler fails if a
+> `codex-approve-issues-skill` entry reappears
+> (`docs/agent-workflow-contract.md:775-778`). The asymmetry with
+> the drainer is principled: the board starts, stops, and merges through
+> `tools/drain_prs_service.py`, while nothing under `src/Kanban/` invokes the
+> issue-review daemon — which is also unloaded here (`launchctl list` shows only
+> the two per-repository drainer jobs) and hardcoded to `~/work/synarchy`. Its
+> "cannot reach a canonically installed backend" defect is cleared by PH-6's
+> migration, after which `APPROVER_PATH` resolves through the compatibility
+> symlink to the tracked backend. Reversing the boundary is a product decision
+> to raise deliberately if the daemon ever becomes a Kanban dependency.
 
 **Verification:** Verified — the repository tracks the drainer's service
 controller and ships an installer for it, but tracks no equivalent for the
@@ -509,7 +551,7 @@ reporting a cause that is not the real one. Observed twice: 2026-08-01 (PRs
 Independent of chapters 1-4, though PH-2 is why the wedge stays invisible for
 so long and PH-1 is why stopping the drainer erases the only alarm it raises.
 
-### PH-8. A conflicted autostash restore permanently wedges every later fast-forward
+### [#200] PH-8. A conflicted autostash restore permanently wedges every later fast-forward
 
 **Verification:** Verified — the failure is self-inflicted and self-sustaining.
 A conflicted restore leaves unmerged entries in the index; `git stash` refuses
@@ -579,7 +621,7 @@ clears that state, so every subsequent pass fails identically.
   left it but still halts the queue until a human acts. The two differ in who
   does the merge, not in whether the drainer stalls.
 
-### PH-9. The wedge reports a misleading cause and never names its remedy
+### [#217] PH-9. The wedge reports a misleading cause and never names its remedy
 
 **Verification:** Verified — the accurate diagnosis is produced once, on the
 pass that creates the problem, and is then overwritten by a message that blames
@@ -639,7 +681,7 @@ breaker; this chapter is about whether its radius matches the fault it trips on.
 
 Independent of chapters 1-5.
 
-### PH-10. A malformed issue halts approval for every issue in the repository
+### [#201] PH-10. A malformed issue halts approval for every issue in the repository
 
 **Verification:** Verified — every mode of the approver consults the same
 repository-wide breaker, and the only incident kind it can raise is scoped to a
@@ -716,7 +758,7 @@ Same subsystem as chapter 5, and reachable through the same conflicted restore,
 but a distinct defect: PH-8 is about the drainer blocking itself, this is about
 what accumulates in the repository afterwards.
 
-### PH-11. Autostash anchor refs leak and are never reaped
+### [#202] PH-11. Autostash anchor refs leak and are never reaped
 
 **Verification:** Verified, with live evidence in a working checkout — two
 anchors exist, one of them orphaned for two days with no corresponding stash
@@ -788,56 +830,75 @@ accumulation and ambiguity, not data loss.
 
 ## Chapter 8 — Where a fix lives versus where it runs
 
-Chapter 4 established that the issue-review half of the pipeline executes an
-untracked pre-Kanban generation. This chapter records the operational
-consequence, made concrete by the PH-4 fix: a repository can hold a correct,
-tested, reviewed fix while the machine runs an untracked copy, and nothing in
-either place can answer "is the pipeline actually protected?"
+Chapter 4 established that, before migration, the issue-review half of the
+pipeline executed an untracked pre-Kanban generation. This chapter records the
+former operational consequence, made concrete by the PH-4 fix: a repository
+could hold a correct, tested, reviewed fix while the machine ran an untracked
+copy, and nothing in either place could answer "is the pipeline actually
+protected?"
 
-Blocked on chapter 4 in the same sense PH-3 is blocked on PH-1: PH-12 is
-resolved by PH-6's migration and has no independent fix of its own.
+PH-12's disposition depended on PH-6 because the migration PH-6 describes was
+its only resolution. That precondition is now satisfied and the migration is
+complete; PH-12 has no independent repository fix.
 
-**Precondition for filing:** PH-6 has a disposition, since PH-12's only
-resolution is the migration PH-6 describes.
+### [no-issue] PH-12. The only executing pull-request guard was an untracked local edit
 
-### PH-12. The only executing pull-request guard is an untracked local edit
+> **Disposition:** No issue — no repository-side fix exists. Its only resolution is
+> PH-6's migration, which that finding closed as an operational task. Everything the
+> repository can supply is already present: the guard is tracked with `--self-test`
+> assertions (`tools/approve_issues.py:1795-1806`) and
+> `PullRequestRejectionTests` (`tools/test_approve_issues.py:108`);
+> `plan_legacy_launcher` reports ordinary-file refusal during a dry run and
+> `migrate_legacy_launcher` performs the opt-in backup and symlink replacement;
+> and preflight reports the unmanaged backend. Detecting divergence in what
+> the daemon launches would reverse the contract boundary PH-7 closed. **Order
+> matters:** the hand-applied guard in `~/work/approve-issues.py` — 9 references to
+> `issue_is_pull_request`, matching the tracked copy — must not be removed before the
+> migration makes the tracked one executable, or the pipeline is unprotected in the
+> interval. **Operational follow-through (2026-08-07):** the migration ran in
+> that order, preserved the old launcher as
+> `approve-issues.py.pre-kanban-backup`, and made the compatibility path resolve
+> to the tracked, managed backend. `kanban --doctor` now reports the canonical
+> review backend ready.
 
-**Verification:** Verified on this machine. The canonical guard landed in
-`tools/approve_issues.py`, which is not the file the daemon runs; the file it
-does run carries a hand-applied copy of the same guard that no repository
-tracks, no test covers, and no review saw.
+**Verification:** Verified on this machine before migration. The canonical
+guard had landed in `tools/approve_issues.py`, which was not the file the daemon
+ran; the file it did run carried a hand-applied copy of the same guard that no
+repository tracked, no test covered, and no review saw. The completed migration
+now makes the daemon's compatibility path resolve to the canonical copy.
 
 **Evidence:**
 
 - The guard was applied to `~/work/approve-issues.py` on 2026-08-03, before it
-  was understood that this file is not the canonical backend. It is still
-  there: nine references to `issue_is_pull_request`.
+  was understood that this file is not the canonical backend. That former file
+  is preserved in `approve-issues.py.pre-kanban-backup`, including its nine
+  references to `issue_is_pull_request`.
 - The canonical fix is a separate, later implementation in
   `tools/approve_issues.py`, committed with `--self-test` and
   `PullRequestRejectionTests` coverage.
 - `~/.codex/skills/approve-issues/scripts/approve_issues_service.py` sets
   `APPROVER_PATH = WORK_DIR / "approve-issues.py"` as a constant, so the daemon
-  runs the untracked file regardless of what the repository contains.
-- `~/work/approve-issues.py` is still an ordinary file, not a symlink to a
-  managed backend, and `~/Library/Application Support/kanban/issue-review/`
-  does not exist — the migration described in PH-6 has not run.
-- Therefore the tracked fix does not execute here, and the executing guard is
-  the untracked one. Removing the untracked copy on the assumption that the
-  tracked fix supersedes it would reinstate the exact failure of 2026-08-03
-  while the repository showed a fix in place. This was proposed and rejected on
-  the evidence above; it is recorded here because it is an easy and plausible
-  mistake to make later.
-- The two copies are independent implementations of the same rule. Nothing
-  compares them, so they can diverge silently — and only one of them is
-  reachable by `tools/test_approve_issues.py`.
+  resolves the compatibility path. Before migration that path was the untracked
+  file; it is now the managed symlink.
+- Before migration, `~/work/approve-issues.py` was an ordinary file, not a
+  symlink to a managed backend, and
+  `~/Library/Application Support/kanban/issue-review/` did not exist.
+- Therefore, before migration, the tracked fix did not execute here and the
+  executing guard was the untracked one. Removing the untracked copy on the
+  assumption that the tracked fix superseded it would have reinstated the exact
+  failure of 2026-08-03 while the repository showed a fix in place. This was
+  proposed and rejected on the evidence above; it is recorded here because it
+  is an easy and plausible mistake to make later.
+- The two copies were independent implementations of the same rule. Nothing
+  compared them, so they could diverge silently — and only one was reachable by
+  `tools/test_approve_issues.py`.
 
 **Handoff context:**
 
-- **Current behavior:** Protection depends on an untracked file. The
-  repository's own tests pass against a copy that does not run, so a green test
-  suite is not evidence that the pipeline is guarded.
-- **Expected behavior:** One implementation, in the repository, executing.
-  PH-6's migration achieves this: `install_issue_review.py
+- **Current behavior:** Protection comes from the tracked backend. The daemon's
+  compatibility path and the provider plugins resolve to that managed copy.
+- **Expected behavior:** Satisfied — one implementation, in the repository,
+  executes. PH-6's migration achieved this: `install_issue_review.py
   --migrate-legacy-launcher` backs the ordinary file up to
   `approve-issues.py.pre-kanban-backup` and replaces it with a symlink to the
   managed link, after which the daemon's hardcoded path resolves to the tracked
@@ -847,8 +908,6 @@ tracks, no test covers, and no review saw.
   one executable, or the pipeline is unprotected in the interval. After the
   migration the backup file is inert and may be deleted at leisure. Nothing
   should be deleted on the strength of a repository fix alone.
-- **Remaining uncertainty:** Whether anything should detect this class of
-  divergence generally — a check that the executing backend carries the
-  identity marker the repository expects, which `Kanban.Preflight.Environment`
-  already has the mechanism for (`isManagedAsset`) but applies to the install
-  path rather than to what the daemon actually launches.
+- **Remaining uncertainty:** The general daemon-divergence question remains
+  outside the repository contract recorded by PH-7. This machine no longer has
+  the divergence.

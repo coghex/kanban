@@ -1746,7 +1746,8 @@ repository, whose label is derived from that repository's normalized identity.
   outstanding post-merge cleanup obligations that same response projects out of
   the drainer's queue state.
 - Refresh local status every ten seconds without network traffic.
-- Render the bottom-left ASCII button with off/on/warning/error colors.
+- Render the bottom-left drainer control with the active border style and
+  off/on/warning/error colors.
 - Support both click and `d` start/stop actions with transition states.
 - Merge one selected Done card with `m`, from the board or the details
   overlay, by running that drainer's own single-pull-request path — resolved
@@ -1907,15 +1908,24 @@ The first solve/autosolve-compatible slice is implemented.
 
 ### Milestone 9 — Hardening and release
 
-- Complete config loading and per-repository overrides.
-- Exercise stale caches, missing tools, auth failures, signals, and subprocess
-  cleanup.
-- Measure startup time, idle CPU, resident memory, refresh count, and redraw
-  behavior.
-- Add installation instructions and a `cabal install` workflow.
-- Complete the release-gate manual Codex and Claude usage refreshes without
+Release-readiness checklist, last audited 2026-08-07:
+
+- [x] Complete config loading and per-repository overrides. The shared Haskell
+  and Python configuration suites cover canonical repository selection,
+  inheritance, validation, and array replacement.
+- [x] Exercise stale caches, missing tools, auth failures, signals, and
+  subprocess cleanup. These paths have deterministic fixtures and process-group
+  integration coverage in the Haskell and Python suites.
+- [ ] Measure startup time, idle CPU, resident memory, refresh count, and redraw
+  behavior in a real terminal, and record the results here.
+- [x] Add installation instructions and verify the `cabal install exe:kanban`
+  workflow from a clean temporary install directory.
+- [ ] Complete the release-gate manual Codex and Claude usage refreshes without
   submitting a model prompt.
-- Tag the first release only after real terminal use.
+- [ ] Exercise the installed executable in a real terminal long enough to
+  confirm startup, refresh, navigation, shutdown, and the absence of visible
+  redraw churn.
+- [ ] Tag the first release after every item above is complete.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status

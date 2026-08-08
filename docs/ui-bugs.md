@@ -7,13 +7,13 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 
 ## Status
 
-- [ ] UI-1. Drainer control uses ASCII borders beside the Unicode UI
+- [x] UI-1. Drainer control uses ASCII borders beside the Unicode UI — [#205]
 
 ---
 
 ## Chapter 1 — Visual consistency and layout
 
-### UI-1. Drainer control uses ASCII borders beside the Unicode UI
+### [#205] UI-1. Drainer control uses ASCII borders beside the Unicode UI
 
 > **Captured note:** the button for drain_prs.py uses pipes and dashes, it should be using the unicode border chars that the rest of the program uses
 

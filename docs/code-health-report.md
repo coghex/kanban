@@ -58,7 +58,7 @@ report still owes.
 - [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
 - [x] 2. `UI.hs` is a god-module — [#50]
 - [x] 3. `AppState` has seven parallel session tables — [#51]
-- [ ] 4. `drain_prs.py` is 3,170 lines — [deferred]: after #147 lands; premise unverified
+- [x] 4. `drain_prs.py` is 3,967 lines — [no-issue]
 - [x] 5. `Worker.hs` threads fifteen mutable cells positionally — [#153]
 - [x] 5a. `Review.hs` exceeds 2,000 lines — [no-issue]
 - [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
@@ -74,9 +74,7 @@ report still owes.
 - [x] 13. Repository override key matched exactly and silently — [#150]
 - [x] 14. `bug`, `ui`, and `input` compiled into the theme — [#152]
 
-**17 of 18 resolved. 1 deferred, 0 unprocessed.** Every finding has been processed.
-The one that remains, 4, is blocked on sequencing rather than evidence: it clears
-when #147 merges.
+**18 of 18 resolved. 0 deferred, 0 unprocessed.** Every finding has been processed.
 
 Findings 2 and 3 were cleared by reading `src/Kanban/UI.hs` end to end. Both were
 already owned by open issues (#50, #51), so neither was refiled; the read produced
@@ -213,18 +211,18 @@ Findings 2 and 3 were not refiled. Both had open issues predating this audit:
 Worth knowing before either is picked up: `UI.hs` has grown from the 4,340 lines
 #50 cites to 5,706, so every approximate line range in that issue is stale.
 
-### Wave 2 — deferred
+### Wave 2 — resolved deferrals
 
-Findings **4 and 7** remain, each marked `[deferred]` with a note stating precisely
-what has to happen before it can be filed. Two distinct reasons:
+Findings **4 and 7** were the last two deferrals. Both preconditions cleared, and
+both are now closed as `[no-issue]`:
 
-- **Blocked on sequencing** (4) — evidence is adequate, but it would be a fourth
-  conflicting change to `tools/drain_prs.py` and `tools/drain_prs_service.py`.
-  File after #147 lands.
-- **Premise unverified** (7) — rests on something not yet checked that could
-  materially shrink or invalidate it: whether `tools/kanban_config.py`'s
-  repositories table already provides the per-target configuration the finding
-  says is missing.
+- **Blocked on sequencing** (4) — #147 landed, so the file could be re-read in
+  its new shape. The read confirmed a phase-ordered module below the ~5,000-line
+  Python threshold recorded by #159, with no demonstrated defect that a package
+  split would prevent.
+- **Premise unverified** (7) — verification showed that `.drain-prs.json` is
+  already loaded from each target repository's root. The shared repositories
+  table does not duplicate those drainer settings, but it does not need to.
 
 Findings **2, 3, 5, 5a, and 8** have all left this wave, and how they left is worth
 recording, because deferral earned its keep in three different ways:
@@ -240,8 +238,9 @@ recording, because deferral earned its keep in three different ways:
   two of its supporting claims did not. It is closed as an accepted risk, not as a
   refuted finding — see its Disposition note.
 
-Findings **5a, 8, and 10** are closed as `[no-issue]`; each carries a Disposition
-note giving the reason and the consequence of leaving the code unchanged.
+Findings **4, 5a, 7, 8, and 10** are closed as `[no-issue]`; each carries a
+Disposition note giving the reason and the consequence of leaving the code
+unchanged.
 
 ---
 
@@ -422,49 +421,47 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### [deferred] 4. `tools/drain_prs.py` is a 3,170-line script
+### [no-issue] 4. `tools/drain_prs.py` is a 3,967-line script
 
-> **Deferred:** Blocked on sequencing rather than evidence. #145 has since merged,
-> but #146 and #147 remain open with no PR in flight, and #147 — giving each
-> repository its own drainer — threads repository identity through config
-> resolution, the service, and the durable state files, so it will touch
-> `tools/drain_prs.py` broadly. A split specified now would be invalidated by it.
-> **Clears when #147 merges** (verified open, 2026-07-26).
->
-> **Verify the premise before filing, do not inherit it.** Roughly 250 of 3,170
-> lines have been read. This is a size-based finding, and every other size-based
-> finding in this report has failed on contact: 5's stated premise was wrong, 5a
-> and 7 closed as no-issue. The structural evidence here already argues for
-> caution — 107 top-level definitions across 3,170 lines is about 30 lines each,
-> which is many small functions in one flat file rather than the god-module shape
-> the text below implies, and is the same shape `Review.hs` had before its finding
-> closed. Of the phases proposed below, `check` (10 functions), `merge` (4),
-> `conflict` (3), and `incident` (1) exist as recognisable clusters, while
-> "eligibility" and "repair" appear as no named function at all. Read the file
-> after #147 lands, then decide whether a split is warranted and where — rather
-> than filing the fix shape below as written.
+> **Disposition:** No issue — #159 considered this exact file and decided against
+> it: "Python is out of scope entirely. Scripts are held to ~5,000 lines instead,
+> and nothing currently exceeds it — `tools/drain_prs.py` is the largest at 3,170."
+> It is 3,967 today, still below that bar. The re-read this deferral
+> asked for supports that decision rather than overturning it: the file is
+> phase-ordered, and its strongest candidate seam — the autostash and fast-forward
+> cluster from `_relocate_untracked_files` through `_require_merged_index` — has
+> exactly two non-private entry points, `sweep_snapshot_anchors` and
+> `fast_forward_default_branch`, and its own 1,193-line
+> `tools/test_fast_forward_stash.py`. That is the `Review.hs` outcome, not the
+> `UI.hs` one.
+> The stated fix shape is costlier than written: `tools/` uses flat sibling
+> imports, so promoting it to a package would repoint `DRAINER_PATH`, the
+> `SCRIPT_MODULES` vendoring fixture in `tools/test_single_pr_drain.py`, and
+> multiple test modules, preventing no demonstrated defect. Revisit if the file
+> crosses the ~5,000-line bar #159 set.
 
 **Severity: High** — this is the component that merges pull requests, and it is
 the least structured code in the repository.
 
-`tools/` is flat: `drain_prs.py` (3,170), `approve_issues.py` (2,138), and
-`drain_prs_service.py` (1,048) are single-module programs sharing only
-`kanban_config.py` (493). The drainer owns the one irreversible action in the
+**Original finding rationale, retained for context with current measurements:**
+`tools/` is flat: `drain_prs.py` (3,967), `approve_issues.py` (2,344), and
+`drain_prs_service.py` (2,049) are single-module programs sharing
+`kanban_config.py` (702). The drainer owns the one irreversible action in the
 whole pipeline — merging — and it has already produced at least one recorded
 deadlock (it stripped the very label its own wait loop depended on, causing
 spurious `reviewed:changes` and 3-of-3 failures).
 
-A 3,000-line flat script is arguably a poor host for that logic: there is no module
-boundary between "decide whether this PR is eligible", "repair a conflicted
-branch", "wait for a check", and "merge", so a state-machine bug in one shows up
-as a mystery in another.
+A 3,967-line flat script is arguably a poor host for that logic: there is no
+module boundary between "decide whether this PR is eligible", "repair a
+conflicted branch", "wait for a check", and "merge", so a state-machine bug in
+one shows up as a mystery in another.
 
 **Fix shape:** promote `tools/` to a package (`tools/kanban_tools/` or similar)
 and split the drainer along its actual phases — eligibility, conflict repair,
 check-waiting, merge, incident reporting — with the merge step as the smallest,
 most-tested module of the set. The Python suite is already large enough
-(`test_integration.py` at 2,038 lines, plus eight other `test_*.py`) to support
-this refactor safely.
+(`test_integration.py` at 2,916 lines and `test_fast_forward_stash.py` at 1,193,
+plus the other focused `test_*.py` modules) to support this refactor safely.
 
 ### [#153] 5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
 
