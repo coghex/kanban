@@ -712,11 +712,20 @@ class ClaudePluginRootReferenceTests(unittest.TestCase):
     def test_every_rereview_handoff_preserves_standalone_pr_contracts(self):
         for name in ("pr-rereview", "pr-revise", "repair"):
             text = (COMMANDS_ROOT / f"{name}.md").read_text(encoding="utf-8")
-            self.assertIn(
-                "--allow-no-issue",
-                text,
-                f"{name}.md must allow a previously reviewed standalone PR through rereview",
-            )
+            command_blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+            expected_actions = ("--rereview", "--publish-verdict") if name == "pr-rereview" else ("--rereview",)
+            for action in expected_actions:
+                matching_blocks = [block for block in command_blocks if action in block]
+                self.assertEqual(
+                    len(matching_blocks),
+                    1,
+                    f"{name}.md must have exactly one {action} coordinator invocation",
+                )
+                self.assertIn(
+                    "--allow-no-issue",
+                    matching_blocks[0],
+                    f"{name}.md {action} invocation must preserve the standalone PR gate mode",
+                )
 
     def test_the_referenced_coordinator_path_exists_relative_to_the_plugin_root(self):
         # ${CLAUDE_PLUGIN_ROOT} resolves to PLUGIN_ROOT at runtime; confirm

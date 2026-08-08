@@ -35,6 +35,7 @@ Read the returned `"status"`, exactly as in `$pr-review`:
     --expected-head <result.expected_head> \
     --gate-key <result.gate_key> \
     --result <path-to-your-result.json> \
+    --allow-no-issue \
     --json
   ```
 
