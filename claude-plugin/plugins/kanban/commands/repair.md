@@ -77,12 +77,13 @@ This plugin bundles its own copy of the coordinator at `${CLAUDE_PLUGIN_ROOT}/sc
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
+  --allow-no-issue \
   --json
 ```
 
 Add `--repo <owner/name>` and `--config <path>` to that same call whenever the caller supplied them.
 
-When a push happened but the rereview is unavailable — the coordinator rejects a rereview on a pull request with no prior canonical review marker, and its issue gate blocks a pull request with no linked issue unless explicitly allowed — stop and report that exact reason. A card can reach Done through GitHub's native `reviewDecision == APPROVED` with no canonical review at all, so this is a reachable state. Never compensate by setting a label yourself.
+The standalone allowance preserves a prior no-issue review contract and still validates every linked issue when closing-issue references exist. When a push happened but the rereview is unavailable — for example, the coordinator rejects a pull request with no prior canonical review marker or blocks an invalid or unapproved linked issue — stop and report that exact reason. A card can reach Done through GitHub's native `reviewDecision == APPROVED` with no canonical review at all, so this is a reachable state. Never compensate by setting a label yourself.
 
 ## 5. Report
 

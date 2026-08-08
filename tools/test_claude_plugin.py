@@ -709,6 +709,15 @@ class ClaudePluginRootReferenceTests(unittest.TestCase):
                 f"{name}.md must locate the coordinator via ${{CLAUDE_PLUGIN_ROOT}}",
             )
 
+    def test_every_rereview_handoff_preserves_standalone_pr_contracts(self):
+        for name in ("pr-rereview", "pr-revise", "repair"):
+            text = (COMMANDS_ROOT / f"{name}.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "--allow-no-issue",
+                text,
+                f"{name}.md must allow a previously reviewed standalone PR through rereview",
+            )
+
     def test_the_referenced_coordinator_path_exists_relative_to_the_plugin_root(self):
         # ${CLAUDE_PLUGIN_ROOT} resolves to PLUGIN_ROOT at runtime; confirm
         # the literal relative path every command references actually

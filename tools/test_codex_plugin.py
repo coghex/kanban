@@ -1106,6 +1106,15 @@ class SharedCoordinatorReferenceTests(unittest.TestCase):
             text = (SKILLS_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
             self.assertIn(COORDINATOR_LOOKUP, text, f"{name}/SKILL.md must locate the coordinator under $CODEX_HOME")
 
+    def test_every_rereview_handoff_preserves_standalone_pr_contracts(self):
+        for name in ("pr-rereview", "pr-revise", "repair"):
+            text = (SKILLS_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "--allow-no-issue",
+                text,
+                f"{name}/SKILL.md must allow a previously reviewed standalone PR through rereview",
+            )
+
     def test_the_codex_home_lookup_command_resolves_against_a_simulated_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_codex_home = Path(tmp) / "fake-codex-home"
