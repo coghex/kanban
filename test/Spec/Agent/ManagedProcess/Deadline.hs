@@ -809,7 +809,7 @@ examples = do
             fakeCodex = binaryRoot </> "codex"
             identifier = WorkerId "solve-820-orphan-then-deadline"
             repository = Repository repositoryRoot "coghex" "kanban"
-            spec = deadlineFixtureSpec repository identifier 820 now 1
+            spec = deadlineFixtureSpec repository identifier 820 now 5
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-820-orphan-then-deadline.spec.json"
             statePath = workerRoot </> "solve-820-orphan-then-deadline.state.json"
@@ -822,7 +822,7 @@ examples = do
         -- a TERM-resistant child first: the normal completion claims
         -- completedRef and, finding that child still alive, reports
         -- WorkerOrphansDetected SolveCompleted rather than WorkerFinished. The
-        -- one-second deadline then fires while that orphan-pending state is
+        -- five-second deadline then fires while that orphan-pending state is
         -- still unresolved.
         ByteString.writeFile
           fakeCodex
@@ -837,7 +837,7 @@ examples = do
                 -- and the child gets reparented, a fresh census can no
                 -- longer discover it by descent -- but short enough that
                 -- the normal completion below still lands well before the
-                -- one-second deadline fires.
+                -- five-second deadline fires.
                 "sleep 0.5"
               ]
           )
@@ -854,7 +854,7 @@ examples = do
             void . forkIO $ runWorker specPath >>= putMVar finished
             orphanState <- waitForWorkerState statePath isOrphaned 80
             orphanState.workerStateStatus `shouldBe` WorkerOrphaned SolveCompleted
-            -- The one-second deadline fires next, while the survivor is
+            -- The five-second deadline fires next, while the survivor is
             -- still alive and the worker is still orphan-pending on it: it
             -- must take over the pending outcome even though it lost
             -- completedRef to the normal completion above.

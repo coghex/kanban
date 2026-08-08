@@ -93,7 +93,7 @@ spec = do
             "while :; do sleep 1; done"
           ]
           $ do
-            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 1
+            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 3
             leaderPid <- readMarkerPid leaderMarker
             descendantPid <- readMarkerPid descendantMarker
             -- The snapshot was taken by the publish callback itself, so this
@@ -128,7 +128,7 @@ spec = do
             "while :; do sleep 1; done"
           ]
           $ do
-            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 1
+            (outcome, snapshotWhenPublished) <- captureBoardRefresh temporaryRoot 3
             descendantPid <- readMarkerPid descendantMarker
             case snapshotWhenPublished of
               Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)

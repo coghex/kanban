@@ -56,7 +56,7 @@ import System.Timeout (timeout)
 -- output capture may lag before the call gives up on a stream something
 -- still holds open. Keeping them separate is what stops an already-observed
 -- exit from being reported as a timeout (issue #15). Production values are
--- chosen per runner by its caller; tests inject sub-second values so the
+-- chosen per runner by its caller; tests inject short values so the
 -- deadline and grace paths are reachable without waiting out the real
 -- deadlines.
 --

@@ -5,7 +5,7 @@ module Spec.Agent.ManagedProcess.Lifecycle (examples) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Exception (finally, throwIO)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Aeson (eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
@@ -730,6 +730,8 @@ examples = do
         let repositoryRoot = temporaryRoot </> "repo"
             binaryRoot = temporaryRoot </> "bin"
             fakeCodex = binaryRoot </> "codex"
+            fakePs = binaryRoot </> "ps"
+            snapshotFailureMarker = temporaryRoot </> "fail-process-snapshots"
             repository = Repository repositoryRoot "coghex" "kanban"
             spec = (workerFixtureSpec repository (WorkerId "solve-788-signal-fixture") 788) {workerCreatedAt = now}
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
@@ -749,10 +751,20 @@ examples = do
               ]
           )
         setFileMode fakeCodex 0o700
+        ByteString.writeFile
+          fakePs
+          ( ByteString.unlines
+              [ "#!/bin/sh",
+                "if [ -e \"$KANBAN_PS_FAILURE_MARKER\" ]; then exit 1; fi",
+                "exec /bin/ps \"$@\""
+              ]
+          )
+        setFileMode fakePs 0o700
         LazyByteString.writeFile specPath (encode spec)
         originalPath <- maybe "" id <$> lookupEnv "PATH"
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
-          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $ do
+          withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
+            withEnvironmentValue "KANBAN_PS_FAILURE_MARKER" snapshotFailureMarker $ do
             -- runWorkerWith assumes its caller already holds the lease, as
             -- launchWorker does in production; acquire it explicitly so
             -- releaseWorkerLease's behavior at the end is meaningfully
@@ -761,24 +773,38 @@ examples = do
             case find ((== spec.workerId) . (.workerId) . (.workerDescriptorSpec)) descriptors of
               Nothing -> expectationFailure "worker fixture was not discoverable"
               Just descriptor -> acquireWorkerLease descriptor `shouldReturn` Right ()
-            failing <- newIORef True
             finished <- newEmptyMVar
-            let flakySnapshot = do
-                  stillFailing <- readIORef failing
-                  if stillFailing then pure (Left "simulated ps outage") else readProcessSnapshot
-                cleanup = do
+            let cleanup = do
+                  snapshotFailureEnabled <- doesFileExist snapshotFailureMarker
+                  when snapshotFailureEnabled (removeFile snapshotFailureMarker)
                   stateBytes <- LazyByteString.readFile statePath
                   case (eitherDecode stateBytes :: Either String WorkerState) of
                     Right state -> do
                       let groups = Set.toList (Set.fromList (map processIdentityGroupPid state.workerStateKnownProcesses))
                       mapM_ (killManagedProcess . managedProcessGroup . fromIntegral) groups
                     Left _ -> pure ()
-                  writeIORef failing False
                   timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
-            void . forkIO $ runWorkerWith flakySnapshot specPath >>= putMVar finished
+            void . forkIO $ runWorkerWith readProcessSnapshot specPath >>= putMVar finished
             ( do
-                _ <- waitForWorkerState statePath (\state -> case state.workerStateStatus of WorkerRunning -> True; _ -> False) 80
-                threadDelay 300000
+                -- WorkerRunning is published as soon as the provider itself
+                -- is registered, before this fixture's background child has
+                -- necessarily started or reached the next census. Wait for
+                -- the descendant to be durably recorded so the signal below
+                -- always exercises failed verification of known work rather
+                -- than racing executable startup on slower platforms.
+                _ <-
+                  waitForWorkerState
+                    statePath
+                    (\state -> case state.workerStateStatus of
+                      WorkerRunning -> not (null state.workerStateKnownProcesses)
+                      _ -> False
+                    )
+                    80
+                -- Discovery above deliberately uses real process snapshots.
+                -- Fail those snapshots only now, after the descendant is a
+                -- known part of the worker census, so shutdown cannot prune
+                -- it before the injected verifier observes the outage.
+                ByteString.writeFile snapshotFailureMarker "fail"
                 raiseSignal sigTERM
                 pendingState <- waitForWorkerState statePath isOrphaned 80
                 pendingState.workerStateStatus `shouldSatisfy` \status -> case status of

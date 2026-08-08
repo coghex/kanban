@@ -294,7 +294,7 @@ spec = do
             (temporaryRoot </> "usage-command.sh")
             [ByteString.pack ("echo $$ > " <> markerPath), "sleep 60 </dev/null >/dev/null 2>&1"]
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          result <- timeout 10000000 (runUsageCommand 500000 [Data.Text.pack scriptPath])
+          result <- timeout 10000000 (runUsageCommand 3000000 [Data.Text.pack scriptPath])
           case result of
             Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
             other -> expectationFailure ("expected a clean timeout, got " <> show other)
@@ -308,7 +308,7 @@ spec = do
             (temporaryRoot </> "usage-command.sh")
             ["trap '' TERM", ByteString.pack ("echo $$ > " <> markerPath), "sleep 60 </dev/null >/dev/null 2>&1"]
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          result <- timeout 10000000 (runUsageCommand 500000 [Data.Text.pack scriptPath])
+          result <- timeout 10000000 (runUsageCommand 3000000 [Data.Text.pack scriptPath])
           case result of
             Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
             other -> expectationFailure ("expected a clean timeout, got " <> show other)

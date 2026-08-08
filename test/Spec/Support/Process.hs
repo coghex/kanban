@@ -524,8 +524,8 @@ readRecordedPid path = do
   requireJust ("fixture never recorded a PID in " <> path) (readMaybe (dropWhileEnd (== '\n') written))
 
 -- | A fake @gh@ on a temporary PATH plus a review client wired to the given
--- 'CommandBounds', so the deadline and capture-grace paths are reachable in
--- well under a second instead of the production 30 s.
+-- 'CommandBounds', so the deadline and capture-grace paths are reachable
+-- without waiting out the production 30 s.
 withFakeGitHubCli :: [ByteString.ByteString] -> CommandBounds -> (ReviewClient -> IO result) -> IO result
 withFakeGitHubCli scriptLines bounds action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
@@ -556,8 +556,8 @@ runBoundedGitHubTool boundMicros client request = do
 
 -- | A fake @claude@ on a temporary PATH plus a review client whose Claude
 -- bounds are the given ones, so 'runAuthenticatedClaude''s deadline and
--- capture-grace paths are reachable in well under a second instead of the
--- production ten minutes. The action is handed @$CLAUDE_CHILD_MARKER@ -- the
+-- capture-grace paths are reachable without waiting out the production ten
+-- minutes. The action is handed @$CLAUDE_CHILD_MARKER@ -- the
 -- path the script is expected to record a PID at when the test needs to see
 -- that the spawned process group was swept.
 withFakeClaudeCli :: [ByteString.ByteString] -> CommandBounds -> (FilePath -> ReviewClient -> IO result) -> IO result

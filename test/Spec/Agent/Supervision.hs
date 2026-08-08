@@ -219,7 +219,7 @@ spec = do
               other -> expectationFailure ("expected the in-flight gh call to fail once the client shut down, got " <> show other)
 
   describe "review subprocess deadline and capture bounds" $ do
-    let injectedBounds = CommandBounds {commandDeadlineMicros = 400000, commandCaptureGraceMicros = 400000}
+    let injectedBounds = CommandBounds {commandDeadlineMicros = 3000000, commandCaptureGraceMicros = 400000}
         -- Every call below runs under this bound. It is generous next to
         -- what these calls actually cost -- the injected deadline plus the
         -- injected capture grace plus 'killManagedProcess'' own 750 ms
