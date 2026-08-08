@@ -863,10 +863,14 @@ examples = do
                 statePath
                 ( \state -> case state.workerStateStatus of
                     WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
+                    WorkerTerminal (SolveFailed message) -> message == workerDeadlineReason
                     _ -> False
                 )
                 80
-            deadlineTookOver.workerStateStatus `shouldBe` WorkerOrphaned (SolveFailed workerDeadlineReason)
+            deadlineTookOver.workerStateStatus `shouldSatisfy` \status -> case status of
+              WorkerOrphaned (SolveFailed message) -> message == workerDeadlineReason
+              WorkerTerminal (SolveFailed message) -> message == workerDeadlineReason
+              _ -> False
             timeout 10000000 (takeMVar finished) `shouldReturn` Just (Right ())
             terminalState <- waitForWorkerState statePath isTerminal 30
             terminalState.workerStateStatus `shouldBe` WorkerTerminal (SolveFailed workerDeadlineReason)

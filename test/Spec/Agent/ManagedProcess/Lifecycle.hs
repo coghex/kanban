@@ -796,14 +796,20 @@ examples = do
                   waitForWorkerState
                     statePath
                     (\state -> case state.workerStateStatus of
-                      WorkerRunning -> not (null state.workerStateKnownProcesses)
+                      WorkerRunning ->
+                        case state.workerStateProviderPid of
+                          Nothing -> False
+                          Just providerPid ->
+                            any
+                              ((/= providerPid) . processIdentityPid)
+                              state.workerStateKnownProcesses
                       _ -> False
                     )
                     80
                 -- Discovery above deliberately uses real process snapshots.
                 -- Fail those snapshots only now, after the descendant is a
                 -- known part of the worker census, so shutdown cannot prune
-                -- it before the injected verifier observes the outage.
+                -- it before verification observes the outage.
                 ByteString.writeFile snapshotFailureMarker "fail"
                 raiseSignal sigTERM
                 pendingState <- waitForWorkerState statePath isOrphaned 80

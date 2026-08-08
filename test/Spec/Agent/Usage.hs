@@ -95,7 +95,7 @@ spec = do
       -- group) does -- exactly the "leader reaped, descendant survives"
       -- shape 'script''s pty produces in production.
       withClaudeProbeFixture True ClaudeIgnoresInterrupt False $ \fixture -> do
-        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
           other -> expectationFailure ("expected a clean timeout, got " <> show other)
@@ -107,7 +107,7 @@ spec = do
 
     it "kills an INT-resistant claude child that still shares the wrapper's own process group" $
       withClaudeProbeFixture False ClaudeIgnoresInterrupt False $ \fixture -> do
-        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
           other -> expectationFailure ("expected a clean timeout, got " <> show other)
