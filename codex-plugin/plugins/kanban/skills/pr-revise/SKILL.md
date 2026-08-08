@@ -13,6 +13,8 @@ The canonical rereview route is fixed by brand: a Claude-origin PR uses the Code
 
 Read the PR title, body, head SHA, labels, merge state, checks, linked issues, and all comments. Identify the newest authenticated-user `pr-review:v2` (or legacy `pr-review:v1`) marker and its verdict.
 
+Record whether the PR has closing-issue references. A reviewed PR with none is a standalone PR whose own evidence is the review contract; preserve that mode through rereview.
+
 - If the PR is already merged or closed, report that and stop.
 - If the current canonical verdict is `APPROVE`, report it and stop unless the user explicitly asks to change the code.
 - If no canonical `CHANGES_REQUESTED` review exists, stop and direct the user to `$pr-review <pr>`.
@@ -53,8 +55,11 @@ COORDINATOR="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/
 python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
+  --allow-no-issue \
   --json
 ```
+
+The standalone allowance does not bypass linked-issue review: if the PR has any closing-issue references, the coordinator still validates every linked issue before invoking a reviewer.
 
 Do not independently review, comment, label, retry a failed model, or compensate for the coordinator's result. A `CHANGES_REQUESTED` verdict starts a new revision cycle only after inspecting its new feedback; an approved verdict leaves merging to the repository's normal merge/drainer process.
 

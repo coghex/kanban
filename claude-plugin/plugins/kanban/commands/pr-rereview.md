@@ -1,5 +1,5 @@
 ---
-description: Rerun the canonical issue-gated review for a changed GitHub pull request, verifying prior blockers and routing known solver origins to the opposite-brand reviewer or unknown origins to both Codex and Claude. Use when asked to re-review a PR.
+description: Rerun the canonical review for a changed GitHub pull request, preserving either its standalone PR contract or its linked-issue gate, verifying prior blockers, and routing known solver origins to the opposite-brand reviewer or unknown origins to both Codex and Claude. Use when asked to re-review a PR.
 argument-hint: "[PR number]"
 ---
 
@@ -12,12 +12,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
   --self-review \
+  --allow-no-issue \
   --json
 ```
 
 Do not independently comment, label, or compensate for the coordinator's result.
 
-The same freshness-aware issue gate runs before reviewing. A blocked gate invokes no review and idempotently posts only `Issue has not been approved.` with its hidden gate marker; changes no `reviewed:*` label. Exit status 2 is the expected blocked result.
+The standalone allowance preserves a prior no-issue review contract; it does not bypass linked-issue review. If the PR has any closing-issue references, the same freshness-aware issue gate validates every link before reviewing. A blocked gate invokes no review and idempotently posts only `Issue has not been approved.` with its hidden gate marker; changes no `reviewed:*` label. Exit status 2 is the expected blocked result.
 
 Require a prior authenticated-user `pr-review:v1` or `pr-review:v2` comment before rereviewing — the coordinator enforces this itself.
 
@@ -33,6 +34,7 @@ Read the returned `"status"`, exactly as in `/pr-review`:
     --expected-head <result.expected_head> \
     --gate-key <result.gate_key> \
     --result <path-to-your-result.json> \
+    --allow-no-issue \
     --json
   ```
 

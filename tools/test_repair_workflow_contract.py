@@ -219,9 +219,9 @@ REQUIRED_PHRASES = {
         "simply report what you found."
     ),
     "stops-with-the-coordinators-reason-when-rereview-is-unavailable": (
-        "the coordinator rejects a rereview on a pull request with no prior canonical "
-        "review marker, and its issue gate blocks a pull request with no linked issue "
-        "unless explicitly allowed — stop and report that exact reason."
+        "the coordinator rejects a pull request with no prior canonical review marker "
+        "or blocks an invalid or unapproved linked issue — stop and report that exact "
+        "reason."
     ),
     "never-compensates-for-an-unavailable-rereview": (
         "Never compensate by setting a label yourself."
