@@ -463,6 +463,23 @@ def canonical_comment(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_spec_relevant_comment(issue: dict[str, Any], comment: dict[str, Any]) -> bool:
+    # Mirrors the solve workflow's own effective-spec rule: only the issue
+    # author or an OWNER/MEMBER/COLLABORATOR can amend the contract. An
+    # unprivileged commenter (a "happy to take this" drive-by, spam, a
+    # lookalike login) is evidence at most -- it must not be able to
+    # invalidate a published approval just by existing.
+    if comment.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        return True
+    commenter = (comment.get("user") or {}).get("login")
+    reporter = (issue.get("author") or {}).get("login")
+    return (
+        isinstance(commenter, str)
+        and isinstance(reporter, str)
+        and commenter.casefold() == reporter.casefold()
+    )
+
+
 def spec_fingerprint(issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
     # Workflow labels are transient review-state handoffs, not part of the
     # implementation contract. A review publishes a terminal verdict by
@@ -480,6 +497,7 @@ def spec_fingerprint(issue: dict[str, Any], comments: list[dict[str, Any]]) -> s
             canonical_comment(item)
             for item in comments
             if not AUTOMATED_REVIEW_COMMENT_RE.search(item.get("body") or "")
+            and is_spec_relevant_comment(issue, item)
         ],
     }
     encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1903,6 +1921,25 @@ def self_test() -> None:
         "body": "Manual amendment\n<!-- issue-review:v1 base=deadbeef verdict=APPROVE -->",
     }
     assert spec_fingerprint(issue, [ordinary, manual_review]) != spec_sha
+    drive_by = {
+        **ordinary,
+        "id": 4,
+        "user": {"login": "some-random-user"},
+        "author_association": "NONE",
+        "body": "Happy to take this one!",
+    }
+    assert spec_fingerprint(issue, [ordinary, drive_by]) == spec_sha
+    reporter_issue = {**issue, "author": {"login": "reporter"}}
+    reporter_comment = {
+        **ordinary,
+        "id": 5,
+        "user": {"login": "reporter"},
+        "author_association": "NONE",
+        "body": "Clarifying my own report.",
+    }
+    reporter_spec = spec_fingerprint(reporter_issue, [])
+    assert spec_fingerprint(reporter_issue, [reporter_comment]) != reporter_spec
+    assert spec_fingerprint(reporter_issue, [drive_by]) == reporter_spec
     untrusted_marker = {
         **marker_comment,
         "author_association": "NONE",
