@@ -390,7 +390,7 @@ spec = do
               ByteString.pack ("echo $$ > " <> leaderFile),
               "while :; do sleep 1; done"
             ]
-        outcome <- runDrainerStatus 1 controller "start"
+        outcome <- runDrainerStatus 3 controller "start"
         -- Taken the instant the invocation returns, so this proves the group
         -- was already empty when the timeout was reported -- not merely that
         -- it emptied by the time an assertion got around to looking.
@@ -401,7 +401,7 @@ spec = do
         identityForPid leaderPid snapshot `shouldBe` Nothing
         identityForPid descendantPid snapshot `shouldBe` Nothing
         message <- requireLeft "a wedged controller reported success" outcome
-        message `shouldMention` "drainer start timed out after 1 seconds"
+        message `shouldMention` "drainer start timed out after 3 seconds"
         message `shouldMention` "the outcome is unknown"
         message `shouldMention` "the next status poll will reconcile it"
 
@@ -423,12 +423,12 @@ spec = do
               ByteString.pack ("echo $! > " <> descendantFile),
               "exit 0"
             ]
-        outcome <- runDrainerStatus 1 controller "status"
+        outcome <- runDrainerStatus 3 controller "status"
         snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the orphaned-descendant timeout"
         descendantPid <- readRecordedPid descendantFile
         identityForPid descendantPid snapshot `shouldBe` Nothing
         message <- requireLeft "an orphaned descendant reported success" outcome
-        message `shouldMention` "drainer status timed out after 1 seconds"
+        message `shouldMention` "drainer status timed out after 3 seconds"
         -- A terminated group is a settled timeout, not a cleanup failure.
         message `shouldNotMention` "could not"
         message `shouldNotMention` "still running"
@@ -455,7 +455,7 @@ spec = do
               ByteString.pack ("echo $$ > " <> leaderFile),
               "while :; do sleep 1; done"
             ]
-        outcome <- runDrainerStatus 1 controller "status"
+        outcome <- runDrainerStatus 3 controller "status"
         snapshot <- readProcessSnapshot >>= requireRight "process snapshot after the forking-handler timeout"
         leaderPid <- readRecordedPid leaderFile
         forkedPid <- readRecordedPid forkedFile
@@ -463,7 +463,7 @@ spec = do
         identityForPid leaderPid snapshot `shouldBe` Nothing
         identityForPid forkedPid snapshot `shouldBe` Nothing
         message <- requireLeft "a forking TERM handler reported success" outcome
-        message `shouldMention` "drainer status timed out after 1 seconds"
+        message `shouldMention` "drainer status timed out after 3 seconds"
         message `shouldNotMention` "still running"
 
     it "keeps the outcome-unknown wording generic for a timed-out status query" $

@@ -95,7 +95,7 @@ spec = do
       -- group) does -- exactly the "leader reaped, descendant survives"
       -- shape 'script''s pty produces in production.
       withClaudeProbeFixture True ClaudeIgnoresInterrupt False $ \fixture -> do
-        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
           other -> expectationFailure ("expected a clean timeout, got " <> show other)
@@ -107,7 +107,7 @@ spec = do
 
     it "kills an INT-resistant claude child that still shares the wrapper's own process group" $
       withClaudeProbeFixture False ClaudeIgnoresInterrupt False $ \fixture -> do
-        result <- timeout 20000000 (runClaudeProvider 1000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
           other -> expectationFailure ("expected a clean timeout, got " <> show other)
@@ -294,7 +294,7 @@ spec = do
             (temporaryRoot </> "usage-command.sh")
             [ByteString.pack ("echo $$ > " <> markerPath), "sleep 60 </dev/null >/dev/null 2>&1"]
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          result <- timeout 10000000 (runUsageCommand 500000 [Data.Text.pack scriptPath])
+          result <- timeout 10000000 (runUsageCommand 3000000 [Data.Text.pack scriptPath])
           case result of
             Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
             other -> expectationFailure ("expected a clean timeout, got " <> show other)
@@ -308,7 +308,7 @@ spec = do
             (temporaryRoot </> "usage-command.sh")
             ["trap '' TERM", ByteString.pack ("echo $$ > " <> markerPath), "sleep 60 </dev/null >/dev/null 2>&1"]
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          result <- timeout 10000000 (runUsageCommand 500000 [Data.Text.pack scriptPath])
+          result <- timeout 10000000 (runUsageCommand 3000000 [Data.Text.pack scriptPath])
           case result of
             Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
             other -> expectationFailure ("expected a clean timeout, got " <> show other)
