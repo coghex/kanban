@@ -193,6 +193,43 @@ snapshot itself is independent of all of this and unchanged: it stays reachable
 through `git stash list` and `refs/drain-prs/autostash/<sha>` whether or not the
 index is resolved first.
 
+#### An edit that arrives after the snapshot
+
+Setting tracked changes aside is not instantaneous. `git stash create` records
+the index and working tree as they stood when it ran, and `git reset --hard
+HEAD` — which discards whatever is in the working tree when it runs — comes
+afterwards. An edit written into that window is in neither the snapshot nor, once
+the reset has run, the working tree. Untracked files never had this exposure:
+`reset --hard` leaves them alone, and their holding directory is taken before the
+snapshot.
+
+The drainer therefore ends the window with a **final pre-reset protection
+boundary** — the last operation before the reset that reads tracked index and
+working-tree state in order to decide whether the reset is safe. It re-reads that
+state and compares it, by content, against the snapshot the reset is about to
+rely on. What that read sees is what is protected.
+
+- **They match.** Nothing landed in the window, the snapshot is a faithful copy,
+  and the pass continues into the reset, the retry, and the restore exactly as
+  described above.
+- **They differ.** The newer content is in the working tree and not in the
+  snapshot, so the drainer runs neither the reset nor the retrying
+  `git merge --ff-only`. HEAD, the index, and the tracked working tree are left
+  exactly as they stand, with the newer content still in place; any relocated
+  untracked files are put back under the contract above; and the snapshot already
+  taken is preserved and named the same way a failed restore names it, so it
+  costs nothing. The fast-forward is simply left owed, and the next ordinary pass
+  discharges it.
+- **The boundary cannot be read.** Treated as the differing case. A tracked state
+  that cannot be read or verified is never grounds for a destructive reset.
+
+This bounds the exposure to the moment between that read and the reset rather
+than the whole snapshot-to-reset window; it does not eliminate it. A writer that
+changes a path *after* the boundary has read that path still wins, and closing
+that last interval needs the drainer and everything else writing to the checkout
+to coordinate — a lock, an atomic writer protocol, or an isolated checkout —
+which is deliberately outside this contract.
+
 #### The lifecycle of an autostash anchor
 
 The anchor at `refs/drain-prs/autostash/<sha>` exists so the snapshot commit is

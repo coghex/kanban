@@ -2126,6 +2126,75 @@ def _snapshot_tracked_changes(ctx: RepoContext, message: str) -> str | None:
     return (proc.stdout or "").strip() or None
 
 
+def _tracked_state_trees(ctx: RepoContext, tracked_sha: str) -> tuple[str, str]:
+    """The (working tree, index) trees one `git stash create` commit records.
+
+    A stash commit's own tree is the working tree it saw, and its second parent
+    is the index commit git wrote alongside it, so this pair pins exactly the
+    tracked state a `reset --hard` would discard.
+
+    Compared by tree rather than by commit ID because the commit IDs of two
+    snapshots of identical content need not match: `git stash create` stamps a
+    commit time, so a second call that lands one second later produces a
+    different commit for the same content. Trees are content-addressed and
+    never do that.
+    """
+    proc = run(
+        ["git", "rev-parse", f"{tracked_sha}^{{tree}}", f"{tracked_sha}^2^{{tree}}"],
+        cwd=ctx.path,
+    )
+    trees = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if len(trees) != 2:
+        raise DrainError(
+            f"Could not read the tracked state snapshot {tracked_sha} holds: expected "
+            f"a working-tree and an index tree, got {len(trees)}"
+        )
+    return trees[0], trees[1]
+
+
+def _require_snapshot_still_current(ctx: RepoContext, tracked_sha: str, message: str) -> None:
+    """The final pre-reset protection boundary: is the snapshot still faithful?
+
+    `_snapshot_tracked_changes` records the index and working tree as they
+    stood when it ran, and `git reset --hard HEAD` discards whatever is in the
+    working tree when *it* runs. A tracked edit written between the two is in
+    neither the snapshot nor, afterwards, the working tree -- the reset would
+    destroy the only copy. (Untracked files never had this exposure:
+    `reset --hard` leaves them alone.)
+
+    So immediately before the reset, re-read the tracked state and compare it
+    by content against the snapshot the reset is about to rely on. Matching
+    means nothing landed in the window and the snapshot is a faithful copy.
+    Anything else -- a newer state, no local changes left at all, or a read
+    that fails outright -- raises, and the caller's abort path leaves the
+    checkout untouched with the fast-forward owed to a later pass. Newer
+    content is never worth less than the snapshot, so a reset is never run on
+    a snapshot that is not provably current.
+
+    The recheck's own `git stash create` commit is deliberately left
+    unanchored: on the matching path its content is byte-identical to the
+    already-anchored snapshot, and on the differing path nothing destructive
+    runs, so that content is still in the working tree. Neither case can leave
+    the only copy of anything reachable from no ref.
+
+    This bounds the exposure to the moment between this read and the reset; it
+    does not close it. A writer that changes a path after this read still wins,
+    and eliminating that needs writer coordination the drainer does not have.
+    """
+    later_sha = _snapshot_tracked_changes(ctx, message)
+    before = _tracked_state_trees(ctx, tracked_sha)
+    after = _tracked_state_trees(ctx, later_sha) if later_sha is not None else None
+    if after == before:
+        return
+    raise DrainError(
+        f"Tracked changes in {ctx.path} are no longer the ones that were snapshotted: "
+        "they changed after the snapshot was taken and before the reset that would "
+        "have discarded them. The reset was not run and the checkout is untouched, so "
+        "the newer content is still in the working tree; the fast-forward is left owed "
+        "to a later pass."
+    )
+
+
 def _restore_snapshot(
     ctx: RepoContext,
     tracked_sha: str | None,
@@ -2244,6 +2313,12 @@ def fast_forward_default_branch(
                 # `reset --hard` runs, this floating commit is the only
                 # copy of the user's changes until restoration completes.
                 anchor_ref = _anchor_snapshot(ctx, tracked_sha)
+                # The last read of tracked state before the destructive
+                # reset, and therefore the final pre-reset protection
+                # boundary: an edit that landed since the snapshot is in
+                # the working tree and nowhere else, so the reset must not
+                # run over one.
+                _require_snapshot_still_current(ctx, tracked_sha, message)
                 run(["git", "reset", "--hard", "HEAD"], cwd=ctx.path)
         except DrainError as prep_exc:
             if untracked is not None:
