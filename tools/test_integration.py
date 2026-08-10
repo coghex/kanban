@@ -1023,7 +1023,13 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         # The case the whole guard exists for: the tip read said one thing and
         # the default branch moved anyway. The swap refuses rather than
         # absorbing an advance nothing inspected.
-        self._script_pr_view(self._behind(), self._behind(), self._behind(), self._settled())
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._settled(),
+        )
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
         self._script_merge_of_this_pr(swap=False)
@@ -1040,7 +1046,9 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
     def test_a_merge_commit_joining_other_commits_is_never_swapped_in(self):
         # The commit that lands has to be the join of the two commits the
         # authorization was computed from, and nothing else.
-        self._script_pr_view(self._behind(), self._behind(), self._settled())
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
         self._script_merge_of_this_pr(
@@ -1055,7 +1063,9 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self._assert_requested_the_update(report, state)
 
     def test_a_merge_commit_github_will_not_build_requests_the_update(self):
-        self._script_pr_view(self._behind(), self._behind(), self._settled())
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
         self._script_merge_of_this_pr(build_exit=1)
@@ -1068,7 +1078,9 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self._assert_requested_the_update(report, state)
 
     def test_a_staging_reference_that_cannot_be_created_requests_the_update(self):
-        self._script_pr_view(self._behind(), self._behind(), self._settled())
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
         self._script_staging_ref(created=False)
@@ -1100,6 +1112,79 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(len(self._update_branch_calls()), 0)
         self.assertEqual(report["reason"], "approved_head_changed")
         self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_closed_before_the_swap_lands_nothing(self):
+        # Approval and checks were re-read before the staging merge was built;
+        # the pull request can still be closed while it is being built. Nothing
+        # may reach the default branch for a pull request that is not open.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(state="CLOSED")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("CLOSED", str(raised.exception))
+        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        # Staged and cleaned up, but never swapped in.
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_github_closed_without_merging_is_a_fatal_incident(self):
+        # The swap landed the commit, but GitHub recorded the pull request as
+        # closed rather than merged. Nothing may report a merge, or run a
+        # merge's cleanup, on the strength of "no longer open".
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "CLOSED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run()
+
+        message = str(raised.exception)
+        self.assertIn("CLOSED", message)
+        self.assertIn("MERGED", message)
+        self.assertEqual(len(self._swap_calls()), 1)
+
+    def test_a_refusal_over_a_head_that_moved_defers_for_rereview(self):
+        # A refusal is only a reason to request the branch update once the
+        # pull request is confirmed to still be at the head it was refused
+        # for; a head that moved needs a fresh review instead.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(headRefOid="f" * 40)
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(len(self._swap_calls()), 0)
+
+    def test_a_refusal_over_a_pull_request_no_longer_open_fails_closed(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(state="MERGED")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+
+        with self.assertRaises(drain_prs.DrainError):
+            self._run()
+
+        # Neither outcome may be claimed for a pull request this run can no
+        # longer account for.
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(len(self._swap_calls()), 0)
 
     def test_a_pull_request_github_never_records_as_merged_is_a_fatal_incident(self):
         # The swap landed, so the merge is durable and reported. A pull request

@@ -525,16 +525,22 @@ the swap — until then it is the only thing keeping the merge commit reachable.
 
 Every refusal along the way — a conflict, a merge commit joining the wrong
 commits, a reference that could not be created, a default branch that advanced
-first — requests the ordinary branch update and reports why. A repository whose
-branch protection refuses the reference update therefore never takes this path
-at all: it degrades to exactly the branch update the drainer has always
-performed.
+first — requests the ordinary branch update, but only once the pull request is
+re-read and confirmed still open at the head the refusal was for. A head that
+moved during the refusal needs a fresh review instead, and a pull request that
+is no longer open, or cannot be read, ends the pass without claiming either a
+merge or a branch update. A repository whose branch protection refuses the
+reference update therefore never takes this path at all: it degrades to exactly
+the branch update the drainer has always performed.
 
 The commits that reach the default branch are the reviewed ones either way: the
 head is named as an explicit object rather than as a branch, so a push that
-lands mid-merge cannot change what merges. It can only leave the pull request
-unfinished by it, and a pull request GitHub never records as merged is a fatal
-`PostMergeAuditError` rather than something left for the next pass to guess at.
+lands mid-merge cannot change what merges. The pull request is re-read
+immediately before the swap and must still be open at that head, so nothing
+lands for one that was closed while its merge was being built. Afterwards, only
+GitHub recording the pull request as `MERGED` ends the attempt: a pull request
+left open, or closed without being merged, is a fatal `PostMergeAuditError`
+rather than something reported as a merge or handed to a merge's cleanup.
 
 The ordinary merge path is untouched: a pull request that was never behind is
 still merged with `gh pr merge --admin --match-head-commit`.

@@ -1513,17 +1513,27 @@ def confirm_pull_request_merged(
     """Wait for GitHub to record the pull request the swap just merged.
 
     The swap lands the head commit on the default branch, and GitHub marks a
-    pull request merged once its head is reachable from its base. A pull
-    request that never gets there is a fatal incident: the commits that landed
-    are exactly the reviewed ones either way, so nothing unreviewed can be on
-    the default branch -- but a pull request that should have closed and did
-    not is not something to leave for the next pass to guess at.
+    pull request merged once its head is reachable from its base. Only that
+    recorded state ends the wait. A pull request that never gets there is a
+    fatal incident: the commits that landed are exactly the reviewed ones
+    either way, so nothing unreviewed can be on the default branch -- but a
+    pull request that should have been recorded as merged and was not is not
+    something to leave for the next pass, or for the cleanup below, to treat
+    as a merge on its own say-so.
     """
     deadline = time.time() + MERGED_STATE_WAIT_SECONDS
     while True:
         pr = get_pr(ctx, number)
-        if pr.get("state") != "OPEN":
+        state = pr.get("state")
+        if state == "MERGED":
             return
+        if state != "OPEN":
+            # Closed without being merged, above all: GitHub never recorded
+            # this as a merge, so nothing here may report one.
+            raise PostMergeAuditError(
+                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"but GitHub recorded the pull request as {state}, not MERGED"
+            )
         if pr.get("headRefOid") != approval.head:
             raise PostMergeAuditError(
                 f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
@@ -1590,8 +1600,16 @@ def merge_past_base_advance(
             )
         # Narrow the head window to this one call: the commit about to land is
         # fixed, so a head that moved cannot change what merges -- only whether
-        # the pull request it belongs to is finished by it.
+        # the pull request it belongs to is finished by it. A pull request that
+        # is no longer open is not a pull request anything may land for, and a
+        # read that fails raises, so both leave the default branch alone.
         current = get_pr(ctx, number)
+        if current.get("state") != "OPEN":
+            raise DrainError(
+                f"PR #{number}: it was {current.get('state')} rather than OPEN "
+                f"before {approval.head[:12]} could be merged onto "
+                f"{approval.tip[:12]}; nothing was landed for it"
+            )
         if current["headRefOid"] != approval.head:
             log(
                 f"PR #{number}: head changed from {approval.head[:12]} to "
@@ -3676,11 +3694,37 @@ def process_pr(
         return True
     if outcome == MERGE_REJECTED:
         # Nothing landed, so the candidate takes the branch update it was
-        # spared: it is reported as behind rather than as merged, and it keeps
-        # the lane while that update settles.
+        # spared -- but only once the refusal is confirmed against a pull
+        # request that is still open at the head it was refused for. The
+        # snapshot above predates the refusal, and a branch update requested
+        # from a stale one is an action taken on a pull request this run no
+        # longer understands. A read that fails raises, which is the same
+        # fail-closed answer.
+        refreshed = get_pr(ctx, number)
+        if refreshed.get("state") != "OPEN":
+            message = (
+                f"PR #{number}: its merge past a coordination-only base advance "
+                f"was refused and it is {refreshed.get('state')} rather than "
+                "OPEN, so neither a merge nor a branch update can be claimed "
+                "for it."
+            )
+            set_outcome(report, "operational_error", message)
+            raise DrainError(message)
+        if refreshed["headRefOid"] != base_advance.head:
+            log(f"PR #{number}: head moved during the refused merge; deferring")
+            set_outcome(
+                report,
+                "approved_head_changed",
+                f"PR #{number}: its head moved away from {base_advance.head[:12]} "
+                "while its merge past a coordination-only base advance was being "
+                "refused; it needs a fresh review.",
+            )
+            return True
+        # Reported as behind rather than as merged, and it keeps the lane while
+        # that update settles.
         return request_base_update(
             ctx,
-            pr,
+            refreshed,
             state=state,
             dry_run=dry_run,
             report=report,
