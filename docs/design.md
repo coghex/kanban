@@ -1,6 +1,55 @@
 # Kanban TUI — Design and Roadmap
 
-Status: implementation in progress. The warning-clean GHC2024/Cabal foundation,
+Design state: `exploring`
+
+Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
+reviewed and deliberately not tracked separately · `[deferred]` blocked on a
+concrete precondition
+
+## Processing status
+
+- [ ] EPIC. Complete Kanban's first-release readiness gate
+- [ ] REL-1. Record real-terminal performance measurements
+- [ ] REL-2. Verify live Codex and Claude usage refreshes
+- [ ] REL-3. Exercise the installed terminal application
+- [ ] REL-4. Publish the first Kanban release
+
+## Epic contract
+
+- **Goal:** Publish a traceable first Kanban release only after its installed
+  terminal behavior, idle-resource profile, and live usage-provider behavior
+  have been verified in the operator environment.
+- **Done when:** The manual evidence is recorded, every release-blocking defect
+  found by those checks is resolved or explicitly removed from scope, required
+  CI passes on the release commit, and the agreed first-release tag identifies
+  that commit.
+- **Users and operators:** People installing Kanban from its source release and
+  the maintainers responsible for its terminal and provider behavior.
+- **Arc label:** None proposed.
+
+## Release scope
+
+### In scope
+
+- Record startup, idle CPU, resident memory, refresh-count, and redraw behavior
+  from the installed executable in a real terminal.
+- Verify the built-in Codex and Claude usage providers against authenticated
+  live clients without submitting a model prompt.
+- Exercise startup, refresh, navigation, shutdown, and visible terminal
+  stability for a deliberately chosen observation period.
+- Publish the first release only after the recorded gates and required CI pass.
+
+### Out of scope
+
+- The broader provider-version fixture matrices noted in milestones 4, 5, and
+  7 unless a live release check exposes a release-blocking incompatibility.
+- New features from section 20's deferred-ideas list.
+- Performance optimization without evidence that an agreed release threshold
+  is missed.
+
+## Current state and evidence
+
+The warning-clean GHC2024/Cabal foundation,
 local repository resolution, event-driven Brick/Vty dashboard, standalone-card
 workflow, explicit GitHub refresh, and last-good repository cache are
 implemented. Checklist-based tracker hierarchy, inherited PR membership,
@@ -12,6 +61,20 @@ canonical v2 issue-review sessions, embedded revision questions, and
 the first resumable issue-solve flow are implemented. The external
 usage-command escape hatch is also implemented. Broader provider-version
 fixtures remain for subsequent slices.
+
+The automated release foundation is already present: `.github/workflows/ci.yml`
+builds and runs both test suites on Linux, `docs/development.md` defines the
+source-distribution check, and the clean-install exercise recorded in milestone
+9 has passed. As of 2026-08-09, `kanban.cabal` still declares version `0.1.0.0`,
+the repository has no tags or release workflow, and no open issue or epic found
+by the release-readiness, idle-performance, live-usage, and terminal-smoke
+tracker searches owns this remaining arc. Closed issue #203 covers the source
+distribution rather than these manual gates. The 2026-08-09 verification run of
+`python3 -m unittest tools.test_source_distribution` has one current failure:
+`docs/document_workflow_findings.md` is tracked without a stated release or
+exclusion decision. Open issue #225 owns that document classification and
+completeness work, so release publication must wait for it or a confirmed
+equivalent fix without duplicating it as a new release slice.
 
 ## 1. Purpose
 
@@ -1916,24 +1979,17 @@ The first solve/autosolve-compatible slice is implemented.
 
 ### Milestone 9 — Hardening and release
 
-Release-readiness checklist, last audited 2026-08-07:
+Automated hardening and installation prerequisites were last audited on
+2026-08-07. Config loading and per-repository overrides have shared Haskell and
+Python coverage for canonical repository selection, inheritance, validation,
+and array replacement. Stale caches, missing tools, authentication failures,
+signals, and subprocess cleanup have deterministic fixtures and process-group
+integration coverage. Installation instructions and a clean temporary
+`cabal install exe:kanban` exercise are complete.
 
-- [x] Complete config loading and per-repository overrides. The shared Haskell
-  and Python configuration suites cover canonical repository selection,
-  inheritance, validation, and array replacement.
-- [x] Exercise stale caches, missing tools, auth failures, signals, and
-  subprocess cleanup. These paths have deterministic fixtures and process-group
-  integration coverage in the Haskell and Python suites.
-- [ ] Measure startup time, idle CPU, resident memory, refresh count, and redraw
-  behavior in a real terminal, and record the results here.
-- [x] Add installation instructions and verify the `cabal install exe:kanban`
-  workflow from a clean temporary install directory.
-- [ ] Complete the release-gate manual Codex and Claude usage refreshes without
-  submitting a model prompt.
-- [ ] Exercise the installed executable in a real terminal long enough to
-  confirm startup, refresh, navigation, shutdown, and the absence of visible
-  redraw churn.
-- [ ] Tag the first release after every item above is complete.
+The remaining manual checks and release publication are now the canonical
+`REL-1` through `REL-4` slices in the processing ledger and delivery plan. This
+milestone is implementation history rather than a second status checklist.
 
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status
@@ -1953,3 +2009,155 @@ refresh key.
 
 These are intentionally outside the first release so the core remains a small,
 predictable, read-only dashboard.
+
+## Decisions
+
+### D-1. First-release evidence includes a real installed-terminal run
+
+Fixture and integration coverage do not replace the release-gate checks that
+depend on an actual terminal, process table, authenticated provider clients, and
+operator-visible redraw behavior. The results must be recorded in this design
+before the release is published.
+
+### D-2. Live usage verification must not consume a model prompt
+
+The Codex app-server rate-limit request and Claude `/usage` interaction are
+account-status probes. A release check that submits an ordinary prompt would
+change user-visible account consumption and would not verify the promised
+bounded behavior.
+
+### D-3. Publication follows every manual gate and required CI
+
+The release tag is a final operation. It must identify a commit containing the
+accepted manual evidence, and that commit must pass the repository's required
+build and test checks.
+
+## Proposals
+
+### P-1. Track the four remaining outcomes as separate delivery slices
+
+Performance calibration, authenticated usage-provider verification, sustained
+terminal exercise, and release publication have different evidence and failure
+modes. Keeping them separate makes a failed gate independently repeatable while
+preserving `REL-4` as the single dependency join.
+
+### P-2. Record reproducible summaries rather than sensitive raw transcripts
+
+Each manual slice should record the environment, client versions, commands or
+interactions, elapsed observation window, and pass/fail result. It should omit
+account identifiers, usage balances, access tokens, and raw provider output not
+needed to reproduce the conclusion.
+
+## Open questions
+
+### Q-1. Which numeric performance limits block the first release?
+
+The existing contract requires effectively zero idle CPU but does not define a
+sampling interval or thresholds for startup time and resident memory. `REL-1`
+must stop for an explicit threshold decision before its evidence can produce a
+pass verdict.
+
+### Q-2. How long must the installed-terminal exercise run?
+
+The existing checklist says "long enough" without defining duration, refresh
+count, or the minimum navigation path. `REL-3` needs those values before the
+absence of redraw churn can be a repeatable acceptance signal.
+
+### Q-3. What exactly constitutes publishing the first release?
+
+The repository has no existing tag convention or release workflow, while
+`kanban.cabal` declares `0.1.0.0`. Before `REL-4` is ready, decide the release
+version and tag name, whether to update package metadata, and whether a GitHub
+release or source artifact beyond the tag is required.
+
+## Verification strategy
+
+Run the installed executable, not `cabal run`, from a clean source-install
+exercise. Record the macOS and terminal versions, Kanban version and commit,
+Codex and Claude client versions, observation window, and commands or UI actions
+used. Attribute network activity to startup or explicit refreshes, sample CPU
+and resident memory only after startup settles, and distinguish application
+redraws from terminal-emulator behavior. Keep account values and credentials
+out of the document. Rerun required CI on the exact commit selected for release
+and verify the published tag resolves to that commit.
+
+## Delivery plan
+
+### REL-1. Record real-terminal performance measurements
+
+- **Outcome:** A committed, reproducible calibration records installed Kanban's
+  startup time, settled idle CPU, resident memory, refresh count, and redraw
+  behavior against agreed release limits.
+- **Scope:** Define the observation environment and sampling method, run the
+  installed executable in a real terminal, record summarized measurements, and
+  identify any missed threshold as release-blocking evidence.
+- **Phase:** 1 — independent manual gates.
+- **Depends on:** `none`.
+- **Ordering:** `can land first`.
+- **Relevant decisions:** `D-1`.
+- **Acceptance signals:** The record names the build commit, host and terminal
+  context, observation window, measurement commands, observed values, and a
+  pass/fail conclusion for every agreed metric.
+- **Out of scope:** Optimizing code or changing the runtime architecture in the
+  same slice.
+- **Open questions:** `Q-1`; stop for the threshold decision before declaring
+  the measurements passing.
+
+### REL-2. Verify live Codex and Claude usage refreshes
+
+- **Outcome:** A committed manual record confirms both built-in usage providers
+  return current account windows through installed Kanban without submitting a
+  model prompt.
+- **Scope:** Exercise one authenticated live refresh per provider, record client
+  versions and bounded lifecycle behavior, and redact account-specific values.
+- **Phase:** 1 — independent manual gates.
+- **Depends on:** `none`.
+- **Ordering:** `independent`.
+- **Relevant decisions:** `D-1`, `D-2`.
+- **Acceptance signals:** Both sidebar providers reach a successful fresh state,
+  no ordinary model prompt is submitted, provider processes exit, and one
+  provider's behavior does not hide the other's result.
+- **Out of scope:** Broad historical client-version compatibility matrices and
+  changes to authenticated provider accounts.
+- **Open questions:** `None`.
+
+### REL-3. Exercise the installed terminal application
+
+- **Outcome:** A committed smoke-test record confirms installed Kanban remains
+  responsive and visually stable through its agreed real-terminal observation
+  path.
+- **Scope:** Cover startup, explicit refresh, card and column navigation,
+  overlays used without external mutation, resize behavior, and clean shutdown;
+  record any visible redraw churn or lifecycle failure.
+- **Phase:** 1 — independent manual gates.
+- **Depends on:** `none`.
+- **Ordering:** `independent`.
+- **Relevant decisions:** `D-1`.
+- **Acceptance signals:** Every required interaction succeeds for the agreed
+  duration and refresh count, shutdown restores the terminal, and the record
+  identifies whether visible redraw churn occurred.
+- **Out of scope:** Starting reviews, solves, merges, or other workflows that
+  mutate GitHub or launch long-running agent work.
+- **Open questions:** `Q-2`; stop for the duration and interaction-path decision
+  before declaring the smoke test passing.
+
+### REL-4. Publish the first Kanban release
+
+- **Outcome:** The agreed first-release identifier points to the exact
+  required-CI-passing commit that contains accepted evidence for every manual
+  gate.
+- **Scope:** Apply the chosen version and tag convention, make any required
+  release-metadata or operator-documentation update, verify the release commit,
+  and publish through the chosen repository mechanism.
+- **Phase:** 2 — publication.
+- **Depends on:** `REL-1`, `REL-2`, `REL-3`; existing issue #225 (or a confirmed
+  equivalent fix) must also clear the current source-distribution failure.
+- **Ordering:** `critical path`.
+- **Relevant decisions:** `D-3`.
+- **Acceptance signals:** Every prerequisite slice is terminal, required CI is
+  green on the selected commit, the published identifier resolves to that
+  commit, and the installed executable reports the chosen version.
+- **Out of scope:** Package-registry publication or binary installers unless
+  `Q-3` explicitly adds them to the first-release contract.
+- **Open questions:** `Q-3`; stop for the release-mechanism decision before an
+  issue is drafted or any tag is created.

@@ -33,52 +33,57 @@ audit the drainer was running, local `master` matched `origin/master`, and no
 active drainer incident was present. Unrelated worktree, stale-ref, and
 merged-branch housekeeping was also left outside this report.
 
-## Status checklist
+Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
+reviewed and deliberately not tracked separately · `[deferred]` blocked on a
+concrete precondition. A cross-repository issue qualifies the marker as
+`[#N, owner/repo]`.
 
-Legend:
-
-- `[ ]` — unprocessed
-- `[x] ... [no-issue]` — investigated; no issue warranted
-- `[x] ... [deferred]` — deliberately deferred
-- `[x] ... [existing: #N]` — represented by an existing tracker item
-- `[x] ... [created: #N]` — a new issue was approved and created
-- `[x] ... [epic: #N]` — represented by an approved epic
+## Status
 
 ### Durability and transaction boundaries
 
-- [ ] DW-1 — Coordination-document mutations stop at the local worktree
-- [ ] DW-2 — Document editing and drainer fast-forwarding share an uncoordinated checkout
-- [ ] DW-3 — Tracker mutations and ledger publication are not one recoverable transaction
+- [ ] DW-1. Coordination-document mutations stop at the local worktree — [deferred]: workflows untracked (DW-11)
+- [x] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout — [#223]
+- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: workflows untracked (DW-11)
 
 ### Cursor integrity and ownership
 
-- [ ] DW-4 — Recovery stashes contain stranded report cursor updates
-- [ ] DW-5 — Processors and implementation PRs both own the same report state
+- [x] DW-4. Recovery stashes contain stranded report cursor updates — [#1195, coghex/synarchy]
+- [x] DW-5. Processors and implementation PRs both own the same report state — [#1196, coghex/synarchy]
 
 ### Pull-request and CI coupling
 
-- [ ] DW-6 — Coordination-only base commits interrupt the active merge lane
-- [ ] DW-7 — Coordination-only master pushes trigger the full build and test workflow
+- [x] DW-6. Coordination-only base commits interrupt the active merge lane — [#224]
+- [x] DW-7. Coordination-only master pushes trigger the full build and test workflow — [no-issue]
 
 ### Policy and migration
 
-- [ ] DW-8 — The direct-master policy does not distinguish coordination documents from code contracts
-- [ ] DW-9 — Synarchy document artifacts are stranded outside canonical master state
+- [x] DW-8. The direct-master policy does not distinguish coordination documents from code contracts — [#225]
+- [x] DW-9. Synarchy document artifacts are stranded outside canonical master state — [#1197, coghex/synarchy]
 
 ### Workflow ownership and routing
 
-- [ ] DW-10 — Coordination-document workflows infer ownership from the current checkout
-- [ ] DW-11 — The design and report workflows remain untracked personal assets
+- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout
+- [ ] DW-11. The design and report workflows remain untracked personal assets
 
 ### Review safety
 
-- [ ] DW-12 — Branch-update completion is mistaken for approval to restore a stale review
+- [ ] DW-12. Branch-update completion is mistaken for approval to restore a stale review
 
 ---
 
 ## Chapter 1: Durability and transaction boundaries
 
-### DW-1 — Coordination-document mutations stop at the local worktree
+### [deferred] DW-1. Coordination-document mutations stop at the local worktree
+
+> **Deferred:** The four workflows live only under `~/.codex/skills/` and
+> `~/.claude/commands/`, so no reviewable PR can add a publication step —
+> `docs/drafting-workflow-contract.md:35-47` declares the tracked drafting
+> assets exhaustively and lists none of them. Clears when DW-11's vendoring
+> lands: `design-epic`, `process-design-doc`, `draft-report`, and
+> `process-report` appear as rows in that contract's §2 asset table with files
+> present under `codex-plugin/plugins/kanban/skills/` and
+> `claude-plugin/plugins/kanban/commands/`.
 
 #### Observation
 
@@ -115,7 +120,7 @@ Draft refinement may still involve multiple local edits, but any checkpoint pres
 - Publication failures must remain visible and recoverable.
 - The workflow must not silently claim durability when only a dirty local file exists.
 
-### DW-2 — Document editing and drainer fast-forwarding share an uncoordinated checkout
+### [#223] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout
 
 #### Observation
 
@@ -163,7 +168,15 @@ The resulting contract should define which component owns the checkout at each m
 
 The appropriate mechanism—such as a shared short-lived lock, an isolated worktree, or publication that avoids the drainer checkout—requires design work. The finding establishes the missing coordination contract rather than selecting that implementation.
 
-### DW-3 — Tracker mutations and ledger publication are not one recoverable transaction
+### [deferred] DW-3. Tracker mutations and ledger publication are not one recoverable transaction
+
+> **Deferred:** The reconciliation step belongs to `process-design-doc`, which
+> exists only at `~/.codex/skills/process-design-doc/SKILL.md`, and unlike DW-2
+> this finding has no kanban-owned counterpart in the tracked tree — so no
+> reviewable PR can carry it. Clears on the same precondition as DW-1: the four
+> workflows appear as rows in `docs/drafting-workflow-contract.md` §2 with files
+> present under `codex-plugin/plugins/kanban/skills/` and
+> `claude-plugin/plugins/kanban/commands/`.
 
 #### Observation
 
@@ -200,7 +213,7 @@ The approved tracker number and its relationship to the design slice must become
 
 ## Chapter 2: Cursor integrity and ownership
 
-### DW-4 — Recovery stashes contain stranded report cursor updates
+### [#1195, coghex/synarchy] DW-4. Recovery stashes contain stranded report cursor updates
 
 #### Observation
 
@@ -257,7 +270,7 @@ The reconciliation should prove, concern by concern, that no approved dispositio
 - Recovery stashes should remain intact until reconciliation is verified.
 - This is both a one-time data repair and evidence for the systemic publication findings above.
 
-### DW-5 — Processors and implementation PRs both own the same report state
+### [#1196, coghex/synarchy] DW-5. Processors and implementation PRs both own the same report state
 
 #### Observation
 
@@ -302,7 +315,7 @@ The report format may need to distinguish machine-like workflow state from imple
 
 ## Chapter 3: Pull-request and CI coupling
 
-### DW-6 — Coordination-only base commits interrupt the active merge lane
+### [#224] DW-6. Coordination-only base commits interrupt the active merge lane
 
 #### Observation
 
@@ -366,7 +379,17 @@ path-aware. The audit establishes the remaining coupling but does not select
 whether publication cadence, merge policy, or a narrower validation mechanism
 should absorb it.
 
-### DW-7 — Coordination-only master pushes trigger the full build and test workflow
+### [no-issue] DW-7. Coordination-only master pushes trigger the full build and test workflow
+
+> **Disposition:** No issue — the trigger is as described (`.github/workflows/ci.yml:3-7`
+> has no path filter), but the cost is negligible and a docs-only exception would be
+> harmful here. Both repositories are public, so Actions minutes are unmetered; master
+> runs take ~9-10 minutes and `concurrency.cancel-in-progress` collapses rapid
+> checkpoints. `tools/test_source_distribution.py:84-104` requires every tracked file,
+> documents included, to be declared as a release asset or a deliberate exclusion, so
+> adding or renaming any document is a contract change — a `paths-ignore: docs/**`
+> filter would have suppressed the genuine `build-test` failure this verification found
+> on master at 282ceeb.
 
 #### Observation
 
@@ -403,7 +426,7 @@ The audit did not quantify runner cost or organization-wide queue contention. Th
 
 ## Chapter 4: Policy and migration
 
-### DW-8 — The direct-master policy does not distinguish coordination documents from code contracts
+### [#225] DW-8. The direct-master policy does not distinguish coordination documents from code contracts
 
 > **Source note:** “I think all docs should be straight to master.”
 
@@ -466,7 +489,7 @@ At minimum, the policy should distinguish:
 - An allowlist or equally auditable policy is safer than assuming every Markdown file is coordination-only.
 - The publishing workflow must fail closed for unknown document classes.
 
-### DW-9 — Synarchy document artifacts are stranded outside canonical master state
+### [#1197, coghex/synarchy] DW-9. Synarchy document artifacts are stranded outside canonical master state
 
 #### Observation
 
@@ -517,7 +540,7 @@ No unreviewed document should be deleted merely because it is untracked or stran
 
 ## Chapter 5: Workflow ownership and routing
 
-### DW-10 — Coordination-document workflows infer ownership from the current checkout
+### DW-10. Coordination-document workflows infer ownership from the current checkout
 
 #### Observation
 
@@ -595,7 +618,7 @@ Kanban.
 The audit does not establish whether ownership should be declared in document
 frontmatter, skill configuration, a Kanban registry, or another durable source.
 
-### DW-11 — The design and report workflows remain untracked personal assets
+### DW-11. The design and report workflows remain untracked personal assets
 
 #### Observation
 
@@ -666,7 +689,7 @@ suggests parity for processing even if drafting experiences differ.
 
 ## Chapter 6: Review safety
 
-### DW-12 — Branch-update completion is mistaken for approval to restore a stale review
+### DW-12. Branch-update completion is mistaken for approval to restore a stale review
 
 #### Observation
 

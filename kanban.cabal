@@ -45,6 +45,7 @@ extra-doc-files:
   config.toml.example
   docs/README.md
   docs/agent-workflow-contract.md
+  docs/bugs.md
   docs/development.md
   docs/design.md
   docs/drafting-workflow-contract.md

@@ -25,7 +25,7 @@ tracked file has none:
 * In, as a whole tree: `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
   and `claude-plugin/` ship every tracked file they contain.
 * In, individually: `README.md`, `CLAUDE.md`, `LICENSE`, `kanban.cabal`,
-  `config.toml.example`, the eight user and workflow-contract documents
+  `config.toml.example`, the nine user and workflow-contract documents
   under `docs/`, and `cabal.project` -- the last because the packaged
   `CLAUDE.md` describes it as what applies the mandatory `-Werror` gate to
   the `cabal build all` and `cabal test all` runs the packaged `README.md`
@@ -83,6 +83,7 @@ RELEASE_ROOT_FILES = (
 RELEASE_DOCUMENTS = (
     "docs/README.md",
     "docs/agent-workflow-contract.md",
+    "docs/bugs.md",
     "docs/design.md",
     "docs/development.md",
     "docs/drafting-workflow-contract.md",
