@@ -296,6 +296,187 @@ class SnapshotAnchoredBeforeResetTest(_FastForwardStashFixture):
         self.assertEqual(refs_after.strip(), "")
 
 
+class _LateTrackedEditFixture(_FastForwardStashFixture):
+    """Shared setup for the window between the initial tracked snapshot and
+    the destructive reset.
+
+    The write is keyed on `_snapshot_tracked_changes` *returning* rather than
+    on any later command, because that is the ordering the contract names: the
+    later content has to land after the initial snapshot is complete and before
+    the final protection operation reads tracked state, so that operation is
+    the one that observes it. Injecting it any later would be the
+    post-boundary interval the contract puts out of scope, and injecting it
+    before the snapshot would be an ordinary dirty checkout.
+    """
+
+    def _dirty_the_checkout(self):
+        (self.main / "shared.txt").write_text(
+            "line1\nline2\nline3-local\n", encoding="utf-8"
+        )
+        (self.main / "untracked.txt").write_text("local-untracked\n", encoding="utf-8")
+
+    def _edit_after_initial_snapshot(self, contents):
+        """Patch `_snapshot_tracked_changes` to write `contents` once it has
+        taken the initial snapshot; returns the patcher and the list of
+        snapshot commits it observed."""
+        real_snapshot = drain_prs._snapshot_tracked_changes
+        snapshots = []
+
+        def snapshot_then_edit(ctx, message):
+            sha = real_snapshot(ctx, message)
+            snapshots.append(sha)
+            if len(snapshots) == 1:
+                (self.main / "shared.txt").write_text(contents, encoding="utf-8")
+            return sha
+
+        patcher = mock.patch.object(
+            drain_prs, "_snapshot_tracked_changes", side_effect=snapshot_then_edit
+        )
+        return patcher, snapshots
+
+    def _recording_run(self, calls, *, fail_later_snapshots_with=None):
+        real_run = drain_prs.run
+        creates = []
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            if args[:3] == ["git", "stash", "create"]:
+                creates.append(list(args))
+                if fail_later_snapshots_with is not None and len(creates) > 1:
+                    # The boundary's own read of tracked state, failing the
+                    # way any git command can fail.
+                    raise drain_prs.DrainError(fail_later_snapshots_with)
+            return real_run(args, **kwargs)
+
+        return mock.patch.object(drain_prs, "run", side_effect=fake_run)
+
+
+class LateTrackedEditBeforeResetTest(_LateTrackedEditFixture):
+    """A tracked edit written after the initial snapshot completes exists in
+    the working tree and nowhere else -- not in the snapshot the drainer is
+    about to rely on -- so `git reset --hard HEAD` would be the only thing
+    that ever saw it. The final pre-reset protection boundary reads tracked
+    state one last time and refuses the reset over anything it does not
+    recognise.
+    """
+
+    def test_content_written_after_the_snapshot_is_never_discarded(self):
+        self._dirty_the_checkout()
+        self._advance_origin_line1("line1-updated")
+        head_before = run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip()
+
+        later = "line1\nline2\nline3-written-after-the-snapshot\n"
+        patcher, snapshots = self._edit_after_initial_snapshot(later)
+        calls = []
+
+        with self._recording_run(calls), patcher:
+            with self.assertRaises(drain_prs.DrainError) as cm:
+                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        # The boundary took a second reading, and what it saw stopped the pass
+        # before anything destructive ran.
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual([c for c in calls if c[:3] == ["git", "reset", "--hard"]], [])
+        self.assertEqual(len([c for c in calls if c[:3] == ["git", "merge", "--ff-only"]]), 1)
+
+        message = str(cm.exception)
+        self.assertIn("no longer the ones that were snapshotted", message)
+
+        # The exact later content is what is still in the working tree -- not
+        # the "line3-local" the snapshot holds, which is what restoring the
+        # snapshot over a completed reset would have left here.
+        self.assertEqual((self.main / "shared.txt").read_text(encoding="utf-8"), later)
+        self.assertEqual(
+            (self.main / "untracked.txt").read_text(encoding="utf-8"), "local-untracked\n"
+        )
+        self.assertEqual(list((self.main / ".git").glob("autostash-*")), [])
+
+        # The fast-forward did not happen and is still owed.
+        self.assertEqual(
+            run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip(), head_before
+        )
+        self.assertNotEqual(
+            run_git(["rev-parse", "origin/master"], cwd=self.main).stdout.strip(),
+            head_before,
+        )
+
+        # The snapshot it had already taken costs nothing: named on the way
+        # out, in `git stash list`, and its anchor therefore reapable by a
+        # later startup sweep rather than stranded there forever.
+        self.assertIn("recovered into `git stash list`", message)
+        self.assertEqual(stash_shas(self.main), [snapshots[0]])
+        self.assertEqual(
+            self._anchor_ref_names(), [f"refs/drain-prs/autostash/{snapshots[0]}"]
+        )
+
+
+class ProtectionBoundaryFailureTest(_LateTrackedEditFixture):
+    """A boundary that cannot be read answers the same as one that reads a
+    changed state: no reset, no retry, nothing touched. An unverifiable
+    tracked state is never a licence to discard it.
+    """
+
+    INJECTED = "injected: tracked state could not be read at the boundary"
+
+    def test_a_failing_boundary_after_a_late_edit_leaves_everything_alone(self):
+        # A staged edit as well, so "the index is unchanged" has something to
+        # be true of.
+        (self.main / "staged.txt").write_text("alpha\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+        run_git(["commit", "-q", "-m", "add staged.txt"], cwd=self.main)
+        run_git(["push", "-q", "origin", "master"], cwd=self.main)
+        (self.main / "staged.txt").write_text("alpha-staged\n", encoding="utf-8")
+        run_git(["add", "staged.txt"], cwd=self.main)
+
+        self._dirty_the_checkout()
+        self._advance_origin_line1("line1-updated")
+
+        head_before = run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip()
+        index_before = index_entries(self.main)
+
+        later = "line1\nline2\nline3-written-after-the-snapshot\n"
+        patcher, snapshots = self._edit_after_initial_snapshot(later)
+        calls = []
+
+        with self._recording_run(calls, fail_later_snapshots_with=self.INJECTED), patcher:
+            with self.assertRaises(drain_prs.DrainError) as cm:
+                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        message = str(cm.exception)
+        self.assertIn(self.INJECTED, message)
+
+        # Neither destructive step ran, and the fast-forward was not retried.
+        self.assertEqual([c for c in calls if c[:3] == ["git", "reset", "--hard"]], [])
+        self.assertEqual(len([c for c in calls if c[:3] == ["git", "merge", "--ff-only"]]), 1)
+
+        # HEAD, the index, and tracked working-tree content are exactly the
+        # state visible at the failed boundary -- the late edit included.
+        self.assertEqual(
+            run_git(["rev-parse", "HEAD"], cwd=self.main).stdout.strip(), head_before
+        )
+        self.assertEqual(index_entries(self.main), index_before)
+        self.assertEqual((self.main / "shared.txt").read_text(encoding="utf-8"), later)
+        self.assertEqual(
+            (self.main / "staged.txt").read_text(encoding="utf-8"), "alpha-staged\n"
+        )
+
+        # Relocated untracked files come back under the existing contract, and
+        # the holding directory goes with them.
+        self.assertEqual(
+            (self.main / "untracked.txt").read_text(encoding="utf-8"), "local-untracked\n"
+        )
+        self.assertEqual(list((self.main / ".git").glob("autostash-*")), [])
+
+        # The fast-forward is still owed, and the snapshot already taken is
+        # named rather than dropped.
+        self.assertNotEqual(
+            run_git(["rev-parse", "origin/master"], cwd=self.main).stdout.strip(),
+            head_before,
+        )
+        self.assertIn("recovered into `git stash list`", message)
+        self.assertEqual(stash_shas(self.main), [snapshots[0]])
+
+
 class SecondFastForwardStillFailsTest(_FastForwardStashFixture):
     def test_stash_restored_when_second_ff_also_fails(self):
         # Origin and local both gain their own new commit -- diverged history
