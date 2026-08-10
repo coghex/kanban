@@ -444,6 +444,64 @@ A candidate's turn ends in one of three ways.
 `--once` is exactly one such pass: it skips the blocked candidates, stops at
 the first advance or barrier, and exits.
 
+### Merging past a coordination-only base advance
+
+A branch update is how a candidate that is behind the default branch normally
+advances, and it costs a full rebuild of a pull request the new base commit
+could not have broken. The drainer skips that update for exactly one shape of
+advance, and only when the repository has said which paths that shape is made
+of, in `workflow.coordination_paths` (`config.toml.example`):
+
+```toml
+[workflow]
+coordination_paths = ["docs/status.md", "ROADMAP.md"]
+```
+
+Each entry is one exact, case-sensitive, repository-relative path. Globs,
+directory prefixes, and extension matching are not implied, and a rename counts
+both its source and its destination, so every path you mean has to be listed.
+The key defaults to empty; a repository that sets nothing requests a branch
+update for every advance, exactly as the drainer always has. Never list a
+document a test parses — in this repository `docs/agent-workflow-contract.md`
+and `docs/drafting-workflow-contract.md` are parsed by
+`tools/test_agent_workflow_contract.py` and
+`tools/test_drafting_workflow_contract.py`, so a change to either really can
+fail `build-test`, and that is a rebuild worth paying for.
+
+The drainer merges past an advance only when all of this holds:
+
+- The candidate's `mergeStateStatus` is `BEHIND`.
+- `coordination_paths` is non-empty.
+- Every file the default branch gained between this pull request's merge base
+  and the current default-branch tip is one of those exact paths.
+- None of those files is a file the pull request itself changes.
+- Both file sets were established completely, pinned to the pull request head,
+  merge base, and default-tip object IDs, and both comparisons agreed on the
+  merge base.
+- The default branch still points at that same inspected tip immediately before
+  the merge.
+
+Reaching that point grants the candidate nothing. It merges only if the
+required CI check and the required review gate pass exactly as they must for
+any other pull request, re-checked immediately before the merge as always.
+
+Everything else requests the branch update as before: a file outside the
+configured set, an overlap with the pull request's own files, an unset or empty
+set, a comparison GitHub truncated or answered malformed, an unreadable tip, an
+indeterminate merge base, a default branch that moved before the merge, and any
+other failure to establish either file set. Uncertainty requests the update.
+
+If the merge is attempted and GitHub refuses it while the pull request is still
+open at the head just attempted, the pass requests the branch update instead
+and reports the refusal alongside it. The candidate is never reported as merged
+and never left stranded. A head that moved during the merge still defers for a
+fresh review, as it does on the ordinary path, and a refusal against a pull
+request that cannot be read, or is no longer open, fails the pass rather than
+claiming either outcome.
+
+Either way this is one advance and one pass: the merge completes and releases
+the active lane, or the branch update is requested and holds it.
+
 ### The active candidate
 
 A candidate that reaches a barrier or takes an advance owns the queue's *active

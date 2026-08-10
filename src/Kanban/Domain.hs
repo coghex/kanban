@@ -391,15 +391,22 @@ data WorkflowConfig = WorkflowConfig
     -- that configures nothing gets ordinary chips rather than an invisible
     -- built-in set of names.
     problemStyleLabels :: Set Text,
-    uiStyleLabels :: Set Text
+    uiStyleLabels :: Set Text,
+    -- | Exact, case-sensitive, repository-relative paths whose content is
+    -- coordination rather than code: the PR drainer may merge a candidate
+    -- whose only distance from the default branch is a change to these.
+    -- Nothing in the dashboard reads them, and they default to empty, so a
+    -- repository that configures nothing keeps today's behavior.
+    coordinationPaths :: Set Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable record written before the display-only
--- styling collections existed still decodes — a worker spec persists a whole
--- 'WorkflowConfig' (see 'Kanban.Worker.WorkerSpec'), and a legacy one simply
--- has no opinion about chip styling, which is exactly the empty default.
+-- styling collections — or the drainer's coordination paths — existed still
+-- decodes: a worker spec persists a whole 'WorkflowConfig' (see
+-- 'Kanban.Worker.WorkerSpec'), and a legacy one simply has no opinion about
+-- either, which is exactly the empty default.
 instance FromJSON WorkflowConfig where
   parseJSON = withObject "WorkflowConfig" $ \object ->
     WorkflowConfig
@@ -412,6 +419,7 @@ instance FromJSON WorkflowConfig where
       <*> object .: "blockingSeverity"
       <*> object .:? "problemStyleLabels" .!= Set.empty
       <*> object .:? "uiStyleLabels" .!= Set.empty
+      <*> object .:? "coordinationPaths" .!= Set.empty
 
 defaultWorkflowConfig :: WorkflowConfig
 defaultWorkflowConfig =
@@ -424,7 +432,8 @@ defaultWorkflowConfig =
       approvalMode = ApprovalByLabel,
       blockingSeverity = SeverityRed,
       problemStyleLabels = Set.empty,
-      uiStyleLabels = Set.empty
+      uiStyleLabels = Set.empty,
+      coordinationPaths = Set.empty
     }
 
 itemId :: BoardItem -> ItemId

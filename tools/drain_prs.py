@@ -34,6 +34,13 @@ import kanban_config
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
+# `workflow.coordination_paths`, resolved for this repository in main(). Exact,
+# case-sensitive, repository-relative paths whose content coordinates the
+# pipeline rather than building it, so a default-branch advance touching only
+# these cannot change a candidate's build result. Empty by default: every
+# repository that sets nothing keeps requesting a branch update for every
+# advance, exactly as before.
+COORDINATION_PATHS: frozenset[str] = frozenset()
 DEFAULT_REQUIRED_CI_CHECK = "build-test"
 DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
 CONFIG_FILENAME = ".drain-prs.json"
@@ -43,6 +50,14 @@ CI_RERUN_INTERVAL_SECONDS = 60
 MAX_CI_RERUN_ATTEMPTS = 3
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
+# GitHub's commit-comparison endpoint returns at most this many files and says
+# nothing when it truncates. A response at the cap therefore cannot be proven
+# complete, and a file set that cannot be proven complete is never eligible to
+# be merged past.
+COMPARE_FILE_LIMIT = 300
+# A Git object ID as GitHub spells one. Anything else in a field that must name
+# an immutable commit is a malformed response, not a commit to pin work to.
+OBJECT_ID_RE = re.compile(r"\A[0-9a-f]{7,64}\Z")
 MODEL_TIMEOUT_SECONDS = 60 * 60
 STATE_VERSION = 4
 FAILURES_BEFORE_BACKOFF = 2
@@ -123,6 +138,12 @@ ERROR_REASONS = frozenset(
         "operational_error",
     }
 )
+
+# What one attempted merge did. Only merge_pr() produces these, and only
+# process_pr() consumes them.
+MERGE_DONE = "merge_done"
+MERGE_HEAD_CHANGED = "merge_head_changed"
+MERGE_REJECTED = "merge_rejected"
 
 # What one candidate's turn did to the polling pass around it. The queue
 # advances one candidate at a time in ascending pull-request order, so every
@@ -1163,6 +1184,174 @@ def update_branch(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> Non
         add_approval_label(ctx, number)
 
 
+def object_id_of(value: Any) -> str | None:
+    """The commit OID a `{"sha": ...}` payload names, or None if it names none.
+
+    Every path decision below is pinned to an object ID rather than to a ref,
+    so a value that is not one is a malformed response the caller must fail
+    closed on rather than a commit it can compare anything against.
+    """
+    if not isinstance(value, dict):
+        return None
+    sha = value.get("sha")
+    if not isinstance(sha, str) or not OBJECT_ID_RE.fullmatch(sha):
+        return None
+    return sha
+
+
+def default_branch_tip(ctx: RepoContext) -> str | None:
+    """The default branch's current tip object ID, or None if it cannot be read.
+
+    Deliberately the ref endpoint rather than the branch or commit ones: it
+    answers with the object ID and nothing else, so there is no larger payload
+    for an unrelated field to make unparseable.
+    """
+    try:
+        payload = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{ctx.repo_slug}/git/ref/heads/{ctx.default_branch}",
+            ],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        log(f"Could not read the {ctx.default_branch} tip: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return object_id_of(payload.get("object"))
+
+
+def compared_paths(
+    ctx: RepoContext, base: str, head: str
+) -> tuple[str, frozenset[str]] | None:
+    """The merge base of two commits and every path their comparison touches.
+
+    None whenever completeness cannot be proven -- the call failed, the
+    response was malformed, the merge base was not an object ID, or the file
+    list stood at the cap where GitHub silently truncates. A rename or a copy
+    contributes both of its endpoints, because either endpoint is a path the
+    caller has to have been told about.
+    """
+    try:
+        payload = run_json(
+            ["gh", "api", f"repos/{ctx.repo_slug}/compare/{base}...{head}"],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        log(f"Could not compare {base[:12]}...{head[:12]}: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    merge_base = object_id_of(payload.get("merge_base_commit"))
+    files = payload.get("files")
+    if merge_base is None or not isinstance(files, list):
+        return None
+    if len(files) >= COMPARE_FILE_LIMIT:
+        log(
+            f"Comparison {base[:12]}...{head[:12]} returned {len(files)} files, "
+            f"at GitHub's {COMPARE_FILE_LIMIT}-file cap; it cannot be proven complete"
+        )
+        return None
+    paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        for key in ("filename", "previous_filename"):
+            value = item.get(key)
+            if value is None and key == "previous_filename":
+                continue
+            if not isinstance(value, str) or not value:
+                return None
+            paths.add(value)
+    return merge_base, frozenset(paths)
+
+
+def describe_paths(paths: list[str], limit: int = 5) -> str:
+    if not paths:
+        return "no files"
+    shown = ", ".join(paths[:limit])
+    remaining = len(paths) - limit
+    return shown if remaining <= 0 else f"{shown} and {remaining} more"
+
+
+def coordination_only_base_advance(ctx: RepoContext, pr: dict[str, Any]) -> str | None:
+    """The default-branch tip a behind candidate may be merged against anyway.
+
+    None -- request the ordinary branch update -- unless every file the default
+    branch gained since this pull request's merge base is a configured
+    coordination path, and none of them is a file the pull request itself
+    changes. Reaching a merge grants nothing: the returned tip only says this
+    advance cannot change the candidate's build result, and every gate is still
+    evaluated exactly as it would have been.
+
+    Uncertainty is not eligibility. An empty configured set, an unreadable tip,
+    an incomplete or malformed file set, and two comparisons that disagree
+    about the merge base all take the ordinary update.
+    """
+    number = pr["number"]
+    if not COORDINATION_PATHS:
+        return None
+    head_sha = pr.get("headRefOid")
+    if not isinstance(head_sha, str) or not OBJECT_ID_RE.fullmatch(head_sha):
+        return None
+
+    tip = default_branch_tip(ctx)
+    if tip is None:
+        log(
+            f"PR #{number}: could not pin the {ctx.default_branch} tip; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    advance = compared_paths(ctx, head_sha, tip)
+    if advance is None:
+        log(
+            f"PR #{number}: could not establish what {ctx.default_branch} gained; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    merge_base, advanced_paths = advance
+    # Pinned to the merge base's own object ID rather than to the pull request,
+    # so both file sets are tied to the same immutable commits.
+    own = compared_paths(ctx, merge_base, head_sha)
+    if own is None:
+        log(
+            f"PR #{number}: could not establish its own file list; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    own_merge_base, own_paths = own
+    if own_merge_base != merge_base:
+        log(
+            f"PR #{number}: merge base is indeterminate ({merge_base[:12]} then "
+            f"{own_merge_base[:12]}); requesting the ordinary branch update"
+        )
+        return None
+
+    outside = sorted(advanced_paths - COORDINATION_PATHS)
+    if outside:
+        log(
+            f"PR #{number}: {ctx.default_branch} advanced past {merge_base[:12]} in "
+            f"{describe_paths(outside)}, outside the configured coordination paths; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    overlap = sorted(advanced_paths & own_paths)
+    if overlap:
+        log(
+            f"PR #{number}: the base advance and this pull request both change "
+            f"{describe_paths(overlap)}; requesting the ordinary branch update"
+        )
+        return None
+    log(
+        f"PR #{number}: {ctx.default_branch} advanced to {tip[:12]} in configured "
+        f"coordination paths only ({describe_paths(sorted(advanced_paths))}); "
+        "evaluating its gates without a branch update"
+    )
+    return tip
+
+
 def audit_merged_pr(
     ctx: RepoContext,
     number: int,
@@ -1235,12 +1424,24 @@ def merge_pr(
     dry_run: bool,
     gates: GateConfig,
     report: dict[str, Any] | None = None,
-) -> bool:
+    allow_rejection: bool = False,
+) -> tuple[str, str | None]:
+    """Attempt the admin merge, and say which of three things happened.
+
+    `MERGE_DONE` and `MERGE_HEAD_CHANGED` are the two outcomes this has always
+    had. `allow_rejection` adds a third for the caller that has a fallback: a
+    refusal *confirmed* against a pull request still open at the head just
+    attempted comes back as `MERGE_REJECTED` with GitHub's own detail, so that
+    caller can request the branch update it skipped instead. Every other
+    refusal still raises, because an unreadable, closed, or already-merged
+    pull request is a refusal whose effect this run could not establish, and
+    nothing may claim either a merge or a branch update on top of it.
+    """
     number = pr["number"]
     head_sha = pr["headRefOid"]
     log(f"PR #{number}: merging with admin merge commit")
     if dry_run:
-        return True
+        return MERGE_DONE, None
     proc = run(
         [
             "gh",
@@ -1268,17 +1469,22 @@ def merge_pr(
             merged=True,
         )
         audit_merged_pr(ctx, number, head_sha, gates)
-        return True
+        return MERGE_DONE, None
 
+    # A read that fails raises, which is the fail-closed answer: a refusal this
+    # run cannot characterize is not a refusal it may fall back from.
     refreshed = get_pr(ctx, number)
     if refreshed["headRefOid"] != head_sha:
         log(
             f"PR #{number}: head changed from {head_sha[:12]} to "
             f"{refreshed['headRefOid'][:12]} during merge; deferring for rereview"
         )
-        return False
+        return MERGE_HEAD_CHANGED, None
 
     detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+    if allow_rejection and refreshed.get("state") == "OPEN":
+        log(f"PR #{number}: GitHub refused the merge of {head_sha[:12]}: {detail}")
+        return MERGE_REJECTED, detail
     raise DrainError(f"Failed to merge PR #{number}: {detail}")
 
 
@@ -2932,6 +3138,40 @@ def check_gate_reason(build_state: str, review_state: str) -> str:
     return "checks_pending"
 
 
+def request_base_update(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    dry_run: bool,
+    report: dict[str, Any] | None,
+    detail: str | None = None,
+) -> bool:
+    """Bring a candidate up to date, and end the pass holding the lane.
+
+    One cycle does one thing: the branch update is this attempt's whole action,
+    and merging waits for the next one -- exactly as the queue behaves. Both
+    the ordinary behind-base path and the fallbacks from a merge past a
+    coordination-only advance end here, so a candidate that did not merge is
+    always left with an update in flight rather than stranded.
+    """
+    number = pr["number"]
+    update_branch(ctx, pr, dry_run=dry_run)
+    if not dry_run:
+        refreshed = get_pr(ctx, number)
+        if has_label(refreshed, APPROVE_LABEL):
+            remember_approved_head(state, number, refreshed["headRefOid"])
+    message = (
+        f"PR #{number} was behind {ctx.default_branch}; its branch update "
+        + ("would be requested" if dry_run else "was requested")
+        + ". Run again once the update settles."
+    )
+    if detail:
+        message = f"{message} {detail}"
+    set_outcome(report, "behind_base", message)
+    return True
+
+
 def process_pr(
     ctx: RepoContext,
     number: int,
@@ -2994,23 +3234,17 @@ def process_pr(
         )
         return False
 
+    # The tip this candidate may be merged against despite being behind it, and
+    # None for every candidate that is not behind or whose advance is not
+    # merge-past-able. Carried to the merge below, which refuses to land
+    # against any other tip.
+    approved_base_tip: str | None = None
     if merge_state == "BEHIND":
-        update_branch(ctx, pr, dry_run=dry_run)
-        if not dry_run:
-            refreshed = get_pr(ctx, number)
-            if has_label(refreshed, APPROVE_LABEL):
-                remember_approved_head(state, number, refreshed["headRefOid"])
-        # One cycle does one thing: the branch update is this attempt's whole
-        # action, and merging waits for the next one -- exactly as the queue
-        # behaves.
-        set_outcome(
-            report,
-            "behind_base",
-            f"PR #{number} was behind {ctx.default_branch}; its branch update "
-            + ("would be requested" if dry_run else "was requested")
-            + ". Run again once the update settles.",
-        )
-        return True
+        approved_base_tip = coordination_only_base_advance(ctx, pr)
+        if approved_base_tip is None:
+            return request_base_update(
+                ctx, pr, state=state, dry_run=dry_run, report=report
+            )
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
@@ -3120,8 +3354,41 @@ def process_pr(
         )
         return True
 
-    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
-    if not merged:
+    if approved_base_tip is not None:
+        # The tip whose path delta was inspected is the only one this merge may
+        # land against: an advance that arrived since is one nothing has looked
+        # at. `--match-head-commit` below pins the pull request's own head, and
+        # GitHub's merge accepts no expected base, so this read is what pins the
+        # other side -- narrowing the same read-to-merge gap the ordinary path
+        # documents above rather than closing it, which is why a refusal below
+        # falls back to the branch update too.
+        current_tip = default_branch_tip(ctx)
+        if current_tip != approved_base_tip:
+            log(
+                f"PR #{number}: {ctx.default_branch} moved from "
+                f"{approved_base_tip[:12]} before the merge; updating instead"
+            )
+            return request_base_update(
+                ctx,
+                pr,
+                state=state,
+                dry_run=dry_run,
+                report=report,
+                detail=(
+                    f"Its coordination-only base advance to "
+                    f"{approved_base_tip[:12]} was superseded before the merge."
+                ),
+            )
+
+    outcome, merge_detail = merge_pr(
+        ctx,
+        pr,
+        dry_run=dry_run,
+        gates=gates,
+        report=report,
+        allow_rejection=approved_base_tip is not None,
+    )
+    if outcome == MERGE_HEAD_CHANGED:
         set_outcome(
             report,
             "approved_head_changed",
@@ -3129,6 +3396,21 @@ def process_pr(
             f"{pr['headRefOid'][:12]} during the merge; it needs a fresh review.",
         )
         return True
+    if outcome == MERGE_REJECTED:
+        # Nothing landed, so the candidate takes the branch update it was
+        # spared: it is reported as behind rather than as merged, and it keeps
+        # the lane while that update settles.
+        return request_base_update(
+            ctx,
+            pr,
+            state=state,
+            dry_run=dry_run,
+            report=report,
+            detail=(
+                "Its merge past a coordination-only base advance was refused "
+                f"({merge_detail})."
+            ),
+        )
 
     if dry_run:
         # Records nothing and mutates nothing, exactly as before: the pass only
@@ -3880,7 +4162,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, LOG_TO_STDERR
+    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, COORDINATION_PATHS, LOG_TO_STDERR
     number = args.pr
     single = number is not None
     # A single-PR run owns stdout for its one JSON result.
@@ -3919,6 +4201,7 @@ def main() -> None:
             resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
             APPROVE_LABEL = resolved_config.workflow.approval_label
             CHANGES_LABEL = resolved_config.workflow.changes_requested_label
+            COORDINATION_PATHS = frozenset(resolved_config.workflow.coordination_paths)
             gates = load_gate_config(ctx)
             log(
                 f"Watching {ctx.repo_slug} at {ctx.path} "
@@ -3928,6 +4211,10 @@ def main() -> None:
                 "Required checks: "
                 f"{gates.required_ci_check or 'ci disabled'}, "
                 f"{gates.required_review_check or 'review disabled'}"
+            )
+            log(
+                "Coordination paths: "
+                + (", ".join(sorted(COORDINATION_PATHS)) or "none configured")
             )
             log(f"Logging to {active_log_path() or 'stderr only (dry run)'}")
             if args.dry_run:

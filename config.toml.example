@@ -28,6 +28,15 @@ blocking_severity = "red"      # "red" or "amber"
 # "input"] restores the tints Kanban used to hardcode.
 problem_style_labels = []
 ui_style_labels = []
+# Paths whose content coordinates the pipeline rather than building it. The PR
+# drainer may merge a candidate whose only distance from the default branch is
+# a change to these, instead of first rebuilding it on a new base that cannot
+# change its result. Each entry is one exact, case-sensitive, repository-
+# relative path: no globs, no directory prefixes, no extension matching, and a
+# rename counts both endpoints, so configure every path you mean. Empty by
+# default, which requests a branch update for every advance as before. Never
+# list a document a test parses -- a change to one really can fail CI.
+coordination_paths = []
 
 [limits]
 max_open_issues = 250
@@ -77,6 +86,7 @@ claude_seconds = 45
 # blocking_severity = "red"
 # problem_style_labels = []
 # ui_style_labels = []
+# coordination_paths = []
 
 [repositories."owner/name".limits]
 # max_open_issues = 250

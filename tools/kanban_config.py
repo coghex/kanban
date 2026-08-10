@@ -91,6 +91,11 @@ class WorkflowConfig:
     # but nothing here reads their styling meaning.
     problem_style_labels: frozenset[str] = frozenset()
     ui_style_labels: frozenset[str] = frozenset()
+    # Exact, case-sensitive, repository-relative paths whose content is
+    # coordination rather than code. drain_prs.py may merge a candidate whose
+    # only distance from the default branch is a change to these; nothing else
+    # reads them. Empty by default, which is today's behavior everywhere.
+    coordination_paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -132,6 +137,7 @@ class WorkflowOverride:
     blocking_severity: str | None = None
     problem_style_labels: frozenset[str] | None = None
     ui_style_labels: frozenset[str] | None = None
+    coordination_paths: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -437,6 +443,7 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
     blocking_severity = _pop_enum(table, "blocking_severity", path, BLOCKING_SEVERITIES)
     problem_style_labels = _pop_str_list(table, "problem_style_labels", path)
     ui_style_labels = _pop_str_list(table, "ui_style_labels", path)
+    coordination_paths = _pop_str_list(table, "coordination_paths", path)
     _collect_unknown(table, path, warnings)
     return WorkflowOverride(
         approval_label=approval_label,
@@ -452,6 +459,9 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
             frozenset(problem_style_labels) if problem_style_labels is not None else None
         ),
         ui_style_labels=frozenset(ui_style_labels) if ui_style_labels is not None else None,
+        coordination_paths=(
+            frozenset(coordination_paths) if coordination_paths is not None else None
+        ),
     )
 
 

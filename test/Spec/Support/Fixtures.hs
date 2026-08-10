@@ -349,6 +349,7 @@ fullFixtureToml =
     <> "blocking_severity = \"amber\"\n"
     <> "problem_style_labels = [\"defect\"]\n"
     <> "ui_style_labels = [\"interface\", \"input\"]\n"
+    <> "coordination_paths = [\"docs/status.md\", \"ROADMAP.md\"]\n"
     <> "\n"
     <> "[limits]\n"
     <> "max_open_issues = 500\n"
