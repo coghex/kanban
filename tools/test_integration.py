@@ -478,8 +478,31 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
 
     # -- scripting -------------------------------------------------------
 
+    def _script_protection(self, *, force_pushes=False, deletions=False, exit_code=0):
+        """The default branch's protection, which is what decides whether its
+        reference can be pinned to one commit at all."""
+        self.fake.script(
+            "gh",
+            ["api", "repos/acme/widgets/branches/master/protection"],
+            stdout=json.dumps(
+                {
+                    "allow_force_pushes": {"enabled": force_pushes},
+                    "allow_deletions": {"enabled": deletions},
+                    "required_status_checks": {"strict": True},
+                }
+            ),
+            stderr="Branch not protected" if exit_code else "",
+            exit_code=exit_code,
+        )
+
     def _script_tip(self, *tips, exit_code=0):
-        """One `gh api .../git/ref/heads/master` response per read, in order."""
+        """One `gh api .../git/ref/heads/master` response per read, in order.
+
+        Scripts the append-only protection the exception requires alongside
+        them, since every scenario that gets as far as reading a tip has to get
+        past that first.
+        """
+        self._script_protection()
         for tip in tips:
             self.fake.script(
                 "gh",
@@ -822,12 +845,64 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
 
     def test_an_unreadable_default_tip_requests_the_update(self):
         self._script_pr_view(self._behind(), self._settled())
+        self._script_protection()
         self.fake.script(
             "gh",
             ["api", "repos/acme/widgets/git/ref/heads/master"],
             stderr="Not Found",
             exit_code=1,
         )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+        self.assertEqual(self._comparison_calls(), [])
+
+    def test_a_default_branch_that_can_be_rewritten_requests_the_update(self):
+        # `force=false` refuses an update that does not descend from where the
+        # reference points; it cannot say which commit that must be. Only an
+        # append-only reference makes the two the same question, so a branch
+        # that can be force-pushed backwards is never merged past.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_protection(force_pushes=True)
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+        # Nothing was even inspected: an inspection that cannot be binding is
+        # not worth the calls.
+        self.assertEqual(self._comparison_calls(), [])
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if call["args"][:2]
+                == ["api", "repos/acme/widgets/git/ref/heads/master"]
+            ],
+            [],
+        )
+
+    def test_a_default_branch_that_can_be_deleted_requests_the_update(self):
+        # Deleting and recreating a reference is a rewrite by another name.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_protection(deletions=True)
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+        self.assertEqual(self._comparison_calls(), [])
+
+    def test_an_unprotected_default_branch_requests_the_update(self):
+        # GitHub answers 404 for a branch with no protection at all, which is
+        # the most rewritable branch there is.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_protection(exit_code=1)
         self._script_update_branch()
 
         result, state, report = self._run()
@@ -1132,6 +1207,38 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(len(self._update_branch_calls()), 0)
         # Staged and cleaned up, but never swapped in.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_retargeted_before_the_swap_lands_nothing(self):
+        # Writing the reference directly means the pull-request merge endpoint
+        # is not there to refuse this: a pull request retargeted away from the
+        # default branch must not be fast-forwarded into it anyway.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(baseRefName="release-1.x")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("release-1.x", str(raised.exception))
+        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_made_a_draft_before_the_swap_lands_nothing(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(isDraft=True)
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("draft", str(raised.exception))
+        self.assertEqual(len(self._swap_calls()), 0)
 
     def test_a_pull_request_github_closed_without_merging_is_a_fatal_incident(self):
         # The swap landed the commit, but GitHub recorded the pull request as

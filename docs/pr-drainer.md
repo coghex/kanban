@@ -472,6 +472,11 @@ The drainer merges past an advance only when all of this holds:
 
 - The candidate's `mergeStateStatus` is `BEHIND`.
 - `coordination_paths` is non-empty.
+- The default branch's protection forbids both force pushes and deletion, so
+  its reference can only ever advance. That is what lets the merge below be
+  held to one commit; a branch that can be rewritten backwards, that is
+  unprotected, or whose protection cannot be read is never merged past, and
+  nothing about it is even inspected.
 - Every file the default branch gained between this pull request's merge base
   and the current default-branch tip is one of those exact paths.
 - None of those files is a file the pull request itself changes.
@@ -520,6 +525,12 @@ the exceptional merge does not use it. It lands in three steps instead:
    that advanced first rejects the update outright instead of absorbing an
    advance nothing inspected.
 
+   That is a descendant check, not by itself an exact one — which is why the
+   append-only condition above is required. A reference that can only advance
+   is, by the swap, either the inspected tip or a descendant of it, and of
+   those only the tip itself is an ancestor of a merge built on the tip. The
+   two checks together pin the swap to exactly one commit.
+
 The staging reference is deleted as soon as the attempt ends, and never before
 the swap — until then it is the only thing keeping the merge commit reachable.
 
@@ -535,9 +546,12 @@ the branch update the drainer has always performed.
 
 The commits that reach the default branch are the reviewed ones either way: the
 head is named as an explicit object rather than as a branch, so a push that
-lands mid-merge cannot change what merges. The pull request is re-read
-immediately before the swap and must still be open at that head, so nothing
-lands for one that was closed while its merge was being built. Afterwards, only
+lands mid-merge cannot change what merges. Writing the reference directly also
+means the pull-request merge endpoint is not there to enforce its own
+preconditions, so the pull request is re-read immediately before the swap and
+must still be open, not a draft, and still targeting the branch about to be
+advanced — one closed, converted, or retargeted while its merge was being built
+lands nothing. Afterwards, only
 GitHub recording the pull request as `MERGED` ends the attempt: a pull request
 left open, or closed without being merged, is a fatal `PostMergeAuditError`
 rather than something reported as a merge or handed to a merge's cleanup.

@@ -1228,6 +1228,49 @@ def default_branch_tip(ctx: RepoContext) -> str | None:
     return object_id_of(payload.get("object"))
 
 
+def default_branch_is_append_only(ctx: RepoContext) -> bool:
+    """Whether the default branch's protection lets its reference only advance.
+
+    This is what makes the unforced reference update an *exact* guard rather
+    than merely a descendant check. `force=false` refuses an update that does
+    not descend from wherever the reference currently points; it cannot state
+    which commit that has to be. A reference that can only ever advance closes
+    the difference: the default branch was the inspected tip when it was read,
+    so by the swap it is that commit or a descendant of it -- and of those,
+    only the commit itself is an ancestor of a merge built on it.
+
+    A branch that is unprotected, that permits force pushes or deletion, or
+    whose protection cannot be read at all is not append-only as far as this
+    run can establish, so the exception is simply not taken for it and the
+    ordinary branch update happens instead.
+    """
+    try:
+        protection = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{ctx.repo_slug}/branches/{ctx.default_branch}/protection",
+            ],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        log(f"Could not read {ctx.default_branch} branch protection: {exc}")
+        return False
+    if not isinstance(protection, dict):
+        return False
+    for setting in ("allow_force_pushes", "allow_deletions"):
+        value = protection.get(setting)
+        # Absent, malformed, or enabled all mean the same thing here: this run
+        # cannot say the reference is append-only.
+        if not isinstance(value, dict) or value.get("enabled") is not False:
+            log(
+                f"{ctx.default_branch} does not forbid {setting}, so its "
+                "reference cannot be pinned to one commit"
+            )
+            return False
+    return True
+
+
 def compared_paths(
     ctx: RepoContext, base: str, head: str
 ) -> tuple[str, frozenset[str]] | None:
@@ -1316,6 +1359,16 @@ def coordination_only_base_advance(
         return None
     head_sha = pr.get("headRefOid")
     if not isinstance(head_sha, str) or not OBJECT_ID_RE.fullmatch(head_sha):
+        return None
+    # Asked before anything is inspected, because it decides whether an
+    # inspection can be binding at all: the merge below is authorized for one
+    # default-branch commit, and only an append-only reference can be held to
+    # one.
+    if not default_branch_is_append_only(ctx):
+        log(
+            f"PR #{number}: {ctx.default_branch} cannot be pinned to the commit "
+            "an inspection would authorize; requesting the ordinary branch update"
+        )
         return None
 
     tip = default_branch_tip(ctx)
@@ -1603,12 +1656,28 @@ def merge_past_base_advance(
         # the pull request it belongs to is finished by it. A pull request that
         # is no longer open is not a pull request anything may land for, and a
         # read that fails raises, so both leave the default branch alone.
+        # This path writes to the default branch's reference directly, so
+        # every eligibility fact the pull-request merge endpoint would have
+        # enforced for itself has to be re-established here instead: open, not
+        # a draft, and still targeting the branch about to be advanced. A pull
+        # request retargeted or converted while its merge was being built is
+        # one nothing may land into the default branch.
         current = get_pr(ctx, number)
+        blockers = []
         if current.get("state") != "OPEN":
+            blockers.append(f"it was {current.get('state')} rather than OPEN")
+        if current.get("isDraft"):
+            blockers.append("it had become a draft")
+        if current.get("baseRefName") != ctx.default_branch:
+            blockers.append(
+                f"it targeted {current.get('baseRefName')} rather than "
+                f"{ctx.default_branch}"
+            )
+        if blockers:
             raise DrainError(
-                f"PR #{number}: it was {current.get('state')} rather than OPEN "
-                f"before {approval.head[:12]} could be merged onto "
-                f"{approval.tip[:12]}; nothing was landed for it"
+                f"PR #{number}: {'; '.join(blockers)} before {approval.head[:12]} "
+                f"could be merged onto {approval.tip[:12]}; nothing was landed "
+                "for it"
             )
         if current["headRefOid"] != approval.head:
             log(
