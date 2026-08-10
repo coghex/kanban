@@ -472,11 +472,6 @@ The drainer merges past an advance only when all of this holds:
 
 - The candidate's `mergeStateStatus` is `BEHIND`.
 - `coordination_paths` is non-empty.
-- The default branch's protection forbids both force pushes and deletion, so
-  its reference can only ever advance. That is what lets the merge below be
-  held to one commit; a branch that can be rewritten backwards, that is
-  unprotected, or whose protection cannot be read is never merged past, and
-  nothing about it is even inspected.
 - Every file the default branch gained between this pull request's merge base
   and the current default-branch tip is one of those exact paths.
 - None of those files is a file the pull request itself changes.
@@ -518,31 +513,34 @@ the exceptional merge does not use it. It lands in three steps instead:
    head, off to one side where the default branch cannot see it. The drainer
    proceeds only once the commit's two parents are confirmed to be exactly the
    inspected tip and the inspected head.
-3. The default branch is fast-forwarded onto that commit with an **unforced**
-   reference update. An unforced update is a compare-and-swap: it succeeds only
-   if the new commit descends from where the reference currently points. The
-   merge commit descends from exactly the inspected tip, so a default branch
-   that advanced first rejects the update outright instead of absorbing an
-   advance nothing inspected.
+3. The commit is fetched and pushed to the default branch under a **lease**:
+   `git push --force-with-lease=refs/heads/<default>:<inspected tip>`. The Git
+   server performs the update only if that reference is still exactly the
+   inspected tip, so this is a compare-and-swap on one named commit.
 
-   That is a descendant check, not by itself an exact one — which is why the
-   append-only condition above is required. A reference that can only advance
-   is, by the swap, either the inspected tip or a descendant of it, and of
-   those only the tip itself is an ancestor of a merge built on the tip. The
-   two checks together pin the swap to exactly one commit.
+   A lease rather than a fast-forward test, deliberately. `force=false` on the
+   reference-update API asks only that the new commit descend from wherever the
+   reference happens to point — which a default branch *rewound* to an ancestor
+   of the inspected tip also satisfies, so the swap would restore commits that
+   rewind removed. The lease names the commit instead, and it is checked by the
+   Git server, so it holds however the reference came to move and whoever is
+   entitled to bypass the branch's protection. The update it admits is still an
+   ordinary fast-forward — the merge commit's first parent is the inspected tip
+   — so nothing is rewritten and no history is dropped.
 
 The staging reference is deleted as soon as the attempt ends, and never before
 the swap — until then it is the only thing keeping the merge commit reachable.
 
 Every refusal along the way — a conflict, a merge commit joining the wrong
-commits, a reference that could not be created, a default branch that advanced
-first — requests the ordinary branch update, but only once the pull request is
+commits, a reference that could not be created, a default branch that moved at
+all, and a push a repository declines for any other reason — requests the
+ordinary branch update, but only once the pull request is
 re-read and confirmed still open at the head the refusal was for. A head that
 moved during the refusal needs a fresh review instead, and a pull request that
 is no longer open, or cannot be read, ends the pass without claiming either a
-merge or a branch update. A repository whose branch protection refuses the
-reference update therefore never takes this path at all: it degrades to exactly
-the branch update the drainer has always performed.
+merge or a branch update. A repository whose branch protection declines the
+push therefore never takes this path at all: it degrades to exactly the branch
+update the drainer has always performed.
 
 The commits that reach the default branch are the reviewed ones either way: the
 head is named as an explicit object rather than as a branch, so a push that

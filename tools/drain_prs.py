@@ -1228,49 +1228,6 @@ def default_branch_tip(ctx: RepoContext) -> str | None:
     return object_id_of(payload.get("object"))
 
 
-def default_branch_is_append_only(ctx: RepoContext) -> bool:
-    """Whether the default branch's protection lets its reference only advance.
-
-    This is what makes the unforced reference update an *exact* guard rather
-    than merely a descendant check. `force=false` refuses an update that does
-    not descend from wherever the reference currently points; it cannot state
-    which commit that has to be. A reference that can only ever advance closes
-    the difference: the default branch was the inspected tip when it was read,
-    so by the swap it is that commit or a descendant of it -- and of those,
-    only the commit itself is an ancestor of a merge built on it.
-
-    A branch that is unprotected, that permits force pushes or deletion, or
-    whose protection cannot be read at all is not append-only as far as this
-    run can establish, so the exception is simply not taken for it and the
-    ordinary branch update happens instead.
-    """
-    try:
-        protection = run_json(
-            [
-                "gh",
-                "api",
-                f"repos/{ctx.repo_slug}/branches/{ctx.default_branch}/protection",
-            ],
-            cwd=ctx.path,
-        )
-    except DrainError as exc:
-        log(f"Could not read {ctx.default_branch} branch protection: {exc}")
-        return False
-    if not isinstance(protection, dict):
-        return False
-    for setting in ("allow_force_pushes", "allow_deletions"):
-        value = protection.get(setting)
-        # Absent, malformed, or enabled all mean the same thing here: this run
-        # cannot say the reference is append-only.
-        if not isinstance(value, dict) or value.get("enabled") is not False:
-            log(
-                f"{ctx.default_branch} does not forbid {setting}, so its "
-                "reference cannot be pinned to one commit"
-            )
-            return False
-    return True
-
-
 def compared_paths(
     ctx: RepoContext, base: str, head: str
 ) -> tuple[str, frozenset[str]] | None:
@@ -1360,17 +1317,6 @@ def coordination_only_base_advance(
     head_sha = pr.get("headRefOid")
     if not isinstance(head_sha, str) or not OBJECT_ID_RE.fullmatch(head_sha):
         return None
-    # Asked before anything is inspected, because it decides whether an
-    # inspection can be binding at all: the merge below is authorized for one
-    # default-branch commit, and only an append-only reference can be held to
-    # one.
-    if not default_branch_is_append_only(ctx):
-        log(
-            f"PR #{number}: {ctx.default_branch} cannot be pinned to the commit "
-            "an inspection would authorize; requesting the ordinary branch update"
-        )
-        return None
-
     tip = default_branch_tip(ctx)
     if tip is None:
         log(
@@ -1528,35 +1474,59 @@ def build_base_advance_merge(
     return commit
 
 
-def swap_default_branch_to(ctx: RepoContext, merge_commit: str) -> bool:
-    """Advance the default branch to a commit, or refuse -- atomically.
+def swap_default_branch_to(
+    ctx: RepoContext,
+    ref: str,
+    merge_commit: str,
+    approval: BaseAdvanceApproval,
+) -> bool:
+    """Advance the default branch to a commit, or refuse -- atomically, and on
+    the exact commit the merge was authorized against.
 
-    This is the guard GitHub's pull-request merge cannot express. A reference
-    update that is not forced is a compare-and-swap: it succeeds only if the
-    new commit descends from where the reference currently points. The merge
-    commit descends from exactly the inspected tip, so a default branch that
-    advanced in the meantime rejects this outright rather than absorbing an
-    advance nothing inspected.
+    This is the guard GitHub's pull-request merge cannot express. It is a
+    lease, not a fast-forward test: `--force-with-lease=<ref>:<sha>` has the
+    server perform the update only if that reference is still exactly `<sha>`.
+    The reference-update API's `force=false` cannot say this -- it only asks
+    that the new commit descend from wherever the reference happens to point,
+    which a default branch rewound to an ancestor of the inspected tip also
+    satisfies. The lease is checked by the Git server itself, so it holds
+    however the reference came to move and whoever is entitled to bypass the
+    branch's protection.
+
+    The update the lease admits is still an ordinary fast-forward: the merge
+    commit's first parent is the inspected tip, so nothing is rewritten and no
+    history is dropped.
     """
-    proc = run(
+    # The merge commit exists only on the remote, on the staging reference
+    # that is currently the one thing keeping it reachable. Fetching it is what
+    # lets the push below name it.
+    fetched = run(
+        ["git", "fetch", "--quiet", ctx.remote_name, f"refs/heads/{ref}"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if fetched.returncode != 0:
+        detail = (fetched.stderr or fetched.stdout or "").strip()
+        log(f"Could not fetch the staged merge commit {merge_commit[:12]}: {detail}")
+        return False
+    pushed = run(
         [
-            "gh",
-            "api",
-            "-X",
-            "PATCH",
-            f"repos/{ctx.repo_slug}/git/refs/heads/{ctx.default_branch}",
-            "-f",
-            f"sha={merge_commit}",
-            "-F",
-            "force=false",
+            "git",
+            "push",
+            f"--force-with-lease=refs/heads/{ctx.default_branch}:{approval.tip}",
+            ctx.remote_name,
+            f"{merge_commit}:refs/heads/{ctx.default_branch}",
         ],
         cwd=ctx.path,
         check=False,
     )
-    if proc.returncode == 0:
+    if pushed.returncode == 0:
         return True
-    detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
-    log(f"{ctx.default_branch} would not fast-forward to {merge_commit[:12]}: {detail}")
+    detail = (pushed.stderr or pushed.stdout or "").strip()
+    log(
+        f"{ctx.default_branch} would not advance from {approval.tip[:12]} to "
+        f"{merge_commit[:12]}: {detail}"
+    )
     return False
 
 
@@ -1685,10 +1655,10 @@ def merge_past_base_advance(
                 f"{current['headRefOid'][:12]} before the swap; deferring for rereview"
             )
             return MERGE_HEAD_CHANGED, None
-        if not swap_default_branch_to(ctx, merge_commit):
+        if not swap_default_branch_to(ctx, ref, merge_commit, approval):
             return (
                 MERGE_REJECTED,
-                f"{ctx.default_branch} would not fast-forward from the inspected "
+                f"{ctx.default_branch} was no longer the inspected "
                 f"{approval.tip[:12]}, so the merge was refused rather than landed "
                 "on a base nothing inspected.",
             )

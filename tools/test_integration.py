@@ -460,7 +460,6 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
     alone.
     """
 
-    TIP = "a" * 40
     MERGE_BASE = "b" * 40
     MOVED_TIP = "e" * 40
     COORDINATION_PATH = "docs/status.md"
@@ -468,6 +467,61 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
     def setUp(self):
         super().setUp()
         self._configure({self.COORDINATION_PATH})
+        # The swap is a real `git fetch` and a real
+        # `git push --force-with-lease` against the fixture's own remote, so
+        # every commit it names has to be a real one. Rebuild the remote's
+        # history as the scenario actually describes it: a default branch that
+        # advanced by one coordination-only push, and a merge of this pull
+        # request onto exactly that commit, staged but not landed.
+        self.ANCESTOR = run_git(
+            ["rev-parse", f"{self.merge_commit_sha}^1"], cwd=self.upstream_sim
+        )
+        run_git(["checkout", "-q", "-B", "staging", self.ANCESTOR], cwd=self.upstream_sim)
+        (self.upstream_sim / "docs").mkdir(exist_ok=True)
+        (self.upstream_sim / "docs" / "status.md").write_text(
+            "coordination\n", encoding="utf-8"
+        )
+        run_git(["add", self.COORDINATION_PATH], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "a coordination push"], cwd=self.upstream_sim)
+        self.TIP = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(
+            [
+                "merge",
+                "-q",
+                "--no-ff",
+                "origin/issue-99-demo",
+                "-m",
+                "Merge pull request #42",
+            ],
+            cwd=self.upstream_sim,
+        )
+        self.MERGE_COMMIT = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(
+            ["push", "-q", "-f", "origin", f"{self.TIP}:refs/heads/master"],
+            cwd=self.upstream_sim,
+        )
+        run_git(
+            [
+                "push",
+                "-q",
+                "-f",
+                "origin",
+                f"{self.MERGE_COMMIT}:refs/heads/{self.STAGING_REF}",
+            ],
+            cwd=self.upstream_sim,
+        )
+
+    def _remote_default_branch(self):
+        return run_git(["rev-parse", "master"], cwd=self.bare)
+
+    def _advance_remote_default_branch(self):
+        """A push to the remote's default branch that beats the drainer's."""
+        run_git(["checkout", "-q", "-B", "advance", self.TIP], cwd=self.upstream_sim)
+        (self.upstream_sim / "unrelated.txt").write_text("later\n", encoding="utf-8")
+        run_git(["add", "unrelated.txt"], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "a later push"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "-f", "origin", "advance:master"], cwd=self.upstream_sim)
+        return run_git(["rev-parse", "master"], cwd=self.bare)
 
     def _configure(self, paths):
         patch = mock.patch.object(
@@ -478,31 +532,8 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
 
     # -- scripting -------------------------------------------------------
 
-    def _script_protection(self, *, force_pushes=False, deletions=False, exit_code=0):
-        """The default branch's protection, which is what decides whether its
-        reference can be pinned to one commit at all."""
-        self.fake.script(
-            "gh",
-            ["api", "repos/acme/widgets/branches/master/protection"],
-            stdout=json.dumps(
-                {
-                    "allow_force_pushes": {"enabled": force_pushes},
-                    "allow_deletions": {"enabled": deletions},
-                    "required_status_checks": {"strict": True},
-                }
-            ),
-            stderr="Branch not protected" if exit_code else "",
-            exit_code=exit_code,
-        )
-
     def _script_tip(self, *tips, exit_code=0):
-        """One `gh api .../git/ref/heads/master` response per read, in order.
-
-        Scripts the append-only protection the exception requires alongside
-        them, since every scenario that gets as far as reading a tip has to get
-        past that first.
-        """
-        self._script_protection()
+        """One `gh api .../git/ref/heads/master` response per read, in order."""
         for tip in tips:
             self.fake.script(
                 "gh",
@@ -550,7 +581,6 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             stdout="",
         )
 
-    MERGE_COMMIT = "9" * 40
     STAGING_REF = "kanban-drainer/merge-42"
 
     def _script_staging_ref(self, *, created=True):
@@ -588,32 +618,19 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             exit_code=exit_code,
         )
 
-    def _script_swap(self, *, accepted=True):
-        """The unforced reference update: the atomic base guard itself."""
-        self.fake.script(
-            "gh",
-            ["api", "-X", "PATCH", "repos/acme/widgets/git/refs/heads/master"],
-            stdout=json.dumps({"object": {"sha": self.MERGE_COMMIT}}) if accepted else "",
-            stderr="" if accepted else "Update is not a fast forward",
-            exit_code=0 if accepted else 1,
-        )
-
-    def _script_merge_of_this_pr(self, *, swap=True, parents=None, build_exit=0):
+    def _script_merge_of_this_pr(self, *, parents=None, build_exit=0):
+        # There is nothing to script for the swap itself: it is a real
+        # `git fetch` and a real leased `git push` against the fixture's remote.
         self._script_staging_ref()
         self._script_build_merge(parents=parents, exit_code=build_exit)
-        self._script_swap(accepted=swap)
         self.fake.script(
             "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
         )
         self.fake.script("gh", ["issue", "close", "99"], stdout="")
 
-    def _swap_calls(self):
-        return [
-            call
-            for call in self.fake.calls("gh")
-            if call["args"][:4]
-            == ["api", "-X", "PATCH", "repos/acme/widgets/git/refs/heads/master"]
-        ]
+    def _swapped(self):
+        """Whether the drainer's own merge commit reached the remote."""
+        return self._remote_default_branch() == self.MERGE_COMMIT
 
     def _staging_ref_deletions(self):
         return [
@@ -703,7 +720,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
 
         self.assertTrue(result)
         self.assertEqual(len(self._update_branch_calls()), 0)
-        self.assertEqual(len(self._swap_calls()), 1)
+        self.assertTrue(self._swapped())
         self.assertEqual(report["reason"], "merged")
         self.assertTrue(report["merged"])
         # The linked issue was closed and the worktree cleaned up, exactly as
@@ -840,69 +857,17 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 1)
+        self.assertTrue(self._swapped())
         self.assertEqual(report["reason"], "merged")
 
     def test_an_unreadable_default_tip_requests_the_update(self):
         self._script_pr_view(self._behind(), self._settled())
-        self._script_protection()
         self.fake.script(
             "gh",
             ["api", "repos/acme/widgets/git/ref/heads/master"],
             stderr="Not Found",
             exit_code=1,
         )
-        self._script_update_branch()
-
-        result, state, report = self._run()
-
-        self.assertTrue(result)
-        self._assert_requested_the_update(report, state)
-        self.assertEqual(self._comparison_calls(), [])
-
-    def test_a_default_branch_that_can_be_rewritten_requests_the_update(self):
-        # `force=false` refuses an update that does not descend from where the
-        # reference points; it cannot say which commit that must be. Only an
-        # append-only reference makes the two the same question, so a branch
-        # that can be force-pushed backwards is never merged past.
-        self._script_pr_view(self._behind(), self._settled())
-        self._script_protection(force_pushes=True)
-        self._script_update_branch()
-
-        result, state, report = self._run()
-
-        self.assertTrue(result)
-        self._assert_requested_the_update(report, state)
-        # Nothing was even inspected: an inspection that cannot be binding is
-        # not worth the calls.
-        self.assertEqual(self._comparison_calls(), [])
-        self.assertEqual(
-            [
-                call
-                for call in self.fake.calls("gh")
-                if call["args"][:2]
-                == ["api", "repos/acme/widgets/git/ref/heads/master"]
-            ],
-            [],
-        )
-
-    def test_a_default_branch_that_can_be_deleted_requests_the_update(self):
-        # Deleting and recreating a reference is a rewrite by another name.
-        self._script_pr_view(self._behind(), self._settled())
-        self._script_protection(deletions=True)
-        self._script_update_branch()
-
-        result, state, report = self._run()
-
-        self.assertTrue(result)
-        self._assert_requested_the_update(report, state)
-        self.assertEqual(self._comparison_calls(), [])
-
-    def test_an_unprotected_default_branch_requests_the_update(self):
-        # GitHub answers 404 for a branch with no protection at all, which is
-        # the most rewritable branch there is.
-        self._script_pr_view(self._behind(), self._settled())
-        self._script_protection(exit_code=1)
         self._script_update_branch()
 
         result, state, report = self._run()
@@ -1081,23 +1046,15 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertIn(f"base={self.STAGING_REF}", built[0]["args"])
         self.assertIn(f"head={self.head_sha}", built[0]["args"])
 
-        swaps = self._swap_calls()
-        self.assertEqual(len(swaps), 1)
-        self.assertIn(f"sha={self.MERGE_COMMIT}", swaps[0]["args"])
-        # Unforced is the whole guarantee: a forced update would overwrite an
-        # advance instead of refusing to absorb it.
-        self.assertIn("force=false", swaps[0]["args"])
-
-        # The staging reference is cleaned up, and never before the swap that
-        # is the only thing keeping the merge commit reachable.
+        # The swap really happened: the remote's default branch is now the
+        # drainer's own merge commit, reached from the inspected tip.
+        self.assertTrue(self._swapped())
         self.assertEqual(len(self._staging_ref_deletions()), 2)
-        order = [call["args"] for call in self.fake.calls("gh")]
-        self.assertLess(order.index(swaps[0]["args"]), len(order) - 1)
 
     def test_a_default_branch_that_advanced_first_refuses_the_swap(self):
         # The case the whole guard exists for: the tip read said one thing and
-        # the default branch moved anyway. The swap refuses rather than
-        # absorbing an advance nothing inspected.
+        # the default branch moved before the swap. The lease refuses rather
+        # than absorbing an advance nothing inspected.
         self._script_pr_view(
             self._behind(),
             self._behind(),
@@ -1107,16 +1064,50 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         )
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
-        self._script_merge_of_this_pr(swap=False)
+        self._script_merge_of_this_pr()
         self._script_update_branch()
+        advanced = self._advance_remote_default_branch()
 
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 1)
-        self._assert_requested_the_update(report, state, fragment="would not fast-forward")
+        self.assertFalse(self._swapped())
+        # Untouched: the advance that beat the drainer is still what the
+        # default branch points at.
+        self.assertEqual(self._remote_default_branch(), advanced)
+        self._assert_requested_the_update(
+            report, state, fragment="no longer the inspected"
+        )
         # Refused or not, the staging reference does not survive the attempt.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_default_branch_rewound_behind_the_inspected_tip_refuses_the_swap(self):
+        # A lease, not a fast-forward test. The staged merge descends from the
+        # inspected tip, so it would fast-forward a default branch rewound to
+        # an ancestor of it -- restoring commits that rewind removed. The lease
+        # names the exact commit instead, so it refuses.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._settled(),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        self._script_update_branch()
+        rewound = self.ANCESTOR
+        run_git(["update-ref", "refs/heads/master", rewound], cwd=self.bare)
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(self._remote_default_branch(), rewound)
+        self._assert_requested_the_update(
+            report, state, fragment="no longer the inspected"
+        )
 
     def test_a_merge_commit_joining_other_commits_is_never_swapped_in(self):
         # The commit that lands has to be the join of the two commits the
@@ -1134,7 +1125,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self._assert_requested_the_update(report, state)
 
     def test_a_merge_commit_github_will_not_build_requests_the_update(self):
@@ -1149,7 +1140,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self._assert_requested_the_update(report, state)
 
     def test_a_staging_reference_that_cannot_be_created_requests_the_update(self):
@@ -1164,7 +1155,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self._assert_requested_the_update(report, state)
 
     def test_a_head_that_moved_before_the_swap_merges_nothing(self):
@@ -1183,7 +1174,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         result, state, report = self._run()
 
         self.assertTrue(result)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self.assertEqual(len(self._update_branch_calls()), 0)
         self.assertEqual(report["reason"], "approved_head_changed")
         self.assertEqual(len(self._staging_ref_deletions()), 2)
@@ -1203,7 +1194,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             self._run()
 
         self.assertIn("CLOSED", str(raised.exception))
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self.assertEqual(len(self._update_branch_calls()), 0)
         # Staged and cleaned up, but never swapped in.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
@@ -1223,7 +1214,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             self._run()
 
         self.assertIn("release-1.x", str(raised.exception))
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
         self.assertEqual(len(self._staging_ref_deletions()), 2)
 
     def test_a_pull_request_made_a_draft_before_the_swap_lands_nothing(self):
@@ -1238,7 +1229,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             self._run()
 
         self.assertIn("draft", str(raised.exception))
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
 
     def test_a_pull_request_github_closed_without_merging_is_a_fatal_incident(self):
         # The swap landed the commit, but GitHub recorded the pull request as
@@ -1257,7 +1248,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         message = str(raised.exception)
         self.assertIn("CLOSED", message)
         self.assertIn("MERGED", message)
-        self.assertEqual(len(self._swap_calls()), 1)
+        self.assertTrue(self._swapped())
 
     def test_a_refusal_over_a_head_that_moved_defers_for_rereview(self):
         # A refusal is only a reason to request the branch update once the
@@ -1275,7 +1266,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertTrue(result)
         self.assertEqual(report["reason"], "approved_head_changed")
         self.assertEqual(len(self._update_branch_calls()), 0)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
 
     def test_a_refusal_over_a_pull_request_no_longer_open_fails_closed(self):
         self._script_pr_view(
@@ -1291,7 +1282,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         # Neither outcome may be claimed for a pull request this run can no
         # longer account for.
         self.assertEqual(len(self._update_branch_calls()), 0)
-        self.assertEqual(len(self._swap_calls()), 0)
+        self.assertFalse(self._swapped())
 
     def test_a_pull_request_github_never_records_as_merged_is_a_fatal_incident(self):
         # The swap landed, so the merge is durable and reported. A pull request
@@ -1307,7 +1298,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
                 self._run()
 
         self.assertIn("still open", str(raised.exception))
-        self.assertEqual(len(self._swap_calls()), 1)
+        self.assertTrue(self._swapped())
 
     def test_an_ordinary_merge_never_stages_anything(self):
         # No exception was taken, so the pull request was never behind. The
@@ -1324,7 +1315,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertTrue(result)
         self.assertEqual(report["reason"], "merged")
         self.assertEqual(len(self._pr_merge_calls()), 1)
-        self.assertEqual(self._swap_calls(), [])
+        self.assertFalse(self._swapped())
         self.assertEqual(self._staging_ref_deletions(), [])
 
 
