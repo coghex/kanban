@@ -480,8 +480,8 @@ The drainer merges past an advance only when all of this holds:
   merge base.
 - The pull request still points at the same head those comparisons were
   computed from, and the default branch still points at that same inspected
-  tip, immediately before the merge. The exception is authorized for that one
-  pair of commits and no other.
+  tip. The exception is authorized for that one pair of commits and no other,
+  and the merge below is built and landed so that no other pair can result.
 
 Reaching that point grants the candidate nothing. It merges only if the
 required CI check and the required review gate pass exactly as they must for
@@ -490,8 +490,9 @@ any other pull request, re-checked immediately before the merge as always.
 Everything else requests the branch update as before: a file outside the
 configured set, an overlap with the pull request's own files, an unset or empty
 set, a comparison GitHub truncated or answered malformed, an unreadable tip, an
-indeterminate merge base, a default branch that moved before the merge, and any
-other failure to establish either file set. Uncertainty requests the update.
+indeterminate merge base, a default branch that moved before or during the
+merge, and any other failure to establish either file set. Uncertainty requests
+the update.
 
 A pull request whose own head moves after its advance was inspected is the one
 case that neither merges nor updates. Its second comparison — what the pull
@@ -499,29 +500,44 @@ request itself changes, and so whether it overlaps the advance — answered for 
 head that is no longer there, so this pass does nothing with it and the next
 one inspects the head that is.
 
-#### The base the merge actually landed on
+#### How the exceptional merge lands
 
 GitHub's pull-request merge takes an expected *head* — that is
-`--match-head-commit` — and no expected base. The pre-merge tip read therefore
-narrows the gap between deciding and merging without closing it: the default
-branch can still advance in the moment between them, and the merge will land on
-whatever it advanced to.
+`--match-head-commit` — and no expected base, so it cannot say "land on this
+tip and no other". That is the precondition this whole exception rests on, so
+the exceptional merge does not use it. It lands in three steps instead:
 
-So the drainer audits the base afterwards, exactly as it already audits the
-approval and check state a merge landed under. It reads the merge commit GitHub
-created and takes its first parent, which is the default-branch commit the
-merge landed on. That parent being the inspected tip ends the question. A base
-that moved is re-decided under the same rule that authorized the merge: an
-advance still confined to configured coordination paths, and still clear of the
-pull request's own files, was safe after all and is recorded as such. Anything
-else — a path outside the set, an overlap with the pull request's files, a base
-that does not descend from the inspected tip, or any of it that cannot be
-established — is a fatal `PostMergeAuditError`, the same loud incident a
-slipped-through label or check mutation raises.
+1. A staging reference, `kanban-drainer/merge-<pr>`, is created at the
+   inspected tip.
+2. `POST /merges` builds the merge commit on that reference from the inspected
+   head, off to one side where the default branch cannot see it. The drainer
+   proceeds only once the commit's two parents are confirmed to be exactly the
+   inspected tip and the inspected head.
+3. The default branch is fast-forwarded onto that commit with an **unforced**
+   reference update. An unforced update is a compare-and-swap: it succeeds only
+   if the new commit descends from where the reference currently points. The
+   merge commit descends from exactly the inspected tip, so a default branch
+   that advanced first rejects the update outright instead of absorbing an
+   advance nothing inspected.
 
-The residual race is bounded rather than eliminated, which is the same contract
-the final pre-merge gate re-check carries. What it can never be is a silent
-merge onto a base nothing inspected.
+The staging reference is deleted as soon as the attempt ends, and never before
+the swap — until then it is the only thing keeping the merge commit reachable.
+
+Every refusal along the way — a conflict, a merge commit joining the wrong
+commits, a reference that could not be created, a default branch that advanced
+first — requests the ordinary branch update and reports why. A repository whose
+branch protection refuses the reference update therefore never takes this path
+at all: it degrades to exactly the branch update the drainer has always
+performed.
+
+The commits that reach the default branch are the reviewed ones either way: the
+head is named as an explicit object rather than as a branch, so a push that
+lands mid-merge cannot change what merges. It can only leave the pull request
+unfinished by it, and a pull request GitHub never records as merged is a fatal
+`PostMergeAuditError` rather than something left for the next pass to guess at.
+
+The ordinary merge path is untouched: a pull request that was never behind is
+still merged with `gh pr merge --admin --match-head-commit`.
 
 If the merge is attempted and GitHub refuses it while the pull request is still
 open at the head just attempted, the pass requests the branch update instead
