@@ -478,8 +478,10 @@ The drainer merges past an advance only when all of this holds:
 - Both file sets were established completely, pinned to the pull request head,
   merge base, and default-tip object IDs, and both comparisons agreed on the
   merge base.
-- The default branch still points at that same inspected tip immediately before
-  the merge.
+- The pull request still points at the same head those comparisons were
+  computed from, and the default branch still points at that same inspected
+  tip, immediately before the merge. The exception is authorized for that one
+  pair of commits and no other.
 
 Reaching that point grants the candidate nothing. It merges only if the
 required CI check and the required review gate pass exactly as they must for
@@ -490,6 +492,12 @@ configured set, an overlap with the pull request's own files, an unset or empty
 set, a comparison GitHub truncated or answered malformed, an unreadable tip, an
 indeterminate merge base, a default branch that moved before the merge, and any
 other failure to establish either file set. Uncertainty requests the update.
+
+A pull request whose own head moves after its advance was inspected is the one
+case that neither merges nor updates. Its second comparison — what the pull
+request itself changes, and so whether it overlaps the advance — answered for a
+head that is no longer there, so this pass does nothing with it and the next
+one inspects the head that is.
 
 If the merge is attempted and GitHub refuses it while the pull request is still
 open at the head just attempted, the pass requests the branch update instead

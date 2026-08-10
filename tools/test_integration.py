@@ -841,6 +841,40 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertTrue(result)
         self._assert_requested_the_update(report, state)
 
+    def test_a_head_that_moved_after_the_inspection_merges_nothing(self):
+        # The comparisons answered for one head; the gate re-read replaces the
+        # snapshot with another. Merging then would land a head whose own
+        # overlap with the base advance -- the whole point of the second
+        # comparison -- was never inspected.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(headRefOid="f" * 40),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertFalse(report["merged"])
+        self.assertIn(self.head_sha[:12], report["message"])
+        # A second tip read would mean the head pin came after the base pin;
+        # the cheaper, more specific check has to come first.
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.fake.calls("gh")
+                    if call["args"][:2]
+                    == ["api", "repos/acme/widgets/git/ref/heads/master"]
+                ]
+            ),
+            1,
+        )
+
     def test_a_default_branch_that_moved_before_the_merge_requests_the_update(self):
         # The delta that was inspected belongs to one tip; an advance that
         # arrived since is one nothing has looked at.

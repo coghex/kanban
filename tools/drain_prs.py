@@ -3236,15 +3236,19 @@ def process_pr(
 
     # The tip this candidate may be merged against despite being behind it, and
     # None for every candidate that is not behind or whose advance is not
-    # merge-past-able. Carried to the merge below, which refuses to land
-    # against any other tip.
+    # merge-past-able. The exception is authorized for exactly one pair of
+    # commits -- this tip and the head whose own files were compared against it
+    # -- so both travel to the merge below, which refuses to land against any
+    # other pair.
     approved_base_tip: str | None = None
+    inspected_head: str | None = None
     if merge_state == "BEHIND":
         approved_base_tip = coordination_only_base_advance(ctx, pr)
         if approved_base_tip is None:
             return request_base_update(
                 ctx, pr, state=state, dry_run=dry_run, report=report
             )
+        inspected_head = pr["headRefOid"]
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
@@ -3355,6 +3359,26 @@ def process_pr(
         return True
 
     if approved_base_tip is not None:
+        # Eligibility was decided from the files *that* head changes, so a head
+        # that moved since is one whose own overlap with the base advance has
+        # never been inspected -- and the re-read above has already replaced
+        # `pr` with it. Nothing is merged and nothing is updated for it: the
+        # next pass reads it fresh and decides the whole question again,
+        # recomputing the exception for whatever head is actually there.
+        if pr["headRefOid"] != inspected_head:
+            log(
+                f"PR #{number}: head changed from {inspected_head[:12]} to "
+                f"{pr['headRefOid'][:12]} after its base advance was inspected; "
+                "deferring"
+            )
+            set_outcome(
+                report,
+                "approved_head_changed",
+                f"PR #{number}: its head moved away from {inspected_head[:12]}, "
+                "the commit whose coordination-only base advance was inspected, "
+                "before the merge. The next pass inspects the new head.",
+            )
+            return True
         # The tip whose path delta was inspected is the only one this merge may
         # land against: an advance that arrived since is one nothing has looked
         # at. `--match-head-commit` below pins the pull request's own head, and
