@@ -412,9 +412,10 @@ spec = do
 
     -- A worker spec persists a whole WorkflowConfig, and Kanban.Worker's
     -- manual instance delegates the nested object to this one, so a spec
-    -- written before the styling collections existed decodes only if they
-    -- default rather than being required.
-    it "decodes a durable workflow configuration written before the styling collections existed" $ do
+    -- written before the styling collections -- or before the drainer's
+    -- coordination paths -- existed decodes only if every one of them defaults
+    -- rather than being required.
+    it "decodes a durable workflow configuration written before the styling and coordination collections existed" $ do
       let legacy =
             object
               [ "approvalLabel" .= ("lgtm" :: Text),
@@ -431,3 +432,4 @@ spec = do
             { approvalLabel = "lgtm",
               changesRequestedLabel = "needs-work"
             }
+      defaultWorkflowConfig.coordinationPaths `shouldBe` Set.empty

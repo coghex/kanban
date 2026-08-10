@@ -34,6 +34,13 @@ import kanban_config
 
 APPROVE_LABEL = "reviewed:approve"
 CHANGES_LABEL = "reviewed:changes"
+# `workflow.coordination_paths`, resolved for this repository in main(). Exact,
+# case-sensitive, repository-relative paths whose content coordinates the
+# pipeline rather than building it, so a default-branch advance touching only
+# these cannot change a candidate's build result. Empty by default: every
+# repository that sets nothing keeps requesting a branch update for every
+# advance, exactly as before.
+COORDINATION_PATHS: frozenset[str] = frozenset()
 DEFAULT_REQUIRED_CI_CHECK = "build-test"
 DEFAULT_REQUIRED_REVIEW_CHECK = "review-approved"
 CONFIG_FILENAME = ".drain-prs.json"
@@ -43,6 +50,19 @@ CI_RERUN_INTERVAL_SECONDS = 60
 MAX_CI_RERUN_ATTEMPTS = 3
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
+# How long GitHub is given to record a pull request the drainer merged by
+# advancing the default branch onto its head, rather than through the
+# pull-request merge endpoint.
+MERGED_STATE_WAIT_SECONDS = 60
+MERGED_STATE_POLL_SECONDS = 3
+# GitHub's commit-comparison endpoint returns at most this many files and says
+# nothing when it truncates. A response at the cap therefore cannot be proven
+# complete, and a file set that cannot be proven complete is never eligible to
+# be merged past.
+COMPARE_FILE_LIMIT = 300
+# A Git object ID as GitHub spells one. Anything else in a field that must name
+# an immutable commit is a malformed response, not a commit to pin work to.
+OBJECT_ID_RE = re.compile(r"\A[0-9a-f]{7,64}\Z")
 MODEL_TIMEOUT_SECONDS = 60 * 60
 STATE_VERSION = 4
 FAILURES_BEFORE_BACKOFF = 2
@@ -123,6 +143,23 @@ ERROR_REASONS = frozenset(
         "operational_error",
     }
 )
+
+# What one attempted merge did. Only merge_pr() produces these, and only
+# process_pr() consumes them.
+MERGE_DONE = "merge_done"
+MERGE_HEAD_CHANGED = "merge_head_changed"
+MERGE_REJECTED = "merge_rejected"
+# A gate withdrawn while the merge was being prepared. The attempt records its
+# own outcome -- which gate went, and how -- so the caller only has to stop.
+MERGE_GATES_CHANGED = "merge_gates_changed"
+
+# What one attempted default-branch swap did. A failed `git push` is not proof
+# of a refused update -- the server can accept it and the client still fail --
+# so the third answer is the one that matters: this run does not know, and may
+# claim neither a merge nor a branch update.
+SWAP_LANDED = "swap_landed"
+SWAP_REFUSED = "swap_refused"
+SWAP_UNKNOWN = "swap_unknown"
 
 # What one candidate's turn did to the polling pass around it. The queue
 # advances one candidate at a time in ascending pull-request order, so every
@@ -1161,6 +1198,570 @@ def update_branch(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> Non
         )
     else:
         add_approval_label(ctx, number)
+
+
+def object_id_of(value: Any) -> str | None:
+    """The commit OID a `{"sha": ...}` payload names, or None if it names none.
+
+    Every path decision below is pinned to an object ID rather than to a ref,
+    so a value that is not one is a malformed response the caller must fail
+    closed on rather than a commit it can compare anything against.
+    """
+    if not isinstance(value, dict):
+        return None
+    sha = value.get("sha")
+    if not isinstance(sha, str) or not OBJECT_ID_RE.fullmatch(sha):
+        return None
+    return sha
+
+
+def default_branch_tip(ctx: RepoContext) -> str | None:
+    """The default branch's current tip object ID, or None if it cannot be read.
+
+    Deliberately the ref endpoint rather than the branch or commit ones: it
+    answers with the object ID and nothing else, so there is no larger payload
+    for an unrelated field to make unparseable.
+    """
+    try:
+        payload = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{ctx.repo_slug}/git/ref/heads/{ctx.default_branch}",
+            ],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        log(f"Could not read the {ctx.default_branch} tip: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return object_id_of(payload.get("object"))
+
+
+def compared_paths(
+    ctx: RepoContext, base: str, head: str
+) -> tuple[str, frozenset[str]] | None:
+    """The merge base of two commits and every path their comparison touches.
+
+    None whenever completeness cannot be proven -- the call failed, the
+    response was malformed, the merge base was not an object ID, or the file
+    list stood at the cap where GitHub silently truncates. A rename or a copy
+    contributes both of its endpoints, because either endpoint is a path the
+    caller has to have been told about.
+    """
+    try:
+        payload = run_json(
+            ["gh", "api", f"repos/{ctx.repo_slug}/compare/{base}...{head}"],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        log(f"Could not compare {base[:12]}...{head[:12]}: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    merge_base = object_id_of(payload.get("merge_base_commit"))
+    files = payload.get("files")
+    if merge_base is None or not isinstance(files, list):
+        return None
+    if len(files) >= COMPARE_FILE_LIMIT:
+        log(
+            f"Comparison {base[:12]}...{head[:12]} returned {len(files)} files, "
+            f"at GitHub's {COMPARE_FILE_LIMIT}-file cap; it cannot be proven complete"
+        )
+        return None
+    paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            return None
+        for key in ("filename", "previous_filename"):
+            value = item.get(key)
+            if value is None and key == "previous_filename":
+                continue
+            if not isinstance(value, str) or not value:
+                return None
+            paths.add(value)
+    return merge_base, frozenset(paths)
+
+
+def describe_paths(paths: list[str], limit: int = 5) -> str:
+    if not paths:
+        return "no files"
+    shown = ", ".join(paths[:limit])
+    remaining = len(paths) - limit
+    return shown if remaining <= 0 else f"{shown} and {remaining} more"
+
+
+@dataclass(frozen=True)
+class BaseAdvanceApproval:
+    """The one pair of commits an exceptional merge is authorized for.
+
+    `own_paths` travels with them because the post-merge audit has to be able
+    to re-decide the very same question the authorization answered, against
+    whatever base the merge actually landed on.
+    """
+
+    head: str
+    tip: str
+    own_paths: frozenset[str]
+
+
+def coordination_only_base_advance(
+    ctx: RepoContext, pr: dict[str, Any]
+) -> BaseAdvanceApproval | None:
+    """The default-branch tip a behind candidate may be merged against anyway.
+
+    None -- request the ordinary branch update -- unless every file the default
+    branch gained since this pull request's merge base is a configured
+    coordination path, and none of them is a file the pull request itself
+    changes. Reaching a merge grants nothing: the returned tip only says this
+    advance cannot change the candidate's build result, and every gate is still
+    evaluated exactly as it would have been.
+
+    Uncertainty is not eligibility. An empty configured set, an unreadable tip,
+    an incomplete or malformed file set, and two comparisons that disagree
+    about the merge base all take the ordinary update.
+    """
+    number = pr["number"]
+    if not COORDINATION_PATHS:
+        return None
+    head_sha = pr.get("headRefOid")
+    if not isinstance(head_sha, str) or not OBJECT_ID_RE.fullmatch(head_sha):
+        return None
+    tip = default_branch_tip(ctx)
+    if tip is None:
+        log(
+            f"PR #{number}: could not pin the {ctx.default_branch} tip; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    advance = compared_paths(ctx, head_sha, tip)
+    if advance is None:
+        log(
+            f"PR #{number}: could not establish what {ctx.default_branch} gained; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    merge_base, advanced_paths = advance
+    # Pinned to the merge base's own object ID rather than to the pull request,
+    # so both file sets are tied to the same immutable commits.
+    own = compared_paths(ctx, merge_base, head_sha)
+    if own is None:
+        log(
+            f"PR #{number}: could not establish its own file list; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    own_merge_base, own_paths = own
+    if own_merge_base != merge_base:
+        log(
+            f"PR #{number}: merge base is indeterminate ({merge_base[:12]} then "
+            f"{own_merge_base[:12]}); requesting the ordinary branch update"
+        )
+        return None
+
+    outside = sorted(advanced_paths - COORDINATION_PATHS)
+    if outside:
+        log(
+            f"PR #{number}: {ctx.default_branch} advanced past {merge_base[:12]} in "
+            f"{describe_paths(outside)}, outside the configured coordination paths; "
+            "requesting the ordinary branch update"
+        )
+        return None
+    overlap = sorted(advanced_paths & own_paths)
+    if overlap:
+        log(
+            f"PR #{number}: the base advance and this pull request both change "
+            f"{describe_paths(overlap)}; requesting the ordinary branch update"
+        )
+        return None
+    log(
+        f"PR #{number}: {ctx.default_branch} advanced to {tip[:12]} in configured "
+        f"coordination paths only ({describe_paths(sorted(advanced_paths))}); "
+        "evaluating its gates without a branch update"
+    )
+    return BaseAdvanceApproval(head=head_sha, tip=tip, own_paths=own_paths)
+
+
+def base_advance_merge_ref(number: int) -> str:
+    """The staging reference one exceptional merge is built on.
+
+    Named per pull request and deleted as soon as the attempt ends, so a
+    crashed attempt leaves at most one recognizable reference behind and the
+    next attempt recreates it rather than trusting whatever tip it names.
+    """
+    return f"kanban-drainer/merge-{number}"
+
+
+def delete_ref(ctx: RepoContext, ref: str) -> None:
+    # Best effort by construction: a reference that is already gone, or that
+    # cannot be removed, is a stray staging branch -- never the merge itself.
+    run(
+        ["gh", "api", "-X", "DELETE", f"repos/{ctx.repo_slug}/git/refs/heads/{ref}"],
+        cwd=ctx.path,
+        check=False,
+    )
+
+
+def create_ref(ctx: RepoContext, ref: str, sha: str) -> bool:
+    proc = run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{ctx.repo_slug}/git/refs",
+            "-f",
+            f"ref=refs/heads/{ref}",
+            "-f",
+            f"sha={sha}",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def build_base_advance_merge(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    ref: str,
+    approval: BaseAdvanceApproval,
+) -> str | None:
+    """Create the merge commit for an exceptional merge, off to one side.
+
+    Built on the staging reference rather than on the default branch, so
+    nothing is visible on the default branch until the swap below decides it.
+    Returns the commit only once its parents are confirmed to be exactly the
+    inspected tip and the inspected head -- the two commits the whole
+    authorization was computed from.
+    """
+    number = pr["number"]
+    message = f"Merge pull request #{number} from {pr['headRefName']}\n\n{pr['title']}"
+    proc = run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{ctx.repo_slug}/merges",
+            "-f",
+            f"base={ref}",
+            "-f",
+            f"head={approval.head}",
+            "-f",
+            f"commit_message={message}",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        log(f"PR #{number}: GitHub would not build the merge commit: {detail}")
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        # Includes the empty 204 body GitHub answers when there is nothing to
+        # merge, which is not a state this may proceed from either.
+        log(f"PR #{number}: the merge commit response was not a commit")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    commit = object_id_of(payload)
+    parents = payload.get("parents")
+    if commit is None or not isinstance(parents, list) or len(parents) != 2:
+        log(f"PR #{number}: the merge commit response named no two parents")
+        return None
+    if (
+        object_id_of(parents[0]) != approval.tip
+        or object_id_of(parents[1]) != approval.head
+    ):
+        log(
+            f"PR #{number}: the merge commit does not join {approval.tip[:12]} "
+            f"to {approval.head[:12]}"
+        )
+        return None
+    return commit
+
+
+def default_branch_contains(ctx: RepoContext, commit: str) -> bool | None:
+    """Whether the remote's default branch contains a commit, or None if that
+    cannot be established.
+
+    Asked of the branch itself rather than of a push's exit code, because that
+    is the only thing that settles whether an update landed. Containment rather
+    than equality: a branch that took the commit and then advanced past it
+    still took it.
+    """
+    fetched = run(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            ctx.remote_name,
+            f"refs/heads/{ctx.default_branch}",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    if fetched.returncode != 0:
+        return None
+    proc = run(
+        ["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    # Any other status is git failing to answer, not answering "no".
+    return None
+
+
+def swap_default_branch_to(
+    ctx: RepoContext,
+    ref: str,
+    merge_commit: str,
+    approval: BaseAdvanceApproval,
+) -> str:
+    """Advance the default branch to a commit, or refuse -- atomically, and on
+    the exact commit the merge was authorized against.
+
+    This is the guard GitHub's pull-request merge cannot express. It is a
+    lease, not a fast-forward test: `--force-with-lease=<ref>:<sha>` has the
+    server perform the update only if that reference is still exactly `<sha>`.
+    The reference-update API's `force=false` cannot say this -- it only asks
+    that the new commit descend from wherever the reference happens to point,
+    which a default branch rewound to an ancestor of the inspected tip also
+    satisfies. The lease is checked by the Git server itself, so it holds
+    however the reference came to move and whoever is entitled to bypass the
+    branch's protection.
+
+    The update the lease admits is still an ordinary fast-forward: the merge
+    commit's first parent is the inspected tip, so nothing is rewritten and no
+    history is dropped.
+    """
+    # The merge commit exists only on the remote, on the staging reference
+    # that is currently the one thing keeping it reachable. Fetching it is what
+    # lets the push below name it.
+    fetched = run(
+        ["git", "fetch", "--quiet", ctx.remote_name, f"refs/heads/{ref}"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if fetched.returncode != 0:
+        # Nothing has been pushed, so nothing can have landed.
+        detail = (fetched.stderr or fetched.stdout or "").strip()
+        log(f"Could not fetch the staged merge commit {merge_commit[:12]}: {detail}")
+        return SWAP_REFUSED
+    pushed = run(
+        [
+            "git",
+            "push",
+            f"--force-with-lease=refs/heads/{ctx.default_branch}:{approval.tip}",
+            ctx.remote_name,
+            f"{merge_commit}:refs/heads/{ctx.default_branch}",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    if pushed.returncode == 0:
+        return SWAP_LANDED
+    # A failed push is not proof of a refused update. The server can accept the
+    # reference update and the client still fail -- reading the report, closing
+    # the connection -- so the only thing that settles it is the branch itself.
+    detail = (pushed.stderr or pushed.stdout or "").strip()
+    landed = default_branch_contains(ctx, merge_commit)
+    if landed is None:
+        log(
+            f"The push of {merge_commit[:12]} to {ctx.default_branch} failed and "
+            f"whether it landed could not be established: {detail}"
+        )
+        return SWAP_UNKNOWN
+    if landed:
+        log(
+            f"The push of {merge_commit[:12]} reported a failure after "
+            f"{ctx.default_branch} had already taken it: {detail}"
+        )
+        return SWAP_LANDED
+    log(
+        f"{ctx.default_branch} would not advance from {approval.tip[:12]} to "
+        f"{merge_commit[:12]}: {detail}"
+    )
+    return SWAP_REFUSED
+
+
+def confirm_pull_request_merged(
+    ctx: RepoContext, number: int, approval: BaseAdvanceApproval
+) -> None:
+    """Wait for GitHub to record the pull request the swap just merged.
+
+    The swap lands the head commit on the default branch, and GitHub marks a
+    pull request merged once its head is reachable from its base. Only that
+    recorded state ends the wait. A pull request that never gets there is a
+    fatal incident: the commits that landed are exactly the reviewed ones
+    either way, so nothing unreviewed can be on the default branch -- but a
+    pull request that should have been recorded as merged and was not is not
+    something to leave for the next pass, or for the cleanup below, to treat
+    as a merge on its own say-so.
+    """
+    deadline = time.time() + MERGED_STATE_WAIT_SECONDS
+    while True:
+        pr = get_pr(ctx, number)
+        state = pr.get("state")
+        if state == "MERGED":
+            return
+        if state != "OPEN":
+            # Closed without being merged, above all: GitHub never recorded
+            # this as a merge, so nothing here may report one.
+            raise PostMergeAuditError(
+                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"but GitHub recorded the pull request as {state}, not MERGED"
+            )
+        if pr.get("headRefOid") != approval.head:
+            raise PostMergeAuditError(
+                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"but its head had already moved to {pr.get('headRefOid')}, so the "
+                "pull request stayed open over commits that did not land"
+            )
+        if time.time() >= deadline:
+            raise PostMergeAuditError(
+                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"but the pull request was still open {MERGED_STATE_WAIT_SECONDS}s later"
+            )
+        time.sleep(MERGED_STATE_POLL_SECONDS)
+
+
+def merge_past_base_advance(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    approval: BaseAdvanceApproval,
+    gates: GateConfig,
+    dry_run: bool,
+    report: dict[str, Any] | None = None,
+) -> tuple[str, str | None]:
+    """Merge a candidate onto the exact default-branch commit it was cleared for.
+
+    GitHub's pull-request merge takes an expected head and no expected base, so
+    it cannot say "land on this tip and no other" -- which is the whole
+    precondition an exceptional merge rests on. This says it: build the merge
+    commit against the inspected tip on a staging reference, then fast-forward
+    the default branch onto it. The unforced reference update is the atomic
+    base guard; the explicit head object is the head guard, so the only commits
+    that can reach the default branch are the reviewed ones that were gated.
+
+    Any refusal -- a conflict, a protected reference, a default branch that
+    advanced first -- returns `MERGE_REJECTED` with the detail, and the caller
+    requests the ordinary branch update. A repository whose protection refuses
+    the reference update therefore never takes this path at all: it degrades to
+    the branch update the drainer has always performed.
+    """
+    number = pr["number"]
+    log(
+        f"PR #{number}: merging {approval.head[:12]} onto the inspected "
+        f"{ctx.default_branch} tip {approval.tip[:12]}"
+    )
+    if dry_run:
+        return MERGE_DONE, None
+
+    ref = base_advance_merge_ref(number)
+    # Recreated rather than reused: a reference an interrupted attempt left
+    # behind names whatever tip *that* attempt inspected.
+    delete_ref(ctx, ref)
+    if not create_ref(ctx, ref, approval.tip):
+        return (
+            MERGE_REJECTED,
+            f"Its staging reference could not be created at {approval.tip[:12]}.",
+        )
+    try:
+        merge_commit = build_base_advance_merge(ctx, pr, ref, approval)
+        if merge_commit is None:
+            return (
+                MERGE_REJECTED,
+                f"GitHub would not build a merge of {approval.head[:12]} onto "
+                f"{approval.tip[:12]}.",
+            )
+        # Narrow the head window to this one call: the commit about to land is
+        # fixed, so a head that moved cannot change what merges -- only whether
+        # the pull request it belongs to is finished by it. A pull request that
+        # is no longer open is not a pull request anything may land for, and a
+        # read that fails raises, so both leave the default branch alone.
+        # This path writes to the default branch's reference directly, so
+        # every eligibility fact the pull-request merge endpoint would have
+        # enforced for itself has to be re-established here instead: open, not
+        # a draft, and still targeting the branch about to be advanced. A pull
+        # request retargeted or converted while its merge was being built is
+        # one nothing may land into the default branch.
+        current = get_pr(ctx, number)
+        blockers = []
+        if current.get("state") != "OPEN":
+            blockers.append(f"it was {current.get('state')} rather than OPEN")
+        if current.get("isDraft"):
+            blockers.append("it had become a draft")
+        if current.get("baseRefName") != ctx.default_branch:
+            blockers.append(
+                f"it targeted {current.get('baseRefName')} rather than "
+                f"{ctx.default_branch}"
+            )
+        if blockers:
+            raise DrainError(
+                f"PR #{number}: {'; '.join(blockers)} before {approval.head[:12]} "
+                f"could be merged onto {approval.tip[:12]}; nothing was landed "
+                "for it"
+            )
+        if current["headRefOid"] != approval.head:
+            log(
+                f"PR #{number}: head changed from {approval.head[:12]} to "
+                f"{current['headRefOid'][:12]} before the swap; deferring for rereview"
+            )
+            return MERGE_HEAD_CHANGED, None
+        # Building the staging merge takes two round trips, which is long
+        # enough for a verdict to be withdrawn or a check to regress. The
+        # ordinary path's own gate re-check sits immediately before its merge
+        # call; this is the same check immediately before this one, on the
+        # response that was just read rather than the one that preceded the
+        # build.
+        regression = gate_regression(current, gates)
+        if regression is not None:
+            reason, message, note = regression
+            log(f"PR #{number}: {note}; deferring before the swap")
+            set_outcome(report, reason, message)
+            return MERGE_GATES_CHANGED, None
+        swap = swap_default_branch_to(ctx, ref, merge_commit, approval)
+        if swap == SWAP_UNKNOWN:
+            raise DrainError(
+                f"PR #{number}: pushing {merge_commit[:12]} to "
+                f"{ctx.default_branch} failed without establishing whether it "
+                "landed, so neither a merge nor a branch update can be claimed "
+                "for it"
+            )
+        if swap == SWAP_REFUSED:
+            return (
+                MERGE_REJECTED,
+                f"{ctx.default_branch} was no longer the inspected "
+                f"{approval.tip[:12]}, so the merge was refused rather than landed "
+                "on a base nothing inspected.",
+            )
+    finally:
+        # After the swap, never before it: until then this reference is the
+        # only thing keeping the merge commit reachable.
+        delete_ref(ctx, ref)
+
+    # Durable from this line on, and recorded before anything that can still
+    # fail below, exactly as the ordinary merge records it.
+    set_outcome(
+        report,
+        "merged",
+        f"PR #{number} merged {approval.head[:12]} into {ctx.default_branch} "
+        f"on {approval.tip[:12]}.",
+        merged=True,
+    )
+    confirm_pull_request_merged(ctx, number, approval)
+    audit_merged_pr(ctx, number, approval.head, gates)
+    return MERGE_DONE, None
 
 
 def audit_merged_pr(
@@ -2923,6 +3524,53 @@ def describe_check_gates(
     )
 
 
+def gate_regression(
+    pr: dict[str, Any], gates: GateConfig
+) -> tuple[str, str, str] | None:
+    """Why a candidate no longer passes its gates, or None if it still does.
+
+    The outcome reason, the message describing it, and the terse note for the
+    log. Shared by both merge paths so that "still approved, still green" means
+    one thing: the ordinary path asks it immediately before `gh pr merge`, and
+    the exceptional path asks it again immediately before its swap, because
+    building a staging merge takes long enough for a verdict to be withdrawn
+    or a check to regress in between.
+    """
+    number = pr["number"]
+    # The changes label wins when both are attached, exactly as it does when
+    # the candidate is first selected.
+    if has_label(pr, CHANGES_LABEL):
+        return (
+            "changes_requested",
+            f"PR #{number} was labelled {CHANGES_LABEL} before the merge.",
+            "approval changed before merge",
+        )
+    if not has_label(pr, APPROVE_LABEL):
+        return (
+            "not_approved",
+            f"PR #{number} lost {APPROVE_LABEL} before the merge.",
+            "approval changed before merge",
+        )
+    build_state = configured_check_state(pr, gates.required_ci_check)
+    review_state = configured_check_state(pr, gates.required_review_check)
+    detail = describe_check_gates(gates, build_state, review_state)
+    if not check_gate_satisfied(build_state):
+        return (
+            check_gate_reason(build_state, review_state),
+            f"PR #{number}: its required CI check changed before the merge "
+            f"({detail}).",
+            "CI changed before merge",
+        )
+    if not check_gate_satisfied(review_state):
+        return (
+            check_gate_reason(build_state, review_state),
+            f"PR #{number}: its required review gate changed before the merge "
+            f"({detail}).",
+            "review gate changed before merge",
+        )
+    return None
+
+
 def check_gate_reason(build_state: str, review_state: str) -> str:
     # "missing" is a check that has not reported yet, which is a wait rather
     # than a refusal -- the state itself stays in the message so the caller
@@ -2930,6 +3578,40 @@ def check_gate_reason(build_state: str, review_state: str) -> str:
     if "failure" in (build_state, review_state):
         return "checks_failed"
     return "checks_pending"
+
+
+def request_base_update(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    dry_run: bool,
+    report: dict[str, Any] | None,
+    detail: str | None = None,
+) -> bool:
+    """Bring a candidate up to date, and end the pass holding the lane.
+
+    One cycle does one thing: the branch update is this attempt's whole action,
+    and merging waits for the next one -- exactly as the queue behaves. Both
+    the ordinary behind-base path and the fallbacks from a merge past a
+    coordination-only advance end here, so a candidate that did not merge is
+    always left with an update in flight rather than stranded.
+    """
+    number = pr["number"]
+    update_branch(ctx, pr, dry_run=dry_run)
+    if not dry_run:
+        refreshed = get_pr(ctx, number)
+        if has_label(refreshed, APPROVE_LABEL):
+            remember_approved_head(state, number, refreshed["headRefOid"])
+    message = (
+        f"PR #{number} was behind {ctx.default_branch}; its branch update "
+        + ("would be requested" if dry_run else "was requested")
+        + ". Run again once the update settles."
+    )
+    if detail:
+        message = f"{message} {detail}"
+    set_outcome(report, "behind_base", message)
+    return True
 
 
 def process_pr(
@@ -2994,23 +3676,19 @@ def process_pr(
         )
         return False
 
+    # The tip this candidate may be merged against despite being behind it, and
+    # None for every candidate that is not behind or whose advance is not
+    # merge-past-able. The exception is authorized for exactly one pair of
+    # commits -- this tip and the head whose own files were compared against it
+    # -- so both travel to the merge below, which refuses to land against any
+    # other pair.
+    base_advance: BaseAdvanceApproval | None = None
     if merge_state == "BEHIND":
-        update_branch(ctx, pr, dry_run=dry_run)
-        if not dry_run:
-            refreshed = get_pr(ctx, number)
-            if has_label(refreshed, APPROVE_LABEL):
-                remember_approved_head(state, number, refreshed["headRefOid"])
-        # One cycle does one thing: the branch update is this attempt's whole
-        # action, and merging waits for the next one -- exactly as the queue
-        # behaves.
-        set_outcome(
-            report,
-            "behind_base",
-            f"PR #{number} was behind {ctx.default_branch}; its branch update "
-            + ("would be requested" if dry_run else "was requested")
-            + ". Run again once the update settles.",
-        )
-        return True
+        base_advance = coordination_only_base_advance(ctx, pr)
+        if base_advance is None:
+            return request_base_update(
+                ctx, pr, state=state, dry_run=dry_run, report=report
+            )
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
@@ -3083,45 +3761,73 @@ def process_pr(
     # successful merge and raises a fatal PostMergeAuditError if it doesn't
     # match what was just checked here.
     pr = get_pr(ctx, number)
-    if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
-        log(f"PR #{number}: approval changed before merge; deferring")
-        if has_label(pr, CHANGES_LABEL):
-            set_outcome(
-                report,
-                "changes_requested",
-                f"PR #{number} was labelled {CHANGES_LABEL} before the merge.",
-            )
-        else:
-            set_outcome(
-                report,
-                "not_approved",
-                f"PR #{number} lost {APPROVE_LABEL} before the merge.",
-            )
-        return True
-    final_build_state = configured_check_state(pr, gates.required_ci_check)
-    final_review_state = configured_check_state(pr, gates.required_review_check)
-    final_detail = describe_check_gates(gates, final_build_state, final_review_state)
-    if not check_gate_satisfied(final_build_state):
-        log(f"PR #{number}: CI changed before merge; deferring")
-        set_outcome(
-            report,
-            check_gate_reason(final_build_state, final_review_state),
-            f"PR #{number}: its required CI check changed before the merge "
-            f"({final_detail}).",
-        )
-        return True
-    if not check_gate_satisfied(final_review_state):
-        log(f"PR #{number}: review gate changed before merge; deferring")
-        set_outcome(
-            report,
-            check_gate_reason(final_build_state, final_review_state),
-            f"PR #{number}: its required review gate changed before the merge "
-            f"({final_detail}).",
-        )
+    regression = gate_regression(pr, gates)
+    if regression is not None:
+        reason, message, note = regression
+        log(f"PR #{number}: {note}; deferring")
+        set_outcome(report, reason, message)
         return True
 
-    merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
-    if not merged:
+    if base_advance is not None:
+        # Eligibility was decided from the files *that* head changes, so a head
+        # that moved since is one whose own overlap with the base advance has
+        # never been inspected -- and the re-read above has already replaced
+        # `pr` with it. Nothing is merged and nothing is updated for it: the
+        # next pass reads it fresh and decides the whole question again,
+        # recomputing the exception for whatever head is actually there.
+        if pr["headRefOid"] != base_advance.head:
+            log(
+                f"PR #{number}: head changed from {base_advance.head[:12]} to "
+                f"{pr['headRefOid'][:12]} after its base advance was inspected; "
+                "deferring"
+            )
+            set_outcome(
+                report,
+                "approved_head_changed",
+                f"PR #{number}: its head moved away from {base_advance.head[:12]}, "
+                "the commit whose coordination-only base advance was inspected, "
+                "before the merge. The next pass inspects the new head.",
+            )
+            return True
+        # A cheap early-out for the common case, not the guard: the swap inside
+        # merge_past_base_advance() is what actually refuses a default branch
+        # that moved, atomically. This only spares the staging reference and
+        # merge commit when the move is already visible.
+        current_tip = default_branch_tip(ctx)
+        if current_tip != base_advance.tip:
+            log(
+                f"PR #{number}: {ctx.default_branch} moved from "
+                f"{base_advance.tip[:12]} before the merge; updating instead"
+            )
+            return request_base_update(
+                ctx,
+                pr,
+                state=state,
+                dry_run=dry_run,
+                report=report,
+                detail=(
+                    f"Its coordination-only base advance to "
+                    f"{base_advance.tip[:12]} was superseded before the merge."
+                ),
+            )
+        outcome, merge_detail = merge_past_base_advance(
+            ctx,
+            pr,
+            approval=base_advance,
+            gates=gates,
+            dry_run=dry_run,
+            report=report,
+        )
+    else:
+        merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
+        outcome = MERGE_DONE if merged else MERGE_HEAD_CHANGED
+        merge_detail = None
+
+    if outcome == MERGE_GATES_CHANGED:
+        # The attempt recorded which gate withdrew, on the response that saw
+        # it; nothing was merged and nothing needs updating.
+        return True
+    if outcome == MERGE_HEAD_CHANGED:
         set_outcome(
             report,
             "approved_head_changed",
@@ -3129,6 +3835,44 @@ def process_pr(
             f"{pr['headRefOid'][:12]} during the merge; it needs a fresh review.",
         )
         return True
+    if outcome == MERGE_REJECTED:
+        # Nothing landed, so the candidate takes the branch update it was
+        # spared -- but only once the refusal is confirmed against a pull
+        # request that is still open at the head it was refused for. The
+        # snapshot above predates the refusal, and a branch update requested
+        # from a stale one is an action taken on a pull request this run no
+        # longer understands. A read that fails raises, which is the same
+        # fail-closed answer.
+        refreshed = get_pr(ctx, number)
+        if refreshed.get("state") != "OPEN":
+            message = (
+                f"PR #{number}: its merge past a coordination-only base advance "
+                f"was refused and it is {refreshed.get('state')} rather than "
+                "OPEN, so neither a merge nor a branch update can be claimed "
+                "for it."
+            )
+            set_outcome(report, "operational_error", message)
+            raise DrainError(message)
+        if refreshed["headRefOid"] != base_advance.head:
+            log(f"PR #{number}: head moved during the refused merge; deferring")
+            set_outcome(
+                report,
+                "approved_head_changed",
+                f"PR #{number}: its head moved away from {base_advance.head[:12]} "
+                "while its merge past a coordination-only base advance was being "
+                "refused; it needs a fresh review.",
+            )
+            return True
+        # Reported as behind rather than as merged, and it keeps the lane while
+        # that update settles.
+        return request_base_update(
+            ctx,
+            refreshed,
+            state=state,
+            dry_run=dry_run,
+            report=report,
+            detail=merge_detail,
+        )
 
     if dry_run:
         # Records nothing and mutates nothing, exactly as before: the pass only
@@ -3880,7 +4624,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, LOG_TO_STDERR
+    global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, COORDINATION_PATHS, LOG_TO_STDERR
     number = args.pr
     single = number is not None
     # A single-PR run owns stdout for its one JSON result.
@@ -3919,6 +4663,7 @@ def main() -> None:
             resolved_config = kanban_config.resolve_config(ctx.repo_slug, raw_config)
             APPROVE_LABEL = resolved_config.workflow.approval_label
             CHANGES_LABEL = resolved_config.workflow.changes_requested_label
+            COORDINATION_PATHS = frozenset(resolved_config.workflow.coordination_paths)
             gates = load_gate_config(ctx)
             log(
                 f"Watching {ctx.repo_slug} at {ctx.path} "
@@ -3928,6 +4673,10 @@ def main() -> None:
                 "Required checks: "
                 f"{gates.required_ci_check or 'ci disabled'}, "
                 f"{gates.required_review_check or 'review disabled'}"
+            )
+            log(
+                "Coordination paths: "
+                + (", ".join(sorted(COORDINATION_PATHS)) or "none configured")
             )
             log(f"Logging to {active_log_path() or 'stderr only (dry run)'}")
             if args.dry_run:

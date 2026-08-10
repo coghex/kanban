@@ -179,7 +179,7 @@ class ProcessPrFixture(unittest.TestCase):
             call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "merge"]
         ]
 
-    def _run_process_pr(self, *, dry_run=False, gates=None):
+    def _run_process_pr(self, *, dry_run=False, gates=None, report=None):
         state = {
             "version": drain_prs.STATE_VERSION,
             "attempt_counter": 3,
@@ -208,6 +208,7 @@ class ProcessPrFixture(unittest.TestCase):
                 dry_run=dry_run,
                 state=state,
                 gates=gates,
+                report=report,
             )
         return result, state
 
@@ -444,6 +445,974 @@ class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
                     dry_run=False,
                     gates=gates,
                 )
+
+
+class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
+    """Covers issue #224: a candidate that is only BEHIND because the default
+    branch gained a configured coordination path is evaluated in the same pass
+    instead of being sent through a branch update that rebuilds it on a base
+    that cannot change its result.
+
+    Every scenario below asserts one of two things: the exception applied and
+    the ordinary gates then decided, or the ordinary branch update was
+    requested exactly as it always is. Nothing here may invent a third
+    outcome, and nothing here may merge on the strength of the exception
+    alone.
+    """
+
+    MERGE_BASE = "b" * 40
+    MOVED_TIP = "e" * 40
+    COORDINATION_PATH = "docs/status.md"
+
+    def setUp(self):
+        super().setUp()
+        self._configure({self.COORDINATION_PATH})
+        # The swap is a real `git fetch` and a real
+        # `git push --force-with-lease` against the fixture's own remote, so
+        # every commit it names has to be a real one. Rebuild the remote's
+        # history as the scenario actually describes it: a default branch that
+        # advanced by one coordination-only push, and a merge of this pull
+        # request onto exactly that commit, staged but not landed.
+        self.ANCESTOR = run_git(
+            ["rev-parse", f"{self.merge_commit_sha}^1"], cwd=self.upstream_sim
+        )
+        run_git(["checkout", "-q", "-B", "staging", self.ANCESTOR], cwd=self.upstream_sim)
+        (self.upstream_sim / "docs").mkdir(exist_ok=True)
+        (self.upstream_sim / "docs" / "status.md").write_text(
+            "coordination\n", encoding="utf-8"
+        )
+        run_git(["add", self.COORDINATION_PATH], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "a coordination push"], cwd=self.upstream_sim)
+        self.TIP = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(
+            [
+                "merge",
+                "-q",
+                "--no-ff",
+                "origin/issue-99-demo",
+                "-m",
+                "Merge pull request #42",
+            ],
+            cwd=self.upstream_sim,
+        )
+        self.MERGE_COMMIT = run_git(["rev-parse", "HEAD"], cwd=self.upstream_sim)
+        run_git(
+            ["push", "-q", "-f", "origin", f"{self.TIP}:refs/heads/master"],
+            cwd=self.upstream_sim,
+        )
+        run_git(
+            [
+                "push",
+                "-q",
+                "-f",
+                "origin",
+                f"{self.MERGE_COMMIT}:refs/heads/{self.STAGING_REF}",
+            ],
+            cwd=self.upstream_sim,
+        )
+
+    def _remote_default_branch(self):
+        return run_git(["rev-parse", "master"], cwd=self.bare)
+
+    def _advance_remote_default_branch(self):
+        """A push to the remote's default branch that beats the drainer's."""
+        run_git(["checkout", "-q", "-B", "advance", self.TIP], cwd=self.upstream_sim)
+        (self.upstream_sim / "unrelated.txt").write_text("later\n", encoding="utf-8")
+        run_git(["add", "unrelated.txt"], cwd=self.upstream_sim)
+        run_git(["commit", "-q", "-m", "a later push"], cwd=self.upstream_sim)
+        run_git(["push", "-q", "-f", "origin", "advance:master"], cwd=self.upstream_sim)
+        return run_git(["rev-parse", "master"], cwd=self.bare)
+
+    def _configure(self, paths):
+        patch = mock.patch.object(
+            drain_prs, "COORDINATION_PATHS", frozenset(paths)
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    # -- scripting -------------------------------------------------------
+
+    def _script_tip(self, *tips, exit_code=0):
+        """One `gh api .../git/ref/heads/master` response per read, in order."""
+        for tip in tips:
+            self.fake.script(
+                "gh",
+                ["api", "repos/acme/widgets/git/ref/heads/master"],
+                stdout=json.dumps({"object": {"sha": tip}}),
+                exit_code=exit_code,
+            )
+
+    def _script_compare(self, base, head, payload, *, exit_code=0):
+        self.fake.script(
+            "gh",
+            ["api", f"repos/acme/widgets/compare/{base}...{head}"],
+            stdout=json.dumps(payload) if payload is not None else "",
+            exit_code=exit_code,
+        )
+
+    def _comparison(self, files, merge_base=None):
+        return {
+            "merge_base_commit": {"sha": merge_base or self.MERGE_BASE},
+            "files": files,
+        }
+
+    def _script_file_sets(self, *, advanced, own=None, tip=None, merge_base=None):
+        """The two comparisons eligibility is computed from: what the default
+        branch gained since the merge base, and what the pull request itself
+        changes."""
+        self._script_compare(
+            self.head_sha,
+            tip or self.TIP,
+            self._comparison(advanced, merge_base=merge_base),
+        )
+        self._script_compare(
+            merge_base or self.MERGE_BASE,
+            self.head_sha,
+            self._comparison(
+                own if own is not None else [{"filename": "feature.txt"}],
+                merge_base=merge_base,
+            ),
+        )
+
+    def _script_update_branch(self):
+        self.fake.script(
+            "gh",
+            ["api", "-X", "PUT", "repos/acme/widgets/pulls/42/update-branch"],
+            stdout="",
+        )
+
+    STAGING_REF = "kanban-drainer/merge-42"
+
+    def _script_staging_ref(self, *, created=True):
+        self.fake.script(
+            "gh",
+            ["api", "-X", "DELETE", f"repos/acme/widgets/git/refs/heads/{self.STAGING_REF}"],
+            stdout="",
+        )
+        self.fake.script(
+            "gh",
+            ["api", "-X", "POST", "repos/acme/widgets/git/refs"],
+            stdout=json.dumps({"ref": f"refs/heads/{self.STAGING_REF}"}),
+            stderr="" if created else "Reference already exists",
+            exit_code=0 if created else 1,
+        )
+
+    def _script_build_merge(self, *, parents=None, exit_code=0, stdout=None):
+        """The merge commit GitHub builds on the staging reference."""
+        if stdout is None:
+            stdout = json.dumps(
+                {
+                    "sha": self.MERGE_COMMIT,
+                    "parents": (
+                        parents
+                        if parents is not None
+                        else [{"sha": self.TIP}, {"sha": self.head_sha}]
+                    ),
+                }
+            )
+        self.fake.script(
+            "gh",
+            ["api", "-X", "POST", "repos/acme/widgets/merges"],
+            stdout=stdout,
+            stderr="Merge conflict" if exit_code else "",
+            exit_code=exit_code,
+        )
+
+    def _script_merge_of_this_pr(self, *, parents=None, build_exit=0):
+        # There is nothing to script for the swap itself: it is a real
+        # `git fetch` and a real leased `git push` against the fixture's remote.
+        self._script_staging_ref()
+        self._script_build_merge(parents=parents, exit_code=build_exit)
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+    def _swapped(self):
+        """Whether the drainer's own merge commit reached the remote."""
+        return self._remote_default_branch() == self.MERGE_COMMIT
+
+    def _staging_ref_deletions(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:4]
+            == [
+                "api",
+                "-X",
+                "DELETE",
+                f"repos/acme/widgets/git/refs/heads/{self.STAGING_REF}",
+            ]
+        ]
+
+    def _stale_approval_ok(self):
+        return self._base_pr_json()["statusCheckRollup"] + [
+            {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:02Z",
+            }
+        ]
+
+    def _settled(self):
+        """The snapshot the branch update leaves behind: a new head whose
+        stale-approval decision has landed."""
+        return {
+            "headRefOid": "c" * 40,
+            "statusCheckRollup": self._stale_approval_ok(),
+        }
+
+    def _behind(self, **overrides):
+        snapshot = {"mergeStateStatus": "BEHIND"}
+        snapshot.update(overrides)
+        return snapshot
+
+    # -- inspection ------------------------------------------------------
+
+    def _update_branch_calls(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:1] == ["api"]
+            and any("update-branch" in arg for arg in call["args"])
+        ]
+
+    def _comparison_calls(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:1] == ["api"]
+            and any("/compare/" in arg for arg in call["args"])
+        ]
+
+    def _run(self, *, dry_run=False):
+        report = drain_prs.new_single_pr_report(42)
+        result, state = self._run_process_pr(dry_run=dry_run, report=report)
+        return result, state, report
+
+    def _assert_requested_the_update(self, report, state, *, fragment=None):
+        self.assertEqual(len(self._update_branch_calls()), 1)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(report["reason"], "behind_base")
+        self.assertFalse(report["merged"])
+        if fragment is not None:
+            self.assertIn(fragment, report["message"])
+        # Requirement 6: an update holds the active lane exactly as it always
+        # has, so the candidate is examined first once it settles.
+        self.assertEqual(
+            drain_prs.classify_pass_outcome(report["reason"], raised=False),
+            drain_prs.PASS_ADVANCE_HOLD,
+        )
+        self.assertEqual(state["prs"]["42"]["approved_head"], "c" * 40)
+
+    # -- the exception itself --------------------------------------------
+
+    def test_a_coordination_only_advance_merges_without_a_branch_update(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertTrue(self._swapped())
+        self.assertEqual(report["reason"], "merged")
+        self.assertTrue(report["merged"])
+        # The linked issue was closed and the worktree cleaned up, exactly as
+        # any other merge cleans up.
+        self.assertNotIn("42", state["prs"])
+        self.assertFalse(self.feature_wt.exists())
+
+    def test_a_coordination_only_advance_still_waits_on_its_required_checks(self):
+        # Requirement 3: reaching the gate evaluation grants nothing.
+        self._script_pr_view(
+            self._behind(
+                statusCheckRollup=[
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                        "startedAt": "2026-07-18T00:00:00Z",
+                    },
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-07-18T00:00:01Z",
+                    },
+                ]
+            )
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "checks_pending")
+
+    def test_a_dry_run_reports_the_merge_it_would_make(self):
+        self._script_pr_view(self._behind(closingIssuesReferences=[]))
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+
+        result, state, report = self._run(dry_run=True)
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "would_merge")
+        self.assertIn("42", state["prs"])
+
+    # -- everything else requests the update ------------------------------
+
+    def test_an_unset_key_requests_the_update_without_inspecting_anything(self):
+        self._configure(set())
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+        # Requirement 4: an empty set is today's drainer, so it costs not one
+        # extra GitHub call.
+        self.assertEqual(self._comparison_calls(), [])
+
+    def test_a_delta_outside_the_configured_set_requests_the_update(self):
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_file_sets(
+            advanced=[
+                {"filename": self.COORDINATION_PATH},
+                {"filename": "src/Kanban/UI.hs"},
+            ]
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_a_delta_overlapping_the_pull_requests_own_files_requests_the_update(self):
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_file_sets(
+            advanced=[{"filename": self.COORDINATION_PATH}],
+            own=[{"filename": "feature.txt"}, {"filename": self.COORDINATION_PATH}],
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_a_rename_out_of_the_configured_set_requests_the_update(self):
+        # Only the destination is configured, so the source is a path nobody
+        # declared inert -- both endpoints have to be matched.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_file_sets(
+            advanced=[
+                {
+                    "filename": self.COORDINATION_PATH,
+                    "previous_filename": "docs/old-status.md",
+                    "status": "renamed",
+                }
+            ]
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_a_rename_between_two_configured_paths_still_merges(self):
+        self._configure({self.COORDINATION_PATH, "docs/old-status.md"})
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(
+            advanced=[
+                {
+                    "filename": self.COORDINATION_PATH,
+                    "previous_filename": "docs/old-status.md",
+                    "status": "renamed",
+                }
+            ]
+        )
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertTrue(self._swapped())
+        self.assertEqual(report["reason"], "merged")
+
+    def test_an_unreadable_default_tip_requests_the_update(self):
+        self._script_pr_view(self._behind(), self._settled())
+        self.fake.script(
+            "gh",
+            ["api", "repos/acme/widgets/git/ref/heads/master"],
+            stderr="Not Found",
+            exit_code=1,
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+        self.assertEqual(self._comparison_calls(), [])
+
+    def test_a_truncated_comparison_requests_the_update(self):
+        # At GitHub's cap the file list cannot be proven complete, so a path
+        # outside the configured set may simply not be in it.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_compare(
+            self.head_sha,
+            self.TIP,
+            self._comparison(
+                [
+                    {"filename": self.COORDINATION_PATH}
+                    for _ in range(drain_prs.COMPARE_FILE_LIMIT)
+                ]
+            ),
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_an_unavailable_own_file_list_requests_the_update(self):
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_compare(
+            self.head_sha,
+            self.TIP,
+            self._comparison([{"filename": self.COORDINATION_PATH}]),
+        )
+        self._script_compare(
+            self.MERGE_BASE, self.head_sha, None, exit_code=1
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_a_malformed_comparison_requests_the_update(self):
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_compare(
+            self.head_sha,
+            self.TIP,
+            {"merge_base_commit": {"sha": self.MERGE_BASE}, "files": "everything"},
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_an_indeterminate_merge_base_requests_the_update(self):
+        # Two comparisons that disagree about the merge base describe two
+        # different histories; neither file set can be trusted against the
+        # other.
+        self._script_pr_view(self._behind(), self._settled())
+        self._script_tip(self.TIP)
+        self._script_compare(
+            self.head_sha,
+            self.TIP,
+            self._comparison([{"filename": self.COORDINATION_PATH}]),
+        )
+        self._script_compare(
+            self.MERGE_BASE,
+            self.head_sha,
+            self._comparison([{"filename": "feature.txt"}], merge_base="d" * 40),
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(report, state)
+
+    def test_a_head_that_moved_after_the_inspection_merges_nothing(self):
+        # The comparisons answered for one head; the gate re-read replaces the
+        # snapshot with another. Merging then would land a head whose own
+        # overlap with the base advance -- the whole point of the second
+        # comparison -- was never inspected.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(headRefOid="f" * 40),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertFalse(report["merged"])
+        self.assertIn(self.head_sha[:12], report["message"])
+        # A second tip read would mean the head pin came after the base pin;
+        # the cheaper, more specific check has to come first.
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.fake.calls("gh")
+                    if call["args"][:2]
+                    == ["api", "repos/acme/widgets/git/ref/heads/master"]
+                ]
+            ),
+            1,
+        )
+
+    def test_a_default_branch_that_moved_before_the_merge_requests_the_update(self):
+        # The delta that was inspected belongs to one tip; an advance that
+        # arrived since is one nothing has looked at.
+        self._script_pr_view(self._behind(), self._behind(), self._settled())
+        self._script_tip(self.TIP, self.MOVED_TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self._assert_requested_the_update(
+            report, state, fragment="superseded before the merge"
+        )
+
+    # -- the atomic base guard --------------------------------------------
+
+    def test_the_merge_is_built_on_the_inspected_tip_and_swapped_atomically(self):
+        # GitHub's pull-request merge takes an expected head and no expected
+        # base, so this path does not use it. The merge commit is built against
+        # the inspected tip on a staging reference, and an unforced reference
+        # update -- a compare-and-swap -- is what lands it.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "merged")
+        self.assertTrue(report["merged"])
+        self.assertNotIn("42", state["prs"])
+        # Nothing went through `gh pr merge`, which cannot express the base pin.
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+
+        staged = [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:3] == ["api", "-X", "POST"]
+            and call["args"][3] == "repos/acme/widgets/git/refs"
+        ]
+        self.assertEqual(len(staged), 1)
+        self.assertIn(f"ref=refs/heads/{self.STAGING_REF}", staged[0]["args"])
+        self.assertIn(f"sha={self.TIP}", staged[0]["args"])
+
+        built = [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:4] == ["api", "-X", "POST", "repos/acme/widgets/merges"]
+        ]
+        self.assertEqual(len(built), 1)
+        self.assertIn(f"base={self.STAGING_REF}", built[0]["args"])
+        self.assertIn(f"head={self.head_sha}", built[0]["args"])
+
+        # The swap really happened: the remote's default branch is now the
+        # drainer's own merge commit, reached from the inspected tip.
+        self.assertTrue(self._swapped())
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_default_branch_that_advanced_first_refuses_the_swap(self):
+        # The case the whole guard exists for: the tip read said one thing and
+        # the default branch moved before the swap. The lease refuses rather
+        # than absorbing an advance nothing inspected.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._settled(),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        self._script_update_branch()
+        advanced = self._advance_remote_default_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        # Untouched: the advance that beat the drainer is still what the
+        # default branch points at.
+        self.assertEqual(self._remote_default_branch(), advanced)
+        self._assert_requested_the_update(
+            report, state, fragment="no longer the inspected"
+        )
+        # Refused or not, the staging reference does not survive the attempt.
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_verdict_withdrawn_while_the_merge_is_staged_lands_nothing(self):
+        # Building the staging merge takes two round trips, and the swap writes
+        # the reference directly, so the gate re-check has to be on the
+        # response read immediately before it rather than the one that
+        # preceded the build.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(labels=[{"name": drain_prs.CHANGES_LABEL}]),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertIn("42", state["prs"])
+
+    def test_a_check_that_regresses_while_the_merge_is_staged_lands_nothing(self):
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(
+                statusCheckRollup=[
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                        "startedAt": "2026-07-18T00:00:05Z",
+                    },
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-07-18T00:00:01Z",
+                    },
+                ]
+            ),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "checks_pending")
+
+    def test_a_push_that_fails_after_the_update_landed_is_still_a_merge(self):
+        # A failed `git push` is not proof of a refused update: the server can
+        # accept the reference update and the client still fail. Standing in
+        # for that here by having the default branch already hold the merge
+        # commit, so the lease refuses while the branch does contain it --
+        # which is exactly what the drainer has to be able to tell apart.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        run_git(
+            ["update-ref", "refs/heads/master", self.MERGE_COMMIT], cwd=self.bare
+        )
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        # Reported as the merge it is, cleaned up, and never sent for a branch
+        # update it does not need.
+        self.assertEqual(report["reason"], "merged")
+        self.assertTrue(report["merged"])
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertNotIn("42", state["prs"])
+
+    def test_a_push_whose_outcome_cannot_be_established_claims_neither(self):
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        self._advance_remote_default_branch()
+
+        with mock.patch.object(
+            drain_prs, "default_branch_contains", return_value=None
+        ):
+            with self.assertRaises(drain_prs.DrainError) as raised:
+                self._run()
+
+        self.assertIn("without establishing whether it landed", str(raised.exception))
+        self.assertEqual(len(self._update_branch_calls()), 0)
+
+    def test_a_default_branch_rewound_behind_the_inspected_tip_refuses_the_swap(self):
+        # A lease, not a fast-forward test. The staged merge descends from the
+        # inspected tip, so it would fast-forward a default branch rewound to
+        # an ancestor of it -- restoring commits that rewind removed. The lease
+        # names the exact commit instead, so it refuses.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._behind(),
+            self._settled(),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        self._script_update_branch()
+        rewound = self.ANCESTOR
+        run_git(["update-ref", "refs/heads/master", rewound], cwd=self.bare)
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(self._remote_default_branch(), rewound)
+        self._assert_requested_the_update(
+            report, state, fragment="no longer the inspected"
+        )
+
+    def test_a_merge_commit_joining_other_commits_is_never_swapped_in(self):
+        # The commit that lands has to be the join of the two commits the
+        # authorization was computed from, and nothing else.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(
+            parents=[{"sha": self.MOVED_TIP}, {"sha": self.head_sha}]
+        )
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self._assert_requested_the_update(report, state)
+
+    def test_a_merge_commit_github_will_not_build_requests_the_update(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self._assert_requested_the_update(report, state)
+
+    def test_a_staging_reference_that_cannot_be_created_requests_the_update(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), self._settled()
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_staging_ref(created=False)
+        self._script_update_branch()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self._assert_requested_the_update(report, state)
+
+    def test_a_head_that_moved_before_the_swap_merges_nothing(self):
+        # The commit about to land is already fixed, so a head that moved
+        # cannot change what merges -- but the pull request it belongs to
+        # would not be finished by it, so nothing is swapped in at all.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(headRefOid="f" * 40),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_closed_before_the_swap_lands_nothing(self):
+        # Approval and checks were re-read before the staging merge was built;
+        # the pull request can still be closed while it is being built. Nothing
+        # may reach the default branch for a pull request that is not open.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(state="CLOSED")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("CLOSED", str(raised.exception))
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        # Staged and cleaned up, but never swapped in.
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_retargeted_before_the_swap_lands_nothing(self):
+        # Writing the reference directly means the pull-request merge endpoint
+        # is not there to refuse this: a pull request retargeted away from the
+        # default branch must not be fast-forwarded into it anyway.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(baseRefName="release-1.x")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("release-1.x", str(raised.exception))
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
+
+    def test_a_pull_request_made_a_draft_before_the_swap_lands_nothing(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(isDraft=True)
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            self._run()
+
+        self.assertIn("draft", str(raised.exception))
+        self.assertFalse(self._swapped())
+
+    def test_a_pull_request_github_closed_without_merging_is_a_fatal_incident(self):
+        # The swap landed the commit, but GitHub recorded the pull request as
+        # closed rather than merged. Nothing may report a merge, or run a
+        # merge's cleanup, on the strength of "no longer open".
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "CLOSED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run()
+
+        message = str(raised.exception)
+        self.assertIn("CLOSED", message)
+        self.assertIn("MERGED", message)
+        self.assertTrue(self._swapped())
+
+    def test_a_refusal_over_a_head_that_moved_defers_for_rereview(self):
+        # A refusal is only a reason to request the branch update once the
+        # pull request is confirmed to still be at the head it was refused
+        # for; a head that moved needs a fresh review instead.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(headRefOid="f" * 40)
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertFalse(self._swapped())
+
+    def test_a_refusal_over_a_pull_request_no_longer_open_fails_closed(self):
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(state="MERGED")
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(build_exit=1)
+
+        with self.assertRaises(drain_prs.DrainError):
+            self._run()
+
+        # Neither outcome may be claimed for a pull request this run can no
+        # longer account for.
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertFalse(self._swapped())
+
+    def test_a_pull_request_github_never_records_as_merged_is_a_fatal_incident(self):
+        # The swap landed, so the merge is durable and reported. A pull request
+        # that should have closed and did not is still not left to the next
+        # pass to guess at.
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        with mock.patch.object(drain_prs, "MERGED_STATE_WAIT_SECONDS", 0):
+            with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+                self._run()
+
+        self.assertIn("still open", str(raised.exception))
+        self.assertTrue(self._swapped())
+
+    def test_an_ordinary_merge_never_stages_anything(self):
+        # No exception was taken, so the pull request was never behind. The
+        # ordinary path keeps using `gh pr merge` exactly as it always has.
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "merged")
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertFalse(self._swapped())
+        self.assertEqual(self._staging_ref_deletions(), [])
 
 
 class MarkerLookupPaginationTests(ProcessPrFixture):

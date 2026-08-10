@@ -1484,6 +1484,14 @@ Configurable repository semantics include:
 - Blocked labels, default including `blocked`.
 - Tracker labels, default including `epic`.
 - Problem-styled and UI-styled label-chip names, both default empty.
+- Coordination paths, default empty. Exact, case-sensitive, repository-relative
+  paths — no globs, directory prefixes, or extension matching, and a rename
+  counts both of its endpoints — whose content coordinates the pipeline rather
+  than building it. The PR drainer reads them, and only to decide whether a
+  default-branch advance that touches nothing else has to be merged into a
+  candidate before that candidate's own gates are evaluated
+  (`docs/pr-drainer.md`). Nothing in the dashboard reads them, and the empty
+  default leaves every repository behaving as it did before the key existed.
 - Additional tracker-section headings.
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.

@@ -133,7 +133,8 @@ data WorkflowOverride = WorkflowOverride
     overrideApprovalMode :: Maybe ApprovalMode,
     overrideBlockingSeverity :: Maybe BlockingSeverity,
     overrideProblemStyleLabels :: Maybe (Set Text),
-    overrideUiStyleLabels :: Maybe (Set Text)
+    overrideUiStyleLabels :: Maybe (Set Text),
+    overrideCoordinationPaths :: Maybe (Set Text)
   }
   deriving stock (Eq, Show)
 
@@ -148,7 +149,8 @@ emptyWorkflowOverride =
       overrideApprovalMode = Nothing,
       overrideBlockingSeverity = Nothing,
       overrideProblemStyleLabels = Nothing,
-      overrideUiStyleLabels = Nothing
+      overrideUiStyleLabels = Nothing,
+      overrideCoordinationPaths = Nothing
     }
 
 data LimitsOverride = LimitsOverride
@@ -283,7 +285,8 @@ applyWorkflowOverride base override =
       approvalMode = fromMaybe base.approvalMode override.overrideApprovalMode,
       blockingSeverity = fromMaybe base.blockingSeverity override.overrideBlockingSeverity,
       problemStyleLabels = fromMaybe base.problemStyleLabels override.overrideProblemStyleLabels,
-      uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels
+      uiStyleLabels = fromMaybe base.uiStyleLabels override.overrideUiStyleLabels,
+      coordinationPaths = fromMaybe base.coordinationPaths override.overrideCoordinationPaths
     }
 
 applyLimitsOverride :: LimitsConfig -> LimitsOverride -> LimitsConfig
@@ -419,6 +422,7 @@ workflowOverrideParser = do
   blockingSeverityValue <- optKeyOf "blocking_severity" parseBlockingSeverity
   problemStyleLabelsValue <- optKeyOf "problem_style_labels" parseLabelSet
   uiStyleLabelsValue <- optKeyOf "ui_style_labels" parseLabelSet
+  coordinationPathsValue <- optKeyOf "coordination_paths" parseNonEmptyTextSet
   pure
     WorkflowOverride
       { overrideApprovalLabel = approvalLabelValue,
@@ -429,7 +433,8 @@ workflowOverrideParser = do
         overrideApprovalMode = approvalModeValue,
         overrideBlockingSeverity = blockingSeverityValue,
         overrideProblemStyleLabels = problemStyleLabelsValue,
-        overrideUiStyleLabels = uiStyleLabelsValue
+        overrideUiStyleLabels = uiStyleLabelsValue,
+        overrideCoordinationPaths = coordinationPathsValue
       }
 
 limitsOverrideParser :: ParseTable Position LimitsOverride
@@ -539,8 +544,13 @@ parseNonEmptyText value = do
 parseNonEmptyTextList :: Value' l -> Matcher l [Text]
 parseNonEmptyTextList = listOf (\_ value -> parseNonEmptyText value)
 
+parseNonEmptyTextSet :: Value' l -> Matcher l (Set Text)
+parseNonEmptyTextSet value = Set.fromList <$> parseNonEmptyTextList value
+
+-- | Labels validate exactly as any other set of non-empty strings does; the
+-- separate name is only so a label key reads as one at its use site.
 parseLabelSet :: Value' l -> Matcher l (Set Text)
-parseLabelSet value = Set.fromList <$> parseNonEmptyTextList value
+parseLabelSet = parseNonEmptyTextSet
 
 parseApprovalMode :: Value' l -> Matcher l ApprovalMode
 parseApprovalMode value = do

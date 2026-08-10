@@ -35,6 +35,7 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.workflow.blocking_severity, "red")
         self.assertEqual(raw.workflow.problem_style_labels, frozenset())
         self.assertEqual(raw.workflow.ui_style_labels, frozenset())
+        self.assertEqual(raw.workflow.coordination_paths, frozenset())
         self.assertEqual(raw.limits.max_open_issues, 250)
         self.assertEqual(raw.limits.max_open_pull_requests, 100)
         self.assertEqual(raw.limits.excerpt_lines, 3)
@@ -73,6 +74,7 @@ approval_mode = "either"
 blocking_severity = "amber"
 problem_style_labels = ["defect"]
 ui_style_labels = ["interface", "input"]
+coordination_paths = ["docs/status.md", "ROADMAP.md"]
 
 [limits]
 max_open_issues = 10
@@ -94,6 +96,7 @@ command = ["/usr/local/bin/my-claude-usage"]
 approval_label = "acme:go"
 blocked_labels = ["only-this"]
 ui_style_labels = ["widget-ui"]
+coordination_paths = ["docs/widgets.md"]
 
 [repositories."acme/widgets".limits]
 max_open_issues = 999
@@ -125,6 +128,12 @@ class FullFixtureTests(unittest.TestCase):
         self.assertEqual(raw.workflow.problem_style_labels, frozenset({"defect"}))
         self.assertEqual(
             raw.workflow.ui_style_labels, frozenset({"interface", "input"})
+        )
+        # Read by drain_prs.py alone, and carried on the Haskell side only so
+        # the shared schema stays one schema.
+        self.assertEqual(
+            raw.workflow.coordination_paths,
+            frozenset({"docs/status.md", "ROADMAP.md"}),
         )
         self.assertEqual(raw.limits.max_open_issues, 10)
         self.assertEqual(raw.limits.max_open_pull_requests, 5)
@@ -168,6 +177,20 @@ class MergeAndSelectionTests(unittest.TestCase):
         # one inherits it, exactly like every other workflow collection.
         self.assertEqual(resolved.workflow.ui_style_labels, frozenset({"widget-ui"}))
         self.assertEqual(resolved.workflow.problem_style_labels, frozenset({"defect"}))
+
+    def test_coordination_paths_inherit_globally_and_are_replaced_per_repository(self):
+        raw = self._raw()
+        # A repository the fixture does not name inherits the global array
+        # whole; the one that names its own replaces it rather than extending
+        # it, exactly like every other workflow collection.
+        self.assertEqual(
+            kc.resolve_config("other/repo", raw).workflow.coordination_paths,
+            frozenset({"docs/status.md", "ROADMAP.md"}),
+        )
+        self.assertEqual(
+            kc.resolve_config("acme/widgets", raw).workflow.coordination_paths,
+            frozenset({"docs/widgets.md"}),
+        )
 
     def test_selection_normalizes_the_resolved_identity_to_lowercase(self):
         raw = self._raw()
@@ -266,6 +289,15 @@ class SemanticValidationErrorTests(unittest.TestCase):
         self._expect_error(
             '[workflow]\napproval_mode = "sometimes"\n', "workflow.approval_mode"
         )
+
+    def test_invalid_coordination_paths_raise(self):
+        for text in (
+            '[workflow]\ncoordination_paths = [""]\n',
+            '[workflow]\ncoordination_paths = "docs/status.md"\n',
+            "[workflow]\ncoordination_paths = [1]\n",
+        ):
+            with self.subTest(text=text):
+                self._expect_error(text, "workflow.coordination_paths")
 
     def test_bad_blocking_severity_raises(self):
         self._expect_error(

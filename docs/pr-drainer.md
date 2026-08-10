@@ -444,6 +444,139 @@ A candidate's turn ends in one of three ways.
 `--once` is exactly one such pass: it skips the blocked candidates, stops at
 the first advance or barrier, and exits.
 
+### Merging past a coordination-only base advance
+
+A branch update is how a candidate that is behind the default branch normally
+advances, and it costs a full rebuild of a pull request the new base commit
+could not have broken. The drainer skips that update for exactly one shape of
+advance, and only when the repository has said which paths that shape is made
+of, in `workflow.coordination_paths` (`config.toml.example`):
+
+```toml
+[workflow]
+coordination_paths = ["docs/status.md", "ROADMAP.md"]
+```
+
+Each entry is one exact, case-sensitive, repository-relative path. Globs,
+directory prefixes, and extension matching are not implied, and a rename counts
+both its source and its destination, so every path you mean has to be listed.
+The key defaults to empty; a repository that sets nothing requests a branch
+update for every advance, exactly as the drainer always has. Never list a
+document a test parses — in this repository `docs/agent-workflow-contract.md`
+and `docs/drafting-workflow-contract.md` are parsed by
+`tools/test_agent_workflow_contract.py` and
+`tools/test_drafting_workflow_contract.py`, so a change to either really can
+fail `build-test`, and that is a rebuild worth paying for.
+
+The drainer merges past an advance only when all of this holds:
+
+- The candidate's `mergeStateStatus` is `BEHIND`.
+- `coordination_paths` is non-empty.
+- Every file the default branch gained between this pull request's merge base
+  and the current default-branch tip is one of those exact paths.
+- None of those files is a file the pull request itself changes.
+- Both file sets were established completely, pinned to the pull request head,
+  merge base, and default-tip object IDs, and both comparisons agreed on the
+  merge base.
+- The pull request still points at the same head those comparisons were
+  computed from, and the default branch still points at that same inspected
+  tip. The exception is authorized for that one pair of commits and no other,
+  and the merge below is built and landed so that no other pair can result.
+
+Reaching that point grants the candidate nothing. It merges only if the
+required CI check and the required review gate pass exactly as they must for
+any other pull request, re-checked immediately before the merge as always.
+
+Everything else requests the branch update as before: a file outside the
+configured set, an overlap with the pull request's own files, an unset or empty
+set, a comparison GitHub truncated or answered malformed, an unreadable tip, an
+indeterminate merge base, a default branch that moved before or during the
+merge, and any other failure to establish either file set. Uncertainty requests
+the update.
+
+A pull request whose own head moves after its advance was inspected is the one
+case that neither merges nor updates. Its second comparison — what the pull
+request itself changes, and so whether it overlaps the advance — answered for a
+head that is no longer there, so this pass does nothing with it and the next
+one inspects the head that is.
+
+#### How the exceptional merge lands
+
+GitHub's pull-request merge takes an expected *head* — that is
+`--match-head-commit` — and no expected base, so it cannot say "land on this
+tip and no other". That is the precondition this whole exception rests on, so
+the exceptional merge does not use it. It lands in three steps instead:
+
+1. A staging reference, `kanban-drainer/merge-<pr>`, is created at the
+   inspected tip.
+2. `POST /merges` builds the merge commit on that reference from the inspected
+   head, off to one side where the default branch cannot see it. The drainer
+   proceeds only once the commit's two parents are confirmed to be exactly the
+   inspected tip and the inspected head.
+3. The commit is fetched and pushed to the default branch under a **lease**:
+   `git push --force-with-lease=refs/heads/<default>:<inspected tip>`. The Git
+   server performs the update only if that reference is still exactly the
+   inspected tip, so this is a compare-and-swap on one named commit.
+
+   A lease rather than a fast-forward test, deliberately. `force=false` on the
+   reference-update API asks only that the new commit descend from wherever the
+   reference happens to point — which a default branch *rewound* to an ancestor
+   of the inspected tip also satisfies, so the swap would restore commits that
+   rewind removed. The lease names the commit instead, and it is checked by the
+   Git server, so it holds however the reference came to move and whoever is
+   entitled to bypass the branch's protection. The update it admits is still an
+   ordinary fast-forward — the merge commit's first parent is the inspected tip
+   — so nothing is rewritten and no history is dropped.
+
+   A failed push is not read as a refused update. The server can accept the
+   reference update and the client still fail, so the branch itself settles it:
+   a default branch that contains the merge commit merged, one that does not
+   was refused, and one that cannot be asked leaves the pass claiming neither a
+   merge nor a branch update.
+
+The staging reference is deleted as soon as the attempt ends, and never before
+the swap — until then it is the only thing keeping the merge commit reachable.
+
+Every refusal along the way — a conflict, a merge commit joining the wrong
+commits, a reference that could not be created, a default branch that moved at
+all, and a push a repository declines for any other reason — requests the
+ordinary branch update, but only once the pull request is
+re-read and confirmed still open at the head the refusal was for. A head that
+moved during the refusal needs a fresh review instead, and a pull request that
+is no longer open, or cannot be read, ends the pass without claiming either a
+merge or a branch update. A repository whose branch protection declines the
+push therefore never takes this path at all: it degrades to exactly the branch
+update the drainer has always performed.
+
+The commits that reach the default branch are the reviewed ones either way: the
+head is named as an explicit object rather than as a branch, so a push that
+lands mid-merge cannot change what merges. Writing the reference directly also
+means the pull-request merge endpoint is not there to enforce its own
+preconditions, so the pull request is re-read immediately before the swap and
+must still be open, not a draft, and still targeting the branch about to be
+advanced — one closed, converted, or retargeted while its merge was being built
+lands nothing. The approval labels and both required checks are re-checked on
+that same response, so a verdict withdrawn or a check that regressed while the
+merge was being staged defers it exactly as it would on the ordinary path.
+Afterwards, only
+GitHub recording the pull request as `MERGED` ends the attempt: a pull request
+left open, or closed without being merged, is a fatal `PostMergeAuditError`
+rather than something reported as a merge or handed to a merge's cleanup.
+
+The ordinary merge path is untouched: a pull request that was never behind is
+still merged with `gh pr merge --admin --match-head-commit`.
+
+If the merge is attempted and GitHub refuses it while the pull request is still
+open at the head just attempted, the pass requests the branch update instead
+and reports the refusal alongside it. The candidate is never reported as merged
+and never left stranded. A head that moved during the merge still defers for a
+fresh review, as it does on the ordinary path, and a refusal against a pull
+request that cannot be read, or is no longer open, fails the pass rather than
+claiming either outcome.
+
+Either way this is one advance and one pass: the merge completes and releases
+the active lane, or the branch update is requested and holds it.
+
 ### The active candidate
 
 A candidate that reaches a barrier or takes an advance owns the queue's *active

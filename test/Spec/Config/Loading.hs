@@ -62,7 +62,8 @@ spec = do
             approvalMode = ApprovalByEither,
             blockingSeverity = SeverityAmber,
             problemStyleLabels = Set.fromList ["defect"],
-            uiStyleLabels = Set.fromList ["interface", "input"]
+            uiStyleLabels = Set.fromList ["interface", "input"],
+            coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"]
           }
       config.rawLimits `shouldBe` LimitsConfig 500 200 5
       config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
@@ -168,6 +169,35 @@ spec = do
       -- replaces it in full rather than extending it.
       resolved.resolvedWorkflow.problemStyleLabels `shouldBe` Set.fromList ["defect"]
       resolved.resolvedWorkflow.uiStyleLabels `shouldBe` Set.fromList ["widget-ui"]
+
+    it "defaults the drainer's coordination paths to empty, so an absent key merges past nothing" $ do
+      let (config, warnings) = unsafeConfig (decodeConfigText "[workflow]\napproval_label = \"lgtm\"\n")
+          resolved = resolveConfig "acme/widgets" config
+      warnings `shouldBe` []
+      defaultWorkflowConfig.coordinationPaths `shouldBe` Set.empty
+      resolved.resolvedWorkflow.coordinationPaths `shouldBe` Set.empty
+
+    it "inherits a global coordination-path array and lets a repository replace it in full" $ do
+      let toml =
+            "[workflow]\n"
+              <> "coordination_paths = [\"docs/status.md\", \"ROADMAP.md\"]\n"
+              <> "[repositories.\"acme/widgets\".workflow]\n"
+              <> "coordination_paths = [\"docs/widgets.md\"]\n"
+          (config, _) = unsafeConfig (decodeConfigText toml)
+      -- The repository that names none inherits the global array; the one that
+      -- names its own replaces it rather than extending it.
+      (resolveConfig "other/repo" config).resolvedWorkflow.coordinationPaths
+        `shouldBe` Set.fromList ["docs/status.md", "ROADMAP.md"]
+      (resolveConfig "acme/widgets" config).resolvedWorkflow.coordinationPaths
+        `shouldBe` Set.fromList ["docs/widgets.md"]
+
+    it "rejects an invalid coordination-path value the way every other string array is rejected" $ do
+      decodeConfigText "[workflow]\ncoordination_paths = [\"\"]\n"
+        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
+      decodeConfigText "[workflow]\ncoordination_paths = \"docs/status.md\"\n"
+        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
+      decodeConfigText "[workflow]\ncoordination_paths = [1]\n"
+        `shouldSatisfy` errorContains ["workflow", "coordination_paths"]
 
     it "rejects an empty label-styling entry the same way every other label list does" $ do
       decodeConfigText "[workflow]\nproblem_style_labels = [\"\"]\n"
