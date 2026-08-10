@@ -528,6 +528,12 @@ the exceptional merge does not use it. It lands in three steps instead:
    ordinary fast-forward — the merge commit's first parent is the inspected tip
    — so nothing is rewritten and no history is dropped.
 
+   A failed push is not read as a refused update. The server can accept the
+   reference update and the client still fail, so the branch itself settles it:
+   a default branch that contains the merge commit merged, one that does not
+   was refused, and one that cannot be asked leaves the pass claiming neither a
+   merge nor a branch update.
+
 The staging reference is deleted as soon as the attempt ends, and never before
 the swap — until then it is the only thing keeping the merge commit reachable.
 

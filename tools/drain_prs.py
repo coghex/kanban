@@ -150,6 +150,14 @@ MERGE_DONE = "merge_done"
 MERGE_HEAD_CHANGED = "merge_head_changed"
 MERGE_REJECTED = "merge_rejected"
 
+# What one attempted default-branch swap did. A failed `git push` is not proof
+# of a refused update -- the server can accept it and the client still fail --
+# so the third answer is the one that matters: this run does not know, and may
+# claim neither a merge nor a branch update.
+SWAP_LANDED = "swap_landed"
+SWAP_REFUSED = "swap_refused"
+SWAP_UNKNOWN = "swap_unknown"
+
 # What one candidate's turn did to the polling pass around it. The queue
 # advances one candidate at a time in ascending pull-request order, so every
 # turn has to say whether the pass may keep walking the queue.
@@ -1474,12 +1482,47 @@ def build_base_advance_merge(
     return commit
 
 
+def default_branch_contains(ctx: RepoContext, commit: str) -> bool | None:
+    """Whether the remote's default branch contains a commit, or None if that
+    cannot be established.
+
+    Asked of the branch itself rather than of a push's exit code, because that
+    is the only thing that settles whether an update landed. Containment rather
+    than equality: a branch that took the commit and then advanced past it
+    still took it.
+    """
+    fetched = run(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            ctx.remote_name,
+            f"refs/heads/{ctx.default_branch}",
+        ],
+        cwd=ctx.path,
+        check=False,
+    )
+    if fetched.returncode != 0:
+        return None
+    proc = run(
+        ["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"],
+        cwd=ctx.path,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    # Any other status is git failing to answer, not answering "no".
+    return None
+
+
 def swap_default_branch_to(
     ctx: RepoContext,
     ref: str,
     merge_commit: str,
     approval: BaseAdvanceApproval,
-) -> bool:
+) -> str:
     """Advance the default branch to a commit, or refuse -- atomically, and on
     the exact commit the merge was authorized against.
 
@@ -1506,9 +1549,10 @@ def swap_default_branch_to(
         check=False,
     )
     if fetched.returncode != 0:
+        # Nothing has been pushed, so nothing can have landed.
         detail = (fetched.stderr or fetched.stdout or "").strip()
         log(f"Could not fetch the staged merge commit {merge_commit[:12]}: {detail}")
-        return False
+        return SWAP_REFUSED
     pushed = run(
         [
             "git",
@@ -1521,13 +1565,29 @@ def swap_default_branch_to(
         check=False,
     )
     if pushed.returncode == 0:
-        return True
+        return SWAP_LANDED
+    # A failed push is not proof of a refused update. The server can accept the
+    # reference update and the client still fail -- reading the report, closing
+    # the connection -- so the only thing that settles it is the branch itself.
     detail = (pushed.stderr or pushed.stdout or "").strip()
+    landed = default_branch_contains(ctx, merge_commit)
+    if landed is None:
+        log(
+            f"The push of {merge_commit[:12]} to {ctx.default_branch} failed and "
+            f"whether it landed could not be established: {detail}"
+        )
+        return SWAP_UNKNOWN
+    if landed:
+        log(
+            f"The push of {merge_commit[:12]} reported a failure after "
+            f"{ctx.default_branch} had already taken it: {detail}"
+        )
+        return SWAP_LANDED
     log(
         f"{ctx.default_branch} would not advance from {approval.tip[:12]} to "
         f"{merge_commit[:12]}: {detail}"
     )
-    return False
+    return SWAP_REFUSED
 
 
 def confirm_pull_request_merged(
@@ -1655,7 +1715,15 @@ def merge_past_base_advance(
                 f"{current['headRefOid'][:12]} before the swap; deferring for rereview"
             )
             return MERGE_HEAD_CHANGED, None
-        if not swap_default_branch_to(ctx, ref, merge_commit, approval):
+        swap = swap_default_branch_to(ctx, ref, merge_commit, approval)
+        if swap == SWAP_UNKNOWN:
+            raise DrainError(
+                f"PR #{number}: pushing {merge_commit[:12]} to "
+                f"{ctx.default_branch} failed without establishing whether it "
+                "landed, so neither a merge nor a branch update can be claimed "
+                "for it"
+            )
+        if swap == SWAP_REFUSED:
             return (
                 MERGE_REJECTED,
                 f"{ctx.default_branch} was no longer the inspected "

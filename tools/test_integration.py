@@ -1081,6 +1081,48 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         # Refused or not, the staging reference does not survive the attempt.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
 
+    def test_a_push_that_fails_after_the_update_landed_is_still_a_merge(self):
+        # A failed `git push` is not proof of a refused update: the server can
+        # accept the reference update and the client still fail. Standing in
+        # for that here by having the default branch already hold the merge
+        # commit, so the lease refuses while the branch does contain it --
+        # which is exactly what the drainer has to be able to tell apart.
+        self._script_pr_view(
+            self._behind(), self._behind(), self._behind(), {"state": "MERGED"}
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        run_git(
+            ["update-ref", "refs/heads/master", self.MERGE_COMMIT], cwd=self.bare
+        )
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        # Reported as the merge it is, cleaned up, and never sent for a branch
+        # update it does not need.
+        self.assertEqual(report["reason"], "merged")
+        self.assertTrue(report["merged"])
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertNotIn("42", state["prs"])
+
+    def test_a_push_whose_outcome_cannot_be_established_claims_neither(self):
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        self._advance_remote_default_branch()
+
+        with mock.patch.object(
+            drain_prs, "default_branch_contains", return_value=None
+        ):
+            with self.assertRaises(drain_prs.DrainError) as raised:
+                self._run()
+
+        self.assertIn("without establishing whether it landed", str(raised.exception))
+        self.assertEqual(len(self._update_branch_calls()), 0)
+
     def test_a_default_branch_rewound_behind_the_inspected_tip_refuses_the_swap(self):
         # A lease, not a fast-forward test. The staged merge descends from the
         # inspected tip, so it would fast-forward a default branch rewound to
