@@ -1276,7 +1276,23 @@ def describe_paths(paths: list[str], limit: int = 5) -> str:
     return shown if remaining <= 0 else f"{shown} and {remaining} more"
 
 
-def coordination_only_base_advance(ctx: RepoContext, pr: dict[str, Any]) -> str | None:
+@dataclass(frozen=True)
+class BaseAdvanceApproval:
+    """The one pair of commits an exceptional merge is authorized for.
+
+    `own_paths` travels with them because the post-merge audit has to be able
+    to re-decide the very same question the authorization answered, against
+    whatever base the merge actually landed on.
+    """
+
+    head: str
+    tip: str
+    own_paths: frozenset[str]
+
+
+def coordination_only_base_advance(
+    ctx: RepoContext, pr: dict[str, Any]
+) -> BaseAdvanceApproval | None:
     """The default-branch tip a behind candidate may be merged against anyway.
 
     None -- request the ordinary branch update -- unless every file the default
@@ -1349,7 +1365,96 @@ def coordination_only_base_advance(ctx: RepoContext, pr: dict[str, Any]) -> str 
         f"coordination paths only ({describe_paths(sorted(advanced_paths))}); "
         "evaluating its gates without a branch update"
     )
-    return tip
+    return BaseAdvanceApproval(head=head_sha, tip=tip, own_paths=own_paths)
+
+
+def audit_merged_base(
+    ctx: RepoContext, number: int, approval: BaseAdvanceApproval
+) -> None:
+    """Prove the merge that just landed carried no uninspected base advance.
+
+    The pre-merge tip read narrows the read-to-merge gap; it cannot close it,
+    because GitHub's pull-request merge accepts an expected head and no
+    expected base. So this samples the merge commit GitHub actually created:
+    its first parent is the default-branch commit the merge landed on. That
+    parent being the inspected tip ends the question.
+
+    A base that moved inside the gap is re-decided under the very rule the
+    merge was authorized by -- an advance still confined to configured
+    coordination paths, and still clear of this pull request's own files, was
+    safe after all. Anything else, and anything this cannot establish, is a
+    fatal incident, exactly as a slipped-through label or check mutation is
+    (see 'audit_merged_pr'). The residual race is therefore not eliminated,
+    only bounded: what it can never be is a silent merge.
+    """
+    def fail(detail: str) -> None:
+        raise PostMergeAuditError(
+            f"PR #{number}: post-merge audit could not confirm the merge landed "
+            f"on the inspected {ctx.default_branch} tip {approval.tip} ({detail})"
+        )
+
+    try:
+        pull = run_json(
+            ["gh", "api", f"repos/{ctx.repo_slug}/pulls/{number}"], cwd=ctx.path
+        )
+    except DrainError as exc:
+        fail(f"the merged pull request could not be read: {exc}")
+    if not isinstance(pull, dict):
+        fail("the merged pull request response was malformed")
+    merge_commit = pull.get("merge_commit_sha")
+    if not isinstance(merge_commit, str) or not OBJECT_ID_RE.fullmatch(merge_commit):
+        fail(f"it names no merge commit ({merge_commit!r})")
+
+    try:
+        commit = run_json(
+            ["gh", "api", f"repos/{ctx.repo_slug}/commits/{merge_commit}"],
+            cwd=ctx.path,
+        )
+    except DrainError as exc:
+        fail(f"merge commit {merge_commit[:12]} could not be read: {exc}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(parents, list) or not parents:
+        fail(f"merge commit {merge_commit[:12]} reported no parents")
+    landed_on = object_id_of(parents[0])
+    if landed_on is None:
+        fail(f"merge commit {merge_commit[:12]} named no first parent")
+    if landed_on == approval.tip:
+        return
+
+    # The base moved between the pre-merge read and the merge. Re-decide it.
+    log(
+        f"PR #{number}: merged onto {landed_on[:12]} rather than the inspected "
+        f"{approval.tip[:12]}; re-deciding the advance it carried"
+    )
+    slipped = compared_paths(ctx, approval.tip, landed_on)
+    if slipped is None:
+        fail(
+            f"it landed on {landed_on} instead, and what that added could not "
+            "be established"
+        )
+    slipped_base, slipped_paths = slipped
+    if slipped_base != approval.tip:
+        fail(
+            f"it landed on {landed_on}, which does not descend from the "
+            f"inspected tip (their merge base is {slipped_base})"
+        )
+    outside = sorted(slipped_paths - COORDINATION_PATHS)
+    if outside:
+        fail(
+            f"it landed on {landed_on}, which added {describe_paths(outside)} "
+            "outside the configured coordination paths"
+        )
+    overlap = sorted(slipped_paths & approval.own_paths)
+    if overlap:
+        fail(
+            f"it landed on {landed_on}, which changed {describe_paths(overlap)}, "
+            "files this pull request also changes"
+        )
+    log(
+        f"PR #{number}: the advance it landed on added only "
+        f"{describe_paths(sorted(slipped_paths))}, so the merge was within its "
+        "authorization after all"
+    )
 
 
 def audit_merged_pr(
@@ -1424,18 +1529,20 @@ def merge_pr(
     dry_run: bool,
     gates: GateConfig,
     report: dict[str, Any] | None = None,
-    allow_rejection: bool = False,
+    base_advance: BaseAdvanceApproval | None = None,
 ) -> tuple[str, str | None]:
     """Attempt the admin merge, and say which of three things happened.
 
     `MERGE_DONE` and `MERGE_HEAD_CHANGED` are the two outcomes this has always
-    had. `allow_rejection` adds a third for the caller that has a fallback: a
-    refusal *confirmed* against a pull request still open at the head just
-    attempted comes back as `MERGE_REJECTED` with GitHub's own detail, so that
-    caller can request the branch update it skipped instead. Every other
-    refusal still raises, because an unreadable, closed, or already-merged
-    pull request is a refusal whose effect this run could not establish, and
-    nothing may claim either a merge or a branch update on top of it.
+    had. `base_advance` -- present only for a merge past a coordination-only
+    advance -- adds a third: a refusal *confirmed* against a pull request still
+    open at the head just attempted comes back as `MERGE_REJECTED` with
+    GitHub's own detail, so that caller can request the branch update it
+    skipped instead. Every other refusal still raises, because an unreadable,
+    closed, or already-merged pull request is a refusal whose effect this run
+    could not establish, and nothing may claim either a merge or a branch
+    update on top of it. A merge that succeeds under `base_advance` is audited
+    against the base it actually landed on.
     """
     number = pr["number"]
     head_sha = pr["headRefOid"]
@@ -1469,6 +1576,8 @@ def merge_pr(
             merged=True,
         )
         audit_merged_pr(ctx, number, head_sha, gates)
+        if base_advance is not None:
+            audit_merged_base(ctx, number, base_advance)
         return MERGE_DONE, None
 
     # A read that fails raises, which is the fail-closed answer: a refusal this
@@ -1482,7 +1591,7 @@ def merge_pr(
         return MERGE_HEAD_CHANGED, None
 
     detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
-    if allow_rejection and refreshed.get("state") == "OPEN":
+    if base_advance is not None and refreshed.get("state") == "OPEN":
         log(f"PR #{number}: GitHub refused the merge of {head_sha[:12]}: {detail}")
         return MERGE_REJECTED, detail
     raise DrainError(f"Failed to merge PR #{number}: {detail}")
@@ -3240,15 +3349,13 @@ def process_pr(
     # commits -- this tip and the head whose own files were compared against it
     # -- so both travel to the merge below, which refuses to land against any
     # other pair.
-    approved_base_tip: str | None = None
-    inspected_head: str | None = None
+    base_advance: BaseAdvanceApproval | None = None
     if merge_state == "BEHIND":
-        approved_base_tip = coordination_only_base_advance(ctx, pr)
-        if approved_base_tip is None:
+        base_advance = coordination_only_base_advance(ctx, pr)
+        if base_advance is None:
             return request_base_update(
                 ctx, pr, state=state, dry_run=dry_run, report=report
             )
-        inspected_head = pr["headRefOid"]
 
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
@@ -3358,39 +3465,40 @@ def process_pr(
         )
         return True
 
-    if approved_base_tip is not None:
+    if base_advance is not None:
         # Eligibility was decided from the files *that* head changes, so a head
         # that moved since is one whose own overlap with the base advance has
         # never been inspected -- and the re-read above has already replaced
         # `pr` with it. Nothing is merged and nothing is updated for it: the
         # next pass reads it fresh and decides the whole question again,
         # recomputing the exception for whatever head is actually there.
-        if pr["headRefOid"] != inspected_head:
+        if pr["headRefOid"] != base_advance.head:
             log(
-                f"PR #{number}: head changed from {inspected_head[:12]} to "
+                f"PR #{number}: head changed from {base_advance.head[:12]} to "
                 f"{pr['headRefOid'][:12]} after its base advance was inspected; "
                 "deferring"
             )
             set_outcome(
                 report,
                 "approved_head_changed",
-                f"PR #{number}: its head moved away from {inspected_head[:12]}, "
+                f"PR #{number}: its head moved away from {base_advance.head[:12]}, "
                 "the commit whose coordination-only base advance was inspected, "
                 "before the merge. The next pass inspects the new head.",
             )
             return True
-        # The tip whose path delta was inspected is the only one this merge may
-        # land against: an advance that arrived since is one nothing has looked
-        # at. `--match-head-commit` below pins the pull request's own head, and
-        # GitHub's merge accepts no expected base, so this read is what pins the
-        # other side -- narrowing the same read-to-merge gap the ordinary path
-        # documents above rather than closing it, which is why a refusal below
-        # falls back to the branch update too.
+        # The tip whose path delta was inspected is the only one this merge is
+        # authorized to land against. `--match-head-commit` below pins the pull
+        # request's own head, and GitHub's merge accepts no expected base, so
+        # this read is what pins the other side -- narrowing the same
+        # read-to-merge gap the ordinary path documents above rather than
+        # closing it. What closes it is 'audit_merged_base' afterwards, which
+        # re-decides the base the merge actually landed on and makes anything
+        # unauthorized a fatal incident instead of a silent merge.
         current_tip = default_branch_tip(ctx)
-        if current_tip != approved_base_tip:
+        if current_tip != base_advance.tip:
             log(
                 f"PR #{number}: {ctx.default_branch} moved from "
-                f"{approved_base_tip[:12]} before the merge; updating instead"
+                f"{base_advance.tip[:12]} before the merge; updating instead"
             )
             return request_base_update(
                 ctx,
@@ -3400,7 +3508,7 @@ def process_pr(
                 report=report,
                 detail=(
                     f"Its coordination-only base advance to "
-                    f"{approved_base_tip[:12]} was superseded before the merge."
+                    f"{base_advance.tip[:12]} was superseded before the merge."
                 ),
             )
 
@@ -3410,7 +3518,7 @@ def process_pr(
         dry_run=dry_run,
         gates=gates,
         report=report,
-        allow_rejection=approved_base_tip is not None,
+        base_advance=base_advance,
     )
     if outcome == MERGE_HEAD_CHANGED:
         set_outcome(

@@ -527,6 +527,43 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
             stdout="",
         )
 
+    MERGE_COMMIT = "9" * 40
+
+    def _script_merged_base(self, landed_on=None, *, merge_commit_sha=True, parents=True):
+        """What the post-merge audit reads: the merge commit GitHub created,
+        and the default-branch commit it landed on."""
+        self.fake.script(
+            "gh",
+            ["api", "repos/acme/widgets/pulls/42"],
+            stdout=json.dumps(
+                {"merge_commit_sha": self.MERGE_COMMIT if merge_commit_sha else None}
+            ),
+        )
+        self.fake.script(
+            "gh",
+            ["api", f"repos/acme/widgets/commits/{self.MERGE_COMMIT}"],
+            stdout=json.dumps(
+                {
+                    "parents": (
+                        [
+                            {"sha": landed_on or self.TIP},
+                            {"sha": self.head_sha},
+                        ]
+                        if parents
+                        else []
+                    )
+                }
+            ),
+        )
+
+    def _script_merge_of_this_pr(self, landed_on=None, **audit):
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_merged_base(landed_on, **audit)
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
     def _stale_approval_ok(self):
         return self._base_pr_json()["statusCheckRollup"] + [
             {
@@ -594,11 +631,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self._script_pr_view(self._behind())
         self._script_tip(self.TIP)
         self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
-        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
-        self.fake.script(
-            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
-        )
-        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._script_merge_of_this_pr()
 
         result, state, report = self._run()
 
@@ -735,11 +768,7 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
                 }
             ]
         )
-        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
-        self.fake.script(
-            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
-        )
-        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._script_merge_of_this_pr()
 
         result, state, report = self._run()
 
@@ -888,6 +917,139 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertTrue(result)
         self._assert_requested_the_update(
             report, state, fragment="superseded before the merge"
+        )
+
+    # -- the read-to-merge race the pre-merge check cannot close -----------
+
+    def _script_eligible_merge_landing_on(self, landed_on):
+        """An authorized merge that GitHub landed on some other base, because
+        the default branch advanced inside the read-to-merge gap."""
+        self._script_pr_view(self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr(landed_on=landed_on)
+
+    def test_a_base_that_moved_inside_the_merge_window_is_re_decided(self):
+        # GitHub's merge takes an expected head and no expected base, so the
+        # pre-merge tip read narrows this window without closing it. What the
+        # merge actually landed on is judged by the rule that authorized it.
+        self._script_eligible_merge_landing_on(self.MOVED_TIP)
+        self._script_compare(
+            self.TIP,
+            self.MOVED_TIP,
+            self._comparison(
+                [{"filename": self.COORDINATION_PATH}], merge_base=self.TIP
+            ),
+        )
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "merged")
+        self.assertTrue(report["merged"])
+        self.assertNotIn("42", state["prs"])
+
+    def test_a_base_that_moved_to_an_uninspected_delta_is_a_fatal_incident(self):
+        self._script_eligible_merge_landing_on(self.MOVED_TIP)
+        self._script_compare(
+            self.TIP,
+            self.MOVED_TIP,
+            self._comparison(
+                [{"filename": "src/Kanban/UI.hs"}], merge_base=self.TIP
+            ),
+        )
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run()
+
+        message = str(raised.exception)
+        self.assertIn(self.TIP, message)
+        self.assertIn(self.MOVED_TIP, message)
+        self.assertIn("src/Kanban/UI.hs", message)
+
+    def test_a_base_that_moved_into_the_pull_requests_own_files_is_a_fatal_incident(self):
+        self._script_eligible_merge_landing_on(self.MOVED_TIP)
+        self._script_compare(
+            self.TIP,
+            self.MOVED_TIP,
+            # Inside the configured set, but a file this pull request also
+            # changes -- the second half of the authorization rule.
+            self._comparison(
+                [{"filename": "feature.txt"}, {"filename": self.COORDINATION_PATH}],
+                merge_base=self.TIP,
+            ),
+        )
+        self._configure({self.COORDINATION_PATH, "feature.txt"})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run()
+
+        self.assertIn("feature.txt", str(raised.exception))
+
+    def test_a_base_that_does_not_descend_from_the_inspected_tip_is_a_fatal_incident(self):
+        self._script_eligible_merge_landing_on(self.MOVED_TIP)
+        self._script_compare(
+            self.TIP,
+            self.MOVED_TIP,
+            self._comparison([], merge_base="d" * 40),
+        )
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._run()
+
+        self.assertIn("d" * 40, str(raised.exception))
+
+    def test_an_unestablishable_landed_base_is_a_fatal_incident(self):
+        self._script_eligible_merge_landing_on(self.MOVED_TIP)
+        self._script_compare(self.TIP, self.MOVED_TIP, None, exit_code=1)
+
+        with self.assertRaises(drain_prs.PostMergeAuditError):
+            self._run()
+
+    def test_a_merge_commit_that_cannot_be_read_is_a_fatal_incident(self):
+        self._script_pr_view(self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["api", "repos/acme/widgets/pulls/42"], stderr="Not Found", exit_code=1
+        )
+
+        with self.assertRaises(drain_prs.PostMergeAuditError):
+            self._run()
+
+    def test_a_merge_commit_naming_no_parents_is_a_fatal_incident(self):
+        self._script_pr_view(self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_merged_base(parents=False)
+
+        with self.assertRaises(drain_prs.PostMergeAuditError):
+            self._run()
+
+    def test_an_ordinary_merge_is_not_audited_against_a_base_advance(self):
+        # No exception was taken, so the pull request was never behind and
+        # there is no authorized tip to audit against. The ordinary path must
+        # not have gained two GitHub reads.
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertEqual(report["reason"], "merged")
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if call["args"][:2] == ["api", "repos/acme/widgets/pulls/42"]
+            ],
+            [],
         )
 
     # -- a refused merge --------------------------------------------------

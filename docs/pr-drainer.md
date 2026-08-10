@@ -499,6 +499,30 @@ request itself changes, and so whether it overlaps the advance — answered for 
 head that is no longer there, so this pass does nothing with it and the next
 one inspects the head that is.
 
+#### The base the merge actually landed on
+
+GitHub's pull-request merge takes an expected *head* — that is
+`--match-head-commit` — and no expected base. The pre-merge tip read therefore
+narrows the gap between deciding and merging without closing it: the default
+branch can still advance in the moment between them, and the merge will land on
+whatever it advanced to.
+
+So the drainer audits the base afterwards, exactly as it already audits the
+approval and check state a merge landed under. It reads the merge commit GitHub
+created and takes its first parent, which is the default-branch commit the
+merge landed on. That parent being the inspected tip ends the question. A base
+that moved is re-decided under the same rule that authorized the merge: an
+advance still confined to configured coordination paths, and still clear of the
+pull request's own files, was safe after all and is recorded as such. Anything
+else — a path outside the set, an overlap with the pull request's files, a base
+that does not descend from the inspected tip, or any of it that cannot be
+established — is a fatal `PostMergeAuditError`, the same loud incident a
+slipped-through label or check mutation raises.
+
+The residual race is bounded rather than eliminated, which is the same contract
+the final pre-merge gate re-check carries. What it can never be is a silent
+merge onto a base nothing inspected.
+
 If the merge is attempted and GitHub refuses it while the pull request is still
 open at the head just attempted, the pass requests the branch update instead
 and reports the refusal alongside it. The candidate is never reported as merged
