@@ -1081,6 +1081,60 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         # Refused or not, the staging reference does not survive the attempt.
         self.assertEqual(len(self._staging_ref_deletions()), 2)
 
+    def test_a_verdict_withdrawn_while_the_merge_is_staged_lands_nothing(self):
+        # Building the staging merge takes two round trips, and the swap writes
+        # the reference directly, so the gate re-check has to be on the
+        # response read immediately before it rather than the one that
+        # preceded the build.
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(labels=[{"name": drain_prs.CHANGES_LABEL}]),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertIn("42", state["prs"])
+
+    def test_a_check_that_regresses_while_the_merge_is_staged_lands_nothing(self):
+        self._script_pr_view(
+            self._behind(),
+            self._behind(),
+            self._behind(
+                statusCheckRollup=[
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                        "startedAt": "2026-07-18T00:00:05Z",
+                    },
+                    {
+                        "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-07-18T00:00:01Z",
+                    },
+                ]
+            ),
+        )
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(len(self._update_branch_calls()), 0)
+        self.assertEqual(report["reason"], "checks_pending")
+
     def test_a_push_that_fails_after_the_update_landed_is_still_a_merge(self):
         # A failed `git push` is not proof of a refused update: the server can
         # accept the reference update and the client still fail. Standing in

@@ -149,6 +149,9 @@ ERROR_REASONS = frozenset(
 MERGE_DONE = "merge_done"
 MERGE_HEAD_CHANGED = "merge_head_changed"
 MERGE_REJECTED = "merge_rejected"
+# A gate withdrawn while the merge was being prepared. The attempt records its
+# own outcome -- which gate went, and how -- so the caller only has to stop.
+MERGE_GATES_CHANGED = "merge_gates_changed"
 
 # What one attempted default-branch swap did. A failed `git push` is not proof
 # of a refused update -- the server can accept it and the client still fail --
@@ -1715,6 +1718,18 @@ def merge_past_base_advance(
                 f"{current['headRefOid'][:12]} before the swap; deferring for rereview"
             )
             return MERGE_HEAD_CHANGED, None
+        # Building the staging merge takes two round trips, which is long
+        # enough for a verdict to be withdrawn or a check to regress. The
+        # ordinary path's own gate re-check sits immediately before its merge
+        # call; this is the same check immediately before this one, on the
+        # response that was just read rather than the one that preceded the
+        # build.
+        regression = gate_regression(current, gates)
+        if regression is not None:
+            reason, message, note = regression
+            log(f"PR #{number}: {note}; deferring before the swap")
+            set_outcome(report, reason, message)
+            return MERGE_GATES_CHANGED, None
         swap = swap_default_branch_to(ctx, ref, merge_commit, approval)
         if swap == SWAP_UNKNOWN:
             raise DrainError(
@@ -3509,6 +3524,53 @@ def describe_check_gates(
     )
 
 
+def gate_regression(
+    pr: dict[str, Any], gates: GateConfig
+) -> tuple[str, str, str] | None:
+    """Why a candidate no longer passes its gates, or None if it still does.
+
+    The outcome reason, the message describing it, and the terse note for the
+    log. Shared by both merge paths so that "still approved, still green" means
+    one thing: the ordinary path asks it immediately before `gh pr merge`, and
+    the exceptional path asks it again immediately before its swap, because
+    building a staging merge takes long enough for a verdict to be withdrawn
+    or a check to regress in between.
+    """
+    number = pr["number"]
+    # The changes label wins when both are attached, exactly as it does when
+    # the candidate is first selected.
+    if has_label(pr, CHANGES_LABEL):
+        return (
+            "changes_requested",
+            f"PR #{number} was labelled {CHANGES_LABEL} before the merge.",
+            "approval changed before merge",
+        )
+    if not has_label(pr, APPROVE_LABEL):
+        return (
+            "not_approved",
+            f"PR #{number} lost {APPROVE_LABEL} before the merge.",
+            "approval changed before merge",
+        )
+    build_state = configured_check_state(pr, gates.required_ci_check)
+    review_state = configured_check_state(pr, gates.required_review_check)
+    detail = describe_check_gates(gates, build_state, review_state)
+    if not check_gate_satisfied(build_state):
+        return (
+            check_gate_reason(build_state, review_state),
+            f"PR #{number}: its required CI check changed before the merge "
+            f"({detail}).",
+            "CI changed before merge",
+        )
+    if not check_gate_satisfied(review_state):
+        return (
+            check_gate_reason(build_state, review_state),
+            f"PR #{number}: its required review gate changed before the merge "
+            f"({detail}).",
+            "review gate changed before merge",
+        )
+    return None
+
+
 def check_gate_reason(build_state: str, review_state: str) -> str:
     # "missing" is a check that has not reported yet, which is a wait rather
     # than a refusal -- the state itself stays in the message so the caller
@@ -3699,41 +3761,11 @@ def process_pr(
     # successful merge and raises a fatal PostMergeAuditError if it doesn't
     # match what was just checked here.
     pr = get_pr(ctx, number)
-    if not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
-        log(f"PR #{number}: approval changed before merge; deferring")
-        if has_label(pr, CHANGES_LABEL):
-            set_outcome(
-                report,
-                "changes_requested",
-                f"PR #{number} was labelled {CHANGES_LABEL} before the merge.",
-            )
-        else:
-            set_outcome(
-                report,
-                "not_approved",
-                f"PR #{number} lost {APPROVE_LABEL} before the merge.",
-            )
-        return True
-    final_build_state = configured_check_state(pr, gates.required_ci_check)
-    final_review_state = configured_check_state(pr, gates.required_review_check)
-    final_detail = describe_check_gates(gates, final_build_state, final_review_state)
-    if not check_gate_satisfied(final_build_state):
-        log(f"PR #{number}: CI changed before merge; deferring")
-        set_outcome(
-            report,
-            check_gate_reason(final_build_state, final_review_state),
-            f"PR #{number}: its required CI check changed before the merge "
-            f"({final_detail}).",
-        )
-        return True
-    if not check_gate_satisfied(final_review_state):
-        log(f"PR #{number}: review gate changed before merge; deferring")
-        set_outcome(
-            report,
-            check_gate_reason(final_build_state, final_review_state),
-            f"PR #{number}: its required review gate changed before the merge "
-            f"({final_detail}).",
-        )
+    regression = gate_regression(pr, gates)
+    if regression is not None:
+        reason, message, note = regression
+        log(f"PR #{number}: {note}; deferring")
+        set_outcome(report, reason, message)
         return True
 
     if base_advance is not None:
@@ -3791,6 +3823,10 @@ def process_pr(
         outcome = MERGE_DONE if merged else MERGE_HEAD_CHANGED
         merge_detail = None
 
+    if outcome == MERGE_GATES_CHANGED:
+        # The attempt recorded which gate withdrew, on the response that saw
+        # it; nothing was merged and nothing needs updating.
+        return True
     if outcome == MERGE_HEAD_CHANGED:
         set_outcome(
             report,

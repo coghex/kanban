@@ -555,7 +555,10 @@ means the pull-request merge endpoint is not there to enforce its own
 preconditions, so the pull request is re-read immediately before the swap and
 must still be open, not a draft, and still targeting the branch about to be
 advanced — one closed, converted, or retargeted while its merge was being built
-lands nothing. Afterwards, only
+lands nothing. The approval labels and both required checks are re-checked on
+that same response, so a verdict withdrawn or a check that regressed while the
+merge was being staged defers it exactly as it would on the ordinary path.
+Afterwards, only
 GitHub recording the pull request as `MERGED` ends the attempt: a pull request
 left open, or closed without being merged, is a fatal `PostMergeAuditError`
 rather than something reported as a merge or handed to a merge's cleanup.
