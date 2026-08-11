@@ -32,21 +32,21 @@ drainer and docs-worktree state.
 - [x] WF-3. Plugin manifests never version-bump, so caches cannot detect staleness — [#235]
 - [x] WF-4. The two tracked review coordinators diverge beyond the documented model-pinning exception — [#236]
 - [x] WF-5. trusted_issue_spec.py exists only in the personal Codex solve skill — [#238]
-- [ ] WF-6. The personal skill layer is unversioned and drifting between brands
-- [ ] WF-7. The vendored design workflows dropped the personal copies' decision-authority guardrails
-- [ ] WF-8. The issue repair-and-rereview loop is closeable only from Codex
-- [ ] WF-9. The Claude plugin has no design-document or report-drafting workflows
-- [ ] WF-10. The kanban repository has no AGENTS.md
-- [ ] WF-11. Approved pull requests merge only while the drainer is explicitly kicked
-- [ ] WF-12. The production drainer executes from the live development checkout
-- [ ] WF-13. Kept autostash anchors and recovery stashes have no escalation or triage path
-- [ ] WF-14. DW-1/DW-3/DW-10 defer on a clearing condition that is unsatisfiable as written
-- [ ] WF-15. design.md's status paragraph names a resolved release blocker
-- [ ] WF-16. agent-workflow-contract prose drifts from its own manifest and tests
-- [ ] WF-17. Cross-reference and coverage omissions across the workflow documents
-- [ ] WF-18. Codex config pins trusted hashes for a hooks file that no longer exists
-- [ ] WF-19. ~/work/drain_prs.py is an ungoverned launcher the contract does not cover
-- [ ] WF-20. Superseded local backups and retired artifacts linger on the workstation
+- [x] WF-6. The personal skill layer is unversioned and drifting between brands — [no-issue]
+- [x] WF-7. The vendored design workflows dropped the personal copies' decision-authority guardrails — [#239]
+- [x] WF-8. The issue repair-and-rereview loop is closeable only from Codex — [#240]
+- [x] WF-9. The Claude plugin has no design-document or report-drafting workflows — [#241]
+- [x] WF-10. The kanban repository has no AGENTS.md — [#242]
+- [x] WF-11. Approved pull requests merge only while the drainer is explicitly kicked — [#245]
+- [x] WF-12. The production drainer executes from the live development checkout — [#246]
+- [x] WF-13. Kept autostash anchors and recovery stashes have no escalation or triage path — [#247]
+- [x] WF-14. DW-1/DW-3/DW-10 defer on a clearing condition that is unsatisfiable as written — [no-issue]
+- [x] WF-15. design.md's status paragraph names a resolved release blocker — [#248]
+- [x] WF-16. agent-workflow-contract prose drifts from its own manifest and tests — [#249]
+- [x] WF-17. Cross-reference and coverage omissions across the workflow documents — [#250]
+- [x] WF-18. Codex config pins trusted hashes for a hooks file that no longer exists — [no-issue]
+- [x] WF-19. ~/work/drain_prs.py is an ungoverned launcher the contract does not cover — [no-issue]
+- [x] WF-20. Superseded local backups and retired artifacts linger on the workstation — [no-issue]
 
 ---
 
@@ -217,7 +217,16 @@ control is unversioned, unreviewed, single-machine, and one brand only.
 - **Scope and constraints:** trust-boundary change; deserves review as a security tightening, not a refactor.
 - **Remaining uncertainty:** whether the exact-login rule is compatible with future collaborators beyond the three known logins.
 
-### WF-6. The personal skill layer is unversioned and drifting between brands
+### [no-issue] WF-6. The personal skill layer is unversioned and drifting between brands
+
+> **Disposition:** No issue — the layer is personal infrastructure (it also
+> holds non-kanban utilities such as `hatch-pet` and `kill-steam`), so its
+> versioning home is a personal git repo, not the kanban tracker; both
+> `~/.claude/commands` and `~/.codex/skills` were placed under local git with
+> baseline commits on 2026-08-10. Per-capability vendoring into the tracked
+> bundles continues through WF-8/WF-9 and successors. Consequence accepted:
+> cross-brand reconciliation of the drifted pairs happens opportunistically in
+> those repos rather than as tracked work.
 
 Nine workflows exist only in personal directories — `epic`, `triage`,
 `retriage`, `janitor`, `autosolve`, `project-review`, `backlog-review`,
@@ -240,7 +249,15 @@ or an unnoticed divergence is a silent workflow loss.
 - **Scope and constraints:** deliberately outside the kanban release surface; any in-repo home must stay out of the source distribution.
 - **Remaining uncertainty:** which brand's variant is canonical for each drifted pair.
 
-### WF-7. The vendored design workflows dropped the personal copies' decision-authority guardrails
+### [#239] WF-7. The vendored design workflows dropped the personal copies' decision-authority guardrails
+
+> **Filed:** [#239](https://github.com/coghex/kanban/issues/239) — verification
+> corrected the causal story: #229/#231 vendored the Codex personal sources
+> byte-for-byte against pinned SHA-256s, and the Codex lineage never had the
+> authority sections; they exist only in the personal Claude copies. The gap
+> and its consequence stand. Filed with the personal sections' full strictness
+> carried into the tracked skills, plus contract-and-test pinning so the
+> policy cannot silently vanish again.
 
 The personal `design-epic` and `process-design-doc` carry a "Human interaction
 and decision authority" section absent from the vendored Codex-plugin copies:
@@ -265,7 +282,15 @@ intended silently deletes the guardrails.
 
 ## Brand capability asymmetries
 
-### WF-8. The issue repair-and-rereview loop is closeable only from Codex
+### [#240] WF-8. The issue repair-and-rereview loop is closeable only from Codex
+
+> **Filed:** [#240](https://github.com/coghex/kanban/issues/240) — depends on
+> #238 for the vendored trusted-comment helper. Verification sharpened two
+> points: both tracked issue-review assets route CHANGES_REQUESTED to a
+> workflow neither bundle ships, so the routing dead-ends on any other
+> machine; and the contract's "deliberately outside" claim carries no recorded
+> rationale (unlike §3.5's reasoned /epic exclusion), so packaging contradicts
+> no decision record. Source pinned at SHA-256 9c9fedef…9469.
 
 `issue-rereview` exists solely as `~/.codex/skills/issue-rereview/`. Both
 plugin bundles explicitly declare it outside the packaged set. A rejected
@@ -286,7 +311,15 @@ and the only implementation is personal-layer (WF-6).
 - **Scope and constraints:** extends the drafting contract's declared asset set; its tests enumerate the packaged names and must move with it.
 - **Remaining uncertainty:** whether keeping rereview out-of-bundle was a scoping decision with reasons not recorded in the contract.
 
-### WF-9. The Claude plugin has no design-document or report-drafting workflows
+### [#241] WF-9. The Claude plugin has no design-document or report-drafting workflows
+
+> **Filed:** [#241](https://github.com/coghex/kanban/issues/241) — verification
+> settled the uncertainty: §3.5's asymmetry was vendoring-model discipline
+> ("no pinned source"), not drafting-experience, and its own clearing
+> condition is now satisfiable — the personal Claude design sources pin
+> cleanly (SHAs recorded in the issue) and carry the #239 authority sections,
+> while draft-report adapts from the tracked Codex skill per #240's
+> precedent. note-problem/backlog stay personal per WF-6's disposition.
 
 `design-epic`, `process-design-doc`, and `draft-report` are Codex-only in the
 tracked bundles — a declared asymmetry — and `note-problem` and `backlog` exist
@@ -309,7 +342,13 @@ drafted from the Codex skill's instructions for that reason.
 - **Scope and constraints:** touches the document-workflow contract's asset table and its test.
 - **Remaining uncertainty:** whether drafting-experience differences between brands motivated the original asymmetry.
 
-### WF-10. The kanban repository has no AGENTS.md
+### [#242] WF-10. The kanban repository has no AGENTS.md
+
+> **Filed:** [#242](https://github.com/coghex/kanban/issues/242) — symlink
+> shape with machine-enforced content equality, a §7 classification row, and
+> source-distribution coverage; verification confirmed both fail-closed gates
+> (document classification, sdist completeness) force those updates in the
+> same PR.
 
 synarchy symlinks `AGENTS.md → CLAUDE.md` so both brands read one contract; kanban
 has only `CLAUDE.md`. A Codex session opened in the kanban checkout (a trusted
@@ -331,7 +370,16 @@ no never-merge rule, no quality gates. The Codex-plugin skills even reference
 
 ## Merge path and durable state
 
-### WF-11. Approved pull requests merge only while the drainer is explicitly kicked
+### [#245] WF-11. Approved pull requests merge only while the drainer is explicitly kicked
+
+> **Filed:** [#245](https://github.com/coghex/kanban/issues/245) — the
+> operating model is decided as doctrine: draining stays session-driven, and a
+> periodic trigger is deliberately withheld while the production drainer
+> executes from the live development checkout (WF-12), where an interval timer
+> would run half-edited tree state. The issue records the doctrine, its
+> consequence, its rationale, and its revisit condition in
+> `docs/pr-drainer.md`; the four cited PRs merged only once sessions kicked
+> the drainer again, confirming the mechanism.
 
 Both drainer LaunchAgents are `RunAtLoad=false`, `KeepAlive=false`, with no
 `StartInterval`: the service runs only while the kanban TUI (or a manual
@@ -353,7 +401,15 @@ may be the intended operating model, but no document states the decision.
 - **Scope and constraints:** installer (`tools/install_drainer.py`) and pr-drainer docs if the interval is chosen.
 - **Remaining uncertainty:** whether always-on draining conflicts with the deliberate user-controlled lifecycle the drain-prs workflow encodes.
 
-### WF-12. The production drainer executes from the live development checkout
+### [#246] WF-12. The production drainer executes from the live development checkout
+
+> **Filed:** [#246](https://github.com/coghex/kanban/issues/246) — report-only
+> advisory in the service log, exactly the finding's expected shape.
+> Verification settled the uncertainty: the primary checkout's reflog shows
+> three `agent/*` branch round-trips on 2026-08-07 alone, so the
+> feature-branch window is demonstrated, not hypothetical. One correction:
+> each LaunchAgent's working directory is its own target repo; only the
+> executed code resolves through the kanban checkout.
 
 `~/Library/Application Support/kanban/pr-drainer/drain_prs.py`,
 `drain_prs_service.py`, and `kanban_config.py` are symlinks into
@@ -375,7 +431,16 @@ repositories. The inverse trade of WF-2 — never stale, but never isolated.
 - **Scope and constraints:** drainer must keep working in a dirty checkout; advisory belongs in the service loop's existing log stream.
 - **Remaining uncertainty:** whether a feature-branch checkout during long solve sessions occurs often enough to justify more than logging.
 
-### WF-13. Kept autostash anchors and recovery stashes have no escalation or triage path
+### [#247] WF-13. Kept autostash anchors and recovery stashes have no escalation or triage path
+
+> **Filed:** [#247](https://github.com/coghex/kanban/issues/247) — read-only
+> surfacing in `status_snapshot`, completing the decision #202 explicitly
+> deferred to #199 and #199 never took up. Verification settled the
+> near-duplicate question: kanban `stash@{2}`/`stash@{3}` share the identical
+> service WIP but each holds lines the other lacks. The synarchy anchor was
+> still warning at pass 5432 with content absent from master, and synarchy
+> gained a fresh autostash 2026-08-11. Manual triage of the five accumulated
+> instances remains operator work the new status report will keep visible.
 
 The drainer preserves autostash anchors and recovery stashes correctly, then
 repeats a quiet log line forever; nothing escalates and nothing owns triage. At
@@ -398,7 +463,15 @@ the only copy of local changes"; kanban held four stashes including
 - **Scope and constraints:** detection data already exists in the drainer; this is routing, not new analysis. The current instances also need one manual triage pass.
 - **Remaining uncertainty:** whether the two near-duplicate kanban stashes are snapshots of identical work.
 
-### WF-14. DW-1/DW-3/DW-10 defer on a clearing condition that is unsatisfiable as written
+### [no-issue] WF-14. DW-1/DW-3/DW-10 defer on a clearing condition that is unsatisfiable as written
+
+> **Disposition:** No issue — already fixed between audit and processing.
+> Commit `5877666` rewrote DW-3's and DW-10's deferral notes against the
+> shipped `document-workflow-contract.md` §2 with "precondition met, ready to
+> process" markers, and commit `a2b4e72` recorded DW-1's promotion to #237.
+> The remaining work — processing DW-3 and DW-10 — belongs to
+> `/process-report` over `docs/document_workflow_findings.md`, which the
+> corrected notes now enable.
 
 The three open findings in `docs/document_workflow_findings.md` defer on
 DW-11, which is closed and whose vendoring landed. But the written clearing
@@ -424,7 +497,13 @@ contract that actually shipped.
 
 ## Documentation contract drift
 
-### WF-15. design.md's status paragraph names a resolved release blocker
+### [#248] WF-15. design.md's status paragraph names a resolved release blocker
+
+> **Filed:** [#248](https://github.com/coghex/kanban/issues/248) — the drift
+> was still live at processing time (#225 closed 2026-08-11T01:06; the
+> exclusion entry and coordination classification both in place). The issue
+> also requires re-verifying the paragraph's other dated claims at PR time
+> rather than copying them forward, since the release lane is moving.
 
 `docs/design.md:71-77` still states that `tools/test_source_distribution.py`
 has one current failure — `docs/document_workflow_findings.md` tracked without
@@ -447,7 +526,14 @@ exists to prevent.
 - **Scope and constraints:** design.md is test-parsed; touch only the prose paragraph.
 - **Remaining uncertainty:** none at draft time.
 
-### WF-16. agent-workflow-contract prose drifts from its own manifest and tests
+### [#249] WF-16. agent-workflow-contract prose drifts from its own manifest and tests
+
+> **Filed:** [#249](https://github.com/coghex/kanban/issues/249) — all three
+> contradictions re-verified live against the current tree (line positions
+> drifted; content unchanged). The glob-vs-enumeration bullet is the sharpest:
+> §4's preamble states the enumerated-list semantics the bullet's glob
+> spelling contradicts, inviting the false belief that new assets are scanned
+> automatically.
 
 Three prose passages contradict the machine-checked reality beside them:
 `:400` attributes the `ps` spawn to `src/Kanban/Worker.hs` while the manifest
@@ -471,7 +557,14 @@ enumerated list.
 - **Scope and constraints:** prose-only edits to a test-parsed document; keep the parsed sections untouched.
 - **Remaining uncertainty:** none at draft time.
 
-### WF-17. Cross-reference and coverage omissions across the workflow documents
+### [#250] WF-17. Cross-reference and coverage omissions across the workflow documents
+
+> **Filed:** [#250](https://github.com/coghex/kanban/issues/250) — four of the
+> five parts verified still live; the drafting contract's zero-mention claim
+> was mostly resolved by the recent /epic-retirement cross-reference, leaving
+> only §2's unstated scoping in the issue. WF-15/WF-16 were filed separately
+> (#248/#249) rather than folded in; the issue coordinates around the
+> in-flight #240/#241 table changes to the same contracts.
 
 Four documents under-describe the shipped system: the drafting contract never
 mentions the document-workflow contract though its §2 claims exhaustiveness
@@ -499,7 +592,15 @@ though twelve packaged workflows are never CLI-spawned.
 
 ## Local install state
 
-### WF-18. Codex config pins trusted hashes for a hooks file that no longer exists
+### [no-issue] WF-18. Codex config pins trusted hashes for a hooks file that no longer exists
+
+> **Disposition:** No issue — machine-local residue with no repository
+> connection. The hooks' manifest and scripts are gone (empty `~/.codex/hooks/`
+> from Jul 17; no source recoverable), enforcement has been silently absent
+> since, and the repo never referenced them. The five stale `[hooks.state]`
+> trust entries and the empty directory were removed on 2026-08-11 (config
+> re-validated as parseable TOML); `[features] hooks = true` stays, and any
+> future `hooks.json` would require fresh trust approval.
 
 `~/.codex/config.toml` carries `[hooks.state]` trusted hashes for five hooks
 declared in `~/.codex/hooks.json` (`pre_tool_use`, `permission_request`,
@@ -519,7 +620,15 @@ longer reflects reality.
 - **Scope and constraints:** machine-local; no repository change unless the hooks belonged to the pipeline and deserve vendoring.
 - **Remaining uncertainty:** what the five hooks did and where their source lives.
 
-### WF-19. ~/work/drain_prs.py is an ungoverned launcher the contract does not cover
+### [no-issue] WF-19. ~/work/drain_prs.py is an ungoverned launcher the contract does not cover
+
+> **Disposition:** No issue — retired rather than governed. Nothing invoked it
+> (no shell-history, repo, or skill invocations; the personal drain-prs
+> workflow's only mention is a prohibition against using it), so the symlink
+> was deleted on 2026-08-11, leaving the managed install dir as the drainer's
+> sole entry point per `docs/pr-drainer.md`. No contract sentence is needed
+> for an entry point that no longer exists; its sibling's legacy-launcher
+> governance existed for pre-kanban muscle memory this link never had.
 
 `~/work/drain_prs.py` is a bare symlink to `tools/drain_prs.py`, bypassing the
 managed install dir the drainer docs designate. Its issue-review sibling
@@ -540,7 +649,17 @@ all.
 - **Scope and constraints:** one contract sentence plus machine-local cleanup.
 - **Remaining uncertainty:** whether anything (shell history, muscle memory, a script) still invokes it.
 
-### WF-20. Superseded local backups and retired artifacts linger on the workstation
+### [no-issue] WF-20. Superseded local backups and retired artifacts linger on the workstation
+
+> **Disposition:** No issue — machine-local litter, deleted 2026-08-11 after a
+> confirmation pass. The `.bak` population had grown to 14 (all committed in
+> the WF-6 personal-layer baselines; the only non-subset lines were the
+> retired `/epic` wording), and the legacy directory's five files were the
+> superseded pre-plugin generation — of which `issue-rereview.md`, a
+> modern-protocol Claude adaptation, was archived as a comment on #240 before
+> deletion since it materially informs that issue's Claude-side authoring. The
+> retired plist and the pre-kanban launcher backup were verified superseded by
+> the per-repo pair and the vendored backend respectively.
 
 Verified-superseded litter accumulates where workflows live: eight
 `*.pre-worktree.bak` files (five in `~/.claude/commands/`, three in
