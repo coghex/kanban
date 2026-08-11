@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -287,6 +288,38 @@ def resolve_remote_name(config_path: str | None) -> str:
     return remote_name if isinstance(remote_name, str) and remote_name else "origin"
 
 
+def url_names_a_pull_request(url: str) -> bool:
+    """Whether a GitHub web URL points at a pull request rather than an issue.
+
+    Issues render under `/issues/<n>`, pull requests under `/pull/<n>`. Compare
+    the path SEGMENT before the number, never a substring -- a repository
+    literally named `pull` puts `/pull/` in the URL of every one of its issues.
+
+    Deliberately duplicated from `tools/approve_issues.py` rather than shared:
+    this script is a vendored, self-contained plugin asset (see
+    `docs/agent-workflow-contract.md` §3) and must not import from `tools/`.
+    """
+    segments = [part for part in urllib.parse.urlsplit(url).path.split("/") if part]
+    return len(segments) >= 2 and segments[-2] == "pull"
+
+
+def github_number_kind(root: Path, repo: str, number: int) -> str | None:
+    """"issue", "pull", or None when the number resolves to neither.
+
+    Asks through `gh issue view`, which -- unlike `gh pr view` -- resolves BOTH
+    kinds, so one call classifies any number. Never asks `gh pr view --json
+    number`: that form returns exit 0 for an issue number without consulting
+    the pull-request resolver, so it cannot tell the two apart.
+    """
+    try:
+        value = gh_json(root, ["issue", "view", str(number), "-R", repo, "--json", "url"])
+    except WorkflowError:
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("url"), str):
+        return None
+    return "pull" if url_names_a_pull_request(value["url"]) else "issue"
+
+
 def pr_view(root: Path, repo: str, number: int) -> dict[str, Any]:
     fields = ",".join(
         [
@@ -309,7 +342,23 @@ def pr_view(root: Path, repo: str, number: int) -> dict[str, Any]:
             "isCrossRepository",
         ]
     )
-    value = gh_json(root, ["pr", "view", str(number), "-R", repo, "--json", fields])
+    try:
+        value = gh_json(root, ["pr", "view", str(number), "-R", repo, "--json", fields])
+    except WorkflowError:
+        # `gh pr view` fails on an issue number, but only with a GraphQL
+        # resolver error naming neither the number's real kind nor the
+        # mistake. Re-query authoritatively rather than pattern-matching that
+        # message, which varies by gh version -- and only on the failure path,
+        # so a healthy review pays nothing for it.
+        kind = github_number_kind(root, repo, number)
+        if kind == "issue":
+            raise WorkflowError(
+                f"#{number} is an ISSUE, not a pull request. This workflow "
+                "reviews pull requests only; GitHub shares one number space "
+                "between them. Nothing was modified. Use the issue-review "
+                f"workflow for #{number} instead."
+            ) from None
+        raise
     if not isinstance(value, dict):
         raise WorkflowError(f"PR #{number} returned an unexpected response")
     if value.get("state") != "OPEN":

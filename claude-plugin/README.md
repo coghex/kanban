@@ -246,7 +246,16 @@ runs) checks that:
   same way Kanban's Haskell code does, and its self-test passes standalone;
 - the coordinator's nested-reviewer model/effort pin matches the exact
   values `src/Kanban/PullRequestFlow.hs` uses for Kanban's own review
-  invocation, so the two cannot silently drift apart.
+  invocation, so the two cannot silently drift apart;
+- handed an issue number, the bundled coordinator refuses it by name rather
+  than surfacing `gh`'s raw resolver error, reading twice and writing nothing.
+
+`tools/test_coordinator_parity.py` bounds how far this coordinator may differ
+from [codex-plugin/](../codex-plugin/README.md)'s copy: the two are compared
+line for line, and the model-pinning divergence described above is the only
+difference permitted. Nothing is excluded — not a function, not a comment block
+— so a fix landing in one copy only fails there, which is how the
+issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
 surface (all ten commands under `claude-plugin/plugins/kanban/commands/`) and
