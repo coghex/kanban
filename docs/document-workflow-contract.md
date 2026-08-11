@@ -97,6 +97,11 @@ These two are the only cross-brand pair in this contract, so §4's status
 vocabulary is a hard compatibility surface between them: a report started by
 one brand must be resumable by the other without translation.
 
+While the Codex-only asymmetry in §3.5 remains, an Epic disposition reached
+through `/process-report` hands the user to Codex's `$design-epic` and
+`$process-design-doc` workflows. The tracked Claude command must not name
+nonexistent Claude counterparts or depend on owner-maintained personal copies.
+
 ### 3.5 Declared Codex-only asymmetry
 
 `$design-epic`, `$process-design-doc`, and `$draft-report` are Codex-only. No

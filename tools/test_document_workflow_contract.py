@@ -10,8 +10,8 @@ a repository pull request can change and verify them.
 Reconciles the responsibility matrix in docs/document-workflow-contract.md
 against the tracked Claude and Codex plugin trees, so a declared asset cannot
 vanish, an undeclared design or report workflow cannot appear, the document
-cannot silently drop the declared Codex-only asymmetry or the
-$design-epic//epic boundary, and the status vocabulary the two process-report
+cannot silently drop the declared Codex-only asymmetry or the design-pipeline
+epic-planner boundary, and the status vocabulary the two process-report
 variants must share cannot drift. The two variants are deliberately not
 reconciled into one text (requirement 3 of issue #229): what is pinned here is
 the surface a report started by one brand and resumed by the other depends on,
@@ -324,6 +324,23 @@ class DeclaredAssetTests(unittest.TestCase):
             sorted(name for name, brands in by_workflow.items() if len(brands) > 1),
             ["process-report"],
         )
+
+    def test_claude_epic_disposition_routes_to_packaged_codex_workflows(self):
+        path = "claude-plugin/plugins/kanban/commands/process-report.md"
+        text = (REPO_ROOT / path).read_text(encoding="utf-8")
+        for workflow in ("design-epic", "process-design-doc"):
+            self.assertNotIn(
+                f"/{workflow}",
+                text,
+                f"{path}: {workflow} is Codex-only; do not name a nonexistent "
+                "Claude slash command",
+            )
+            self.assertIn(
+                f"${workflow}",
+                text,
+                f"{path}: Epic dispositions must hand off to the packaged Codex "
+                f"${workflow} workflow while the §3.5 asymmetry remains",
+            )
 
 
 class DocumentedBoundaryTests(unittest.TestCase):
