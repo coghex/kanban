@@ -150,6 +150,10 @@ than stopping at "registered and enabled":
   non-zero. Nothing outside Kanban's own installed bundle is read or
   reported. An enabled plugin whose cache is absent entirely is the same
   repairable state.
+- An **extra** path may be a directory as well as a file: a skill directory
+  left behind or emptied still offers Codex something the tracked bundle does
+  not define, so it is named with a trailing slash rather than passed over
+  for holding no file.
 - `--apply` converges it with the provider's own commands, in the only order
   that refreshes a local-source bundle — `codex plugin remove kanban@kanban`
   then `codex plugin add kanban@kanban` — and never writes into the cache

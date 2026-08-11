@@ -442,6 +442,44 @@ class CodexBundleStalenessTests(HermeticSetupTests):
         self.assertEqual(entry["divergence"]["extra"], ["skills/retired/SKILL.md"])
         self.assertIn("skills/retired/SKILL.md", entry["message"])
 
+    def test_an_extra_directory_holding_no_file_is_still_reported(self):
+        # A file-only inventory cannot see this: the skill's files are gone
+        # but its directory remains, so the cache still offers Codex a skill
+        # the tracked bundle does not define.
+        cache = self.install_codex_cache()
+        (cache / "skills" / "retired").mkdir()
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+        self.assertIn("skills/retired/", entry["message"])
+
+    def test_a_nested_extra_directory_run_is_named_once_at_its_root(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "retired" / "scripts" / "helpers").mkdir(parents=True)
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+
+    def test_an_ignored_directory_holding_no_file_is_never_divergence(self):
+        # The emptied form of the artefact the packaged coordinator leaves
+        # behind: still ignored, so still not bundle content.
+        self.install_codex_cache()
+        (self.cache_dir() / "skills" / "pr-review" / "scripts" / "__pycache__").mkdir()
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertEqual(self.mutating_calls("codex"), [])
+
     def test_an_absent_cache_for_an_enabled_plugin_is_repairable_divergence(self):
         self.configure_codex()
 

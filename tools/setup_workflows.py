@@ -32,7 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -280,7 +280,8 @@ def tracked_bundle_files(repo: Path) -> list[str]:
 
 def checkout_ignored(repo: Path, relative_paths: list[str]) -> set[str]:
     """The subset of bundle-relative paths this checkout's own ignore rules
-    exclude.
+    exclude. A directory is passed with a trailing slash, which is how git is
+    told the path is one.
 
     Applied to the *installed* side as well as the checkout, and that is the
     point. The provider copies the bundle directory as it finds it and then
@@ -320,22 +321,59 @@ def checkout_ignored(repo: Path, relative_paths: list[str]) -> set[str]:
     }
 
 
-def installed_bundle_files(cache: Path) -> list[str]:
-    """Every file under an installed bundle, relative to it. A directory that
-    cannot be read raises rather than reading as empty: an unreadable cache is
-    an unusable one, not a diverged one."""
+def installed_bundle_entries(cache: Path) -> tuple[list[str], list[str]]:
+    """The files and the directories under an installed bundle, each relative
+    to it. A directory that cannot be read raises rather than reading as
+    empty: an unreadable cache is an unusable one, not a diverged one.
+
+    Directories are collected as well as files because a directory holding no
+    file at all is still installed content — an emptied or left-behind skill
+    directory is invisible to a file-only inventory, and would read as
+    convergence.
+    """
 
     def _fail(error: OSError) -> None:
         raise error
 
-    found: list[str] = []
+    files: list[str] = []
+    directories: list[str] = []
     try:
-        for current, _directories, names in os.walk(cache, onerror=_fail):
+        for current, names, filenames in os.walk(cache, onerror=_fail):
             for name in names:
-                found.append(Path(current, name).relative_to(cache).as_posix())
+                directories.append(Path(current, name).relative_to(cache).as_posix())
+            for name in filenames:
+                files.append(Path(current, name).relative_to(cache).as_posix())
     except OSError as exc:
         raise SetupError(f"Could not read the installed Codex bundle at {cache}: {exc}") from exc
-    return sorted(found)
+    return sorted(files), sorted(directories)
+
+
+def tracked_ancestors(tracked: list[str]) -> set[str]:
+    """Every directory a tracked path lies inside. These are the directories
+    the bundle defines, so an installed directory outside this set is one the
+    tracked bundle does not have."""
+    return {
+        parent.as_posix()
+        for path in tracked
+        for parent in PurePosixPath(path).parents
+        if parent.as_posix() != "."
+    }
+
+
+def unexpected_directories(
+    directories: list[str], tracked: list[str], unexpected_files: list[str]
+) -> list[str]:
+    """Installed directories the tracked bundle does not define, reduced to
+    the ones worth naming: the shallowest of a nested run, and only when no
+    unexpected file beneath one already names it."""
+    defined = tracked_ancestors(tracked)
+    candidates = [path for path in directories if path not in defined]
+    return [
+        path
+        for path in candidates
+        if not any(path.startswith(other + "/") for other in candidates)
+        and not any(name.startswith(path + "/") for name in unexpected_files)
+    ]
 
 
 def _same_bytes(tracked_file: Path, installed_file: Path) -> bool:
@@ -369,7 +407,8 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
             f"The installed Codex bundle path {cache} is not a readable directory, so "
             f"{PLUGIN_IDENTIFIER} cannot be compared against {bundle_root}."
         )
-    installed = set(installed_bundle_files(cache))
+    installed_files, installed_directories = installed_bundle_entries(cache)
+    installed = set(installed_files)
     tracked_set = set(tracked)
     missing = [path for path in tracked if path not in installed]
     different = [
@@ -377,7 +416,15 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
         for path in tracked
         if path in installed and not _same_bytes(bundle_root / path, cache / path)
     ]
-    unexpected = sorted(installed - tracked_set)
+    unexpected_files = sorted(installed - tracked_set)
+    # Queried with a trailing slash, which is how `git check-ignore` is told a
+    # path is a directory — a directory-only rule such as `__pycache__/` does
+    # not match the bare spelling of a path that is not in the checkout.
+    unexpected_dirs = [
+        path + "/"
+        for path in unexpected_directories(installed_directories, tracked, unexpected_files)
+    ]
+    unexpected = unexpected_files + unexpected_dirs
     extra = sorted(set(unexpected) - checkout_ignored(repo, unexpected))
     if not missing and not different and not extra:
         return None

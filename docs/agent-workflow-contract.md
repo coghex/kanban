@@ -409,7 +409,12 @@ arithmetic, which §2.3 owns.
     bundle that is missing a tracked path, holds a byte-different copy of
     one, or carries a path the tracked bundle does not define, is reported as
     `repair` with those bundle-relative paths grouped as missing, different,
-    and extra. The checkout's own ignore rules apply to both sides, so an
+    and extra. A path there is a directory as well as a file — a directory
+    holding no file at all is still installed content, and a file-only
+    inventory would read a left-behind or emptied skill directory as
+    convergence — reported with a trailing slash, at the root of a nested
+    run, and only when no extra file beneath it already names it. The
+    checkout's own ignore rules apply to both sides, so an
     interpreter artefact such as `__pycache__/` is never divergence in either
     direction — counting one would plan a repair that could not converge. The
     `claude-plugin` component has no counterpart state: its marketplace
