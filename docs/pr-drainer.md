@@ -127,6 +127,70 @@ and the message names the checkout already running it.
 
 Installation never starts the drainer. Starting it can merge eligible pull requests immediately.
 
+### Run lifecycle
+
+The LaunchAgent is non-resident by design. Every generated job sets `RunAtLoad`
+and `KeepAlive` to false and carries no `StartInterval`, so launchd never starts
+a drainer on its own — not at login, not after a run ends, not on a timer. A run
+begins only when something explicitly asks for one: the `d` key in Kanban, or
+the controller's `start`.
+
+Once started, the run outlives whatever asked for it. The LaunchAgent
+supervises a polling drainer that keeps sweeping the queue on its own interval
+until it is stopped explicitly or exits unexpectedly. Quitting Kanban does not
+stop it — that repository's drainer keeps merging, and the next Kanban window
+opened on that repository reports it as still running. Press `d` again, or run
+the controller's `stop`, to end it.
+
+A run that ends because it was asked to is normal operation, not a fault. The
+service log records it as `PR drainer stopped intentionally; no incident
+notification sent` and writes no incident. That line is exactly what separates
+an intentional stop from an unexpected exit, which does write a crash incident
+and does notify.
+
+#### Approvals that land between runs
+
+Nothing merges while no run is up. A pull request approved after an intentional
+stop stays queued — it is not lost and no state expires — and the next run
+someone starts reconsiders it from scratch. It merges then only if it is
+eligible then: approval is one requirement among
+[approval and checks](#approval-and-checks), and a failing required check, a
+merge conflict, or anything else the queue refuses still holds it back exactly
+as it would during a continuously running service. Waiting between runs delays
+the attempt; it does not pre-authorize it.
+
+Two documented paths drain it without opening Kanban:
+
+- Start the polling service for the whole queue through the installed
+  controller, which performs the same guarded start the `d` key does:
+
+  ```console
+  CONTROL="$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py"
+  python3 "$CONTROL" --path /path/to/project --json start
+  ```
+
+- Merge one named pull request and exit, starting no service at all: see
+  [Merging one pull request](#merging-one-pull-request).
+
+#### Why there is no periodic trigger
+
+The obvious way to close that gap — a `StartInterval`, or `KeepAlive` to hold
+one up permanently — is withheld deliberately rather than overlooked. The
+installer links the drainer, the controller, and their shared configuration
+module to the tracked sources in the live Kanban checkout, so what launchd
+executes is whatever those files contain at that moment, including a
+half-finished edit sitting in that checkout's working tree. The exposure is the
+executable code, not the tree being merged: each job's working directory is the
+repository it drains, and Kanban's own checkout is only where the code comes
+from. An operator-driven start happens when someone knows what state that tree
+is in; an unattended timer would run it unwatched.
+
+The constraint is that installation model, not the drainer itself. Once
+installed drainer code no longer executes straight out of a development
+checkout, a periodic or resident trigger becomes a reasonable thing to add.
+
+### The local checkout
+
 The drainer coexists with uncommitted local work. It starts, runs, and merges
 from a checkout holding staged, unstaged, or untracked changes; nothing has to
 be committed, stashed, or discarded first. Merging itself is GitHub's and never
