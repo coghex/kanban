@@ -389,27 +389,67 @@ arithmetic, which §2.3 owns.
     `tools/install_issue_review.py` primitives described in §3, and each
     provider bundle through that provider's own documented mechanism
     (`codex plugin marketplace add` / `codex plugin add`,
-    `claude plugin marketplace add` / `claude plugin install`). It runs no
-    other external command.
+    `claude plugin marketplace add` / `claude plugin install`). Refreshing an
+    installed Codex bundle is that same mechanism and nothing else:
+    `codex plugin remove kanban@kanban` followed by
+    `codex plugin add kanban@kanban`, in that order, because the Codex CLI has
+    no plugin update command for a local-source marketplace. Setup never
+    writes into or deletes from a provider's own cache directly. Its only
+    other external command is a read-only `git` — `ls-files` and
+    `check-ignore` against the checkout — to establish what the tracked
+    bundle is.
+  - Setup additionally inspects the *content* the Codex provider installed,
+    not only its `plugin list --json` registration. Codex installs
+    `kanban@kanban` by copying the tracked bundle into
+    `$CODEX_HOME/plugins/cache/kanban/kanban/<version>` — `~/.codex` when
+    `CODEX_HOME` is empty or unset, and `<version>` as declared by
+    `codex-plugin/plugins/kanban/.codex-plugin/plugin.json`, never whichever
+    version happens to be cached. The tracked bundle is defined by the
+    Git-tracked content under `codex-plugin/plugins/kanban`; an installed
+    bundle that is missing a tracked path, holds a byte-different copy of
+    one, or carries a path the tracked bundle does not define, is reported as
+    `repair` with those bundle-relative paths grouped as missing, different,
+    and extra. A path there is a directory as well as a file — a directory
+    holding no file at all is still installed content, and a file-only
+    inventory would read a left-behind or emptied skill directory as
+    convergence — reported with a trailing slash, at the root of a nested
+    run, and only when no extra file beneath it already names it. The
+    checkout's own ignore rules apply to both sides, so an
+    interpreter artefact such as `__pycache__/` is never divergence in either
+    direction — counting one would plan a repair that could not converge. The
+    `claude-plugin` component has no counterpart state: its marketplace
+    serves the tracked bundle live from the repository directory.
   - Preflight resolves `codex`, `claude`, `gh`, and `python3` with
     `findExecutable`, then runs only status-only probes: `--version`,
     `codex login status`, `claude auth status`, `gh auth status`, and each
     provider's `plugin list --json`. It also stats the Kanban-managed
     backend install path resolved by `canonicalIssueReviewerPath`.
 - **Inputs:** for setup, the selected components, `--scope`, the Kanban
-  checkout, and the target repository for a project-scoped registration;
-  for preflight, the repository the board is pointed at (provider plugin
-  listings are resolved relative to it).
+  checkout, the target repository for a project-scoped registration, and —
+  for the Codex bundle comparison — `CODEX_HOME` and the version the tracked
+  `plugin.json` declares; for preflight, the repository the board is pointed
+  at (provider plugin listings are resolved relative to it).
 - **Outputs:** for setup, a plan (the default) or the performed
   installation, plus a non-zero exit whenever a component needs user
   action; for preflight, a per-dependency and per-action readiness report,
   and the remediation the board substitutes for a generic agent failure.
+  "Needs user action" is `refused`, `unavailable`, `failed`, and a `repair`
+  that is still pending — an ordinary fresh-install plan exits 0, and so
+  does a `repair` that the same `--apply` run converged.
 - **Failure semantics:** setup never replaces an ordinary user file, a
   symlink it does not recognize as its own, a marketplace registered from
   another checkout, or an installed-but-disabled bundle — each is reported
-  as `refused`, preserved, and paired with its recovery step. Preflight
-  blocks an action only on a definite local observation; a probe it cannot
-  interpret is reported as unknown and never blocks. Its per-action
+  as `refused`, preserved, and paired with its recovery step; both of those
+  provider refusals keep precedence over any bundle refresh and run no
+  command. A provider cache that cannot be read — a path that is not a
+  directory, one that cannot be traversed, or a tracked manifest declaring no
+  version to name it by — is `unavailable` rather than stale, so an
+  installation setup cannot inspect is never reinstalled over. After a
+  refresh, setup re-runs the same comparison that planned it: commands that
+  exited 0 but left the bundle still diverging are reported as `failed`,
+  because a provider's exit status is not evidence that the cache converged.
+  Preflight blocks an action only on a definite local observation; a probe it
+  cannot interpret is reported as unknown and never blocks. Its per-action
   dependency set is exact and follows what each action spawns: the
   canonical gate needs both installed backend files, `gh`, and the reviewer
   the backend itself invokes (the opposite brand from the issue's origin,
@@ -427,8 +467,10 @@ arithmetic, which §2.3 owns.
   Preflight needs none: it is read-only and non-interactive, never starts an
   agent session or a login flow, consumes no model quota, and mutates no
   filesystem, provider-configuration, LaunchAgent, or GitHub state.
-- **Durable state:** whatever each provider's own installer records, plus
-  the install directory described in §3. Setup owns no state of its own.
+- **Durable state:** whatever each provider's own installer records —
+  including the bundle copy Codex caches under `CODEX_HOME`, which setup
+  reads and refreshes only through `codex plugin remove`/`add` — plus the
+  install directory described in §3. Setup owns no state of its own.
 - **Mandatory/optional:** fully optional, and never run by Kanban's build or
   startup path. The PR drainer is deliberately outside both: it keeps its
   own dedicated installer and status flow (§2.4), and neither the setup
@@ -637,7 +679,7 @@ codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Ka
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review/Tools.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
@@ -774,7 +816,13 @@ nothing else, which is what `mandatory: no` records.
   registration an explicit `--scope user` choice. It installs each provider
   bundle only through that provider's own documented mechanism, and it is
   not, and must not become, an installer for the PR drainer, an approval
-  daemon, models, or credentials.
+  daemon, models, or credentials. That constraint holds for repair as much as
+  for installation: an installed Codex bundle that has fallen behind the
+  tracked one is refreshed by `codex plugin remove kanban@kanban` then
+  `codex plugin add kanban@kanban` (§2.5), never by writing into or deleting
+  from the provider's cache, and the comparison that plans it reads only
+  Kanban's own installed bundle — nothing else under `CODEX_HOME` is
+  inspected or reported.
 - **Installers must be dry-run capable, idempotent, and must never replace
   an ordinary user file.** `tools/install_drainer.py`'s `install_symlink`
   already meets this bar (see `tools/test_install_drainer.py`);
@@ -929,6 +977,7 @@ recording only one would understate what a change to it can break:
   `coordination` lane.
 
 ```text
+AGENTS.md | pr-atomic | release-document;implementation-coupled
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
 README.md | pr-atomic | release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
@@ -970,6 +1019,15 @@ the frontmatter and body of every packaged workflow under `claude-plugin/` and
 that are `test-parsed` and `implementation-coupled` at once: `CLAUDE.md` names
 both as authoritative contracts, and each is also read as data. Neither
 rationale supersedes the other, which is why the row records both.
+
+`AGENTS.md` is the Codex entry point for the same contract: a repository-relative
+symlink to `CLAUDE.md`, so one session-instruction document serves both brands
+with no second copy to drift.
+`tools/test_repository_contract_alias.py` follows it and compares its bytes with
+`CLAUDE.md`'s, and `tools/test_source_distribution.py` repeats that comparison
+inside the unpacked archive. Its row therefore mirrors `CLAUDE.md`'s exactly: it
+ships, and it is the same implementation-coupled contract read through a second
+name.
 
 ### 7.1 Classification check
 

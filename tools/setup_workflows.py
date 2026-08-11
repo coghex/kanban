@@ -15,7 +15,11 @@ symlink policy `tools/install_issue_review.py` already implements.
 Dry run first: with no `--apply`, every component is inspected and the exact
 planned action printed, and nothing at all is written. `--apply` performs
 that same plan. Re-running converges: an already-correct component reports
-`unchanged` and runs no command.
+`unchanged` and runs no command. "Correct" includes content, not only
+registration -- the Codex bundle is installed by copy into a provider cache
+with no update command, so a cache that has fallen behind the tracked bundle
+is reported as `repair` and refreshed through that provider's own
+remove-then-add.
 
 See docs/workflow-setup.md for the fresh-clone procedure this implements.
 """
@@ -28,7 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,12 +54,25 @@ COMPONENTS = ("issue-review", "legacy-launcher", "codex-plugin", "claude-plugin"
 SCOPES = ("project", "user")
 
 # The plugin identifier both marketplaces publish, and the marketplace name
-# both plugin manifests declare. Kept in one place so the conflict check and
-# the install commands cannot drift apart.
+# both plugin manifests declare. Kept in one place so the conflict check, the
+# install commands, and the installed-bundle cache path cannot drift apart:
+# a provider identifier is `<plugin>@<marketplace>`, and Codex's own cache is
+# partitioned by those same two names.
+PLUGIN_NAME = "kanban"
 MARKETPLACE_NAME = "kanban"
-PLUGIN_IDENTIFIER = "kanban@kanban"
+PLUGIN_IDENTIFIER = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
+
+# The tracked Codex bundle, relative to the checkout root. `codex-plugin/` is
+# the marketplace; this is the one plugin it publishes, and the directory the
+# provider copies into its cache.
+CODEX_BUNDLE_SEGMENTS = ("codex-plugin", "plugins", PLUGIN_NAME)
+CODEX_BUNDLE_PREFIX = "/".join(CODEX_BUNDLE_SEGMENTS)
 
 PROBE_TIMEOUT_SECONDS = 60
+
+# How many diverging paths a human-readable message names before summarizing
+# the rest. The JSON output always carries the complete lists.
+DIVERGENCE_MESSAGE_LIMIT = 8
 
 
 class SetupError(RuntimeError):
@@ -168,6 +185,303 @@ def marketplace_matches(entry: dict[str, Any], expected_root: Path) -> bool:
         except OSError:
             continue
     return False
+
+
+# -- installed Codex bundle inspection ----------------------------------------
+#
+# `codex plugin list --json` answers "is it registered and enabled", never
+# "is what got copied still the bundle this checkout tracks". The provider
+# copies the bundle into its own cache at install time and offers no update
+# command for a local-source marketplace, so a checkout that moves ahead
+# leaves every Codex session running the bundle as it was when it was last
+# added -- with no signal anywhere that it happened. Comparing the cache
+# against the tracked bundle is what turns that into a reported, repairable
+# state.
+
+
+def codex_home() -> Path:
+    """Where Codex keeps its own configuration and plugin cache: a non-empty
+    `CODEX_HOME`, else the documented `~/.codex` default."""
+    value = os.environ.get("CODEX_HOME", "")
+    if value.strip():
+        return Path(value).expanduser()
+    return Path.home() / ".codex"
+
+
+def codex_bundle_root(repo: Path) -> Path:
+    return repo.joinpath(*CODEX_BUNDLE_SEGMENTS)
+
+
+def codex_bundle_version(repo: Path) -> str:
+    """The version the tracked bundle declares for itself, which is the cache
+    directory the provider installs it into. Deliberately not a search for
+    whichever version happens to be cached: selecting a different one would
+    silently compare against a bundle this checkout never published."""
+    manifest = codex_bundle_root(repo) / ".codex-plugin" / "plugin.json"
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SetupError(
+            f"Could not read the tracked Codex plugin manifest at {manifest}: {exc}"
+        ) from exc
+    version = document.get("version") if isinstance(document, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        raise SetupError(
+            f"The tracked Codex plugin manifest at {manifest} declares no usable "
+            "version, so the installed bundle it should be compared against cannot "
+            "be identified."
+        )
+    return version.strip()
+
+
+def codex_cache_dir(repo: Path) -> Path:
+    return (
+        codex_home()
+        / "plugins"
+        / "cache"
+        / MARKETPLACE_NAME
+        / PLUGIN_NAME
+        / codex_bundle_version(repo)
+    )
+
+
+def tracked_bundle_files(repo: Path) -> list[str]:
+    """Every Git-tracked path under the tracked Codex bundle, relative to it.
+
+    Tracked content is the whole definition of the bundle: a file the
+    checkout carries but Git does not track is not something the provider was
+    ever asked to install, so it can never make an installation look stale.
+    """
+    try:
+        proc = run_command(
+            ["git", "ls-files", "-z", "--", CODEX_BUNDLE_PREFIX], cwd=repo
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupError(f"Could not list the tracked Codex bundle in {repo}: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise SetupError(
+            f"Could not list the tracked Codex bundle in {repo}: "
+            + (detail[0] if detail else f"git ls-files exited {proc.returncode}")
+        )
+    prefix = CODEX_BUNDLE_PREFIX + "/"
+    tracked = sorted(
+        entry[len(prefix) :]
+        for entry in proc.stdout.split("\0")
+        if entry.startswith(prefix)
+    )
+    if not tracked:
+        raise SetupError(
+            f"{repo} tracks no files under {CODEX_BUNDLE_PREFIX}, so there is no "
+            "tracked bundle to compare the installed one against."
+        )
+    return tracked
+
+
+def checkout_ignored(repo: Path, relative_paths: list[str]) -> set[str]:
+    """The subset of bundle-relative paths this checkout's own ignore rules
+    exclude. A directory is passed with a trailing slash, which is how git is
+    told the path is one.
+
+    Applied to the *installed* side as well as the checkout, and that is the
+    point. The provider copies the bundle directory as it finds it and then
+    executes the packaged coordinator from the copy, so `__pycache__/` lands
+    in the cache from both directions. Counting an interpreter artefact as
+    installed content would make the component report a repair it can never
+    converge -- the refresh would recreate the artefact on first use -- which
+    is exactly the non-convergence this whole check exists to end.
+    """
+    if not relative_paths:
+        return set()
+    prefix = CODEX_BUNDLE_PREFIX + "/"
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"],
+            cwd=str(repo),
+            input="\0".join(prefix + path for path in relative_paths),
+            text=True,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SetupError(f"Could not apply {repo}'s ignore rules: {exc}") from exc
+    # 0: some path is ignored. 1: none is. Anything else is a real failure,
+    # and guessing "nothing is ignored" there would report artefacts as
+    # divergence.
+    if proc.returncode not in (0, 1):
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise SetupError(
+            f"Could not apply {repo}'s ignore rules: "
+            + (detail[0] if detail else f"git check-ignore exited {proc.returncode}")
+        )
+    return {
+        entry[len(prefix) :]
+        for entry in proc.stdout.split("\0")
+        if entry.startswith(prefix)
+    }
+
+
+def installed_bundle_entries(cache: Path) -> tuple[list[str], list[str]]:
+    """The files and the directories under an installed bundle, each relative
+    to it. A directory that cannot be read raises rather than reading as
+    empty: an unreadable cache is an unusable one, not a diverged one.
+
+    Directories are collected as well as files because a directory holding no
+    file at all is still installed content — an emptied or left-behind skill
+    directory is invisible to a file-only inventory, and would read as
+    convergence.
+    """
+
+    def _fail(error: OSError) -> None:
+        raise error
+
+    files: list[str] = []
+    directories: list[str] = []
+    try:
+        for current, names, filenames in os.walk(cache, onerror=_fail):
+            for name in names:
+                directories.append(Path(current, name).relative_to(cache).as_posix())
+            for name in filenames:
+                files.append(Path(current, name).relative_to(cache).as_posix())
+    except OSError as exc:
+        raise SetupError(f"Could not read the installed Codex bundle at {cache}: {exc}") from exc
+    return sorted(files), sorted(directories)
+
+
+def tracked_ancestors(tracked: list[str]) -> set[str]:
+    """Every directory a tracked path lies inside. These are the directories
+    the bundle defines, so an installed directory outside this set is one the
+    tracked bundle does not have."""
+    return {
+        parent.as_posix()
+        for path in tracked
+        for parent in PurePosixPath(path).parents
+        if parent.as_posix() != "."
+    }
+
+
+def unexpected_directories(
+    directories: list[str], tracked: list[str], extra_files: list[str]
+) -> list[str]:
+    """Installed directories the tracked bundle does not define, reduced to
+    the ones worth naming: the shallowest of a nested run, and only when no
+    reported extra file beneath one already names it.
+
+    `extra_files` must already have the ignore rules applied. An ignored file
+    is not content, so it cannot stand in for the directory holding it — a
+    `skills/retired/` whose only occupant is a `__pycache__/` artefact is
+    still an installed directory the tracked bundle does not define, and
+    suppressing it on the strength of a file that is then filtered away would
+    report the whole cache as converged. Keeping only the shallowest of a
+    nested run loses nothing, because git ignores every descendant of an
+    ignored directory.
+    """
+    defined = tracked_ancestors(tracked)
+    candidates = [path for path in directories if path not in defined]
+    return [
+        path
+        for path in candidates
+        if not any(path.startswith(other + "/") for other in candidates)
+        and not any(name.startswith(path + "/") for name in extra_files)
+    ]
+
+
+def _same_bytes(tracked_file: Path, installed_file: Path) -> bool:
+    try:
+        return tracked_file.read_bytes() == installed_file.read_bytes()
+    except OSError as exc:
+        raise SetupError(
+            f"Could not compare {installed_file} against {tracked_file}: {exc}"
+        ) from exc
+
+
+def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
+    """How the installed Codex bundle differs from the tracked one, or None
+    when they match. Raises SetupError when the installed side cannot be read
+    at all, so an unusable cache is reported rather than repaired blindly."""
+    cache = codex_cache_dir(repo)
+    tracked = tracked_bundle_files(repo)
+    bundle_root = codex_bundle_root(repo)
+    if not os.path.lexists(cache):
+        # An enabled installation whose cache is simply not there is the same
+        # repairable state as a stale one: the provider will recreate it.
+        return {
+            "cache": str(cache),
+            "installed": False,
+            "missing": tracked,
+            "extra": [],
+            "different": [],
+        }
+    if not cache.is_dir():
+        raise SetupError(
+            f"The installed Codex bundle path {cache} is not a readable directory, so "
+            f"{PLUGIN_IDENTIFIER} cannot be compared against {bundle_root}."
+        )
+    installed_files, installed_directories = installed_bundle_entries(cache)
+    installed = set(installed_files)
+    tracked_set = set(tracked)
+    missing = [path for path in tracked if path not in installed]
+    different = [
+        path
+        for path in tracked
+        if path in installed and not _same_bytes(bundle_root / path, cache / path)
+    ]
+    # Files first, and only the ones that survive the ignore rules go on to
+    # suppress the directories holding them.
+    unexpected_files = sorted(installed - tracked_set)
+    extra_files = sorted(set(unexpected_files) - checkout_ignored(repo, unexpected_files))
+    # Queried with a trailing slash, which is how `git check-ignore` is told a
+    # path is a directory — a directory-only rule such as `__pycache__/` does
+    # not match the bare spelling of a path that is not in the checkout.
+    unexpected_dirs = [
+        path + "/"
+        for path in unexpected_directories(installed_directories, tracked, extra_files)
+    ]
+    extra = sorted(
+        extra_files + sorted(set(unexpected_dirs) - checkout_ignored(repo, unexpected_dirs))
+    )
+    if not missing and not different and not extra:
+        return None
+    return {
+        "cache": str(cache),
+        "installed": True,
+        "missing": missing,
+        "extra": extra,
+        "different": different,
+    }
+
+
+def _name_paths(paths: list[str]) -> str:
+    shown = ", ".join(paths[:DIVERGENCE_MESSAGE_LIMIT])
+    remaining = len(paths) - DIVERGENCE_MESSAGE_LIMIT
+    return f"{shown} (+{remaining} more)" if remaining > 0 else shown
+
+
+def divergence_message(repo: Path, divergence: dict[str, Any]) -> str:
+    """Name the divergence in bundle-relative paths. Only paths belonging to
+    Kanban's own installed bundle are reported, so nothing else under
+    `CODEX_HOME` is exposed by asking about this one."""
+    cache = divergence["cache"]
+    bundle_root = codex_bundle_root(repo)
+    if not divergence["installed"]:
+        return (
+            f"{PLUGIN_IDENTIFIER} is installed and enabled for codex, but its bundle is "
+            f"not cached at {cache}, so every Codex session runs no tracked skill from "
+            f"{bundle_root}. Re-adding the plugin restores it."
+        )
+    groups = [
+        (name, divergence[name])
+        for name in ("missing", "different", "extra")
+        if divergence[name]
+    ]
+    detail = "; ".join(f"{name} ({len(paths)}): {_name_paths(paths)}" for name, paths in groups)
+    return (
+        f"{PLUGIN_IDENTIFIER} is installed and enabled for codex, but the bundle cached "
+        f"at {cache} no longer matches the tracked bundle in {bundle_root} — {detail}. "
+        f"Codex has no plugin update command for a local-source marketplace, so the "
+        f"refresh is `codex plugin remove {PLUGIN_IDENTIFIER}` followed by "
+        f"`codex plugin add {PLUGIN_IDENTIFIER}`."
+    )
 
 
 # -- component planning -------------------------------------------------------
@@ -341,13 +655,34 @@ def plan_codex_plugin(repo: Path, scope: str) -> dict[str, Any]:
     if not marketplaces:
         commands.append([executable, "plugin", "marketplace", "add", str(marketplace_root)])
     entries = plugin_entries(probe_json([executable, "plugin", "list", "--json"], cwd=repo))
-    if any(entry_enabled(entry) for entry in entries) and not commands:
-        return component_result(
-            component,
-            "unchanged",
-            scope=scope,
-            message=f"{PLUGIN_IDENTIFIER} is already installed and enabled for codex.",
-        )
+    if any(entry_enabled(entry) for entry in entries):
+        # Registered and enabled is not the same as current. Read-only, and
+        # reached only once the marketplace conflict above has cleared, so a
+        # marketplace registered from another checkout still refuses first
+        # and still runs nothing.
+        divergence = codex_cache_divergence(repo)
+        if divergence:
+            commands.append([executable, "plugin", "remove", PLUGIN_IDENTIFIER])
+            commands.append([executable, "plugin", "add", PLUGIN_IDENTIFIER])
+            return component_result(
+                component,
+                "repair",
+                scope=scope,
+                commands=commands,
+                divergence=divergence,
+                message=divergence_message(repo, divergence),
+            )
+        if not commands:
+            return component_result(
+                component,
+                "unchanged",
+                scope=scope,
+                divergence=None,
+                message=(
+                    f"{PLUGIN_IDENTIFIER} is already installed and enabled for codex, and "
+                    f"its cached bundle matches {codex_bundle_root(repo)}."
+                ),
+            )
     if any(entry_installed(entry) and not entry_enabled(entry) for entry in entries):
         return component_result(
             component,
@@ -479,8 +814,11 @@ def apply_component(
     migrate: bool,
 ) -> dict[str, Any]:
     """Perform exactly the plan that was inspected and reported. A component
-    whose plan is `unchanged`, `refused`, or `unavailable` runs nothing."""
-    if plan["status"] != "install":
+    whose plan is `unchanged`, `refused`, or `unavailable` runs nothing; an
+    `install` or a `repair` runs the commands it named, in that order.
+    `repair` is produced by the codex-plugin component alone, which is why
+    the convergence re-check below is the Codex bundle comparison."""
+    if plan["status"] not in ("install", "repair"):
         return plan
     component = plan["component"]
     if component == "issue-review":
@@ -540,6 +878,37 @@ def apply_component(
                     "attempted for this component."
                 ),
             )
+    if plan["status"] == "repair":
+        # The provider reporting success is not evidence that the cache now
+        # matches: verify the same comparison that planned the repair, so a
+        # refresh that silently did not converge is reported rather than
+        # counted as a repair.
+        try:
+            divergence = codex_cache_divergence(repo)
+        except SetupError as exc:
+            return dict(plan, status="failed", applied=False, outputs=outputs, message=str(exc))
+        if divergence:
+            return dict(
+                plan,
+                status="failed",
+                applied=False,
+                outputs=outputs,
+                divergence=divergence,
+                message=(
+                    "The refresh ran, but the installed bundle still does not match the "
+                    f"tracked one: {divergence_message(repo, divergence)}"
+                ),
+            )
+        return dict(
+            plan,
+            applied=True,
+            outputs=outputs,
+            divergence=None,
+            message=(
+                f"Refreshed {PLUGIN_IDENTIFIER} for codex; the bundle cached at "
+                f"{codex_cache_dir(repo)} now matches {codex_bundle_root(repo)}."
+            ),
+        )
     return dict(plan, applied=True, outputs=outputs)
 
 
@@ -633,6 +1002,20 @@ def selected_components(args: argparse.Namespace) -> list[str]:
     return [component for component in COMPONENTS if component in set(args.component)]
 
 
+def plan_needs_attention(plan: dict[str, Any]) -> bool:
+    """Whether a component still needs the user to act after this run.
+
+    A pending `repair` does: an installed bundle that no longer matches the
+    tracked one silently runs stale workflows, and a dry run's job is to say
+    so and exit non-zero. A repair `--apply` already performed does not — the
+    same run converged it, and an ordinary fresh install has never been
+    "attention" either.
+    """
+    if plan["status"] in ("refused", "unavailable", "failed"):
+        return True
+    return plan["status"] == "repair" and not plan.get("applied")
+
+
 def print_plan(result: dict[str, Any]) -> None:
     if result["dry_run"]:
         print(f"Dry run for {result['repo']}; nothing will be changed.")
@@ -695,9 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for plan in planned
             ]
-        needs_attention = any(
-            plan["status"] in ("refused", "unavailable", "failed") for plan in planned
-        )
+        needs_attention = any(plan_needs_attention(plan) for plan in planned)
         result = {
             "dry_run": not args.apply,
             "repo": str(repo),

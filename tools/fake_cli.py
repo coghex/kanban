@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -36,6 +37,24 @@ def _calls_path(state_dir: Path, binary: str) -> Path:
 
 def _match_counts_path(state_dir: Path, binary: str) -> Path:
     return state_dir / f"{binary}.match_counts.json"
+
+
+def perform_side_effect(effect: dict) -> None:
+    """Apply one filesystem consequence a scripted command stands in for.
+
+    Some provider commands are only meaningful through what they leave on
+    disk -- `codex plugin remove` drops its cached bundle and `codex plugin
+    add` copies a fresh one back -- so a scenario checking what the caller
+    does *after* such a command has to be able to model that, rather than
+    scripting a command that claims success and changes nothing.
+    """
+    if "remove_tree" in effect:
+        shutil.rmtree(effect["remove_tree"], ignore_errors=True)
+    elif "copy_tree" in effect:
+        source, destination = effect["copy_tree"]
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+    else:
+        raise ValueError(f"fake_cli: unsupported side effect {effect!r}")
 
 
 def run_as(binary: str, argv: list[str]) -> int:
@@ -79,6 +98,8 @@ def run_as(binary: str, argv: list[str]) -> int:
     sleep_seconds = entry.get("sleep_seconds", 0)
     if sleep_seconds:
         time.sleep(sleep_seconds)
+    for effect in entry.get("side_effects", []):
+        perform_side_effect(effect)
     sys.stdout.write(entry.get("stdout", ""))
     sys.stderr.write(entry.get("stderr", ""))
     return entry.get("exit_code", 0)
@@ -126,16 +147,22 @@ class FakeCli:
         stderr: str = "",
         exit_code: int = 0,
         sleep_seconds: float = 0,
+        side_effects: list[dict] | None = None,
     ) -> None:
         """Queue one response. `sleep_seconds` stalls before answering, which
         is how a scenario stands in for a command that has wedged: long enough
-        that only a caller bounding the command can get past it."""
+        that only a caller bounding the command can get past it.
+        `side_effects` gives the command the filesystem consequence the real
+        one has -- `{"remove_tree": path}` or `{"copy_tree": [source,
+        destination]}` -- for scenarios that check what the caller does with
+        the state the command left behind."""
         entry = {
             "match": match,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
             "sleep_seconds": sleep_seconds,
+            "side_effects": list(side_effects or []),
         }
         with _responses_path(self.state_dir, binary).open(
             "a", encoding="utf-8"
