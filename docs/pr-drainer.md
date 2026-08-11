@@ -151,8 +151,15 @@ and does notify.
 #### Approvals that land between runs
 
 Nothing merges while no run is up. A pull request approved after an intentional
-stop stays queued — it is not lost and no state expires — and it merges on the
-next run someone starts. Two documented paths drain it without opening Kanban:
+stop stays queued — it is not lost and no state expires — and the next run
+someone starts reconsiders it from scratch. It merges then only if it is
+eligible then: approval is one requirement among
+[approval and checks](#approval-and-checks), and a failing required check, a
+merge conflict, or anything else the queue refuses still holds it back exactly
+as it would during a continuously running service. Waiting between runs delays
+the attempt; it does not pre-authorize it.
+
+Two documented paths drain it without opening Kanban:
 
 - Start the polling service for the whole queue through the installed
   controller, which performs the same guarded start the `d` key does:
