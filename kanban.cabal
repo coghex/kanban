@@ -48,6 +48,7 @@ extra-doc-files:
   docs/bugs.md
   docs/development.md
   docs/design.md
+  docs/document-workflow-contract.md
   docs/drafting-workflow-contract.md
   docs/pr-drainer.md
   docs/user-guide.md

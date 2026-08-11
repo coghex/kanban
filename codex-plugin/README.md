@@ -4,15 +4,19 @@ This directory is a Codex marketplace, tracked in this repository, that
 packages the Codex-side workflows Kanban invokes by name — `$solve`,
 `$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` — plus the issue-drafting and
 canonical issue-review workflows a user or the review daemon invokes directly:
-`$issue`, `$autoissue`, and `$issue-review`. It exists so a clean Codex
-installation can perform these actions without depending on any developer's
-personal skill collection. See
+`$issue`, `$autoissue`, and `$issue-review`. Since issue #229 it also packages
+the design and report document workflows a user invokes directly — `$design-epic`,
+`$process-design-doc`, `$draft-report`, and `$process-report`. It exists so a
+clean Codex installation can perform these actions without depending on any
+developer's personal skill collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
 the full dependency contract these workflows implement, including the
 `solve`/PR-flow authority boundaries and the canonical issue-review backend
-they call into, and
+they call into,
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md)
-for the drafting and issue-review responsibility matrix.
+for the drafting and issue-review responsibility matrix, and
+[docs/document-workflow-contract.md](../docs/document-workflow-contract.md)
+for the design and report document responsibility matrix.
 
 Claude packaging is a separate marketplace tracked at
 [claude-plugin/](../claude-plugin/README.md); nothing here covers `/solve` or
@@ -47,10 +51,11 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all eight workflow
+`kanban@kanban` should show as `installed, enabled`, and all twelve workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
-`$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, and `$repair` in any
-Codex session run from this checkout.
+`$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, `$repair`,
+`$design-epic`, `$process-design-doc`, `$draft-report`, and `$process-report`
+in any Codex session run from this checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
 version that provides the `codex plugin` / `codex plugin marketplace`
@@ -61,13 +66,13 @@ without those subcommands cannot install this plugin.
 
 Kanban's own CLI spawns five of these by name: the first four, plus `$repair`,
 which `r` selects for a Done pull request whose status is a problem (issue
-#127). The other three are drafting and readiness-gate workflows a user or the
-review daemon invokes directly; see
-[docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md).
-`$repair` is not part of that declared drafting surface either. Only the three
-drafting skills are excluded from the Haskell invocation-parity pinning in
-`tools/test_codex_plugin.py`, which covers exactly the names Kanban's own code
-spawns.
+#127). The other seven are drafting, readiness-gate, and document workflows a
+user or the review daemon invokes directly; see
+[docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md) and
+[docs/document-workflow-contract.md](../docs/document-workflow-contract.md).
+`$repair` is not part of either declared surface. Only those seven are excluded
+from the Haskell invocation-parity pinning in `tools/test_codex_plugin.py`,
+which covers exactly the names Kanban's own code spawns.
 
 | Skill | Codex command | Boundary |
 | --- | --- | --- |
@@ -79,12 +84,30 @@ spawns.
 | `skills/autoissue/` | `$autoissue` | Delegates drafting to `$issue`, and on signoff creates the issue and immediately runs `$issue-review` with no second confirmation. Stops without reviewing if drafting stops before creation. |
 | `skills/issue-review/` | `$issue-review` | Runs the canonical opposite-agent readiness gate for one numbered issue through the portable backend. Never drafts, creates, or posts a competing verdict. |
 | `skills/repair/` | `$repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
+| `skills/design-epic/` | `$design-epic` | Captures and refines an epic-sized design in one durable `*_design.md` document. Creates no tracker items at all; hands off to `$process-design-doc` only once the user declares the design ready. |
+| `skills/process-design-doc/` | `$process-design-doc` | Turns a ready design document into tracker artifacts, the epic first and then **one** dependency-ready child per invocation, using the document's ledger as the durable cursor. Stops for approval before every tracker mutation. |
+| `skills/draft-report/` | `$draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. |
+| `skills/process-report/` | `$process-report` | Processes **exactly one** finding per invocation from an existing report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. The one document workflow with a Claude counterpart. |
 
-Two workflows are deliberately **not** packaged here. `draft-issues`, the
+The four document workflows are user-invoked only. Kanban's CLI never spawns
+one, because each has a mandatory human approval stop in the middle; see
+[docs/document-workflow-contract.md §5](../docs/document-workflow-contract.md#5-one-artifact-per-invocation-and-the-approval-stop).
+
+Three workflows are deliberately **not** packaged here. `draft-issues`, the
 breadth counterpart to `$issue`, is Claude-only by contract — see
 [claude-plugin/](../claude-plugin/README.md). `epic` decomposes a user-supplied
 feature arc rather than independently hunting discretionary work, so it is not
-part of the drafting contract and is packaged in neither marketplace.
+part of the drafting contract and is packaged in neither marketplace; it is
+also not a substitute for `$design-epic`, which produces a design document and
+creates no tracker items.
+
+The asymmetry runs the other way for the document workflows: `$design-epic`,
+`$process-design-doc`, and `$draft-report` are **Codex-only**, and the Claude
+marketplace packages only `/process-report`. That is a declared gap rather than
+an oversight — authoring Claude counterparts would be new behavior no pinned
+source defines, which the SHA-pinned vendoring model of issue #118 refused to
+do. See
+[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry).
 
 `pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
 to the bundled coordinator at `skills/pr-review/scripts/review_pr.py`. Kanban
@@ -141,11 +164,11 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the skills directory contains exactly the eight packaged workflows, and the
+- the skills directory contains exactly the twelve packaged workflows, and the
   five Kanban spawns exactly match the `$`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  three drafting skills;
+  three drafting or four document skills;
 - `draft-issues` is absent, keeping the Claude-only breadth boundary;
 - no packaged manifest sets model/effort/sandbox/approval/working-directory
   configuration, and every packaged skill — drafting skills included — has a
@@ -156,11 +179,12 @@ runs) checks that:
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone.
 
-`tools/test_agent_workflow_contract.py` reconciles all eight skills' own bash
+`tools/test_agent_workflow_contract.py` reconciles all twelve skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting and issue-review
-skills name.
+skills name and the `git`/`awk`/`gh` commands the document skills resolve their
+docs worktree and tracker state with.
 
 `tools/test_repair_workflow_contract.py` pins `$repair`'s own behavioral
 contract — the ordered diagnosis branches, worktree selection and safe push,
@@ -180,6 +204,17 @@ boundaries must remain stated. It also pins the optional scope gate
 document, each gate instruction must follow the guard that makes it apply only
 when the consuming repo declares a gate, and `$issue-review` must stay free of
 gate language.
+
+`tools/test_document_workflow_contract.py` does the same for the four document
+skills against
+[docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
+every declared asset must exist, no undeclared design or report workflow may
+appear, the document must keep stating the Codex-only asymmetry and the
+`$design-epic`/`/epic` boundary, and the exact `[#N]`, `[no-issue]`,
+`[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
+the assets — including in both `process-report` variants, which may differ in
+wording but not on the surface that makes a report started under one brand
+resumable under the other.
 
 ## Project-scoped locations
 

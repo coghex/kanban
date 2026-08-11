@@ -15,14 +15,19 @@ plugin's assets to exist.
 
 Issue #118 added four more packaged commands — the drafting and canonical
 issue-review workflows /issue, /draft-issues, /autoissue, and /issue-review —
-so discovery and Haskell name parity are now two separate concepts here.
+so discovery and Haskell name parity are now two separate concepts here, and
+issue #229 added /process-report, the one design/report document workflow with
+a Claude counterpart.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all nine); HASKELL_PARITY_COMMAND_NAMES is the strictly
+commands directory (all ten); HASKELL_PARITY_COMMAND_NAMES is the strictly
 smaller set Kanban's own Haskell code spawns by name (the five above). The
-drafting workflows are user- or daemon-invoked and are deliberately excluded
-from that parity pinning; see docs/drafting-workflow-contract.md. They are
-still subject to every structural policy this module enforces: frontmatter
-description, forbidden configuration keys, and no personal paths.
+drafting and document workflows are user- or daemon-invoked and are
+deliberately excluded from that parity pinning; see
+docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
+whose §3.5 records why /design-epic, /process-design-doc, and /draft-report
+have no Claude counterpart here. They are still subject to every structural
+policy this module enforces: frontmatter description, forbidden configuration
+keys, and no personal paths.
 
 Issue #125 packaged /repair ahead of the key that spawns it, so it briefly
 formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
@@ -71,8 +76,17 @@ HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise"
 # and policy-checked but excluded from Haskell name parity above.
 DRAFTING_COMMAND_NAMES = {"issue", "draft-issues", "autoissue", "issue-review"}
 
+# The design and report document workflows vendored by issue #229. Also user-
+# invoked and excluded from Haskell name parity. Only /process-report has a
+# Claude counterpart: docs/document-workflow-contract.md §3.5 declares the
+# other three Codex-only, so the Claude plugin must not grow one.
+DOCUMENT_COMMAND_NAMES = {"process-report"}
+CODEX_ONLY_DOCUMENT_WORKFLOWS = ("design-epic", "process-design-doc", "draft-report")
+
 # What a Claude Code installation must actually discover in commands/.
-EXPECTED_COMMAND_NAMES = HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES
+EXPECTED_COMMAND_NAMES = (
+    HASKELL_PARITY_COMMAND_NAMES | DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES
+)
 
 # Keys that would let a packaged command's frontmatter or manifest silently
 # override the model, reasoning effort, permission mode, or working
@@ -198,13 +212,24 @@ class CommandDiscoveryTests(unittest.TestCase):
         # The two concepts must stay distinct: discovery covers every packaged
         # workflow, while WorkflowNameParityTests pins only the ones Kanban's
         # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting
-        # commands.
+        # either break parity or silently stop discovering the drafting and
+        # document commands.
         self.assertTrue(HASKELL_PARITY_COMMAND_NAMES < EXPECTED_COMMAND_NAMES)
         self.assertEqual(
             EXPECTED_COMMAND_NAMES - HASKELL_PARITY_COMMAND_NAMES,
-            DRAFTING_COMMAND_NAMES,
+            DRAFTING_COMMAND_NAMES | DOCUMENT_COMMAND_NAMES,
         )
+        self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
+
+    def test_the_codex_only_document_workflows_are_not_packaged_here(self):
+        for name in CODEX_ONLY_DOCUMENT_WORKFLOWS:
+            self.assertNotIn(name, EXPECTED_COMMAND_NAMES)
+            self.assertFalse(
+                (COMMANDS_ROOT / f"{name}.md").exists(),
+                f"{name} is Codex-only "
+                "(docs/document-workflow-contract.md §3.5); authoring a Claude "
+                "counterpart is new behavior no pinned source defines",
+            )
 
     def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
         # Kanban's `r` spawns /repair for a red Done card (issue #127), so it
@@ -275,6 +300,7 @@ class WorkflowNameParityTests(unittest.TestCase):
         # spawn, so an extraction that silently matched nothing fails here.
         self.assertEqual(spawned & EXPECTED_COMMAND_NAMES, HASKELL_PARITY_COMMAND_NAMES)
         self.assertEqual(spawned & DRAFTING_COMMAND_NAMES, set())
+        self.assertEqual(spawned & DOCUMENT_COMMAND_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):

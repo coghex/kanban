@@ -13,6 +13,14 @@ and canonical issue-review assets (docs/drafting-workflow-contract.md §2),
 including a markdown counterpart of the Haskell home-relative-path check so
 the user-scoped install path those assets name is reconciled against the same
 `personal-path` manifest rows.
+
+Issue #229 added the five design and report document workflows
+(docs/document-workflow-contract.md §2) on the same terms. The plugin surfaces
+here are enumerated lists rather than globs, so an asset reaches the scan only
+by being listed; the document assets are therefore reconciled against their own
+contract's declared set, and what the extractor recovers from each of them is
+pinned, so neither list can drift away from the other and neither can shrink to
+covering nothing.
 """
 
 import re
@@ -61,6 +69,10 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/repair/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
 ]
 
@@ -79,6 +91,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "claude-plugin/plugins/kanban/commands/issue-review.md",
     "claude-plugin/plugins/kanban/commands/repair.md",
+    "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
 ]
 
@@ -99,6 +112,35 @@ DRAFTING_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
 ]
+
+# The five design and report document-workflow assets vendored by issue #229
+# (docs/document-workflow-contract.md §2), covered exactly the way the drafting
+# assets above are: all five are members of the two plugin surface lists, so
+# their bash fences are already scanned for external commands, and all five are
+# scanned here for user-scoped paths. They name none today — which is why the
+# assertion below pins what the extractor actually recovers from them, rather
+# than only asserting that nothing undeclared was found.
+DOCUMENT_SURFACE_FILES = [
+    "claude-plugin/plugins/kanban/commands/process-report.md",
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
+]
+
+# What each document-workflow asset's bash fences actually invoke. Every one
+# resolves the docs worktree with `git worktree list | awk ...`; the processing
+# workflows additionally list and search issues with `gh`, and the Claude
+# process-report lists finding headings with `rg` inside a fence rather than in
+# prose. Pinned so a rewrite that stops invoking anything cannot leave the
+# completeness check with nothing to discover.
+DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/process-report.md": {"git", "awk", "gh", "rg"},
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk"},
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {"git", "awk", "gh"},
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk"},
+    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {"git", "awk", "gh"},
+}
 
 # The repository's own tools (issue #149): the drainer, its installer and
 # controller, the canonical issue-review backend, and the workflow installers.
@@ -138,6 +180,39 @@ INDIRECT_VAR_RE = re.compile(r'findExecutable\s+([A-Za-z_][A-Za-z0-9_\']*)\b')
 # `home <> "/Library/Application Support/kanban/pr-drainer/config.json"`.
 HOME_PATH_EXPR_RE = re.compile(r'\bhome(?:\s*(?:<>|</>)\s*"[^"]*")+')
 QUOTED_RE = re.compile(r'"([^"]*)"')
+
+
+DOCUMENT_CONTRACT_PATH = REPO_ROOT / "docs" / "document-workflow-contract.md"
+DOCUMENT_CONTRACT_FENCE_RE = re.compile(
+    r"^##\s*2\.\s*Declared assets\s*$.*?```text\n(?P<body>.*?)\n```",
+    re.DOTALL | re.MULTILINE,
+)
+DOCUMENT_CONTRACT_ROW_RE = re.compile(
+    r"^(?:claude|codex)\s*\|\s*[/$][\w-]+\s*\|\s*(?P<path>\S+)$"
+)
+
+
+def declared_document_assets():
+    """The asset paths docs/document-workflow-contract.md §2 declares, read
+    from the document rather than restated here, so this module's scan surface
+    is reconciled against the contract instead of against a copy of it."""
+    text = DOCUMENT_CONTRACT_PATH.read_text(encoding="utf-8")
+    fence_match = DOCUMENT_CONTRACT_FENCE_RE.search(text)
+    if fence_match is None:
+        raise AssertionError(
+            "docs/document-workflow-contract.md has no ```text declared-asset "
+            "fence under its '## 2. Declared assets' heading"
+        )
+    paths = set()
+    for line in fence_match.group("body").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        row_match = DOCUMENT_CONTRACT_ROW_RE.match(line)
+        if row_match is None:
+            raise AssertionError(f"unparseable declared-asset row: {line!r}")
+        paths.add(row_match.group("path"))
+    return paths
 
 
 def parse_manifest():
@@ -209,8 +284,18 @@ def home_relative_segments(content):
 # items), so the leading whitespace before both fences is not anchored.
 BASH_FENCE_RE = re.compile(r"```bash\n(.*?)\n[ \t]*```", re.DOTALL)
 # A command invoked inside a subshell/command-substitution or after a pipe,
-# e.g. `$(find ...)` or `| head -n1`.
-SUBSHELL_OR_PIPE_COMMAND_RE = re.compile(r'(?:\$\(|\|)\s*([A-Za-z][A-Za-z0-9_.-]*)')
+# e.g. `$(find ...)` or `| head -n1`. The trailing lookahead requires the word
+# to end where a command name ends: not mid-token, and not at an `=`. Without
+# it the second `|` of a `||` reads as a pipe, so the shell assignment in
+# `[ -n "$X" ] || X="$(git ...)"` — the docs-worktree fallback every
+# DOCUMENT_SURFACE_FILES asset opens with — would be reported as an
+# undocumented external command named `X`. Line-leading assignments are already
+# skipped via ASSIGNMENT_RE below; this is the same exclusion for the one
+# position that regex cannot see. A real invocation is never followed by `=`,
+# so nothing is lost.
+SUBSHELL_OR_PIPE_COMMAND_RE = re.compile(
+    r'(?:\$\(|\|)\s*([A-Za-z][A-Za-z0-9_.-]*)(?![A-Za-z0-9_.=-])'
+)
 # The leading word of a non-continuation, non-assignment line, e.g.
 # `python3 "$COORDINATOR" \` or `gh issue list ...`.
 LEADING_COMMAND_RE = re.compile(r'^([A-Za-z][A-Za-z0-9_.-]*)(?=[ \t]|$)')
@@ -580,6 +665,95 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{relative_path} names an undocumented user-scoped path "
                     f"segment {segment!r}; declare it in the manifest",
                 )
+
+    def test_every_declared_document_asset_is_scanned_for_external_commands(self):
+        # Requirement 6 of issue #229 and its review correction: the two plugin
+        # surfaces above are enumerated lists, not globs, so a vendored asset
+        # that is not listed is simply never scanned. Driven by the contract
+        # document itself, so declaring a sixth asset without adding it to a
+        # scan list fails here rather than silently exempting it.
+        declared = declared_document_assets()
+        self.assertEqual(
+            declared,
+            set(DOCUMENT_SURFACE_FILES),
+            "docs/document-workflow-contract.md §2 and DOCUMENT_SURFACE_FILES "
+            "disagree about which assets exist",
+        )
+        for relative_path in sorted(declared):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+
+    def test_every_document_asset_bash_command_is_documented(self):
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in DOCUMENT_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+
+    def test_document_asset_command_discovery_is_not_vacuous(self):
+        # The bullet above passes trivially against an asset the extractor
+        # recovers nothing from, so pin what each one actually invokes. These
+        # are the commands docs/agent-workflow-contract.md §4 declares for
+        # them; a rewrite that drops or adds one fails here rather than
+        # quietly shrinking the surface being reconciled.
+        for relative_path, expected in sorted(DOCUMENT_SURFACE_EXPECTED_COMMANDS.items()):
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertEqual(
+                discovered_commands_for_plugin_file(relative_path, content),
+                expected,
+                relative_path,
+            )
+
+    def test_every_document_asset_home_relative_path_is_documented(self):
+        personal_tokens = [
+            row["token"] for row in self.manifest if row["kind"] == "personal-path"
+        ]
+        for relative_path in DOCUMENT_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for segment in markdown_home_relative_segments(content):
+                self.assertTrue(
+                    any(segment in token or token in segment for token in personal_tokens),
+                    f"{relative_path} names an undocumented user-scoped path "
+                    f"segment {segment!r}; declare it in the manifest",
+                )
+
+    def test_plugin_bash_command_discovery_skips_an_assignment_after_a_logical_or(self):
+        # The docs-worktree fallback every document-workflow asset opens with.
+        # Its `||` is a logical OR, not a pipe, and what follows is a shell
+        # assignment; only the two `git` calls and the `awk` filter are
+        # commands.
+        snippet = (
+            "```bash\n"
+            'DOCS_WT="$(git worktree list --porcelain \\\n'
+            "  | awk '/^worktree /{p=substr($0,10)} "
+            "/^branch refs\\/heads\\/docs-wip$/{print p; exit}')\"\n"
+            '[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"\n'
+            "```\n"
+        )
+        self.assertEqual(discovered_plugin_commands(snippet), {"git", "awk"})
+
+    def test_the_assignment_exclusion_does_not_hide_a_command_after_a_logical_or(self):
+        # The exclusion above must stay an assignment exclusion. A real command
+        # in the same position is still an invocation, and a `--flag=value`
+        # argument must not shorten the command name that precedes it.
+        snippet = (
+            "```bash\n"
+            "[ -f config ] || cp config.example config\n"
+            "git log | grep --max-count=1 origin\n"
+            "```\n"
+        )
+        self.assertEqual(discovered_plugin_commands(snippet), {"cp", "git", "grep"})
 
     def test_markdown_home_path_extraction_finds_the_backend_install_path(self):
         # Pins the extractor against the actual packaged issue-review assets
