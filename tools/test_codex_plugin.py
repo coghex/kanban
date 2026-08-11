@@ -50,6 +50,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import fake_cli
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin"
 MARKETPLACE_MANIFEST = CODEX_PLUGIN_ROOT / ".agents" / "plugins" / "marketplace.json"
@@ -1293,6 +1295,202 @@ class ApproverPathResolutionTests(unittest.TestCase):
         self.assertIn("is unreadable", message)
         self.assertIn(str(self.record_path), message)
         self.assertNotIn(str(backend), message)
+
+
+PR_RESOLVER_SENTINEL = (
+    "SENTINEL-pr-view-failure: GraphQL: Could not resolve to a PullRequest "
+    "with the number of 236."
+)
+ISSUE_LOOKUP_SENTINEL = "SENTINEL-issue-view-failure: gh: Not Found (HTTP 404)"
+
+# Anything `gh` would accept as a write. The guard promises "Nothing was
+# modified"; these are what would make that false.
+MUTATING_GH_ARGS = frozenset(
+    {
+        "edit",
+        "comment",
+        "close",
+        "reopen",
+        "merge",
+        "create",
+        "delete",
+        "review",
+        "ready",
+        "lock",
+        "unlock",
+        "transfer",
+        "pin",
+        "unpin",
+        "--add-label",
+        "--remove-label",
+        "--add-assignee",
+        "--remove-assignee",
+        "--body",
+        "--body-file",
+        "-X",
+        "--method",
+        "-f",
+        "--field",
+        "-F",
+        "--raw-field",
+    }
+)
+
+
+class PullRequestUrlClassificationTests(unittest.TestCase):
+    """`url_names_a_pull_request` reads the path SEGMENT before the number.
+
+    A substring test would misread every issue in a repository literally named
+    `pull`, which is the edge case the function's own docstring calls out and
+    which already anchors the sibling predicate's asserts in
+    tools/approve_issues.py.
+    """
+
+    def setUp(self):
+        self.module = load_review_pr_module()
+
+    def test_the_segment_before_the_number_decides(self):
+        cases = [
+            ("https://github.com/owner/repo/pull/1080", True),
+            ("https://github.com/owner/repo/issues/1080", False),
+            ("https://github.com/owner/repo/pull/1080/", True),
+            # A repository named `pull`: `/pull/` appears in every URL it has,
+            # so only the segment immediately before the number separates its
+            # issues from its pull requests.
+            ("https://github.com/owner/pull/issues/12", False),
+            ("https://ghe.example/owner/pull/pull/12", True),
+            # `pull` as a substring of another segment, and as an owner name.
+            ("https://github.com/owner/pull-requests/issues/12", False),
+            ("https://github.com/pull/repo/issues/12", False),
+            # Unknown or short shapes are never a pull request.
+            ("https://example.invalid/7", False),
+            ("", False),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(self.module.url_names_a_pull_request(url), expected)
+
+
+class NumberKindGuardTests(unittest.TestCase):
+    """`pr_view` handed an issue number refuses it by name.
+
+    GitHub shares one number space between issues and pull requests, and `gh
+    pr view` answers an issue number with a GraphQL resolver error naming
+    neither the number's real kind nor the mistake. Driven end to end against
+    the Codex bundle's own copy over a fake `gh` on a temporary PATH: no
+    network, no GitHub account.
+    """
+
+    def setUp(self):
+        self.module = load_review_pr_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+        self.fake = fake_cli.FakeCli(self.root / "fake")
+        self.fake.install("gh")
+
+    def pr_view(self, number: int):
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            return self.module.pr_view(self.checkout, "coghex/kanban", number)
+
+    def gh_calls(self) -> list[list[str]]:
+        return [call["args"] for call in self.fake.calls("gh")]
+
+    def test_an_open_pull_request_returns_without_any_classification(self):
+        self.fake.script(
+            "gh",
+            ["pr", "view", "412"],
+            stdout=json.dumps(
+                {"number": 412, "state": "OPEN", "headRefOid": "a" * 40}
+            ),
+        )
+        value = self.pr_view(412)
+        self.assertEqual(value["number"], 412)
+        # The classifier is on the failure path only: a healthy review pays
+        # nothing for the guard.
+        self.assertEqual([call[:2] for call in self.gh_calls()], [["pr", "view"]])
+
+    def test_an_issue_number_is_refused_by_name(self):
+        self.fake.script(
+            "gh", ["pr", "view", "236"], exit_code=1, stderr=PR_RESOLVER_SENTINEL
+        )
+        self.fake.script(
+            "gh",
+            ["issue", "view", "236"],
+            stdout=json.dumps({"url": "https://github.com/coghex/kanban/issues/236"}),
+        )
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.pr_view(236)
+        message = str(raised.exception)
+        self.assertIn("#236 is an ISSUE, not a pull request", message)
+        self.assertIn("Nothing was modified", message)
+        self.assertIn("issue-review workflow for #236", message)
+        # The raw resolver error is replaced, not merely appended to.
+        self.assertNotIn(PR_RESOLVER_SENTINEL, message)
+
+    def test_refusing_an_issue_number_reads_twice_and_writes_nothing(self):
+        self.fake.script(
+            "gh", ["pr", "view", "236"], exit_code=1, stderr=PR_RESOLVER_SENTINEL
+        )
+        self.fake.script(
+            "gh",
+            ["issue", "view", "236"],
+            stdout=json.dumps({"url": "https://github.com/coghex/kanban/issues/236"}),
+        )
+        with self.assertRaises(self.module.WorkflowError):
+            self.pr_view(236)
+        calls = self.gh_calls()
+        self.assertEqual(
+            [call[:2] for call in calls], [["pr", "view"], ["issue", "view"]]
+        )
+        # The classification read asks for `url` and nothing else.
+        self.assertEqual(
+            calls[1],
+            ["issue", "view", "236", "-R", "coghex/kanban", "--json", "url"],
+        )
+        # "Nothing was modified" is a claim about observable behavior.
+        for call in calls:
+            for argument in call:
+                self.assertNotIn(
+                    argument,
+                    MUTATING_GH_ARGS,
+                    f"the number-kind guard ran a mutating gh command: {call}",
+                )
+
+    def test_an_unresolvable_number_keeps_the_original_pull_request_failure(self):
+        self.fake.script(
+            "gh", ["pr", "view", "999999"], exit_code=1, stderr=PR_RESOLVER_SENTINEL
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "999999"], exit_code=1, stderr=ISSUE_LOOKUP_SENTINEL
+        )
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.pr_view(999999)
+        message = str(raised.exception)
+        self.assertIn(PR_RESOLVER_SENTINEL, message)
+        self.assertNotIn("is an ISSUE", message)
+        # The classifier's own failure never displaces the real diagnosis.
+        self.assertNotIn(ISSUE_LOOKUP_SENTINEL, message)
+
+    def test_a_number_that_classifies_as_a_pull_request_keeps_the_original_failure(self):
+        # A pull request that exists but whose `pr view` read failed (a closed
+        # repository, a transient error): the guard must not relabel it an
+        # issue, and must not swallow the real failure either.
+        self.fake.script(
+            "gh", ["pr", "view", "412"], exit_code=1, stderr=PR_RESOLVER_SENTINEL
+        )
+        self.fake.script(
+            "gh",
+            ["issue", "view", "412"],
+            stdout=json.dumps({"url": "https://github.com/coghex/kanban/pull/412"}),
+        )
+        with self.assertRaises(self.module.WorkflowError) as raised:
+            self.pr_view(412)
+        message = str(raised.exception)
+        self.assertIn(PR_RESOLVER_SENTINEL, message)
+        self.assertNotIn("is an ISSUE", message)
 
 
 if __name__ == "__main__":

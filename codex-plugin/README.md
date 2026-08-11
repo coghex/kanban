@@ -192,7 +192,17 @@ runs) checks that:
   compatibility launcher path (see
   [docs/agent-workflow-contract.md §3](../docs/agent-workflow-contract.md#3-migration-boundary));
 - the bundled coordinator resolves the canonical issue-review backend the
-  same way Kanban's Haskell code does, and its self-test passes standalone.
+  same way Kanban's Haskell code does, and its self-test passes standalone;
+- handed an issue number, the bundled coordinator refuses it by name rather
+  than surfacing `gh`'s raw resolver error, reading twice and writing nothing.
+
+`tools/test_coordinator_parity.py` bounds how far this coordinator may differ
+from [claude-plugin/](../claude-plugin/README.md)'s copy: the two are compared
+line for line, and only the nested-reviewer model-pinning exception of
+[docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md) is
+permitted. Nothing is excluded — not a function, not a comment block — so a fix
+landing in one copy only fails there, which is how the issue-vs-pull-request
+number guard went eight days Codex-side only.
 
 `tools/test_trusted_issue_spec.py` pins `$solve`'s bundled trusted-comment
 helper against its Claude counterpart — the two copies must stay byte-identical
