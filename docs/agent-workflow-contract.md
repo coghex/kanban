@@ -927,9 +927,11 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The eleven `coordination` documents are
-`docs/claude_document_workflows_design.md`, `docs/code-health-report.md`,
-`docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
+The fourteen `coordination` documents are
+`docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
+`docs/code-health-report.md`, `docs/document_workflow_findings.md`,
+`docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
+`docs/issue_search_design.md`,
 `docs/linux_portability_design.md`, `docs/multi_repo_boards_design.md`,
 `docs/pipeline-hardening.md`, `docs/public_release_design.md`,
 `docs/ui-bugs.md`, `docs/usage_awareness_design.md`, and
@@ -985,6 +987,7 @@ codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
 docs/agent-workflow-contract.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/bugs.md | pr-atomic | release-document
+docs/card_filter_design.md | coordination | audit-report
 docs/claude_document_workflows_design.md | coordination | audit-report
 docs/code-health-report.md | coordination | audit-report
 docs/design.md | pr-atomic | test-parsed;release-document;implementation-coupled
@@ -993,6 +996,8 @@ docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
+docs/issue_approval_queue_design.md | coordination | audit-report
+docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report
 docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
