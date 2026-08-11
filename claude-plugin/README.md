@@ -131,9 +131,12 @@ formatting: `$process-report` in [codex-plugin/](../codex-plugin/README.md) is
 its counterpart, the two variants may differ in wording, and a report started
 under either brand must be resumable under the other.
 
-`/epic` is deliberately **not** packaged: it decomposes a user-supplied feature
-arc rather than independently hunting for discretionary work, so it is not part
-of this drafting contract.
+No `epic` command is packaged: arc decomposition — planning a user-supplied
+feature arc rather than independently hunting for discretionary work — belongs
+to the `design-epic`/`process-design-doc` pipeline (see the
+[document-workflow contract](../docs/document-workflow-contract.md)) and is
+not part of this drafting contract. The personal `/epic` command that once
+created epic trees directly was retired 2026-08-11 in that pipeline's favor.
 
 Three document workflows are deliberately not packaged here either.
 `design-epic`, `process-design-doc`, and `draft-report` are **Codex-only** — a
@@ -252,7 +255,8 @@ commands against the responsibility matrix in
 every declared asset must exist, no undeclared drafting command may appear,
 the exact `<!-- issue-origin:claude -->` marker literal must be present in each
 issue-creating command, and the Claude-only `/draft-issues` and unpackaged
-`/epic` boundaries must remain stated. It also pins the optional scope gate
+arc-decomposition boundaries must remain stated. It also pins the optional
+scope gate
 ([docs/drafting-workflow-contract.md §4](../docs/drafting-workflow-contract.md#4-scope-gate)):
 `/issue`, `/draft-issues`, and `/autoissue` must state the same gate and
 exemption rules as the document, each gate instruction must follow the guard
@@ -264,7 +268,7 @@ against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
 appear here, the document must keep stating the Codex-only asymmetry and the
-`$design-epic`/`/epic` boundary, and the exact `[#N]`, `[no-issue]`,
+design-pipeline epic-planner boundary, and the exact `[#N]`, `[no-issue]`,
 `[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
 both `process-report` variants — the surface that makes a report portable
 between the brands.

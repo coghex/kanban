@@ -11,7 +11,7 @@ against the tracked Claude and Codex plugin trees, so a declared asset cannot
 vanish, an undeclared drafting or issue-review asset cannot appear, an
 origin-marker literal cannot drift from what tools/approve_issues.py parses,
 and the document cannot silently drop the Claude-only /draft-issues boundary
-or the non-hunting, unpackaged /epic boundary.
+or the non-hunting, unpackaged arc-decomposition boundary.
 
 Also guards issue #116's scope gate: the canonical document and the five
 assets that perform or drive discretionary candidate discovery must state the
@@ -283,11 +283,11 @@ class DeclaredAssetTests(unittest.TestCase):
     def test_epic_is_packaged_in_neither_plugin(self):
         self.assertFalse(
             (CLAUDE_COMMANDS_ROOT / "epic.md").exists(),
-            "/epic plans a user-supplied arc rather than hunting candidates; it is not packaged",
+            "arc decomposition belongs to the design pipeline; no epic command is packaged",
         )
         self.assertFalse(
             (CODEX_SKILLS_ROOT / "epic").exists(),
-            "$epic plans a user-supplied arc rather than hunting candidates; it is not packaged",
+            "arc decomposition belongs to the design pipeline; no epic skill is packaged",
         )
 
 
@@ -337,10 +337,11 @@ class OriginMarkerTests(unittest.TestCase):
 
 class DocumentedBoundaryTests(unittest.TestCase):
     """§3.2's Claude-only /draft-issues boundary and §3.5's non-hunting,
-    unpackaged /epic boundary are load-bearing: they are the reason the Codex
-    plugin's declared set is smaller than the Claude plugin's, and the reason
-    /epic is absent from both. Asserted against whitespace-normalized,
-    emphasis-stripped text so reflowing a paragraph does not fail CI."""
+    unpackaged arc-decomposition boundary are load-bearing: they are the
+    reason the Codex plugin's declared set is smaller than the Claude
+    plugin's, and the reason an epic asset is absent from both. Asserted
+    against whitespace-normalized, emphasis-stripped text so reflowing a
+    paragraph does not fail CI."""
 
     def setUp(self):
         self.text = normalized(contract_text())
@@ -350,7 +351,7 @@ class DocumentedBoundaryTests(unittest.TestCase):
         self.assertIn("there is deliberately no $draft-issues Codex skill", self.text)
 
     def test_document_states_the_non_hunting_unpackaged_epic_boundary(self):
-        self.assertIn("/epic plans a user-specified feature arc", self.text)
+        self.assertIn("Arc decomposition plans a user-specified feature arc", self.text)
         self.assertIn("It is not a discretionary candidate-hunting workflow", self.text)
         self.assertIn("not packaged in either plugin", self.text)
 
@@ -467,7 +468,8 @@ class ScopeGateTests(unittest.TestCase):
         self.assertIn(
             "nothing in this repository defines any project's gate", self.document
         )
-        # /epic is excluded on the same behavioral rationale as §3.5.
+        # Arc decomposition is excluded on the same behavioral rationale as
+        # §3.5.
         self.assertIn(
             "decomposes a user-supplied arc rather than independently selecting",
             self.document,

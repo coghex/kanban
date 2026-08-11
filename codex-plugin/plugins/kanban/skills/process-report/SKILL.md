@@ -259,8 +259,9 @@ revising the draft.
 
 Use only when the concern genuinely requires multiple dependency-ordered PRs
 or an unresolved product/design decision. Explain why one issue is insufficient
-and propose the decomposition boundary. Stop for user agreement, then use the
-available `epic` workflow. Do not force epic-sized work into one issue.
+and propose the decomposition boundary. Stop for user agreement, then capture
+the arc with the available `design-epic` workflow; its slices are filed later
+through `process-design-doc`. Do not force epic-sized work into one issue.
 
 ## 5. Apply the approved disposition
 
@@ -271,7 +272,9 @@ Only after explicit approval:
   issue number before editing the report.
 - **Existing issue:** optionally post only an explicitly approved comment, then
   confirm the target issue still exists.
-- **Epic:** complete the approved epic workflow and obtain its tracker number.
+- **Epic:** capture the approved arc in a design document with the
+  `design-epic` workflow, then process its `EPIC` entry through
+  `process-design-doc` and obtain the created tracker number.
 - **No issue:** make no external mutation.
 - **Deferred:** make no external mutation.
 
