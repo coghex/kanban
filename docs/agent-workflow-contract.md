@@ -829,9 +829,10 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The five `coordination` documents are `docs/code-health-report.md`,
+The six `coordination` documents are `docs/code-health-report.md`,
 `docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
-`docs/pipeline-hardening.md`, and `docs/ui-bugs.md`. **Every other tracked
+`docs/pipeline-hardening.md`, `docs/ui-bugs.md`, and
+`docs/workflow_audit_findings.md`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -894,6 +895,7 @@ docs/pr-drainer.md | pr-atomic | release-document
 docs/ui-bugs.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
+docs/workflow_audit_findings.md | coordination | audit-report
 ```
 
 The six `test-parsed` rows name what actually parses them:

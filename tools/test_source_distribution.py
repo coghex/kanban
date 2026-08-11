@@ -33,7 +33,7 @@ tracked file has none:
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
-  which only do anything in the upstream Git repository; and the five
+  which only do anything in the upstream Git repository; and the six
   development audit reports under `docs/`, which no runtime, setup, test, or
   workflow path reads and which no packaged document links to.
 
@@ -105,6 +105,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/drainer-bugs.md",
     "docs/pipeline-hardening.md",
     "docs/ui-bugs.md",
+    "docs/workflow_audit_findings.md",
 )
 
 # The files each provider's `plugin marketplace add` reads. They are the only

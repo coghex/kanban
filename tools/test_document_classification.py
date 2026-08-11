@@ -67,12 +67,13 @@ TEST_PARSED_PATHS = {
     "codex-plugin/",
 }
 
-# The five coordination documents §7 names in prose, so a contributor can place
+# The coordination documents §7 names in prose, so a contributor can place
 # a known document without reading the machine-readable rows. Reconciled
 # against those rows below: the prose is the human-readable answer, and it must
-# not be able to drift from the one the check enforces.
+# not be able to drift from the one the check enforces. The count word is
+# matched loosely so adding a report only updates the sentence, not this regex.
 PROSE_COORDINATION_SENTENCE_RE = re.compile(
-    r"The five `coordination` documents are\s+(?P<body>.*?)\.\s*\*\*Every other",
+    r"The \w+ `coordination` documents are\s+(?P<body>.*?)\.\s*\*\*Every other",
     re.DOTALL,
 )
 
@@ -568,8 +569,8 @@ class DocumentedBoundaryTests(unittest.TestCase):
 
     def test_a_prose_set_that_drifts_from_the_rows_is_reported(self):
         mutated = contract_text().replace(
-            "The five `coordination` documents are `docs/code-health-report.md`,",
-            "The five `coordination` documents are `docs/design.md`,",
+            "`coordination` documents are `docs/code-health-report.md`,",
+            "`coordination` documents are `docs/design.md`,",
         )
         rows = parse_classification()
         from_rows = {
