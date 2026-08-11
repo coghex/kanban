@@ -467,6 +467,23 @@ class CodexBundleStalenessTests(HermeticSetupTests):
         self.assertEqual(code, 1)
         self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
 
+    def test_an_ignored_file_does_not_mask_the_extra_directory_holding_it(self):
+        # The retired skill's own files are gone and all that is left inside
+        # it is an interpreter artefact. The artefact is not content, so it
+        # cannot stand in for the directory: `skills/retired/` is still an
+        # installed path the tracked bundle does not define.
+        cache = self.install_codex_cache()
+        artefact = cache / "skills" / "retired" / "__pycache__"
+        artefact.mkdir(parents=True)
+        (artefact / "helper.cpython-314.pyc").write_bytes(b"\x00compiled")
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+
     def test_an_ignored_directory_holding_no_file_is_never_divergence(self):
         # The emptied form of the artefact the packaged coordinator leaves
         # behind: still ignored, so still not bundle content.

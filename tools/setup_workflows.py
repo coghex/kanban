@@ -361,18 +361,28 @@ def tracked_ancestors(tracked: list[str]) -> set[str]:
 
 
 def unexpected_directories(
-    directories: list[str], tracked: list[str], unexpected_files: list[str]
+    directories: list[str], tracked: list[str], extra_files: list[str]
 ) -> list[str]:
     """Installed directories the tracked bundle does not define, reduced to
     the ones worth naming: the shallowest of a nested run, and only when no
-    unexpected file beneath one already names it."""
+    reported extra file beneath one already names it.
+
+    `extra_files` must already have the ignore rules applied. An ignored file
+    is not content, so it cannot stand in for the directory holding it — a
+    `skills/retired/` whose only occupant is a `__pycache__/` artefact is
+    still an installed directory the tracked bundle does not define, and
+    suppressing it on the strength of a file that is then filtered away would
+    report the whole cache as converged. Keeping only the shallowest of a
+    nested run loses nothing, because git ignores every descendant of an
+    ignored directory.
+    """
     defined = tracked_ancestors(tracked)
     candidates = [path for path in directories if path not in defined]
     return [
         path
         for path in candidates
         if not any(path.startswith(other + "/") for other in candidates)
-        and not any(name.startswith(path + "/") for name in unexpected_files)
+        and not any(name.startswith(path + "/") for name in extra_files)
     ]
 
 
@@ -416,16 +426,20 @@ def codex_cache_divergence(repo: Path) -> dict[str, Any] | None:
         for path in tracked
         if path in installed and not _same_bytes(bundle_root / path, cache / path)
     ]
+    # Files first, and only the ones that survive the ignore rules go on to
+    # suppress the directories holding them.
     unexpected_files = sorted(installed - tracked_set)
+    extra_files = sorted(set(unexpected_files) - checkout_ignored(repo, unexpected_files))
     # Queried with a trailing slash, which is how `git check-ignore` is told a
     # path is a directory — a directory-only rule such as `__pycache__/` does
     # not match the bare spelling of a path that is not in the checkout.
     unexpected_dirs = [
         path + "/"
-        for path in unexpected_directories(installed_directories, tracked, unexpected_files)
+        for path in unexpected_directories(installed_directories, tracked, extra_files)
     ]
-    unexpected = unexpected_files + unexpected_dirs
-    extra = sorted(set(unexpected) - checkout_ignored(repo, unexpected))
+    extra = sorted(
+        extra_files + sorted(set(unexpected_dirs) - checkout_ignored(repo, unexpected_dirs))
+    )
     if not missing and not different and not extra:
         return None
     return {
