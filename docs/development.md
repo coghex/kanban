@@ -12,6 +12,13 @@ CI uses GHC 9.12.2 and Cabal 3.16.1.0 on Linux. The required
 both test suites. Pull requests also require the `review-approved` check, which
 passes while the current pull request carries `reviewed:approve`. A head change
 removes that label through the review-gate workflow, requiring a fresh review.
+The single exception is a push the workflow can prove touches none of the pull
+request's own files — a base-branch update merged forward — which changes only
+the branch's ancestry and so keeps the label. Anything it cannot prove
+content-free that way, including any failure to establish either file list,
+removes the label as before. A removal the workflow cannot confirm actually
+happened fails the job rather than reporting a decision the label does not
+reflect.
 
 ## Test
 

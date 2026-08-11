@@ -577,6 +577,41 @@ claiming either outcome.
 Either way this is one advance and one pass: the merge completes and releases
 the active lane, or the branch update is requested and holds it.
 
+### Carrying approval across a branch update
+
+A branch update moves the head, and a moved head is normally an unreviewed
+head. The drainer carries `reviewed:approve` past one only when the repository
+itself says the update was content-safe for that pull request, and the only
+statement it accepts is the one the review-gate workflow makes by **leaving the
+label attached**: the `dismiss-stale-approval` check completed successfully and
+`reviewed:approve` is still there, both read from the same response, naming the
+same head. That is the same conjunction the drainer applies when it finds a
+head that moved on its own.
+
+Completing is not deciding. The workflow runs on every synchronize and answers
+"this push changed files this pull request owns" by removing the label, so a
+successful run says only that the policy finished — it is not a review of the
+new head, and the drainer never turns one into a verdict. In particular the
+drainer **adds no label**: it has no path that applies `reviewed:approve` to
+any pull request, so a repository whose workflow publishes no positive
+content-safe signal simply never carries approval forward.
+
+It fails closed on everything else, and records no approved head in any of
+these cases, so the pull request stays subject to the ordinary handling for a
+head that changed:
+
+- the label is gone — the deliberate negative verdict;
+- the check is missing, skipped, still running, or failed;
+- the head moved again between the successful run and the label read, so the
+  verdict describes a commit that is no longer the head;
+- the pull request could not be read at all, which cannot establish that the
+  label is off any more than that it is on.
+
+A genuinely base-only update — one whose push touches none of the pull
+request's own files — still costs no rereview. Its approval carries forward on
+the workflow's own kept label, and the candidate returns to the queue at the
+new head.
+
 ### The active candidate
 
 A candidate that reaches a barrier or takes an advance owns the queue's *active

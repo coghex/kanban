@@ -3751,10 +3751,12 @@ class QueueOrderTests(ProcessPrFixture):
         settled = self._other_pr_json(
             7, "c" * 40, statusCheckRollup=self._pending_ci()
         )
-        # In order: the pass's own read, the two reads the update's policy wait
-        # makes, then the re-read that records the new approved head. Every
-        # later read -- this pass's and the next two passes' -- repeats the
-        # last entry, a settled head whose replacement CI is still running.
+        # In order: the pass's own read, then the two reads the update's policy
+        # wait makes. The second of those is what records the new approved
+        # head -- the payload showing the successful policy run, the retained
+        # label, and the head together. Every later read -- this pass's and
+        # the next two passes' -- repeats the last entry, a settled head whose
+        # replacement CI is still running.
         self._script_pr(7, behind, updated, updated, settled)
         self.fake.script(
             "gh",
