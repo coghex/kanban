@@ -830,11 +830,12 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The nine `coordination` documents are `docs/code-health-report.md`,
+The eleven `coordination` documents are
+`docs/claude_document_workflows_design.md`, `docs/code-health-report.md`,
 `docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
-`docs/multi_repo_boards_design.md`, `docs/pipeline-hardening.md`,
-`docs/public_release_design.md`, `docs/ui-bugs.md`,
-`docs/usage_awareness_design.md`, and
+`docs/linux_portability_design.md`, `docs/multi_repo_boards_design.md`,
+`docs/pipeline-hardening.md`, `docs/public_release_design.md`,
+`docs/ui-bugs.md`, `docs/usage_awareness_design.md`, and
 `docs/workflow_audit_findings.md`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
@@ -886,6 +887,7 @@ codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
 docs/agent-workflow-contract.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/bugs.md | pr-atomic | release-document
+docs/claude_document_workflows_design.md | coordination | audit-report
 docs/code-health-report.md | coordination | audit-report
 docs/design.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/development.md | pr-atomic | release-document
@@ -893,6 +895,7 @@ docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
+docs/linux_portability_design.md | coordination | audit-report
 docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document

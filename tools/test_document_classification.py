@@ -568,9 +568,12 @@ class DocumentedBoundaryTests(unittest.TestCase):
         self.assertEqual(prose_coordination_set(), from_rows)
 
     def test_a_prose_set_that_drifts_from_the_rows_is_reported(self):
+        # Swap one coordination document's mention for a pr-atomic one. The
+        # bare path literal keeps this fixture independent of where in the
+        # prose list the document happens to sit.
         mutated = contract_text().replace(
-            "`coordination` documents are `docs/code-health-report.md`,",
-            "`coordination` documents are `docs/design.md`,",
+            "`docs/code-health-report.md`",
+            "`docs/design.md`",
         )
         rows = parse_classification()
         from_rows = {
