@@ -287,6 +287,15 @@ class SinglePrCliFixture(unittest.TestCase):
             if call["args"][: len(prefix)] == list(prefix)
         ]
 
+    def label_edits(self):
+        """Every `gh pr edit` that would write a label. The drainer reads
+        review verdicts and writes none, so this is empty on every path."""
+        return [
+            call
+            for call in self.gh_calls("pr", "edit")
+            if {"--add-label", "--remove-label"} & set(call["args"])
+        ]
+
     def assert_result(self, result, *, outcome, reason, merged, would_merge, dry_run):
         self.assertEqual(
             result,
@@ -484,8 +493,86 @@ class SinglePrOutcomeTests(SinglePrCliFixture):
         self.assertEqual(len(self.gh_calls("api", "-X", "PUT")), 1)
         # One cycle does one thing: the update happened, the merge did not.
         self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        # The workflow kept the label, so approval carries on the workflow's
+        # own verdict -- the drainer writes no label to reach that outcome.
+        self.assertEqual(self.label_edits(), [])
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["prs"]["42"]["approved_head"], moved_head)
+
+    def test_a_branch_update_that_lost_its_approval_is_left_unapproved(self):
+        """Issue #230: a successful `dismiss-stale-approval` run says the
+        invalidation policy finished, not that the new head was reviewed. When
+        that run removed the label -- the decision that this push touched
+        PR-owned files -- the drainer must not put it back, and must record no
+        approved head for a commit no review covers."""
+        moved_head = "c" * 40
+        settled = {
+            "headRefOid": moved_head,
+            "labels": [],
+            "statusCheckRollup": [
+                *self.base_pr_json()["statusCheckRollup"],
+                {
+                    "name": drain_prs.STALE_APPROVAL_CHECK,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-07-18T00:00:02Z",
+                },
+            ],
+        }
+        self.script_pr_view(
+            {"mergeStateStatus": "BEHIND"},
+            {"mergeStateStatus": "BEHIND"},
+            settled,
+        )
+        self.fake.script("gh", ["api", "-X", "PUT"], stdout="{}")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "behind_base")
+        self.assertEqual(len(self.gh_calls("api", "-X", "PUT")), 1)
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assertEqual(self.label_edits(), [])
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            state["prs"].get("42", {}).get("approved_head"), moved_head
+        )
+
+    def test_a_head_pushed_during_the_branch_update_is_not_recorded_approved(self):
+        """Issue #230: the policy verdict, the label that survived it, and the
+        head recorded from them all have to be the same head. A push landing
+        between the settled run and the state write gets its own review."""
+        moved_head = "c" * 40
+        newer_head = "d" * 40
+        stale_approval_ok = [
+            *self.base_pr_json()["statusCheckRollup"],
+            {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:02Z",
+            },
+        ]
+        self.script_pr_view(
+            {"mergeStateStatus": "BEHIND"},
+            {"mergeStateStatus": "BEHIND"},
+            {"headRefOid": moved_head, "statusCheckRollup": stale_approval_ok},
+            # The label is still attached and the earlier run is still the
+            # latest non-skipped result, so nothing but the head says this
+            # commit was never the one the policy decided about.
+            {"headRefOid": newer_head, "statusCheckRollup": stale_approval_ok},
+        )
+        self.fake.script("gh", ["api", "-X", "PUT"], stdout="{}")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "behind_base")
+        self.assertEqual(self.label_edits(), [])
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        recorded = state["prs"].get("42", {}).get("approved_head")
+        self.assertNotEqual(recorded, newer_head)
+        self.assertNotEqual(recorded, moved_head)
 
     def test_mergeability_still_computing_waits(self):
         self.script_pr_view({"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"})

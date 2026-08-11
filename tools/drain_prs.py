@@ -959,23 +959,6 @@ def latest_review_marker(ctx: RepoContext, number: int) -> tuple[str, str] | Non
     return head, verdict
 
 
-def add_approval_label(ctx: RepoContext, number: int) -> None:
-    log(f"PR #{number}: re-adding {APPROVE_LABEL}")
-    run(
-        [
-            "gh",
-            "pr",
-            "edit",
-            str(number),
-            "--repo",
-            ctx.repo_slug,
-            "--add-label",
-            APPROVE_LABEL,
-        ],
-        cwd=ctx.path,
-    )
-
-
 def parse_check_name(item: dict[str, Any]) -> str | None:
     return item.get("name") or item.get("context")
 
@@ -1130,6 +1113,32 @@ def render_check_gate(kind: str, name: str | None, state: str) -> str:
     return f"{name}={state}"
 
 
+def branch_update_carried_approval(
+    settled: dict[str, Any], observed_head: str
+) -> bool:
+    """Whether one settled payload positively clears `observed_head`.
+
+    This is the same conjunction recover_stale_approval already applies to a
+    moved head: the repository's stale-approval policy ran to success AND it
+    left `reviewed:approve` attached. A successful run on its own says only
+    that the invalidation policy finished deciding -- under a workflow that
+    strips on overlap, the removed label IS the negative decision, so
+    completion can never stand in for a verdict.
+
+    Every conjunct is read from this one payload, and the head it names is
+    compared explicitly rather than inferred from the check: a head that moved
+    again between the two reads leaves the earlier run's success sitting in
+    the newer payload's rollup, where it describes a commit that is no longer
+    the head.
+    """
+    return (
+        settled["headRefOid"] == observed_head
+        and classify_check(latest_non_skipped_check(settled, STALE_APPROVAL_CHECK))
+        == "success"
+        and has_label(settled, APPROVE_LABEL)
+    )
+
+
 def wait_for_branch_update_policy(
     ctx: RepoContext,
     number: int,
@@ -1137,7 +1146,15 @@ def wait_for_branch_update_policy(
     *,
     timeout_seconds: int,
     poll_seconds: int,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
+    """The payload the stale-approval policy positively cleared, or None.
+
+    None is every case the policy did not positively identify as content-safe
+    for this pull request -- the label is gone, or the head moved again before
+    the label could be read at the head the run decided about. The caller
+    carries nothing forward then, and the pull request keeps whatever label
+    state the repository left it in.
+    """
     deadline = time.time() + timeout_seconds
     last_state = "missing"
     while True:
@@ -1151,8 +1168,12 @@ def wait_for_branch_update_policy(
             )
             if last_state == "success":
                 # The workflow's gh label edit completes before the job does.
-                # Fetch once more so the caller observes that final label state.
-                return get_pr(ctx, number)
+                # Fetch once more so the label state read here is the one that
+                # run settled on.
+                settled = get_pr(ctx, number)
+                if branch_update_carried_approval(settled, pr["headRefOid"]):
+                    return settled
+                return None
             if last_state == "failure":
                 raise DrainError(
                     f"PR #{number}: {STALE_APPROVAL_CHECK} failed after branch update."
@@ -1165,12 +1186,24 @@ def wait_for_branch_update_policy(
         time.sleep(poll_seconds)
 
 
-def update_branch(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> None:
+def update_branch(
+    ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool
+) -> dict[str, Any] | None:
+    """Update a branch that is behind; return the head approval carried to.
+
+    A returned payload is the caller's sole authority to record a new approved
+    head: the successful policy run, the retained `reviewed:approve`, and the
+    head all came out of that one read together. None means no positive
+    content-safe verdict, so the label stays exactly as the repository left it
+    and the pull request reaches the ordinary rereview path. The drainer never
+    adds `reviewed:approve` to any head -- reading a verdict is not writing
+    one, and an unreadable payload cannot establish that the label is off.
+    """
     number = pr["number"]
     head_sha = pr["headRefOid"]
     log(f"PR #{number}: branch is behind {ctx.default_branch}; updating via GitHub")
     if dry_run:
-        return
+        return None
     run(
         [
             "gh",
@@ -1184,20 +1217,25 @@ def update_branch(ctx: RepoContext, pr: dict[str, Any], *, dry_run: bool) -> Non
         cwd=ctx.path,
     )
     log(f"PR #{number}: waiting for stale-approval workflow decision")
-    refreshed = wait_for_branch_update_policy(
+    settled = wait_for_branch_update_policy(
         ctx,
         number,
         head_sha,
         timeout_seconds=UPDATE_BRANCH_WAIT_SECONDS,
         poll_seconds=UPDATE_BRANCH_POLL_SECONDS,
     )
-    if has_label(refreshed, APPROVE_LABEL):
+    if settled is None:
         log(
-            f"PR #{number}: branch update touched no PR-owned files; "
-            f"{APPROVE_LABEL} was retained"
+            f"PR #{number}: the branch update produced no content-safe verdict; "
+            f"{APPROVE_LABEL} stays as the repository left it and a fresh "
+            "review decides this head"
         )
-    else:
-        add_approval_label(ctx, number)
+        return None
+    log(
+        f"PR #{number}: branch update touched no PR-owned files; "
+        f"{APPROVE_LABEL} was retained"
+    )
+    return settled
 
 
 def object_id_of(value: Any) -> str | None:
@@ -3598,11 +3636,13 @@ def request_base_update(
     always left with an update in flight rather than stranded.
     """
     number = pr["number"]
-    update_branch(ctx, pr, dry_run=dry_run)
-    if not dry_run:
-        refreshed = get_pr(ctx, number)
-        if has_label(refreshed, APPROVE_LABEL):
-            remember_approved_head(state, number, refreshed["headRefOid"])
+    settled = update_branch(ctx, pr, dry_run=dry_run)
+    if settled is not None:
+        # The only head recordable here is the one the policy cleared, in the
+        # very payload that cleared it. An independent read at this point can
+        # observe a head pushed since, and recording that one would hand an
+        # earlier update's verdict to a commit nobody decided anything about.
+        remember_approved_head(state, number, settled["headRefOid"])
     message = (
         f"PR #{number} was behind {ctx.default_branch}; its branch update "
         + ("would be requested" if dry_run else "was requested")

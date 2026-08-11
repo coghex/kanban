@@ -23,17 +23,91 @@ jobs:
             exit 1
           fi
 
+  # New commits that touch this pull request's own files invalidate a prior
+  # approval: strip the label so the gate closes until a reviewer approves the
+  # updated code. The removal fires an `unlabeled` event, which re-runs
+  # review-approved. A synchronize push that touches none of this pull
+  # request's own files -- a base-branch update merged forward with no
+  # overlapping content -- leaves the label alone: the reviewed code has not
+  # changed, only the branch's ancestry has.
+  #
+  # Keeping the label is the ONLY positive content-safe signal this repository
+  # publishes, and the drainer reads it as one (`tools/drain_prs.py`,
+  # branch_update_carried_approval). So this job runs on every synchronize
+  # rather than only on an already-approved payload: a run skipped for a later
+  # push would leave an earlier run's success as the latest non-skipped
+  # result, and that stale success would speak for a head it never saw.
   dismiss-stale-approval:
-    if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'reviewed:approve')
+    if: github.event.action == 'synchronize'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - name: Remove approval after the pull-request head changes
+      - name: Check out the pushed branch with full history
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Remove approval unless this push touches no PR-owned file
         env:
           GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        run: gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label reviewed:approve
+        run: |
+          strip() {
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label reviewed:approve || true
+          }
+          # Every case that cannot positively prove non-overlap strips. This
+          # only ever SKIPS a strip when the push is provably content-free for
+          # this pull request, never the reverse.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "no usable 'before' SHA -- can't confirm this is a no-op update, stripping"
+            strip
+            exit 0
+          fi
+          if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "'before' SHA not reachable in this checkout -- can't confirm, stripping"
+            strip
+            exit 0
+          fi
+          if [ -z "$AFTER" ] || [ "$AFTER" = "0000000000000000000000000000000000000000" ]; then
+            echo "no usable 'after' SHA -- can't confirm this is a no-op update, stripping"
+            strip
+            exit 0
+          fi
+          if ! git cat-file -e "$AFTER^{commit}" 2>/dev/null; then
+            echo "'after' SHA not reachable in this checkout -- can't confirm, stripping"
+            strip
+            exit 0
+          fi
+          if ! drifted_files=$(git diff --name-only "$BEFORE" "$AFTER"); then
+            echo "couldn't diff 'before'..'after' -- can't confirm, stripping"
+            strip
+            exit 0
+          fi
+          if [ -z "$drifted_files" ]; then
+            echo "push introduced no file changes -- stripping (unexpected, be safe)"
+            strip
+            exit 0
+          fi
+          if ! pr_files=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only); then
+            echo "couldn't fetch this PR's own file list -- can't confirm, stripping"
+            strip
+            exit 0
+          fi
+          if [ -z "$pr_files" ]; then
+            echo "this PR reports no files of its own -- nothing to prove non-overlap against, stripping"
+            strip
+            exit 0
+          fi
+          overlap=$(comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$drifted_files" | sort -u))
+          if [ -n "$overlap" ]; then
+            echo "push touched PR-owned file(s): $overlap -- stripping"
+            strip
+          else
+            echo "push touched no PR-owned files (branch-update merge) -- keeping reviewed:approve"
+          fi
