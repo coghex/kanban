@@ -12,16 +12,19 @@ src/Kanban/PullRequestFlow.hs actually spawn.
 
 Issue #118 added three more packaged skills — the drafting and canonical
 issue-review workflows $issue, $autoissue, and $issue-review — so discovery
-and Haskell name parity are now two separate concepts here.
+and Haskell name parity are now two separate concepts here, and issue #229
+added four more with the design and report document workflows $design-epic,
+$process-design-doc, $draft-report, and $process-report.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all eight); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
-own Haskell code spawns by name (the five above). The drafting workflows are
-user- or daemon-invoked and are deliberately excluded from that parity
-pinning; the breadth workflow /draft-issues is Claude-only and has no Codex
-counterpart here by design. See docs/drafting-workflow-contract.md. The new
-skills are still subject to every structural policy this module enforces:
-frontmatter name matching, forbidden configuration keys, and no personal
-paths.
+(all twelve); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+own Haskell code spawns by name (the five above). Both later sets are user- or
+daemon-invoked and are deliberately excluded from that parity pinning; the
+breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
+by design, and three of the four document workflows are Codex-only in the
+opposite direction. See docs/drafting-workflow-contract.md and
+docs/document-workflow-contract.md. The new skills are still subject to every
+structural policy this module enforces: frontmatter name matching, forbidden
+configuration keys, and no personal paths.
 
 Issue #125 packaged $repair ahead of the key that spawns it, so it briefly
 formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
@@ -73,8 +76,21 @@ HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", 
 # (docs/drafting-workflow-contract.md §3.2).
 DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review"}
 
+# The design and report document workflows vendored by issue #229. Also user-
+# invoked and excluded from Haskell name parity. Three of the four are
+# Codex-only by declaration (docs/document-workflow-contract.md §3.5); only
+# process-report has a Claude counterpart.
+DOCUMENT_SKILL_NAMES = {
+    "design-epic",
+    "process-design-doc",
+    "draft-report",
+    "process-report",
+}
+
 # What a Codex installation must actually discover under skills/.
-EXPECTED_SKILL_NAMES = HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES
+EXPECTED_SKILL_NAMES = (
+    HASKELL_PARITY_SKILL_NAMES | DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES
+)
 
 # Keys that would let a packaged manifest silently override the model,
 # reasoning effort, sandbox/approval policy, or working directory Kanban's
@@ -260,12 +276,14 @@ class SkillDiscoveryTests(unittest.TestCase):
         # The two concepts must stay distinct: discovery covers every packaged
         # workflow, while WorkflowNameParityTests pins only the ones Kanban's
         # Haskell code spawns. Collapsing them back into one constant would
-        # either break parity or silently stop discovering the drafting skills.
+        # either break parity or silently stop discovering the drafting and
+        # document skills.
         self.assertTrue(HASKELL_PARITY_SKILL_NAMES < EXPECTED_SKILL_NAMES)
         self.assertEqual(
             EXPECTED_SKILL_NAMES - HASKELL_PARITY_SKILL_NAMES,
-            DRAFTING_SKILL_NAMES,
+            DRAFTING_SKILL_NAMES | DOCUMENT_SKILL_NAMES,
         )
+        self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
 
     def test_repair_is_a_spawned_workflow_and_not_a_drafting_one(self):
         # Kanban's `r` spawns $repair for a red Done card (issue #127), so it
@@ -337,6 +355,7 @@ class WorkflowNameParityTests(unittest.TestCase):
         # spawn, so an extraction that silently matched nothing fails here.
         self.assertEqual(spawned & EXPECTED_SKILL_NAMES, HASKELL_PARITY_SKILL_NAMES)
         self.assertEqual(spawned & DRAFTING_SKILL_NAMES, set())
+        self.assertEqual(spawned & DOCUMENT_SKILL_NAMES, set())
 
 
 class NoPersonalPathTests(unittest.TestCase):
