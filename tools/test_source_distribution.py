@@ -33,9 +33,10 @@ tracked file has none:
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
-  which only do anything in the upstream Git repository; and the six
-  development audit reports under `docs/`, which no runtime, setup, test, or
-  workflow path reads and which no packaged document links to.
+  which only do anything in the upstream Git repository; and the nine
+  development audit reports and design documents under `docs/`, which no
+  runtime, setup, test, or workflow path reads and which no packaged document
+  links to.
 
 Prerequisites are `cabal` on `PATH` and a Git checkout of this repository.
 Both hold in the required `build-test` CI job. Neither holds inside an
@@ -103,8 +104,11 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/code-health-report.md",
     "docs/document_workflow_findings.md",
     "docs/drainer-bugs.md",
+    "docs/multi_repo_boards_design.md",
     "docs/pipeline-hardening.md",
+    "docs/public_release_design.md",
     "docs/ui-bugs.md",
+    "docs/usage_awareness_design.md",
     "docs/workflow_audit_findings.md",
 )
 

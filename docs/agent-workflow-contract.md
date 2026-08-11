@@ -817,8 +817,9 @@ other's rows, and a third fence added later cannot silently displace either.
 Every tracked Markdown file in this repository takes exactly one publication
 lane:
 
-- `coordination` — a coordination record: a findings or code-health report and
-  its status ledger, whose content no runtime, installer, or test reads.
+- `coordination` — a coordination record: a findings, code-health, or design
+  document and its status ledger, whose content no runtime, installer, or test
+  reads.
   Eligible for direct publication to `master`, bypassing the pull-request lane.
 - `pr-atomic` — a document that lands atomically with its implementation
   through the pull-request lane, because changing it on its own can invalidate
@@ -829,9 +830,11 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The six `coordination` documents are `docs/code-health-report.md`,
+The nine `coordination` documents are `docs/code-health-report.md`,
 `docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
-`docs/pipeline-hardening.md`, `docs/ui-bugs.md`, and
+`docs/multi_repo_boards_design.md`, `docs/pipeline-hardening.md`,
+`docs/public_release_design.md`, `docs/ui-bugs.md`,
+`docs/usage_awareness_design.md`, and
 `docs/workflow_audit_findings.md`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
@@ -870,8 +873,8 @@ recording only one would understate what a change to it can break:
   in `RELEASE_TREES`), so editing it alone changes what ships.
 - `implementation-coupled` — `CLAUDE.md`'s "The contract" section requires this
   file to stay consistent with behavior in the same pull request.
-- `audit-report` — a findings or code-health report carrying its own status
-  ledger, which `tools/test_source_distribution.py` lists in
+- `audit-report` — a findings, code-health, or design document carrying its
+  own status ledger, which `tools/test_source_distribution.py` lists in
   `EXCLUDED_TRACKED_PATHS`. This is the only reason that admits the
   `coordination` lane.
 
@@ -890,9 +893,12 @@ docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
+docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
+docs/public_release_design.md | coordination | audit-report
 docs/ui-bugs.md | coordination | audit-report
+docs/usage_awareness_design.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
