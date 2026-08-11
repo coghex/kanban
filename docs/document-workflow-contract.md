@@ -110,15 +110,17 @@ The asymmetry runs opposite to the Claude-only `/draft-issues` boundary in
 [drafting-workflow-contract.md §3.2](drafting-workflow-contract.md#32-claude-only-breadth-draft-issues),
 and is recorded the same way rather than closed.
 
-### 3.6 Not an epic planner: the `$design-epic` and `/epic` boundary
+### 3.6 The epic planner: `$design-epic` with `$process-design-doc`
 
 `$design-epic` produces a durable design document and creates no tracker items;
-`/epic` decomposes a user-supplied arc into issues and remains unpackaged per
-[drafting-workflow-contract.md §3.5](drafting-workflow-contract.md#35-not-a-candidate-hunting-workflow-epic).
-The two are adjacent but not substitutes: the design workflow settles behavior,
-scope, decisions, and slice boundaries without touching the tracker, and
 `$process-design-doc` — not `$design-epic` — is what later turns an approved
-slice into an issue.
+slice into an issue. Together they are the arc-decomposition pipeline: an
+`epic` asset that would decompose a user-supplied arc into issues directly
+remains unpackaged in both plugins per
+[drafting-workflow-contract.md §3.5](drafting-workflow-contract.md#35-not-a-candidate-hunting-workflow-arc-decomposition),
+and the personal `/epic` command that once did so was retired 2026-08-11 in
+this pipeline's favor. The design workflow settles behavior, scope, decisions,
+and slice boundaries without touching the tracker.
 
 ## 4. Shared status vocabulary
 
@@ -193,8 +195,8 @@ parses §2 and fails if:
 - a declared row's brand, invocation sigil, or workflow name disagrees with the
   plugin and file the row points at;
 - this document stops stating the Codex-only asymmetry (§3.5), the
-  `$design-epic`/`/epic` boundary (§3.6), or the Haskell invocation-parity
-  exclusion (§1);
+  design-pipeline epic-planner boundary (§3.6), or the Haskell
+  invocation-parity exclusion (§1);
 - this document or a declared asset drops one of the exact `[#N]`,
   `[no-issue]`, or `[deferred]` literals of §4, or an asset that applies a
   disposition drops a checklist form — which is how the surface the two brands

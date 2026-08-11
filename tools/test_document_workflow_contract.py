@@ -110,9 +110,7 @@ CONTRACT_STATEMENTS = {
     "design-epic-creates-nothing": (
         "$design-epic produces a durable design document and creates no tracker items"
     ),
-    "epic-stays-unpackaged": (
-        "/epic decomposes a user-supplied arc into issues and remains unpackaged"
-    ),
+    "epic-stays-unpackaged": "remains unpackaged in both plugins",
     "one-artifact-per-invocation": "One artifact per invocation",
     "stop-for-explicit-approval": "Stop for explicit approval",
 }
@@ -329,12 +327,12 @@ class DeclaredAssetTests(unittest.TestCase):
 
 
 class DocumentedBoundaryTests(unittest.TestCase):
-    """§3.5's declared Codex-only asymmetry, §3.6's $design-epic//epic
-    boundary, §1's Haskell invocation-parity exclusion, and §5's two processing
-    boundaries are load-bearing: they are the reason the Claude plugin's
-    declared set here is one asset rather than five, the reason /epic is still
-    packaged in neither plugin, and the reason Kanban's CLI never spawns any of
-    these."""
+    """§3.5's declared Codex-only asymmetry, §3.6's design-pipeline
+    epic-planner boundary, §1's Haskell invocation-parity exclusion, and §5's
+    two processing boundaries are load-bearing: they are the reason the Claude
+    plugin's declared set here is one asset rather than five, the reason an
+    epic asset is still packaged in neither plugin, and the reason Kanban's
+    CLI never spawns any of these."""
 
     def test_document_states_every_declared_boundary(self):
         self.assertEqual(missing_contract_statements(contract_text()), [])
