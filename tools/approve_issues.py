@@ -464,11 +464,23 @@ def canonical_comment(comment: dict[str, Any]) -> dict[str, Any]:
 
 
 def is_spec_relevant_comment(issue: dict[str, Any], comment: dict[str, Any]) -> bool:
-    # Mirrors the solve workflow's own effective-spec rule: only the issue
-    # author or an OWNER/MEMBER/COLLABORATOR can amend the contract. An
+    # Reviewer-gate arithmetic, and deliberately no longer the solve agent's
+    # own trust rule. This decides which comments a *published approval* is
+    # bound to: the issue's own reporter or an OWNER/MEMBER/COLLABORATOR can
+    # amend the contract, so a reporter's follow-up re-opens the gate, while an
     # unprivileged commenter (a "happy to take this" drive-by, spam, a
     # lookalike login) is evidence at most -- it must not be able to
     # invalidate a published approval just by existing.
+    #
+    # The tracked solve workflows read the timeline through their bundles'
+    # vendored trusted_issue_spec.py instead, which exposes a comment body only
+    # for the exact case-insensitive logins claude/codex/coghex and grants
+    # nothing for association or issue authorship. The two layers answer
+    # different questions and are meant to diverge: a reporter comment can be
+    # inside this fingerprint -- changing the spec hash and forcing a fresh
+    # review -- while its body never reaches the solve agent. See
+    # docs/agent-workflow-contract.md §2.1. Do not re-align this function with
+    # that helper; the gate needs the wider set.
     if comment.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}:
         return True
     commenter = (comment.get("user") or {}).get("login")

@@ -164,6 +164,20 @@ model, reasoning effort, permission mode, or working directory — Kanban's own
 CLI invocation pins those per action, and `tools/test_claude_plugin.py`
 asserts none of the packaged manifests override them.
 
+`/solve` bundles a second script, `scripts/trusted_issue_spec.py`, and reads the
+issue's effective spec through nothing else. It fetches the complete paginated
+comment timeline and exposes a comment body only for the exact, case-insensitive
+logins `claude`, `codex`, and `coghex`; every other comment comes back as
+metadata alone, so an untrusted body never enters the solving session's context.
+Repository role, `author_association`, issue authorship, display name, and bot
+status grant nothing, and the set is hardcoded, so widening it costs a reviewed
+pull request. `/solve` resolves the helper at
+`${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`, so it needs no filesystem
+search and no Codex plugin, exactly like the coordinator above. The trust rule
+and its deliberate divergence from the reviewer gate's association-based
+arithmetic are recorded in
+[docs/agent-workflow-contract.md §2.1](../docs/agent-workflow-contract.md#21-issue-solve-solve--solve).
+
 `/issue-review` — and `/autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, through the discovery record at
 `~/Library/Application Support/kanban/issue-review/config.json` that
@@ -233,12 +247,19 @@ runs) checks that:
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
 surface (all ten commands under `claude-plugin/plugins/kanban/commands/`) and
-bundled coordinator against the same manifest in
+both bundled Python assets — the review coordinator and `/solve`'s
+trusted-comment helper — against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
 that the Codex plugin and Kanban's Haskell source are reconciled against,
 including the user-scoped backend install path the drafting and issue-review
 commands name and the `git`/`awk`/`gh`/`rg` commands `/process-report` resolves
 its docs worktree, tracker state, and finding headings with.
+
+`tools/test_trusted_issue_spec.py` pins that helper against its Codex
+counterpart — the two copies must stay byte-identical — and drives both over
+every signal that must grant no comment body, proving no untrusted body or
+body-derived content survives serialization and that each copy resolves from its
+own installed bundle while the working directory is the repository being solved.
 
 `tools/test_repair_workflow_contract.py` pins `/repair`'s own behavioral
 contract — the ordered diagnosis branches, worktree selection and safe push,

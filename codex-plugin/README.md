@@ -129,6 +129,19 @@ invocation pins those per action, and `tools/test_codex_plugin.py` asserts
 none of the packaged manifests (or the coordinator's own nested-reviewer
 invocations) override them.
 
+`$solve` bundles a second script, `skills/solve/scripts/trusted_issue_spec.py`,
+and reads the issue's effective spec through nothing else. It fetches the
+complete paginated comment timeline and exposes a comment body only for the
+exact, case-insensitive logins `claude`, `codex`, and `coghex`; every other
+comment comes back as metadata alone, so an untrusted body never enters the
+solving session's context. Repository role, `author_association`, issue
+authorship, display name, and bot status grant nothing, and the set is
+hardcoded, so widening it costs a reviewed pull request. `$solve` locates this
+helper under `$CODEX_HOME` exactly the way the PR-flow skills locate the
+coordinator, and for the same reason. The trust rule and its deliberate
+divergence from the reviewer gate's association-based arithmetic are recorded in
+[docs/agent-workflow-contract.md §2.1](../docs/agent-workflow-contract.md#21-issue-solve-solve--solve).
+
 `$issue-review` — and `$autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, through the discovery record at
 `~/Library/Application Support/kanban/issue-review/config.json` that
@@ -179,12 +192,20 @@ runs) checks that:
 - the bundled coordinator resolves the canonical issue-review backend the
   same way Kanban's Haskell code does, and its self-test passes standalone.
 
+`tools/test_trusted_issue_spec.py` pins `$solve`'s bundled trusted-comment
+helper against its Claude counterpart — the two copies must stay byte-identical
+— and drives both over every signal that must grant no comment body, proving no
+untrusted body or body-derived content survives serialization and that each copy
+resolves from its own installed bundle while the working directory is the
+repository being solved.
+
 `tools/test_agent_workflow_contract.py` reconciles all twelve skills' own bash
 surface against the manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest),
 including the user-scoped backend install path the drafting and issue-review
-skills name and the `git`/`awk`/`gh` commands the document skills resolve their
-docs worktree and tracker state with.
+skills name, the `git`/`awk`/`gh` commands the document skills resolve their
+docs worktree and tracker state with, and the `gh` surface of both bundled
+Python assets — the review coordinator and `$solve`'s trusted-comment helper.
 
 `tools/test_repair_workflow_contract.py` pins `$repair`'s own behavioral
 contract — the ordered diagnosis branches, worktree selection and safe push,

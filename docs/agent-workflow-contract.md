@@ -42,6 +42,30 @@ everything else.
   by `initialSolvePrompt`/`resumeSolvePrompt`).
 - **Inputs:** issue number, solver brand, optional resumed session id and
   follow-up user message.
+- **Comment trust boundary:** both tracked solve workflows
+  (`codex-plugin/plugins/kanban/skills/solve/SKILL.md` and
+  `claude-plugin/plugins/kanban/commands/solve.md`) fetch the issue's effective
+  spec exclusively through their own bundle's vendored `trusted_issue_spec.py`
+  (`codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
+  `claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py`). Each copy
+  retrieves the complete paginated timeline in deterministic chronological
+  order and serializes a comment body only for the exact, case-insensitive
+  logins `claude`, `codex`, and `coghex`; every other comment is returned as
+  metadata alone — id, author, timestamp, url — with no body and no
+  body-derived content of any kind. Repository role, `author_association`,
+  issue authorship, display name, bot status, and a lookalike login such as
+  `codex-bot` or `coghex-helper` grant nothing, and the trusted set is
+  hardcoded in the tracked helper so widening it costs a reviewed pull request.
+  The workflows forbid `gh issue view`, the raw comments endpoint, GraphQL, and
+  every other unfiltered source: only the helper's own internal fetch may read
+  the untrusted bodies it drops. Each copy is a vendored self-contained asset
+  per §3 — standard library only, no import from `tools/` — carries a
+  standalone `--self-test`, and declares its `gh` surface in §4. The Codex
+  skill locates its copy under `$CODEX_HOME` the way its PR-flow skills locate
+  their coordinator; the Claude command resolves its own at
+  `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`. Neither resolves a
+  checkout-relative or personal-skill path, because Kanban spawns the workflow
+  with the worked repository as the working directory.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
@@ -55,6 +79,28 @@ everything else.
 - **Durable state:** the per-issue worktree, plus the session log file.
 - **Mandatory/optional:** optional — only exercised by the `S`/`A` keys, and
   only after the user picks a provider.
+
+That solve-agent trust boundary is deliberately narrower than, and independent
+of, the reviewer gate's arithmetic in `tools/approve_issues.py`; the two answer
+different questions and are not meant to converge.
+`is_spec_relevant_comment` decides which comments a **published approval is
+bound to**, so it counts a comment as spec-relevant when its
+`author_association` is `OWNER`, `MEMBER`, or `COLLABORATOR` *or* when its
+author is the issue's own reporter — including a reporter whose association is
+`NONE`, the case that function's standalone self-test pins. That is the right
+rule there: an unprivileged drive-by comment must not invalidate a published
+approval merely by existing, while a reporter's own follow-up must re-open the
+gate rather than be silently ignored. The helper answers a different question —
+whose text may steer an agent that is about to write code — and there issue
+authorship earns nothing. The two rules therefore cross: a reporter comment can
+be inside the gate's fingerprint, changing the `spec` hash and forcing a fresh
+review, while its body never reaches the solve agent. That outcome is intended.
+The reviewer reads such a comment and either carries what matters into its own
+`issue-review:v2` comment — authored by a trusted login, and so visible to the
+solver — or it does not, and the solver proceeds from the body plus trusted
+amendments alone. Nothing in the solve path may widen its own view to match the
+gate's, and nothing in this boundary changes the gate's association-based
+arithmetic, which §2.3 owns.
 
 ### 2.2 PR review, rereview, revise, and repair
 
@@ -590,7 +636,7 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review/Tools.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
@@ -601,8 +647,8 @@ issue-review-discovery-record | personal-path | /Library/Application Support/kan
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
-find-cli | executable | find | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
-head-cli | executable | head | codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
 awk-cli | executable | awk | codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 ```
@@ -623,16 +669,19 @@ label of the machine-wide singleton that predates per-repository jobs, which
 `tools/drain_prs_service.py` retires rather than installs.
 
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
-the installed Codex plugin's shared review coordinator from `$pr-review`,
-`$pr-rereview`, `$pr-revise`, and `$repair`, themselves optional AI actions,
-and every supported macOS/Linux shell already provides both. The Claude
-plugin's equivalent commands need neither: Claude Code exposes
-`${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so `/pr-review`,
-`/pr-rereview`, `/pr-revise`, and `/repair` resolve their bundled coordinator
-directly at
-`${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py` without a filesystem search, and
-that plugin bundles its own copy of the coordinator so it never depends on
-the Codex plugin being installed.
+one of the installed Codex plugin's own vendored scripts from inside a workflow
+Kanban spawned with the worked repository as its working directory — the shared
+review coordinator for `$pr-review`, `$pr-rereview`, `$pr-revise`, and
+`$repair`, and the trusted-comment issue-spec helper for `$solve` (§2.1) —
+themselves optional AI actions, and every supported macOS/Linux shell already
+provides both. The Claude plugin's equivalent workflows need neither: Claude
+Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
+`/pr-review`, `/pr-rereview`, `/pr-revise`, and `/repair` resolve their bundled
+coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`, and
+`/solve` its bundled helper at
+`${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`, without a filesystem
+search. That plugin bundles its own copy of both, so it never depends on the
+Codex plugin being installed.
 
 `awk-cli` and `rg-cli` are `mandatory: no` because nothing outside the
 document workflows declared in

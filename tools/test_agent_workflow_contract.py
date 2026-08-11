@@ -74,6 +74,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+    "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
 ]
 
 # The tracked Claude plugin's own packaged workflows (issue #77): the same
@@ -93,7 +94,18 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/repair.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
+    "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
 ]
+
+# Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
+# a member of its brand's surface list above, so its external commands are
+# already reconciled against the manifest; these two are named here so the
+# non-vacuity pin below drives the real assets, and so dropping one from a
+# surface list fails a test rather than silently un-scanning a vendored asset.
+TRUSTED_SPEC_SURFACE_FILES = {
+    "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
+    "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
+}
 
 # The seven drafting and canonical issue-review assets vendored by issue #118.
 # All seven are scanned for external commands via the lists above — the bash
@@ -356,21 +368,33 @@ def discovered_plugin_commands(content):
     return names
 
 
-# run(["gh", ...]) / subprocess.run(["git", ...]) / run(\n    [\n        "codex", —
-# the coordinator's own external-command invocation surface. `\s` matches
-# newlines without needing re.DOTALL, so this covers both the single-line
-# and the multi-line list-literal call styles review_pr.py uses.
-PYTHON_COMMAND_CALL_RE = re.compile(r'(?:subprocess\.)?run\(\s*\[\s*"([^"]+)"')
+# run(["gh", ...]) / subprocess.run(["git", ...]) / run_json(["gh", ...]) /
+# run(\n    [\n        "codex", — a vendored Python asset's own
+# external-command invocation surface. `\s` matches newlines without needing
+# re.DOTALL, so this covers both the single-line and the multi-line
+# list-literal call styles review_pr.py uses.
+#
+# The callee is matched as a family, exactly the way TOOL_COMMAND_CALL_RE below
+# matches the tools/ surface, rather than as the two literal spellings
+# review_pr.py happens to use: trusted_issue_spec.py spawns `gh` through its own
+# run_json wrapper, and a check that only recognized `run(`/`subprocess.run(`
+# would have discovered nothing there and passed vacuously. Both quote styles are
+# accepted for the same reason — a gate a single-quoted literal walks through is
+# not a gate.
+PYTHON_COMMAND_CALL_RE = re.compile(
+    r'\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?'
+    r'(?:[a-z_]*run[a-z_0-9]*|Popen|check_call|check_output|call)'
+    r'\(\s*\[\s*(?P<quote>["\'])(?P<name>[^"\']+)(?P=quote)'
+)
 
 
 def discovered_python_commands(content):
-    """Every external command a packaged coordinator's own Python source
-    invokes as the first element of a `run`/`subprocess.run` argument
-    list. Deliberately does not match a dynamically-resolved first
-    argument like `sys.executable` (no leading string literal there) —
-    that path is python3, already covered via the SKILL.md bash surface
-    that invokes this script with `python3 ...`."""
-    return {match.group(1) for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
+    """Every external command a packaged Python asset's own source invokes as
+    the first element of a literal `run`-family argument list. Deliberately does
+    not match a dynamically-resolved first argument like `sys.executable` (no
+    leading string literal there) — that path is python3, already covered via
+    the SKILL.md bash surface that invokes this script with `python3 ...`."""
+    return {match.group("name") for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
 
 
 def discovered_commands_for_plugin_file(relative_path, content):
@@ -604,6 +628,43 @@ class AgentWorkflowContractTests(unittest.TestCase):
         content = (REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
+    def test_both_trusted_issue_spec_helpers_are_scanned_and_declared(self):
+        # Issue #238's review requirement: the two vendored helpers must reach a
+        # surface list (an unlisted vendored asset is never scanned at all), and
+        # what the extractor recovers from each is pinned so a helper whose `gh`
+        # call the regex stops matching fails here rather than passing with an
+        # empty discovered set.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(TRUSTED_SPEC_SURFACE_FILES.items()):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by either plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
+    def test_python_command_discovery_matches_a_wrapper_named_call_site(self):
+        # The extractor must recognize a run-family wrapper, not only the two
+        # spellings review_pr.py uses: the trusted-comment helper spawns gh
+        # through run_json, and the pre-#238 regex found nothing in it.
+        snippet = (
+            'def run_json(args):\n'
+            '    return subprocess.run(args, text=True)\n'
+            'run_json(["gh", "api", "repos/o/r/issues/1/comments"])\n'
+            "subprocess.run(['git', 'status'])\n"
+        )
+        self.assertEqual(discovered_python_commands(snippet), {"gh", "git"})
 
     def test_plugin_bash_command_discovery_finds_find_and_head(self):
         # Pins the extractor against the actual pr-review skill rather than
