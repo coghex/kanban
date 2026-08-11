@@ -44,7 +44,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 - [x] DW-1. Coordination-document mutations stop at the local worktree — [#237]
 - [x] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout — [#223]
-- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: workflows untracked (DW-11)
+- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: precondition met by #229, ready to process
 
 ### Cursor integrity and ownership
 
@@ -63,7 +63,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 ### Workflow ownership and routing
 
-- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout — [deferred]: workflows untracked (DW-11)
+- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout — [deferred]: precondition met by #229, ready to process
 - [x] DW-11. The design and report workflows remain untracked personal assets — [#229]
 
 ### Review safety
@@ -162,12 +162,17 @@ The appropriate mechanism—such as a shared short-lived lock, an isolated workt
 ### [deferred] DW-3. Tracker mutations and ledger publication are not one recoverable transaction
 
 > **Deferred:** The reconciliation step belongs to `process-design-doc`, which
-> exists only at `~/.codex/skills/process-design-doc/SKILL.md`, and unlike DW-2
-> this finding has no kanban-owned counterpart in the tracked tree — so no
-> reviewable PR can carry it. Clears on the same precondition as DW-1: the four
-> workflows appear as rows in `docs/drafting-workflow-contract.md` §2 with files
-> present under `codex-plugin/plugins/kanban/skills/` and
-> `claude-plugin/plugins/kanban/commands/`.
+> existed only at `~/.codex/skills/process-design-doc/SKILL.md`, and unlike DW-2
+> this finding had no kanban-owned counterpart in the tracked tree — so no
+> reviewable PR could carry it. Clears on the same precondition as DW-1: the
+> four document workflows tracked as plugin assets.
+>
+> **Precondition met.** #229 (PR #231) landed them as rows in
+> `docs/document-workflow-contract.md` §2 — a dedicated contract, not
+> `docs/drafting-workflow-contract.md` §2 as this note originally predicted —
+> with files present under `codex-plugin/plugins/kanban/skills/` and
+> `claude-plugin/plugins/kanban/commands/`. Verify those rows and files, then
+> process this finding normally.
 
 #### Observation
 
@@ -533,18 +538,23 @@ No unreviewed document should be deleted merely because it is untracked or stran
 
 ### [deferred] DW-10. Coordination-document workflows infer ownership from the current checkout
 
-> **Deferred:** The four workflows are still untracked personal files, so no
-> reviewable PR can add an ownership-resolution step —
-> `docs/drafting-workflow-contract.md:35-47` declares the packaged assets
-> exhaustively and lists none of them, and
-> `tools/test_drafting_workflow_contract.py:43` limits the enforced inventory to
-> `issue`, `draft-issues`, `autoissue`, and `issue-review`. The durable source
-> for the ownership declaration is also unchosen; see this finding's Remaining
-> uncertainty. Clears when DW-11's vendoring lands: `design-epic`,
-> `process-design-doc`, `draft-report`, and `process-report` appear as rows in
-> that contract's §2 asset table with files present under
-> `codex-plugin/plugins/kanban/skills/` and
-> `claude-plugin/plugins/kanban/commands/`.
+> **Deferred:** The four workflows were untracked personal files, so no
+> reviewable PR could add an ownership-resolution step. Clears when DW-11's
+> vendoring lands: `design-epic`, `process-design-doc`, `draft-report`, and
+> `process-report` tracked as plugin assets.
+>
+> **Precondition met.** #229 (PR #231) landed them as rows in
+> `docs/document-workflow-contract.md` §2 — a dedicated contract, not
+> `docs/drafting-workflow-contract.md` §2 as this note originally predicted —
+> with files present under `codex-plugin/plugins/kanban/skills/` and
+> `claude-plugin/plugins/kanban/commands/`. Verify those rows and files, then
+> process this finding normally.
+>
+> One consideration survives into that run rather than blocking it: the durable
+> source for the ownership declaration is still unchosen (see this finding's
+> Remaining uncertainty). §7 of `docs/agent-workflow-contract.md`, the
+> machine-checked document classification #225 landed, is now a candidate it
+> did not have at audit time.
 
 #### Observation
 
