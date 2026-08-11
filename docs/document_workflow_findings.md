@@ -42,7 +42,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 ### Durability and transaction boundaries
 
-- [ ] DW-1. Coordination-document mutations stop at the local worktree — [deferred]: workflows untracked (DW-11)
+- [x] DW-1. Coordination-document mutations stop at the local worktree — [#237]
 - [x] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout — [#223]
 - [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: workflows untracked (DW-11)
 
@@ -74,16 +74,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 ## Chapter 1: Durability and transaction boundaries
 
-### [deferred] DW-1. Coordination-document mutations stop at the local worktree
-
-> **Deferred:** The four workflows live only under `~/.codex/skills/` and
-> `~/.claude/commands/`, so no reviewable PR can add a publication step —
-> `docs/drafting-workflow-contract.md:35-47` declares the tracked drafting
-> assets exhaustively and lists none of them. Clears when DW-11's vendoring
-> lands: `design-epic`, `process-design-doc`, `draft-report`, and
-> `process-report` appear as rows in that contract's §2 asset table with files
-> present under `codex-plugin/plugins/kanban/skills/` and
-> `claude-plugin/plugins/kanban/commands/`.
+### [#237] DW-1. Coordination-document mutations stop at the local worktree
 
 #### Observation
 
