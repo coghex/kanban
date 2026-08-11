@@ -155,6 +155,8 @@ DOCUMENTED_DIVERGENCE = '''\
 @@
 +            result_models(results),
 @@
++                result_models(results),
+@@
 -    review = review_marker([CODEX_REVIEWER, CLAUDE_REVIEWER], "a" * 40, "APPROVE")
 +    review = review_marker(
 +        [CODEX_REVIEWER, CLAUDE_REVIEWER], [UNVERIFIED_MODEL_TOKEN, UNVERIFIED_MODEL_TOKEN], "a" * 40, "APPROVE"

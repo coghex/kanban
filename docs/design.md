@@ -515,6 +515,12 @@ Open pull requests that do not satisfy the approval predicate, including draft
 pull requests. A draft has already crossed the issue-to-PR boundary, so it
 belongs in Reviewing rather than Active and carries a prominent `DRAFT` badge.
 Drafts remain in Reviewing even if an approval label is applied accidentally.
+Canonical review approval is not an accidental label application: its
+publisher marks the PR ready for review as part of the guarded approval
+transaction. A successful approval therefore enters Done immediately even
+while CI is pending; changes requested never changes draft state. The PR
+drainer retains the same transition as a fallback for approvals published by
+older or external tooling.
 
 ### Done
 

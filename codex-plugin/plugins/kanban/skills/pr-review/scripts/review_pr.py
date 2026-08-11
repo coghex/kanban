@@ -321,6 +321,7 @@ def pr_view(root: Path, repo: str, number: int) -> dict[str, Any]:
             "statusCheckRollup",
             "closingIssuesReferences",
             "isCrossRepository",
+            "isDraft",
         ]
     )
     try:
@@ -997,6 +998,14 @@ def clear_verdict_labels(
     )
 
 
+def mark_ready_for_review(root: Path, repo: str, number: int) -> None:
+    run(["gh", "pr", "ready", str(number), "-R", repo], cwd=root)
+
+
+def restore_draft(root: Path, repo: str, number: int) -> None:
+    run(["gh", "pr", "ready", str(number), "-R", repo, "--undo"], cwd=root)
+
+
 def latest_owned_review_marker(
     comments: list[dict[str, Any]], login: str
 ) -> tuple[re.Match[str], str] | None:
@@ -1049,7 +1058,11 @@ def verify_publication(
         or marker.group("reviewers") != expected_reviewers
     ):
         raise WorkflowError("newest review marker does not match the published verdict")
-    return {"comment_url": url, "labels": verdict_labels}
+    return {
+        "comment_url": url,
+        "labels": verdict_labels,
+        "ready_for_review": not bool(pr.get("isDraft")),
+    }
 
 
 def require_prior_review(root: Path, repo: str, number: int) -> None:
@@ -1080,10 +1093,12 @@ def publish_results(
 ) -> tuple[int, dict[str, Any]]:
     """Safely publish an already-computed set of review results: re-verify
     nothing went stale since `gate`/`pr` were captured, post the
-    consolidated comment, then label — clearing both verdict labels if
-    anything changes between commenting and labeling. Shared by workflow()'s
-    own nested-reviewer path and publish_verdict()'s self-reviewed path, so
-    both go through identical race handling."""
+    consolidated comment, then label. An approved draft is also marked ready
+    for review, which is what moves it into Kanban's Done column even while CI
+    is pending. If anything changes during publication, clear both verdict
+    labels and restore draft state when this call changed it. Shared by
+    workflow()'s own nested-reviewer path and publish_verdict()'s self-reviewed
+    path, so both go through identical race handling."""
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, repo, number)
     refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
@@ -1119,6 +1134,7 @@ def publish_results(
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
+    made_ready = False
     try:
         require_current_review_state(
             root,
@@ -1143,14 +1159,43 @@ def publish_results(
             allow_no_issue=allow_no_issue,
             config_path=config_path,
         )
+        if verdict == "APPROVE" and not verified["ready_for_review"]:
+            mark_ready_for_review(root, repo, number)
+            made_ready = True
+            verified = verify_publication(
+                root,
+                repo,
+                number,
+                reviewers,
+                pr["headRefOid"],
+                verdict,
+                gate["key"],
+                approval_label,
+                changes_requested_label,
+                allow_no_issue=allow_no_issue,
+                config_path=config_path,
+            )
+            if not verified["ready_for_review"]:
+                raise WorkflowError("approved PR remained a draft after marking it ready for review")
     except WorkflowError as exc:
+        cleanup_errors: list[str] = []
         try:
             clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
+            cleanup_errors.append(f"verdict-label cleanup failed ({cleanup_exc})")
+        if made_ready:
+            try:
+                restore_draft(root, repo, number)
+            except WorkflowError as cleanup_exc:
+                cleanup_errors.append(f"draft-state rollback failed ({cleanup_exc})")
+        if cleanup_errors:
             raise WorkflowError(
-                f"publication failed ({exc}); verdict-label cleanup also failed ({cleanup_exc})"
-            ) from cleanup_exc
-        raise WorkflowError(f"publication failed ({exc}); both verdict labels were cleared") from exc
+                f"publication failed ({exc}); {'; '.join(cleanup_errors)}"
+            ) from exc
+        cleanup = "both verdict labels were cleared"
+        if made_ready:
+            cleanup += " and draft state was restored"
+        raise WorkflowError(f"publication failed ({exc}); {cleanup}") from exc
     return 0, {
         **base,
         "status": "reviewed",

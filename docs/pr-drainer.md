@@ -705,7 +705,9 @@ an all-blocked queue does not have to advance some unrelated pull request first.
 Recording a merge-conflict incident is not an advance, so one pass can record
 more than one — it skips each conflicting candidate in turn. Marking an
 approved draft ready for review is likewise not an advance and still applies to
-every approved draft in the queue.
+every approved draft in the queue. Canonical review publication now normally
+performs that transition immediately; the drainer keeps this step as a fallback
+for approvals published by older or external tooling.
 
 ## Merge conflicts
 
