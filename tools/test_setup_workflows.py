@@ -27,6 +27,10 @@ import setup_workflows
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# The version the fixture bundle declares for itself, and therefore the cache
+# directory the provider would install it into.
+BUNDLE_VERSION = "1.0.0"
+
 INSTALLED_AND_ENABLED = json.dumps(
     [{"id": "kanban@kanban", "installed": True, "enabled": True, "scope": "user"}]
 )
@@ -64,6 +68,9 @@ class HermeticSetupTests(unittest.TestCase):
             self.home / "Library" / "Application Support" / "kanban" / "issue-review"
         )
         self.legacy_path = self.home / "work" / "approve-issues.py"
+        # The documented default location, so most cases exercise the
+        # `~/.codex` fallback rather than the override.
+        self.codex_home = self.home / ".codex"
         self.fake = fake_cli.FakeCli(self.root / "fake")
         self._make_checkout()
         # The hermetic PATH holds only git (which
@@ -78,16 +85,77 @@ class HermeticSetupTests(unittest.TestCase):
         (self.repo / "tools").mkdir(parents=True)
         for name in ("approve_issues.py", "kanban_config.py"):
             shutil.copy(REPO_ROOT / "tools" / name, self.repo / "tools" / name)
-        (self.repo / "codex-plugin").mkdir()
         (self.repo / "claude-plugin").mkdir()
+        # A miniature but structurally real tracked Codex bundle: a manifest
+        # declaring the version its cache directory is named for, skills at
+        # the tracked depth, and a vendored script — the shapes the installed
+        # bundle is compared against.
+        self.bundle = self.repo / "codex-plugin" / "plugins" / "kanban"
+        (self.bundle / ".codex-plugin").mkdir(parents=True)
+        (self.bundle / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "kanban", "version": BUNDLE_VERSION}) + "\n",
+            encoding="utf-8",
+        )
+        for skill in ("solve", "pr-review"):
+            (self.bundle / "skills" / skill).mkdir(parents=True)
+            (self.bundle / "skills" / skill / "SKILL.md").write_text(
+                f"# {skill}\n", encoding="utf-8"
+            )
+        (self.bundle / "skills" / "pr-review" / "scripts").mkdir()
+        (self.bundle / "skills" / "pr-review" / "scripts" / "review_pr.py").write_text(
+            "print('review')\n", encoding="utf-8"
+        )
+        # The same rule the real checkout carries, and the reason an
+        # interpreter artefact is not bundle content on either side.
+        (self.repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
         subprocess.run(
             ["git", "init", "-q", str(self.repo)],
             check=True,
             capture_output=True,
             text=True,
         )
+        # Added, not committed: `git ls-files` reads the index, and a commit
+        # would need an identity this hermetic checkout deliberately has not
+        # configured.
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "-A"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-    def install_provider(self, binary, *, marketplaces="[]", plugins=("[]",)):
+    def cache_dir(self, codex_home=None):
+        """Where the provider caches this bundle, under a given Codex home."""
+        return (
+            Path(codex_home or self.codex_home)
+            / "plugins"
+            / "cache"
+            / "kanban"
+            / "kanban"
+            / BUNDLE_VERSION
+        )
+
+    def install_codex_cache(self, codex_home=None):
+        """Copy the tracked bundle into the provider cache exactly the way
+        `codex plugin add` does, so the installed side is a real copy rather
+        than a hand-listed inventory."""
+        cache = self.cache_dir(codex_home)
+        shutil.copytree(self.bundle, cache, dirs_exist_ok=True)
+        return cache
+
+    def refresh_side_effects(self, codex_home=None):
+        """The filesystem consequences of a real `codex plugin remove` and
+        `codex plugin add`: the cached bundle is dropped, then recopied from
+        the marketplace."""
+        cache = str(self.cache_dir(codex_home))
+        return (
+            [{"remove_tree": cache}],
+            [{"copy_tree": [str(self.bundle), cache]}],
+        )
+
+    def install_provider(
+        self, binary, *, marketplaces="[]", plugins=("[]",), remove_effects=(), add_effects=()
+    ):
         self.fake.install(binary)
         self.fake.script(
             binary, ["plugin", "marketplace", "list", "--json"], stdout=marketplaces
@@ -95,17 +163,32 @@ class HermeticSetupTests(unittest.TestCase):
         for listing in plugins:
             self.fake.script(binary, ["plugin", "list", "--json"], stdout=listing)
         self.fake.script(binary, ["plugin", "marketplace", "add"], stdout="added\n")
-        self.fake.script(binary, ["plugin", "add"], stdout="installed\n")
+        self.fake.script(
+            binary,
+            ["plugin", "remove"],
+            stdout="removed\n",
+            side_effects=list(remove_effects),
+        )
+        self.fake.script(
+            binary, ["plugin", "add"], stdout="installed\n", side_effects=list(add_effects)
+        )
         self.fake.script(binary, ["plugin", "install"], stdout="installed\n")
 
-    def run_setup(self, *argv):
+    def run_setup(self, *argv, codex_home=None):
         environment = {
             "PATH": str(self.fake.bin_dir),
             "FAKE_CLI_STATE_DIR": str(self.fake.state_dir),
             "HOME": str(self.home),
         }
+        if codex_home is not None:
+            environment["CODEX_HOME"] = str(codex_home)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, environment):
+            if codex_home is None:
+                # Not merely unset in the fixture: an ambient CODEX_HOME on
+                # the developer's own machine would otherwise point these
+                # cases at a real install.
+                os.environ.pop("CODEX_HOME", None)
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = setup_workflows.main(
                     [
@@ -233,6 +316,7 @@ class AlreadyConfiguredTests(HermeticSetupTests):
         return json.dumps([{"name": "kanban", "path": str(self.repo / directory)}])
 
     def test_rerun_reports_unchanged_and_runs_no_command(self):
+        self.install_codex_cache()
         self.install_provider(
             "codex",
             marketplaces=self._configured_marketplace("codex-plugin"),
@@ -266,6 +350,350 @@ class AlreadyConfiguredTests(HermeticSetupTests):
         )
 
         entry = self.component(payload, "codex-plugin")
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "refused")
+        self.assertIn("disabled", entry["message"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+
+class CodexBundleStalenessTests(HermeticSetupTests):
+    """`codex plugin list --json` answers "registered and enabled", never
+    "still the bundle this checkout tracks". Codex installs the bundle by
+    copying it into its own cache and offers no update command for a
+    local-source marketplace, so a checkout that moves ahead leaves every
+    Codex session running the bundle as it was when it was last added. These
+    cases pin the state being detected, named, and repaired (issue #234)."""
+
+    def configure_codex(self, *, plugins=(INSTALLED_AND_ENABLED,), refresh=True, codex_home=None):
+        remove_effects, add_effects = self.refresh_side_effects(codex_home) if refresh else ((), ())
+        self.install_provider(
+            "codex",
+            marketplaces=json.dumps([{"name": "kanban", "path": str(self.repo / "codex-plugin")}]),
+            plugins=plugins,
+            remove_effects=remove_effects,
+            add_effects=add_effects,
+        )
+
+    def codex(self, *argv, **kwargs):
+        code, payload = self.run_setup("--component", "codex-plugin", "--scope", "user", *argv, **kwargs)
+        return code, self.component(payload, "codex-plugin")
+
+    def command_tails(self):
+        return [call["args"] for call in self.mutating_calls("codex")]
+
+    # -- detection ------------------------------------------------------------
+
+    def test_the_tracked_inventory_is_the_bundles_git_tracked_content(self):
+        # Guards the whole comparison against passing vacuously: every case
+        # below is only meaningful if this inventory is really populated.
+        self.assertEqual(
+            setup_workflows.tracked_bundle_files(self.repo.resolve()),
+            [
+                ".codex-plugin/plugin.json",
+                "skills/pr-review/SKILL.md",
+                "skills/pr-review/scripts/review_pr.py",
+                "skills/solve/SKILL.md",
+            ],
+        )
+
+    def test_a_missing_skill_is_reported_for_repair_rather_than_unchanged(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "solve" / "SKILL.md").unlink()
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["missing"], ["skills/solve/SKILL.md"])
+        self.assertEqual(entry["divergence"]["different"], [])
+        self.assertEqual(entry["divergence"]["extra"], [])
+        self.assertIn("skills/solve/SKILL.md", entry["message"])
+        self.assertIn(str(cache), entry["message"])
+        # A dry run inspects and reports; it never touches the provider.
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_an_outdated_file_is_reported_as_different(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "pr-review" / "scripts" / "review_pr.py").write_text(
+            "print('three weeks ago')\n", encoding="utf-8"
+        )
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(
+            entry["divergence"]["different"], ["skills/pr-review/scripts/review_pr.py"]
+        )
+        self.assertIn("skills/pr-review/scripts/review_pr.py", entry["message"])
+
+    def test_a_skill_the_tracked_bundle_no_longer_has_is_reported_as_extra(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "retired").mkdir()
+        (cache / "skills" / "retired" / "SKILL.md").write_text("# retired\n", encoding="utf-8")
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/SKILL.md"])
+        self.assertIn("skills/retired/SKILL.md", entry["message"])
+
+    def test_an_extra_directory_holding_no_file_is_still_reported(self):
+        # A file-only inventory cannot see this: the skill's files are gone
+        # but its directory remains, so the cache still offers Codex a skill
+        # the tracked bundle does not define.
+        cache = self.install_codex_cache()
+        (cache / "skills" / "retired").mkdir()
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+        self.assertIn("skills/retired/", entry["message"])
+
+    def test_a_nested_extra_directory_run_is_named_once_at_its_root(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "retired" / "scripts" / "helpers").mkdir(parents=True)
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+
+    def test_an_ignored_file_does_not_mask_the_extra_directory_holding_it(self):
+        # The retired skill's own files are gone and all that is left inside
+        # it is an interpreter artefact. The artefact is not content, so it
+        # cannot stand in for the directory: `skills/retired/` is still an
+        # installed path the tracked bundle does not define.
+        cache = self.install_codex_cache()
+        artefact = cache / "skills" / "retired" / "__pycache__"
+        artefact.mkdir(parents=True)
+        (artefact / "helper.cpython-314.pyc").write_bytes(b"\x00compiled")
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["extra"], ["skills/retired/"])
+
+    def test_an_ignored_directory_holding_no_file_is_never_divergence(self):
+        # The emptied form of the artefact the packaged coordinator leaves
+        # behind: still ignored, so still not bundle content.
+        self.install_codex_cache()
+        (self.cache_dir() / "skills" / "pr-review" / "scripts" / "__pycache__").mkdir()
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_an_absent_cache_for_an_enabled_plugin_is_repairable_divergence(self):
+        self.configure_codex()
+
+        code, entry = self.codex()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertFalse(entry["divergence"]["installed"])
+        self.assertIn(str(self.cache_dir()), entry["message"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_the_cache_is_resolved_under_a_non_default_codex_home(self):
+        elsewhere = self.root / "elsewhere" / "codex"
+        self.install_codex_cache(elsewhere)
+        self.configure_codex(codex_home=elsewhere)
+
+        code, entry = self.codex(codex_home=elsewhere)
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        # The fallback location is not consulted at all when the override is
+        # set: a cache there must not stand in for the selected one.
+        (self.cache_dir(elsewhere) / "skills" / "solve" / "SKILL.md").unlink()
+        self.install_codex_cache()
+
+        code, entry = self.codex(codex_home=elsewhere)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "repair")
+        self.assertEqual(entry["divergence"]["cache"], str(self.cache_dir(elsewhere)))
+
+    # -- convergence ----------------------------------------------------------
+
+    def test_a_matching_cache_reports_unchanged_and_runs_no_mutating_command(self):
+        self.install_codex_cache()
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertIsNone(entry["divergence"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_an_ignored_checkout_artefact_is_never_divergence(self):
+        # `__pycache__/` lands on both sides — the checkout grows one from
+        # running the packaged coordinator, and the provider copies the
+        # directory as it finds it — so counting either as content would make
+        # the component report a repair it can never converge.
+        self.install_codex_cache()
+        for root in (self.bundle, self.cache_dir()):
+            artefact = root / "skills" / "pr-review" / "scripts" / "__pycache__"
+            artefact.mkdir()
+            (artefact / "review_pr.cpython-314.pyc").write_bytes(b"\x00compiled")
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_an_untracked_checkout_file_is_never_divergence(self):
+        # Never added to the index, so it was never part of the bundle the
+        # provider was asked to install, and its absence from the cache is
+        # not staleness.
+        self.install_codex_cache()
+        (self.bundle / "skills" / "draft").mkdir(parents=True)
+        (self.bundle / "skills" / "draft" / "SKILL.md").write_text("# wip\n", encoding="utf-8")
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_apply_refreshes_through_remove_then_add_and_verifies_convergence(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "solve" / "SKILL.md").unlink()
+        (cache / "skills" / "retired").mkdir()
+        (cache / "skills" / "retired" / "SKILL.md").write_text("# retired\n", encoding="utf-8")
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "repair")
+        self.assertTrue(entry["applied"])
+        self.assertIsNone(entry["divergence"])
+        # The provider's own mechanism, in the only order that refreshes a
+        # local-source bundle, and nothing that writes the cache directly.
+        self.assertEqual(
+            self.command_tails(),
+            [
+                ["plugin", "remove", "kanban@kanban"],
+                ["plugin", "add", "kanban@kanban"],
+            ],
+        )
+        self.assertTrue((cache / "skills" / "solve" / "SKILL.md").is_file())
+        self.assertFalse((cache / "skills" / "retired").exists())
+
+    def test_a_refresh_that_did_not_converge_is_reported_rather_than_claimed(self):
+        # Both commands report success, but the cache they leave behind is
+        # still stale: the provider's exit status is not evidence.
+        cache = self.install_codex_cache()
+        (cache / "skills" / "solve" / "SKILL.md").unlink()
+        self.configure_codex(refresh=False)
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "failed")
+        self.assertFalse(entry["applied"])
+        self.assertIn("still does not match", entry["message"])
+
+    def test_a_repaired_run_reports_the_same_installation_as_converged_afterwards(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "solve" / "SKILL.md").unlink()
+        self.configure_codex()
+        first, _ = self.codex("--apply")
+        self.assertEqual(first, 0)
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 0, entry)
+        self.assertEqual(entry["status"], "unchanged")
+
+    # -- unusable rather than diverged ---------------------------------------
+
+    def test_a_cache_path_that_is_not_a_directory_is_unavailable_and_untouched(self):
+        cache = self.cache_dir()
+        cache.parent.mkdir(parents=True)
+        cache.write_text("not a bundle\n", encoding="utf-8")
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "unavailable")
+        self.assertIn(str(cache), entry["message"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+        self.assertEqual(cache.read_text(encoding="utf-8"), "not a bundle\n")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a directory with no permissions")
+    def test_an_unreadable_cache_is_unavailable_rather_than_read_as_empty(self):
+        cache = self.install_codex_cache()
+        skills = cache / "skills"
+        skills.chmod(0o000)
+        self.addCleanup(skills.chmod, 0o755)
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "unavailable")
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_a_manifest_without_a_version_cannot_name_a_cache_to_compare(self):
+        (self.bundle / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "kanban"}) + "\n", encoding="utf-8"
+        )
+        self.install_codex_cache()
+        self.configure_codex()
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "unavailable")
+        self.assertIn("declares no usable version", entry["message"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    # -- the refusal states keep precedence ----------------------------------
+
+    def test_a_marketplace_from_another_checkout_still_refuses_before_any_repair(self):
+        other = self.root / "other-checkout" / "codex-plugin"
+        self.install_provider(
+            "codex",
+            marketplaces=json.dumps([{"name": "kanban", "path": str(other)}]),
+            plugins=(INSTALLED_AND_ENABLED,),
+        )
+
+        code, entry = self.codex("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(entry["status"], "refused")
+        self.assertIn(str(other), entry["message"])
+        self.assertIn("codex plugin marketplace remove kanban", entry["message"])
+        self.assertEqual(self.mutating_calls("codex"), [])
+
+    def test_a_disabled_bundle_still_refuses_even_with_a_stale_cache(self):
+        cache = self.install_codex_cache()
+        (cache / "skills" / "solve" / "SKILL.md").unlink()
+        self.configure_codex(plugins=(INSTALLED_BUT_DISABLED,))
+
+        code, entry = self.codex("--apply")
+
         self.assertEqual(code, 1)
         self.assertEqual(entry["status"], "refused")
         self.assertIn("disabled", entry["message"])
