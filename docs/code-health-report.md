@@ -49,30 +49,34 @@ unclear.
 Issue numbers appearing in prose, in a `Related` list, or inside a fix shape are
 not dispositions — only a bracketed marker in a heading is.
 
+Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
+reviewed and deliberately not tracked separately · `[deferred]` blocked on a
+concrete precondition
+
 ## Status
 
 A box is checked only for a terminal disposition — filed or closed. `[deferred]`
 and unmarked findings stay unchecked, so the unchecked count is the work this
 report still owes.
 
-- [x] 1. `test/Spec.hs` is one 9,200-line module — [#148]
-- [x] 2. `UI.hs` is a god-module — [#50]
-- [x] 3. `AppState` has seven parallel session tables — [#51]
-- [x] 4. `drain_prs.py` is 3,967 lines — [no-issue]
-- [x] 5. `Worker.hs` threads fifteen mutable cells positionally — [#153]
-- [x] 5a. `Review.hs` exceeds 2,000 lines — [no-issue]
-- [x] 6. LaunchAgent label is a machine-wide singleton — [#147]
-- [x] 6a. Launchd label defined three times — [#146]
-- [x] 7. `.drain-prs.json` is repo-specific at the root — [no-issue]
-- [x] 7a. Issue-reviewer install path spelled twice, in two languages — [#155]
-- [x] 8. `review_pr.py` duplicated and diverged — [no-issue]
-- [x] 9. `launchctl` is undeclared — [#149]
-- [x] 10. Process-group hardening not swept — [no-issue]
-- [x] 11. `Drainer.hs` has no platform guard — [#146]
-- [x] 12. Drainer refuses to start on a dirty tree — [#145]
-- [x] 12a. #15's capture fix reached two of three review runners — [#154]
-- [x] 13. Repository override key matched exactly and silently — [#150]
-- [x] 14. `bug`, `ui`, and `input` compiled into the theme — [#152]
+- [x] CH-1. `test/Spec.hs` is a 9,200-line single-file test suite — [#148]
+- [x] CH-2. `src/Kanban/UI.hs` is a 5,706-line god-module — [#50]
+- [x] CH-3. `AppState` tracks seven parallel `Map Int` session tables — [#51]
+- [x] CH-4. `tools/drain_prs.py` is a 3,967-line script — [no-issue]
+- [x] CH-5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally — [#153]
+- [x] CH-5A-1. `src/Kanban/Review.hs` exceeds 2,000 lines — [no-issue]
+- [x] CH-6. The LaunchAgent label hardcodes a personal namespace — [#147]
+- [x] CH-6A-1. The launchd label is defined three times, and the contract says it is defined once — [#146]
+- [x] CH-7. `.drain-prs.json` is a tracked, repo-specific config at the root — [no-issue]
+- [x] CH-7A-1. The canonical issue reviewer's install path is spelled twice, in two languages — [#155]
+- [x] CH-8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together — [no-issue]
+- [x] CH-9. `launchctl` is an undeclared dependency of the drainer — [#149]
+- [x] CH-10. Process-group hardening was applied to `GitHub.hs` only — [no-issue]
+- [x] CH-11. `Drainer.hs` has no platform guard, so a non-macOS host gets a raw exception — [#146]
+- [x] CH-12. The drainer refuses to start on a dirty tree, using a rationale its own autostash had already made obsolete — [#145]
+- [x] CH-12A-1. The #15 capture fix reached two of three review subprocess runners — [#154]
+- [x] CH-13. A `[repositories."owner/name"]` key that does not match exactly is silently ignored — [#150]
+- [x] CH-14. Three of this repository's own label names are compiled into the theme — [#152]
 
 **18 of 18 resolved. 0 deferred, 0 unprocessed.** Every finding has been processed.
 
@@ -250,7 +254,7 @@ The single most visible artifact of an automated build process: every file grew
 by accretion, and nothing was ever split, because no agent's task was ever "make
 this smaller."
 
-### [#148] 1. `test/Spec.hs` is a 9,200-line single-file test suite
+### [#148] CH-1. `test/Spec.hs` is a 9,200-line single-file test suite
 
 **Severity: High** — this is the largest file in the repository by a factor of
 1.6, and it is the one every behavior change has to touch.
@@ -281,7 +285,7 @@ them to `other-modules` in the test target. This is a mechanical, behavior-free
 change and should be sequenced *before* the source-side splits below, so that
 those splits land against a suite that can be selectively built.
 
-### [#50] 2. `src/Kanban/UI.hs` is a 5,706-line god-module
+### [#50] CH-2. `src/Kanban/UI.hs` is a 5,706-line god-module
 
 > **Disposition:** Already owned by #50, "Split the 4,340-line UI.hs along its
 > natural seams", which is open and carries `reviewed:approve`. The full
@@ -344,7 +348,7 @@ order, smallest-risk first, each as its own PR:
 Leave `Kanban.UI` as the app wiring plus a re-export shim so downstream imports
 and the test suite do not churn.
 
-### [#51] 3. `AppState` tracks seven parallel `Map Int` session tables
+### [#51] CH-3. `AppState` tracks seven parallel `Map Int` session tables
 
 > **Disposition:** Already owned by #51, "Unify the three near-identical
 > agent-session record types — drift has already cost features". The full read of
@@ -421,7 +425,7 @@ variant and its optional `ManagedProcess` together. Insertion and cleanup then
 become single operations that cannot half-apply, and the five reusability
 predicates collapse into one function over `AgentSlot`.
 
-### [no-issue] 4. `tools/drain_prs.py` is a 3,967-line script
+### [no-issue] CH-4. `tools/drain_prs.py` is a 3,967-line script
 
 > **Disposition:** No issue — #159 considered this exact file and decided against
 > it: "Python is out of scope entirely. Scripts are held to ~5,000 lines instead,
@@ -463,7 +467,7 @@ most-tested module of the set. The Python suite is already large enough
 (`test_integration.py` at 2,916 lines and `test_fast_forward_stash.py` at 1,193,
 plus the other focused `test_*.py` modules) to support this refactor safely.
 
-### [#153] 5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
+### [#153] CH-5. `src/Kanban/Worker.hs` threads fifteen mutable cells positionally
 
 > **Disposition:** Filed as #153, after reading all 2,253 lines. **This finding's
 > original premise was wrong** and is corrected below; the issue that came out of
@@ -519,7 +523,7 @@ The first two both imply a lease with no recorded supervisor identity eventually
 ages out. It never does — that case is deliberately and permanently unacquirable.
 Defensible, but the opposite of what the comments promise.
 
-### [no-issue] 5a. `src/Kanban/Review.hs` exceeds 2,000 lines
+### [no-issue] CH-5A-1. `src/Kanban/Review.hs` exceeds 2,000 lines
 
 > **Disposition:** No issue — the size claim itself does not warrant one. All
 > 2,015 lines were read. `Review.hs` is multi-subject, but each subject is small
@@ -557,7 +561,7 @@ of three reads, its line count says only that it is worth opening.
 
 ## Part 2 — Portability and "install on a new machine"
 
-### [#147] 6. The LaunchAgent label hardcodes a personal namespace
+### [#147] CH-6. The LaunchAgent label hardcodes a personal namespace
 
 **Severity: High** for the project-agnostic goal.
 
@@ -603,7 +607,7 @@ per-repository drainers mean the `"foreign"` state becomes unreachable and
 `docs/pr-drainer.md` needs rewriting. Worth deciding deliberately before anyone
 implements it.
 
-### [#146] 6a. The launchd label is defined three times, and the contract says it is defined once
+### [#146] CH-6A-1. The launchd label is defined three times, and the contract says it is defined once
 
 **Severity: Medium** — a documentation claim that is verifiably false, which
 makes finding 6 harder to fix than it looks.
@@ -636,7 +640,7 @@ either reading it or having its literal pinned by a test that reads the Python
 value. Then update the manifest row's `files` column to list all sites, so the
 existing check enforces it.
 
-### [no-issue] 7. `.drain-prs.json` is a tracked, repo-specific config at the root
+### [no-issue] CH-7. `.drain-prs.json` is a tracked, repo-specific config at the root
 
 > **Disposition:** No issue — **the finding was wrong on every substantive point.**
 > `.drain-prs.json` is already per-target: `load_gate_config`
@@ -684,7 +688,7 @@ repository. Treating it as a portability bug would repeat the mistake finding 8
 made with the `coghex/kanban` test vector — reading a fixed sample value as
 configuration.
 
-### [#155] 7a. The canonical issue reviewer's install path is spelled twice, in two languages
+### [#155] CH-7A-1. The canonical issue reviewer's install path is spelled twice, in two languages
 
 > **Disposition:** Filed as #155. Found by reading `src/Kanban/Review.hs` in full.
 
@@ -735,7 +739,7 @@ launchd requires a user agent plist to live there.
 
 ## Part 3 — Duplicated logic across the two plugin bundles
 
-### [no-issue] 8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
+### [no-issue] CH-8. `review_pr.py` is duplicated, has diverged, and no test holds the shared part together
 
 > **Disposition:** No issue — maintainer decision, 2026-07-26. The premise was
 > verified and holds: no test compares the two copies. But the proposed
@@ -840,7 +844,7 @@ patterns. (`Worker.hs` is not listed and does spawn processes, but only via
 `createProcess`, which is not one of the scanned idioms, and its only
 home-relative path is `getXdgDirectory`. It is out of scope rather than missed.)
 
-### [#149] 9. `launchctl` is an undeclared dependency of the drainer
+### [#149] CH-9. `launchctl` is an undeclared dependency of the drainer
 
 **Severity: Medium.**
 
@@ -876,7 +880,7 @@ A recognizable signature of issue-at-a-time automated development: a hazard gets
 diagnosed properly, fixed thoroughly at the one call site the issue named, and
 the identical hazard is left standing everywhere else.
 
-### [no-issue] 10. Process-group hardening was applied to `GitHub.hs` only
+### [no-issue] CH-10. Process-group hardening was applied to `GitHub.hs` only
 
 > **Disposition:** No issue — the `Drainer.hs:122` half is rewritten by #146,
 > which replaces `discoverDrainerController` and its `runProcess` helper outright.
@@ -924,7 +928,7 @@ the startup-hang path. Routing both through `Kanban.Process` is the more complet
 fix and worth doing, but it is a larger change and should be judged against the
 fact that neither command touches the network.
 
-### [#146] 11. `Drainer.hs` has no platform guard, so a non-macOS host gets a raw exception
+### [#146] CH-11. `Drainer.hs` has no platform guard, so a non-macOS host gets a raw exception
 
 **Severity: Low.**
 
@@ -959,7 +963,7 @@ return a purpose-written `Text` for each. This is a small change with a
 disproportionate effect on how a fresh install feels, which makes it a good
 candidate to do early despite the Low severity.
 
-### [#145] 12. The drainer refuses to start on a dirty tree, using a rationale its own autostash had already made obsolete
+### [#145] CH-12. The drainer refuses to start on a dirty tree, using a rationale its own autostash had already made obsolete
 
 **Severity: High** — this one blocks the maintainer's actual daily workflow, and
 the fix is mostly deletion.
@@ -1035,7 +1039,7 @@ mid-conflict. That is strictly better than today's behavior (refuse to run), but
 it should be called out in `docs/pr-drainer.md` so the recovery path is
 documented rather than discovered.
 
-### [#154] 12a. The #15 capture fix reached two of three review subprocess runners
+### [#154] CH-12A-1. The #15 capture fix reached two of three review subprocess runners
 
 > **Disposition:** Filed as #154 and **merged** in 289de6d (PR #157), same day.
 > Found by reading `src/Kanban/Review.hs` in full. This is the clearest instance of
@@ -1096,7 +1100,7 @@ wrong message, a lost answer, and up to ten wasted minutes.
 see the clean list below — and has exactly one hole, but it is in the worst
 possible place for a tool meant to be set up on a new machine.
 
-### [#150] 13. A `[repositories."owner/name"]` key that does not match exactly is silently ignored
+### [#150] CH-13. A `[repositories."owner/name"]` key that does not match exactly is silently ignored
 
 **Severity: High** for the new-machine goal. Nothing is wrong with the code's
 logic; the problem is that the most likely setup mistake produces no signal at
@@ -1166,7 +1170,7 @@ no configured remote still needs to be able to ask why an AI action would not
 start" — and `doctorLines` reports only dependencies and action readiness. Moving
 config reporting into doctor would mean giving up that property.
 
-### [#152] 14. Three of this repository's own label names are compiled into the theme
+### [#152] CH-14. Three of this repository's own label names are compiled into the theme
 
 > **Disposition:** Filed as #152. Found during the full line-by-line read of
 > `UI.hs`, in its last seventy lines.
