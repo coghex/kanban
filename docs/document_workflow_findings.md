@@ -63,12 +63,12 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 ### Workflow ownership and routing
 
-- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout
-- [ ] DW-11. The design and report workflows remain untracked personal assets
+- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout — [deferred]: workflows untracked (DW-11)
+- [x] DW-11. The design and report workflows remain untracked personal assets — [#229]
 
 ### Review safety
 
-- [ ] DW-12. Branch-update completion is mistaken for approval to restore a stale review
+- [x] DW-12. Branch-update completion is mistaken for approval to restore a stale review — [#230]
 
 ---
 
@@ -540,7 +540,20 @@ No unreviewed document should be deleted merely because it is untracked or stran
 
 ## Chapter 5: Workflow ownership and routing
 
-### DW-10. Coordination-document workflows infer ownership from the current checkout
+### [deferred] DW-10. Coordination-document workflows infer ownership from the current checkout
+
+> **Deferred:** The four workflows are still untracked personal files, so no
+> reviewable PR can add an ownership-resolution step —
+> `docs/drafting-workflow-contract.md:35-47` declares the packaged assets
+> exhaustively and lists none of them, and
+> `tools/test_drafting_workflow_contract.py:43` limits the enforced inventory to
+> `issue`, `draft-issues`, `autoissue`, and `issue-review`. The durable source
+> for the ownership declaration is also unchosen; see this finding's Remaining
+> uncertainty. Clears when DW-11's vendoring lands: `design-epic`,
+> `process-design-doc`, `draft-report`, and `process-report` appear as rows in
+> that contract's §2 asset table with files present under
+> `codex-plugin/plugins/kanban/skills/` and
+> `claude-plugin/plugins/kanban/commands/`.
 
 #### Observation
 
@@ -618,7 +631,7 @@ Kanban.
 The audit does not establish whether ownership should be declared in document
 frontmatter, skill configuration, a Kanban registry, or another durable source.
 
-### DW-11. The design and report workflows remain untracked personal assets
+### [#229] DW-11. The design and report workflows remain untracked personal assets
 
 #### Observation
 
@@ -689,7 +702,7 @@ suggests parity for processing even if drafting experiences differ.
 
 ## Chapter 6: Review safety
 
-### DW-12. Branch-update completion is mistaken for approval to restore a stale review
+### [#230] DW-12. Branch-update completion is mistaken for approval to restore a stale review
 
 #### Observation
 
