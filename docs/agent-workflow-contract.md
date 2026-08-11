@@ -929,6 +929,7 @@ recording only one would understate what a change to it can break:
   `coordination` lane.
 
 ```text
+AGENTS.md | pr-atomic | release-document;implementation-coupled
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
 README.md | pr-atomic | release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
@@ -970,6 +971,15 @@ the frontmatter and body of every packaged workflow under `claude-plugin/` and
 that are `test-parsed` and `implementation-coupled` at once: `CLAUDE.md` names
 both as authoritative contracts, and each is also read as data. Neither
 rationale supersedes the other, which is why the row records both.
+
+`AGENTS.md` is the Codex entry point for the same contract: a repository-relative
+symlink to `CLAUDE.md`, so one session-instruction document serves both brands
+with no second copy to drift.
+`tools/test_repository_contract_alias.py` follows it and compares its bytes with
+`CLAUDE.md`'s, and `tools/test_source_distribution.py` repeats that comparison
+inside the unpacked archive. Its row therefore mirrors `CLAUDE.md`'s exactly: it
+ships, and it is the same implementation-coupled contract read through a second
+name.
 
 ### 7.1 Classification check
 
