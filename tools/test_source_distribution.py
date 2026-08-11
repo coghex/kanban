@@ -24,12 +24,13 @@ tracked file has none:
 
 * In, as a whole tree: `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
   and `claude-plugin/` ship every tracked file they contain.
-* In, individually: `README.md`, `CLAUDE.md`, `LICENSE`, `kanban.cabal`,
-  `config.toml.example`, the ten user and workflow-contract documents
-  under `docs/`, and `cabal.project` -- the last because the packaged
-  `CLAUDE.md` describes it as what applies the mandatory `-Werror` gate to
-  the `cabal build all` and `cabal test all` runs the packaged `README.md`
-  tells the recipient to make.
+* In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
+  the one session contract under the two names Claude and Codex each read
+  it by -- `LICENSE`, `kanban.cabal`, `config.toml.example`, the ten user
+  and workflow-contract documents under `docs/`, and `cabal.project` --
+  the last because the packaged `CLAUDE.md` describes it as what applies
+  the mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
+  runs the packaged `README.md` tells the recipient to make.
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
@@ -48,6 +49,7 @@ is a hard failure.
 """
 
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -73,6 +75,7 @@ RELEASE_TREES = (
 
 # Tracked files outside those trees that ship.
 RELEASE_ROOT_FILES = (
+    "AGENTS.md",
     "CLAUDE.md",
     "LICENSE",
     "README.md",
@@ -195,6 +198,21 @@ def _prerequisite_gap():
             "file set that defines the expected archive inventory cannot be read."
         )
     return None
+
+
+def _contract_alias():
+    """tools/test_repository_contract_alias.py's check, loaded from the module
+    itself rather than reimplemented here, so the archive is held to exactly
+    the equality the checkout is. Loaded by path under a private name for the
+    reason tools/test_document_classification.py loads this module that way:
+    discovery may have imported it as a bare top-level name or inside a
+    `tools.` namespace package, and the copy loaded here must not shadow the
+    discovered one."""
+    source = REPO_ROOT / "tools" / "test_repository_contract_alias.py"
+    spec = importlib.util.spec_from_file_location("_kanban_contract_alias", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _tracked_files(*paths):
@@ -328,6 +346,24 @@ class SourceDistributionTest(unittest.TestCase):
             "The packaged README, session instructions, license, example "
             "configuration, project file, and every user or workflow-contract "
             "document must reach the source distribution.",
+        )
+
+    def test_the_packaged_contract_alias_resolves_to_the_contract(self):
+        # Carrying both names is not the guarantee. A recipient's Codex session
+        # reads AGENTS.md and nothing else, so the archive has to hold the
+        # contract's exact bytes under that name -- whether the archiver kept
+        # the symlink or dereferenced it into a copy.
+        alias = _contract_alias()
+        self.assert_present(
+            (alias.ALIAS_NAME, alias.CONTRACT_NAME),
+            "The source distribution must carry the session contract under "
+            "both the name Claude reads and the name Codex reads.",
+        )
+        self.assertIsNone(
+            alias.alias_gap(self.unpacked_root),
+            f"{alias.ALIAS_NAME} reached {self.archive.name} without resolving "
+            f"to {alias.CONTRACT_NAME}'s content, so an unpacked release hands "
+            "a Codex session a contract that is not the one it ships.",
         )
 
     def test_provider_bundle_manifests_ship(self):
