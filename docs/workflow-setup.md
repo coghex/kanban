@@ -112,11 +112,59 @@ choice.
   configuration, LaunchAgent, daemon, or network-side change is made.
   `--dry-run` states that explicitly; it cannot be combined with `--apply`.
 - **Re-running converges.** A component that is already correct reports
-  `unchanged` and runs no command.
+  `unchanged` and runs no command. "Correct" means content, not merely
+  registration — see the stale Codex bundle below.
 - **Nothing is silently replaced.** A conflicting state is reported as
   `refused`, left exactly as it was, and paired with the recovery step you
   would take. `setup_workflows.py` exits non-zero whenever any component
-  needs your attention.
+  needs your attention. An ordinary fresh-install plan is not "attention":
+  it exits 0, and so does a `repair` that `--apply` converged in the same
+  run.
+
+### An installed Codex bundle that has fallen behind
+
+Codex installs `kanban@kanban` by *copying* the tracked bundle into its own
+cache under
+`$CODEX_HOME/plugins/cache/kanban/kanban/<version>` (`~/.codex` when
+`CODEX_HOME` is unset), and its CLI has no plugin update command for a
+local-source marketplace — `codex plugin` offers `add`, `list`,
+`marketplace`, and `remove`, and `codex plugin marketplace upgrade` refreshes
+Git snapshots, which this marketplace is not. So a checkout that moves ahead
+of that copy leaves every Codex session running the bundle as it was when it
+was last added: skills vendored since then simply do not exist there, and
+`$pr-review`, `$pr-rereview`, `$pr-revise`, and `$repair` execute whatever
+shared coordinator that copy holds, because the tracked skills resolve it by
+searching that same cache.
+
+Setup therefore compares the installed bundle against the tracked one rather
+than stopping at "registered and enabled":
+
+- The tracked bundle is its **Git-tracked** content under
+  `codex-plugin/plugins/kanban`. A file the checkout carries but Git does not
+  track was never part of what the provider was asked to install, so it can
+  never make an installation look stale — and `__pycache__/` is ignored on
+  *both* sides, since running the packaged coordinator leaves one in the
+  checkout and in the cache alike.
+- A divergence is reported as `repair`, naming the differing bundle-relative
+  paths grouped as **missing**, **different**, and **extra**, and exits
+  non-zero. Nothing outside Kanban's own installed bundle is read or
+  reported. An enabled plugin whose cache is absent entirely is the same
+  repairable state.
+- `--apply` converges it with the provider's own commands, in the only order
+  that refreshes a local-source bundle — `codex plugin remove kanban@kanban`
+  then `codex plugin add kanban@kanban` — and never writes into the cache
+  itself. It then re-compares: a refresh whose commands succeeded but whose
+  result still diverges is reported as `failed`, not as a repair.
+- A cache that cannot be read at all — a path that is not a directory, or one
+  the current user cannot traverse — is `unavailable`, and no command runs.
+  The same is true when the tracked manifest declares no version, since
+  nothing then names the cache to compare against.
+- A marketplace registered from another checkout, and an installed-but-
+  disabled bundle, still refuse first and still run nothing.
+
+The `claude-plugin` component has no equivalent state: its marketplace serves
+the tracked bundle live from the repository directory, so there is no cached
+copy to fall behind.
 
 ## Preflight and in-app diagnostics
 
@@ -212,7 +260,9 @@ for the policy this implements.
 | `legacy-launcher: refused` | An ordinary pre-Kanban file, or a symlink resolving to a real file that is not Kanban's tracked backend, exists at `~/work/approve-issues.py` | For an ordinary file, re-run with `--migrate-legacy-launcher` to back it up as `approve-issues.py.pre-kanban-backup` and replace it with a symlink. A symlink to someone else's file is refused outright even with that flag — there is no content to back up — so remove it yourself if you want the launcher here. Either way, nothing in Kanban resolves this path. |
 | `codex-plugin`/`claude-plugin: refused`, marketplace mismatch | A marketplace named `kanban` is already registered from another checkout | Remove it (`codex plugin marketplace remove kanban` / `claude plugin marketplace remove kanban`) and re-run, or point `--repo` at that checkout. |
 | `codex-plugin`/`claude-plugin: refused`, bundle disabled | `kanban@kanban` is installed but disabled | Re-enable it (`claude plugin enable kanban@kanban`), or remove it (`codex plugin remove kanban@kanban` / `claude plugin uninstall kanban@kanban`) and re-run. |
-| `codex-plugin`/`claude-plugin: unavailable` | The provider CLI is absent, or its plugin listing could not be read | Install or update the provider CLI. An unreadable listing is never treated as "nothing installed". |
+| `codex-plugin: repair` | `kanban@kanban` is installed and enabled, but the bundle Codex cached no longer matches this checkout's tracked one (or is not cached at all) | Re-run with `--apply`: it runs `codex plugin remove kanban@kanban` then `codex plugin add kanban@kanban` and verifies the result. Nothing else is touched. |
+| `codex-plugin: failed`, after a refresh | Both provider commands succeeded, but the cached bundle still diverges | The reported paths say how. Check that `--repo` names the checkout the `kanban` marketplace is registered from, then re-run. |
+| `codex-plugin`/`claude-plugin: unavailable` | The provider CLI is absent, its plugin listing could not be read, or (Codex) its cached bundle is present but unreadable | Install or update the provider CLI. An unreadable listing is never treated as "nothing installed", and an unreadable cache is never treated as stale — neither guess can trigger a reinstall. |
 
 ## Removal
 
@@ -247,7 +297,14 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 `tools/test_setup_workflows.py` covers a clean machine, an
 already-configured machine, absent executables, an unreadable listing, a
 marketplace registered from another checkout, an ordinary legacy launcher,
-an occupied install path, and the no-write guarantee of a dry run.
+an occupied install path, and the no-write guarantee of a dry run. Its
+`CodexBundleStalenessTests` group covers the installed-but-stale state
+end to end against a temporary `CODEX_HOME` and a real copied cache: each
+divergence class, an absent cache, untracked and ignored checkout files
+counting as neither, the exact remove-then-add refresh and the convergence
+re-check afterwards, a refresh that did not converge, an unreadable or
+non-directory cache, and both refusal states keeping precedence over any
+repair.
 `test/Spec/Agent/Preflight.hs`'s `workflow preflight` group covers the probe
 classifications and the same fresh-machine states end to end, including
 that the doctor path only ever runs status-only probes and changes nothing.
