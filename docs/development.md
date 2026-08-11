@@ -16,7 +16,9 @@ The single exception is a push the workflow can prove touches none of the pull
 request's own files — a base-branch update merged forward — which changes only
 the branch's ancestry and so keeps the label. Anything it cannot prove
 content-free that way, including any failure to establish either file list,
-removes the label as before.
+removes the label as before. A removal the workflow cannot confirm actually
+happened fails the job rather than reporting a decision the label does not
+reflect.
 
 ## Test
 

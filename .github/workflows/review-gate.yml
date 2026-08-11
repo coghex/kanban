@@ -59,7 +59,24 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           strip() {
+            # A suppressed removal failure would be the whole bug back again:
+            # this job succeeding with reviewed:approve still attached is
+            # precisely what the drainer reads as "this push was content-safe".
+            # So the removal is confirmed rather than assumed, and a strip that
+            # did not happen fails the job instead of reporting a decision the
+            # label does not reflect. The attempt itself is allowed to fail --
+            # the job runs on unapproved synchronizes too, where there is no
+            # label to remove -- because only the state afterwards decides.
             gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label reviewed:approve || true
+            if ! remaining=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name'); then
+              echo "couldn't read this PR's labels back -- the removal is unconfirmed, failing"
+              exit 1
+            fi
+            if printf '%s\n' "$remaining" | grep -qx 'reviewed:approve'; then
+              echo "reviewed:approve is still attached after the removal attempt -- failing"
+              exit 1
+            fi
+            echo "reviewed:approve is not attached"
           }
           # Every case that cannot positively prove non-overlap strips. This
           # only ever SKIPS a strip when the push is provably content-free for

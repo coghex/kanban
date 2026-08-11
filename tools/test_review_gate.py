@@ -140,15 +140,36 @@ class DismissStaleApprovalPredicateTests(unittest.TestCase):
 
     # -- running the job's step -------------------------------------------
 
-    def run_step(self, *, before, after, pr_files="README.md\n", pr_files_ok=True):
-        """Run the extracted script for one push; report whether it stripped."""
+    def run_step(
+        self,
+        *,
+        before,
+        after,
+        pr_files="README.md\n",
+        pr_files_ok=True,
+        edit_ok=True,
+        labels_after=(),
+        labels_readable=True,
+        expect_exit=0,
+    ):
+        """Run the extracted script for one push; report whether it stripped.
+
+        `labels_after` is what `gh pr view` reports once the removal has been
+        attempted, which is the only thing the job may conclude a strip from.
+        """
         self.fake.script(
             "gh",
             ["pr", "diff", "7"],
             stdout=pr_files,
             exit_code=0 if pr_files_ok else 1,
         )
-        self.fake.script("gh", ["pr", "edit", "7"], stdout="")
+        self.fake.script("gh", ["pr", "edit", "7"], stdout="", exit_code=0 if edit_ok else 1)
+        self.fake.script(
+            "gh",
+            ["pr", "view", "7"],
+            stdout="".join(f"{name}\n" for name in labels_after),
+            exit_code=0 if labels_readable else 1,
+        )
         env = dict(os.environ)
         env.update(self.fake.environ_overrides())
         env.update(
@@ -168,7 +189,9 @@ class DismissStaleApprovalPredicateTests(unittest.TestCase):
             capture_output=True,
             stdin=subprocess.DEVNULL,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.returncode, expect_exit, f"{proc.stdout}\n{proc.stderr}"
+        )
         removals = [
             call
             for call in self.fake.calls("gh")
@@ -260,35 +283,59 @@ class DismissStaleApprovalPredicateTests(unittest.TestCase):
         after = self.commit("advance", **{"docs__guide.md": "two\n"})
         self.assert_stripped(before=before, after=after, pr_files="")
 
-    def test_a_gh_failure_during_the_strip_does_not_fail_the_job(self):
-        # A job that dies mid-strip reports failure, and a failed check is one
-        # more thing the drainer must not read as a verdict. Now that the job
-        # runs on unapproved synchronizes too, removing a label that is
-        # already off is the ordinary case rather than the odd one.
+    # -- a strip is only a strip once the label is gone --------------------
+
+    def test_a_removal_that_left_the_label_attached_fails_the_job(self):
+        # The whole defect in one shape: succeeding here with the label still
+        # attached is exactly the pair the drainer reads as content-safe, so a
+        # removal that did not take must not report a decision at all.
         before = self.commit("base", **{"src__app.py": "one\n"})
         after = self.commit("edit", **{"src__app.py": "two\n"})
-        self.fake.script("gh", ["pr", "diff", "7"], stdout="src/app.py\n")
-        self.fake.script("gh", ["pr", "edit", "7"], stdout="", exit_code=1)
-        env = dict(os.environ)
-        env.update(self.fake.environ_overrides())
-        env.update(
-            {
-                "GH_TOKEN": "fake-token",
-                "BEFORE": before,
-                "AFTER": after,
-                "PR_NUMBER": "7",
-                "REPO": "acme/widgets",
-            }
+        self.run_step(
+            before=before,
+            after=after,
+            pr_files="src/app.py\n",
+            edit_ok=False,
+            labels_after=[APPROVE_LABEL, "bug"],
+            expect_exit=1,
         )
-        proc = subprocess.run(
-            ["bash", "-e", "-c", self.script],
-            cwd=str(self.repo),
-            env=env,
-            text=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
+
+    def test_a_removal_of_an_already_absent_label_succeeds(self):
+        # Now that the job runs on unapproved synchronizes too, `gh pr edit`
+        # refusing to remove a label that is not there is the ordinary case.
+        # What decides is the state afterwards, not that one call's status.
+        before = self.commit("base", **{"src__app.py": "one\n"})
+        after = self.commit("edit", **{"src__app.py": "two\n"})
+        self.assert_stripped(
+            before=before,
+            after=after,
+            pr_files="src/app.py\n",
+            edit_ok=False,
+            labels_after=["bug"],
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_labels_that_cannot_be_read_back_fail_the_job(self):
+        before = self.commit("base", **{"src__app.py": "one\n"})
+        after = self.commit("edit", **{"src__app.py": "two\n"})
+        self.run_step(
+            before=before,
+            after=after,
+            pr_files="src/app.py\n",
+            labels_readable=False,
+            expect_exit=1,
+        )
+
+    def test_a_lookalike_label_does_not_pass_for_the_approval(self):
+        # `grep -qx`, not a substring match: `reviewed:approved` is a
+        # different label and must not read as the one that had to go.
+        before = self.commit("base", **{"src__app.py": "one\n"})
+        after = self.commit("edit", **{"src__app.py": "two\n"})
+        self.assert_stripped(
+            before=before,
+            after=after,
+            pr_files="src/app.py\n",
+            labels_after=["reviewed:approved", "not-reviewed:approve"],
+        )
 
 
 if __name__ == "__main__":
