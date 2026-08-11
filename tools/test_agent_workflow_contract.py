@@ -162,6 +162,17 @@ MANIFEST_ROW_RE = re.compile(
     r"\s*(?P<mandatory>yes|no)\s*$"
 )
 
+# Anchored to the §4 heading rather than taking the document's first ```text
+# fence. Issue #225 added a second machine-readable fence to the same contract
+# (§7's document publication classification), so "the first unqualified text
+# fence" stopped being a definition of this manifest and became an accident of
+# section order. Each parser now owns its heading; see
+# tools/test_document_classification.py for §7's counterpart.
+SECTION_4_FENCE_RE = re.compile(
+    r"^##\s*4\.\s*Dependency manifest\s*$.*?```text\n(?P<body>.*?)\n```",
+    re.DOTALL | re.MULTILINE,
+)
+
 # proc "name" [...] / findExecutable "name" / readProcessWithExitCode "name"
 # / runProcess <timeoutSeconds> "name" [...] (Kanban.Drainer's timed helper).
 EXECUTABLE_CALL_RE = re.compile(
@@ -215,15 +226,23 @@ def declared_document_assets():
     return paths
 
 
-def parse_manifest():
-    text = CONTRACT_PATH.read_text(encoding="utf-8")
-    fence_match = re.search(r"```text\n(.*?)\n```", text, re.DOTALL)
+def parse_manifest(text=None):
+    """Rows from the §4 machine-readable fence. Anchored to the '## 4.
+    Dependency manifest' heading so another ```text fence in this document —
+    §7's classification table, or anything added later — can never be parsed
+    as the dependency manifest. Parameterized by text so the regression test
+    below can drive it against a fixture rather than only against the document
+    that already passes."""
+    if text is None:
+        text = CONTRACT_PATH.read_text(encoding="utf-8")
+    fence_match = SECTION_4_FENCE_RE.search(text)
     if fence_match is None:
         raise AssertionError(
-            "docs/agent-workflow-contract.md has no ```text manifest fence"
+            "docs/agent-workflow-contract.md has no ```text manifest fence "
+            "under its '## 4. Dependency manifest' heading"
         )
     rows = []
-    for line in fence_match.group(1).splitlines():
+    for line in fence_match.group("body").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -472,6 +491,40 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertIn(row["owner"], {"kanban", "external"}, row["id"])
             self.assertIn(row["status"], {"supported", "migration-target"}, row["id"])
             self.assertIn(row["mandatory"], {"yes", "no"}, row["id"])
+
+    def test_the_manifest_parser_is_anchored_to_its_own_section(self):
+        # Issue #225 added §7's classification fence to this same document, so
+        # the manifest parser can no longer be defined as "the first ```text
+        # fence". Drive it against a fixture whose classification fence comes
+        # first: an unanchored parser returns the classification rows (or
+        # raises on them as unparseable manifest rows), and this one does not.
+        fixture = (
+            "# Contract\n\n"
+            "## 7. Document publication classification\n\n"
+            "```text\n"
+            "docs/ui-bugs.md | coordination | audit-report\n"
+            "```\n\n"
+            "## 4. Dependency manifest\n\n"
+            "```text\n"
+            "fixture-cli | executable | fixture | src/Fixture.hs | kanban | supported | no\n"
+            "```\n"
+        )
+        rows = parse_manifest(fixture)
+        self.assertEqual([row["id"] for row in rows], ["fixture-cli"])
+        self.assertEqual(rows[0]["files"], ["src/Fixture.hs"])
+
+    def test_the_real_contract_yields_only_dependency_rows(self):
+        # The same regression against the tracked document rather than a
+        # fixture. A classification row's first column is a path, which no
+        # dependency id is; the §7 half of this pair — that its parser
+        # recovers no dependency row — lives in
+        # tools/test_document_classification.py.
+        self.assertIn("gh-cli", {row["id"] for row in self.manifest})
+        self.assertEqual(
+            [],
+            [row["id"] for row in self.manifest if "/" in row["id"] or "." in row["id"]],
+            "the §4 parser captured rows from the §7 classification fence",
+        )
 
     def test_manifest_entries_are_grounded_in_their_declared_files(self):
         for row in self.manifest:

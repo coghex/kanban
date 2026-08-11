@@ -806,3 +806,137 @@ runs) parses the manifest in §4 and:
   cannot silently regress to the pre-migration boundary described in §3;
 - fails if the drainer LaunchAgent plist is marked anything other than a
   `kanban`-owned `supported` path.
+
+Both machine-readable fences in this document are parsed anchored to their own
+heading — §4's to `## 4. Dependency manifest` and §7's to
+`## 7. Document publication classification` — so neither parser can capture the
+other's rows, and a third fence added later cannot silently displace either.
+
+## 7. Document publication classification
+
+Every tracked Markdown file in this repository takes exactly one publication
+lane:
+
+- `coordination` — a coordination record: a findings or code-health report and
+  its status ledger, whose content no runtime, installer, or test reads.
+  Eligible for direct publication to `master`, bypassing the pull-request lane.
+- `pr-atomic` — a document that lands atomically with its implementation
+  through the pull-request lane, because changing it on its own can invalidate
+  the tree.
+
+Anything unclassified is `pr-atomic` to every consumer. An unknown document is
+never direct-master eligible: the table below is an allowlist for the
+`coordination` lane alone, so a tracked Markdown file matching no row is a
+check failure rather than a document that publishes directly.
+
+The five `coordination` documents are `docs/code-health-report.md`,
+`docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
+`docs/pipeline-hardening.md`, and `docs/ui-bugs.md`. **Every other tracked
+Markdown file in this repository is `pr-atomic`.** Those two sentences are the
+human-readable answer to "which lane does this document take", and
+`tools/test_document_classification.py` reconciles them against the rows below,
+so placing a known document never requires reading the machine-readable table.
+
+This classification is Kanban's own. It describes this repository and nothing
+else. A consuming repository declares its own coordination paths through the
+drainer configuration key `workflow.coordination_paths`
+([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance)),
+which ships empty; Kanban never infers a consuming repository's classes from
+file extension or directory, and never applies the rows below to another
+repository's tree.
+
+Machine-readable; parsed verbatim by `tools/test_document_classification.py`.
+Columns: `path | class | reasons`.
+
+A row naming a directory ends with `/` and covers the tracked Markdown files
+beneath it, matched by whole path component rather than by string prefix: the
+`codex-plugin/` row covers
+`codex-plugin/plugins/kanban/skills/solve/SKILL.md` and never a sibling
+directory such as `codex-plugin-old/`. That component boundary is the point of
+a directory row — it is a statement about one tracked component, not about
+every name that happens to begin the same way. Non-Markdown files beneath a
+declared directory are outside this classification entirely: it classifies
+documents, not bundle assets.
+
+`reasons` is a `;`-separated set rather than a single choice, because a
+document is frequently `pr-atomic` for more than one of these at once and
+recording only one would understate what a change to it can break:
+
+- `test-parsed` — a tracked test reads this file's content as data, so editing
+  it alone can fail `build-test`.
+- `release-document` — `tools/test_source_distribution.py` declares this file
+  in a release inventory (`RELEASE_DOCUMENTS`, `RELEASE_ROOT_FILES`, or a tree
+  in `RELEASE_TREES`), so editing it alone changes what ships.
+- `implementation-coupled` — `CLAUDE.md`'s "The contract" section requires this
+  file to stay consistent with behavior in the same pull request.
+- `audit-report` — a findings or code-health report carrying its own status
+  ledger, which `tools/test_source_distribution.py` lists in
+  `EXCLUDED_TRACKED_PATHS`. This is the only reason that admits the
+  `coordination` lane.
+
+```text
+CLAUDE.md | pr-atomic | release-document;implementation-coupled
+README.md | pr-atomic | release-document
+claude-plugin/ | pr-atomic | test-parsed;release-document
+codex-plugin/ | pr-atomic | test-parsed;release-document
+docs/README.md | pr-atomic | release-document
+docs/agent-workflow-contract.md | pr-atomic | test-parsed;release-document;implementation-coupled
+docs/bugs.md | pr-atomic | release-document
+docs/code-health-report.md | coordination | audit-report
+docs/design.md | pr-atomic | test-parsed;release-document;implementation-coupled
+docs/development.md | pr-atomic | release-document
+docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
+docs/document_workflow_findings.md | coordination | audit-report
+docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
+docs/drainer-bugs.md | coordination | audit-report
+docs/pipeline-hardening.md | coordination | audit-report
+docs/pr-drainer.md | pr-atomic | release-document
+docs/ui-bugs.md | coordination | audit-report
+docs/user-guide.md | pr-atomic | release-document
+docs/workflow-setup.md | pr-atomic | release-document
+```
+
+The six `test-parsed` rows name what actually parses them:
+`tools/test_agent_workflow_contract.py` reads §4 of this document (and
+`tools/test_document_classification.py` reads §7),
+`test/Spec/UI/Keys.hs` reads the binding table in `docs/design.md` §7,
+`tools/test_document_workflow_contract.py` and
+`tools/test_drafting_workflow_contract.py` read their own contracts' §2 asset
+tables, and `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` read
+the frontmatter and body of every packaged workflow under `claude-plugin/` and
+`codex-plugin/`.
+
+`docs/design.md` and `docs/agent-workflow-contract.md` are the two documents
+that are `test-parsed` and `implementation-coupled` at once: `CLAUDE.md` names
+both as authoritative contracts, and each is also read as data. Neither
+rationale supersedes the other, which is why the row records both.
+
+### 7.1 Classification check
+
+`tools/test_document_classification.py` (discovered by
+`python3 -m unittest discover -s tools -p 'test_*.py'`, which CI already runs)
+parses the table in §7 and:
+
+- fails if a Git-tracked `*.md` path matches no row, so an added document
+  cannot reach `master` without a stated lane. The subject inventory is
+  `git ls-files '*.md'`, not a restated list, so a new document is classified
+  or reported the moment it is tracked;
+- fails if a declared path is absent from the tree — a file row whose file is
+  gone, or a directory row whose directory is gone;
+- fails if a tracked Markdown path matches two rows, so no document can carry
+  two lanes;
+- fails if a row names a class outside `coordination`/`pr-atomic`, states no
+  reason, or states a reason outside the vocabulary above;
+- fails if a `coordination` row cites any reason other than `audit-report`, or
+  if a `pr-atomic` row cites `audit-report`;
+- fails if an entry in `RELEASE_DOCUMENTS` in `tools/test_source_distribution.py`
+  does not classify `pr-atomic`, and if a path declaring `release-document`
+  appears in no release inventory there or appears in
+  `EXCLUDED_TRACKED_PATHS`. The release lists are an independent corroboration
+  reconciled against this table, never the source the classes are derived
+  from: publication policy and release packaging must stay free to diverge;
+- fails if the prose sentences above name a different `coordination` set than
+  the rows do, so the human-readable answer cannot drift from the
+  machine-readable one;
+- fails if `CLAUDE.md` stops pointing contributors at this section, or stops
+  stating the fail-closed default.
