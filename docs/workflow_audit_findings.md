@@ -27,11 +27,11 @@ drainer and docs-worktree state.
 
 ## Status
 
-- [ ] WF-1. Personal PR-review workflows in both brands invoke the retired coordinator generation
-- [ ] WF-2. The Codex plugin cache is stale and the tracked skills resolve their coordinator from it
-- [ ] WF-3. Plugin manifests never version-bump, so caches cannot detect staleness
-- [ ] WF-4. The two tracked review coordinators diverge beyond the documented model-pinning exception
-- [ ] WF-5. trusted_issue_spec.py exists only in the personal Codex solve skill
+- [x] WF-1. Personal PR-review workflows in both brands invoke the retired coordinator generation — [no-issue]
+- [x] WF-2. The Codex plugin cache is stale and the tracked skills resolve their coordinator from it — [#234]
+- [x] WF-3. Plugin manifests never version-bump, so caches cannot detect staleness — [#235]
+- [x] WF-4. The two tracked review coordinators diverge beyond the documented model-pinning exception — [#236]
+- [x] WF-5. trusted_issue_spec.py exists only in the personal Codex solve skill — [#238]
 - [ ] WF-6. The personal skill layer is unversioned and drifting between brands
 - [ ] WF-7. The vendored design workflows dropped the personal copies' decision-authority guardrails
 - [ ] WF-8. The issue repair-and-rereview loop is closeable only from Codex
@@ -52,7 +52,17 @@ drainer and docs-worktree state.
 
 ## Stale execution surfaces
 
-### WF-1. Personal PR-review workflows in both brands invoke the retired coordinator generation
+### [no-issue] WF-1. Personal PR-review workflows in both brands invoke the retired coordinator generation
+
+> **Disposition:** No issue — verified real, but the fix is machine-local
+> retirement (delete `~/.claude/commands/pr-{review,rereview,revise}.md` and
+> `~/.codex/skills/pr-{review,rereview,revise,review-standalone}/`, taking the
+> legacy `review-pr.py` with them), which no PR can land. The repository
+> already records the tracked bundles as the only supported source
+> (`docs/workflow-setup.md:183-187`); the drainer, LaunchAgents, and
+> `~/.codex/config.toml` never reference the personal copies — only bare-name
+> invocations in the personal `autosolve`/`finalize` copies, which now resolve
+> to the plugin workflows. Retired on-machine 2026-08-10.
 
 `~/.claude/commands/pr-review.md`, `pr-rereview.md`, and `pr-revise.md`, and
 their `~/.codex/skills` twins, all invoke
@@ -80,7 +90,14 @@ the issue-approval gate and publish markers the current gate rejects.
 - **Scope and constraints:** machine-local cleanup plus any repository guidance that should record the retirement; `pr-review-standalone` is fully superseded by `--allow-no-issue`.
 - **Remaining uncertainty:** whether any active session or automation still names the personal copies.
 
-### WF-2. The Codex plugin cache is stale and the tracked skills resolve their coordinator from it
+### [#234] WF-2. The Codex plugin cache is stale and the tracked skills resolve their coordinator from it
+
+> **Filed:** [#234](https://github.com/coghex/kanban/issues/234) — the installer's
+> convergence check is registration-only, so a stale cache reports `unchanged`;
+> verification found the cited repair (`setup_workflows.py --apply`) is a no-op
+> against this state, and the Codex CLI has no update command (only
+> `remove` + `add` re-copies). The stale cache itself was refreshed on-machine
+> 2026-08-10; all 12 tracked skills now match the bundle.
 
 The Codex marketplace entry last updated 2026-07-21. The cache at
 `~/.codex/plugins/cache/kanban/kanban/1.0.0/` is missing 8 of the 12 tracked
@@ -108,7 +125,14 @@ repository.
 - **Scope and constraints:** the refresh itself is machine-local; a freshness check would touch preflight or workflow docs.
 - **Remaining uncertainty:** whether `codex plugin` update semantics re-copy an unchanged-version bundle, which determines if WF-3 is the whole root cause.
 
-### WF-3. Plugin manifests never version-bump, so caches cannot detect staleness
+### [#235] WF-3. Plugin manifests never version-bump, so caches cannot detect staleness
+
+> **Filed:** [#235](https://github.com/coghex/kanban/issues/235) — verification
+> added that the version was never bumped in either manifest's whole history,
+> and that the Claude side declares the version twice (`plugin.json` plus the
+> marketplace entry) while the Codex marketplace manifest declares none. The
+> cached-manifest evidence line reflects the pre-refresh cache; WF-2's repair
+> has since converged it.
 
 Both tracked `plugin.json` files still declare `1.0.0` while bundle contents
 changed materially across #229/#231/#232. Provider caches are keyed by version
@@ -130,7 +154,15 @@ manifest describes 7 skills while shipping 12.
 - **Scope and constraints:** `tools/test_claude_plugin.py` / `tools/test_codex_plugin.py` already parse the bundles and are the natural enforcement point.
 - **Remaining uncertainty:** none at draft time.
 
-### WF-4. The two tracked review coordinators diverge beyond the documented model-pinning exception
+### [#236] WF-4. The two tracked review coordinators diverge beyond the documented model-pinning exception
+
+> **Filed:** [#236](https://github.com/coghex/kanban/issues/236) — the full
+> diff settles the remaining uncertainty: the four listed deltas collapse into
+> exactly two clusters, the documented pinning thread (models,
+> `verify_publication` signature, self-test block) and the undocumented guard,
+> introduced Codex-only by commit `4525a35` and untested on either side. The
+> Claude copy requests PR-only fields, so an issue number always fails closed —
+> the defect is the diagnostic, not a gate bypass.
 
 `claude-plugin/plugins/kanban/scripts/review_pr.py` and
 `codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py` differ in
@@ -156,7 +188,15 @@ given an issue number.
 
 ## Untracked load-bearing assets
 
-### WF-5. trusted_issue_spec.py exists only in the personal Codex solve skill
+### [#238] WF-5. trusted_issue_spec.py exists only in the personal Codex solve skill
+
+> **Filed:** [#238](https://github.com/coghex/kanban/issues/238) — scoped to
+> solve-agent context hygiene with the hardcoded three-login allowlist;
+> `tools/approve_issues.py`'s association-based gate arithmetic is a distinct
+> layer and deliberately unchanged, with the relationship (including the
+> reporter-comment case) to be documented in the contract. Verification added
+> that the tracked skills' issue-author clause grants amendment authority to
+> any outsider who filed the issue.
 
 `~/.codex/skills/solve/scripts/trusted_issue_spec.py` (6,488 bytes) appears
 nowhere in the kanban repository, yet implements a stricter trust boundary than
