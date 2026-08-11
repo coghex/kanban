@@ -27,6 +27,14 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   authority, and durable state the solve, review, and drainer actions depend on.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and
   `docs/workflow-setup.md` cover the optional local components.
+- Every tracked Markdown file takes one of two publication lanes, classified in
+  `docs/agent-workflow-contract.md` section 7. The five coordination documents publish
+  straight to master, bypassing the PR lane: `docs/code-health-report.md`,
+  `docs/document_workflow_findings.md`, `docs/drainer-bugs.md`,
+  `docs/pipeline-hardening.md`, and `docs/ui-bugs.md`. Everything else is pr-atomic and
+  lands with its implementation through a pull request. Anything unclassified is
+  pr-atomic too — that default fails closed, so a new document never publishes directly
+  until section 7 says it may.
 
 ## Quality gates
 
