@@ -10,8 +10,8 @@ a repository pull request can change and verify them.
 Reconciles the responsibility matrix in docs/document-workflow-contract.md
 against the tracked Claude and Codex plugin trees, so a declared asset cannot
 vanish, an undeclared design or report workflow cannot appear, the document
-cannot silently drop the declared Codex-only asymmetry or the
-$design-epic//epic boundary, and the status vocabulary the two process-report
+cannot silently drop the declared Codex-only asymmetry or the design-pipeline
+epic-planner boundary, and the status vocabulary the two process-report
 variants must share cannot drift. The two variants are deliberately not
 reconciled into one text (requirement 3 of issue #229): what is pinned here is
 the surface a report started by one brand and resumed by the other depends on,
@@ -110,9 +110,7 @@ CONTRACT_STATEMENTS = {
     "design-epic-creates-nothing": (
         "$design-epic produces a durable design document and creates no tracker items"
     ),
-    "epic-stays-unpackaged": (
-        "/epic decomposes a user-supplied arc into issues and remains unpackaged"
-    ),
+    "epic-stays-unpackaged": "remains unpackaged in both plugins",
     "one-artifact-per-invocation": "One artifact per invocation",
     "stop-for-explicit-approval": "Stop for explicit approval",
 }
@@ -327,14 +325,31 @@ class DeclaredAssetTests(unittest.TestCase):
             ["process-report"],
         )
 
+    def test_claude_epic_disposition_routes_to_packaged_codex_workflows(self):
+        path = "claude-plugin/plugins/kanban/commands/process-report.md"
+        text = (REPO_ROOT / path).read_text(encoding="utf-8")
+        for workflow in ("design-epic", "process-design-doc"):
+            self.assertNotIn(
+                f"/{workflow}",
+                text,
+                f"{path}: {workflow} is Codex-only; do not name a nonexistent "
+                "Claude slash command",
+            )
+            self.assertIn(
+                f"${workflow}",
+                text,
+                f"{path}: Epic dispositions must hand off to the packaged Codex "
+                f"${workflow} workflow while the §3.5 asymmetry remains",
+            )
+
 
 class DocumentedBoundaryTests(unittest.TestCase):
-    """§3.5's declared Codex-only asymmetry, §3.6's $design-epic//epic
-    boundary, §1's Haskell invocation-parity exclusion, and §5's two processing
-    boundaries are load-bearing: they are the reason the Claude plugin's
-    declared set here is one asset rather than five, the reason /epic is still
-    packaged in neither plugin, and the reason Kanban's CLI never spawns any of
-    these."""
+    """§3.5's declared Codex-only asymmetry, §3.6's design-pipeline
+    epic-planner boundary, §1's Haskell invocation-parity exclusion, and §5's
+    two processing boundaries are load-bearing: they are the reason the Claude
+    plugin's declared set here is one asset rather than five, the reason an
+    epic asset is still packaged in neither plugin, and the reason Kanban's
+    CLI never spawns any of these."""
 
     def test_document_states_every_declared_boundary(self):
         self.assertEqual(missing_contract_statements(contract_text()), [])

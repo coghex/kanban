@@ -93,13 +93,15 @@ The four document workflows are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
 [docs/document-workflow-contract.md §5](../docs/document-workflow-contract.md#5-one-artifact-per-invocation-and-the-approval-stop).
 
-Three workflows are deliberately **not** packaged here. `draft-issues`, the
+Two workflows are deliberately **not** packaged here. `draft-issues`, the
 breadth counterpart to `$issue`, is Claude-only by contract — see
-[claude-plugin/](../claude-plugin/README.md). `epic` decomposes a user-supplied
-feature arc rather than independently hunting discretionary work, so it is not
-part of the drafting contract and is packaged in neither marketplace; it is
-also not a substitute for `$design-epic`, which produces a design document and
-creates no tracker items.
+[claude-plugin/](../claude-plugin/README.md). And no `epic` asset exists in
+either marketplace: arc decomposition — a user-supplied feature arc rather
+than independently hunted discretionary work — belongs to `$design-epic`,
+which captures the arc as a durable design document, with
+`$process-design-doc` filing its slices; the personal `/epic` command that
+once created epic trees directly was retired 2026-08-11 in that pipeline's
+favor.
 
 The asymmetry runs the other way for the document workflows: `$design-epic`,
 `$process-design-doc`, and `$draft-report` are **Codex-only**, and the Claude
@@ -218,8 +220,9 @@ against the responsibility matrix in
 [docs/drafting-workflow-contract.md](../docs/drafting-workflow-contract.md):
 every declared asset must exist, no undeclared drafting skill may appear, the
 exact `<!-- issue-origin:codex -->` marker literal must be present in each
-issue-creating skill, and the Claude-only `draft-issues` and unpackaged `epic`
-boundaries must remain stated. It also pins the optional scope gate
+issue-creating skill, and the Claude-only `draft-issues` and unpackaged
+arc-decomposition boundaries must remain stated. It also pins the optional
+scope gate
 ([docs/drafting-workflow-contract.md §4](../docs/drafting-workflow-contract.md#4-scope-gate)):
 `$issue` and `$autoissue` must state the same gate and exemption rules as the
 document, each gate instruction must follow the guard that makes it apply only
@@ -231,7 +234,7 @@ skills against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
 appear, the document must keep stating the Codex-only asymmetry and the
-`$design-epic`/`/epic` boundary, and the exact `[#N]`, `[no-issue]`,
+design-pipeline epic-planner boundary, and the exact `[#N]`, `[no-issue]`,
 `[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
 the assets — including in both `process-report` variants, which may differ in
 wording but not on the surface that makes a report started under one brand

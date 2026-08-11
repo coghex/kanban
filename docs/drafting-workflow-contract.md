@@ -114,15 +114,20 @@ report and route the issue to the separate `issue-rereview` repair workflow,
 which is deliberately **not** part of this packaged set, rather than rerunning
 an unchanged spec.
 
-### 3.5 Not a candidate-hunting workflow: `/epic`
+### 3.5 Not a candidate-hunting workflow: arc decomposition
 
-`/epic` plans a **user-specified feature arc** into an epic plus
+Arc decomposition plans a **user-specified feature arc** into an epic plus
 dependency-ordered child issues. It is **not** a discretionary
 candidate-hunting workflow: it never independently selects what work is worth
-doing, so it does not belong to this drafting contract and is deliberately
-**not packaged** in either plugin. `/issue`, `$issue`, and `/draft-issues`
-are the discretionary hunters; `/epic` only decomposes an arc the user
-supplied.
+doing, so it does not belong to this drafting contract, and an `epic` asset
+is deliberately **not packaged in either plugin**. The decomposition itself
+belongs to the `design-epic` and `process-design-doc` pair declared in
+[document-workflow-contract.md](document-workflow-contract.md): `design-epic`
+captures the arc as a durable design document, and `process-design-doc` later
+files its slices as tracker items. The personal `/epic` command that once
+created epic trees directly was retired 2026-08-11 in that pipeline's favor.
+`/issue`, `$issue`, and `/draft-issues` are the discretionary hunters; arc
+decomposition only works an arc the user supplied.
 
 ## 4. Scope gate
 
@@ -139,7 +144,8 @@ they drive discovery through their delegate (§3.3); each must surface the
 deferrals its delegate reports and pass a user override back to it rather
 than resolving one itself. `/issue-review` and `$issue-review` judge an
 already-filed issue instead of hunting candidates, so the gate does not reach
-them, and `/epic` is excluded for the same reason it is unpackaged (§3.5): it
+them, and arc decomposition is excluded for the same reason it is unpackaged
+(§3.5): it
 decomposes a user-supplied arc rather than independently selecting what work
 is worth doing.
 
@@ -308,7 +314,7 @@ runs) parses §2 and fails if:
 - a required origin-marker literal (§5) is missing from this document or from
   a packaged asset of the matching brand;
 - this document no longer states the Claude-only `/draft-issues` boundary
-  (§3.2) or the non-hunting, unpackaged `/epic` boundary (§3.5);
+  (§3.2) or the non-hunting, unpackaged arc-decomposition boundary (§3.5);
 - the packaged `autoissue` assets no longer describe delegating drafting,
   stopping without review before creation, creating after signoff, and
   immediately running the canonical review without a second confirmation;
