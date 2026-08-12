@@ -41,12 +41,14 @@ concrete precondition
   It owns reviewer routing, review worktrees, `issue-review:v2` comments,
   verdict-label transitions, the per-checkout `approve_issues.lock`, and
   `--review`, `--rereview`, and `--check` one-issue modes.
-- Its existing no-action queue path calls `get_open_issues`, whose results are
-  sorted by `(createdAt, number)`, and `select_candidate` chooses one stale or
-  unreviewed issue per pass. It deliberately skips any issue whose latest
-  canonical marker says `CHANGES_REQUESTED`, then continues to later issues.
-  That is background-daemon behavior and does not satisfy the requested
-  ordered barrier.
+- Its existing no-action queue path calls `get_open_issues`, which runs
+  `gh issue list --limit 500` and sorts that bounded result by
+  `(createdAt, number)`. `select_candidate` chooses one stale or unreviewed
+  issue per pass, deliberately skips any issue whose latest canonical marker
+  says `CHANGES_REQUESTED`, and continues to later issues. Both behaviors are
+  incompatible with the requested ordered barrier: the fixed inventory can
+  omit an earlier issue when more than 500 are open, and the skip crosses a
+  barrier that was returned.
 - `src/Kanban/Review/Canonical.hs` resolves the installed backend through
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR` or the installer-written discovery record,
   invokes it as a bounded process, captures its process group, and parses the
@@ -64,8 +66,10 @@ concrete precondition
   pass.
 - Under `docs/agent-workflow-contract.md` section 7, a new design document is
   `pr-atomic` until that authoritative classification explicitly admits it to
-  the coordination lane. This draft therefore remains in the `docs-wip`
-  worktree and must not be published directly under the current contract.
+  the coordination lane. This document's first tracked publication therefore
+  lands atomically with its `coordination | audit-report` row; before that
+  commit it remained in the `docs-wip` worktree and was not eligible for
+  direct publication.
 
 ## Desired experience
 
@@ -155,10 +159,13 @@ dashboard, and the legacy daemon cannot interleave canonical publications.
 
 ### Queue classification and ordering
 
-The backend fetches the live open-issue inventory once per selection pass and
-sorts it by integer issue number. Pull requests remain excluded. For each issue
-in that order it classifies the current effective specification and canonical
-record before taking any action:
+The backend fetches the complete live open-issue inventory once per selection
+pass and sorts it by integer issue number. It must page through the provider
+until the terminal page rather than reuse the current fixed `--limit 500`
+result; a truncated, malformed, or otherwise incomplete inventory stops before
+any review because the no-bypass guarantee cannot be established. Pull
+requests remain excluded. For each issue in that order it classifies the
+current effective specification and canonical record before taking any action:
 
 - a current `APPROVE` record is already complete and is skipped;
 - an issue needing initial review is reviewed synchronously and then
@@ -321,10 +328,11 @@ This affects IAQ-1 and IAQ-2 but not the stop warning.
 
 ## Verification strategy
 
-- Python pure/fixture tests prove numeric ordering, current-approval skips,
-  current and newly produced changes-requested barriers, incident and invalid
-  stops, legacy dual routing, lock exclusion, no later model invocation after
-  a barrier, and exact result/exit semantics.
+- Python pure/fixture tests prove complete pagination beyond 500 open issues,
+  numeric ordering, current-approval skips, current and newly produced
+  changes-requested barriers, fail-closed incomplete inventory, incident and
+  invalid stops, legacy dual routing, lock exclusion, no later model invocation
+  after a barrier, and exact result/exit semantics.
 - Python CLI tests use fake `gh`, `codex`, and `claude` executables and
   temporary Git repositories; no real account, network, or terminal is needed.
 - Haskell pure tests prove command construction, discovery/config forwarding,
@@ -350,17 +358,19 @@ This affects IAQ-1 and IAQ-2 but not the stop warning.
 - **Outcome:** The installed canonical Python backend can run one finite,
   numerically ordered pass and return a validated terminal result without
   continuing past a changes-requested barrier.
-- **Scope:** Add `--review-queue`; refactor queue classification away from the
-  daemon-only skip behavior; hold the existing lock for the pass; define the
-  v1 JSON result and exit semantics; add Python tests and backend contract
-  documentation.
+- **Scope:** Add `--review-queue`; enumerate the complete open-issue inventory;
+  refactor queue classification away from the daemon-only cap and skip
+  behavior; hold the existing lock for the pass; define the v1 JSON result and
+  exit semantics; add Python tests and backend contract documentation.
 - **Phase:** 1 — backend contract.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
 - **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-5`.
-- **Acceptance signals:** Fake-executable tests show ascending numeric calls,
-  no calls above the barrier, canonical comments/labels unchanged in shape,
-  one bounded result on stdout, and failure on concurrent lock ownership.
+- **Acceptance signals:** Fake-executable tests with more than 500 open issues
+  show complete enumeration and ascending numeric calls; incomplete inventory
+  starts no review; no call occurs above a barrier; canonical comments/labels
+  remain unchanged in shape; stdout contains one bounded result; and concurrent
+  lock ownership fails.
 - **Out of scope:** Haskell integration, sidebar rendering, service
   installation, and issue revision.
 - **Open questions:** `Q-1`, `Q-3`; stop for those decisions before drafting
