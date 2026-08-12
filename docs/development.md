@@ -68,6 +68,33 @@ records whether it belongs in a release. It runs in the required `build-test`
 job as part of the Python suite, and skips with a reason where `cabal` or the
 Git metadata is unavailable, such as inside an unpacked release.
 
+## Changing a workflow bundle
+
+A change that touches tracked content under `claude-plugin/` or `codex-plugin/`
+must raise that bundle's declared manifest version in the same change, and must
+leave the manifest still naming exactly the workflows the bundle ships.
+`tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` enforce both
+through `tools/plugin_bundle_gate.py`, so both fail in the required
+`build-test` job rather than after the fact.
+
+- **Version.** Bump `codex-plugin/plugins/kanban/.codex-plugin/plugin.json`, or
+  — for Claude, which declares its version twice — both
+  `claude-plugin/plugins/kanban/.claude-plugin/plugin.json` and the plugin
+  entry in `claude-plugin/.claude-plugin/marketplace.json`, which must agree.
+  Codex caches a local-source bundle under exactly that version
+  (`$CODEX_HOME/plugins/cache/kanban/kanban/<version>/`), so an unchanged
+  version makes a stale cache indistinguishable from a current one.
+- **Listing.** Add the workflow to every manifest field that enumerates them:
+  the description on the Claude side (in both manifests), and the description,
+  keywords, `interface.shortDescription`, `interface.longDescription`, and
+  `interface.defaultPrompt` on the Codex side.
+
+The change unit is one pull request: the candidate tracked tree compared with
+its default-branch merge base, counting committed, staged, and tracked
+working-tree edits and ignoring untracked files. `.github/workflows/ci.yml`
+therefore checks out with `fetch-depth: 0`; without that baseline the check
+fails rather than passing unenforced.
+
 ## Source layout
 
 - `app/` — executable entry point.

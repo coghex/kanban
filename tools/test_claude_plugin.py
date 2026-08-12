@@ -29,6 +29,14 @@ have no Claude counterpart here. They are still subject to every structural
 policy this module enforces: frontmatter description, forbidden configuration
 keys, and no personal paths.
 
+Issue #235 added the two manifest gates at the end of this module, both built
+on tools/plugin_bundle_gate.py: the bundle's declared version must increase in
+any change unit that touches its tracked content, and the two manifest
+descriptions that enumerate workflows must name exactly the commands the
+bundle ships. The version gate is silent on an untouched tree by construction,
+so PlantedBundleVersionGateTests drives it against a throwaway Git repository
+rather than trusting it to fire.
+
 Issue #125 packaged /repair ahead of the key that spawns it, so it briefly
 formed a third, packaged-only category. Issue #127 gave Kanban's own `r` its
 Done-column repair branch, so /repair is now spawned by name from
@@ -53,6 +61,7 @@ from typing import Any
 from unittest import mock
 
 import fake_cli
+import plugin_bundle_gate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin"
@@ -61,6 +70,22 @@ PLUGIN_ROOT = CLAUDE_PLUGIN_ROOT / "plugins" / "kanban"
 PLUGIN_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 COMMANDS_ROOT = PLUGIN_ROOT / "commands"
 REVIEW_COORDINATOR = PLUGIN_ROOT / "scripts" / "review_pr.py"
+
+# Repository-relative spellings the bundle gates work in: git reports paths
+# this way, and the failure messages have to name something a reader can
+# find from the repository root.
+BUNDLE_PREFIX = "claude-plugin"
+PLUGIN_MANIFEST_PATH = "claude-plugin/plugins/kanban/.claude-plugin/plugin.json"
+MARKETPLACE_MANIFEST_PATH = "claude-plugin/.claude-plugin/marketplace.json"
+COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
+
+# The version both manifests declared from their introduction until issue
+# #235, through every bundle change #229/#231/#232 landed.
+ORIGINAL_BUNDLE_VERSION = "1.0.0"
+
+# Claude commands are named with a leading slash wherever a manifest
+# enumerates them.
+COMMAND_SIGIL = "/"
 
 SOLVE_HS = REPO_ROOT / "src" / "Kanban" / "Solve.hs"
 PR_FLOW_HS = REPO_ROOT / "src" / "Kanban" / "PullRequestFlow.hs"
@@ -134,6 +159,13 @@ FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):", re.MULTILINE)
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def kanban_plugin_entry() -> dict:
+    """The marketplace's own entry for this plugin, which duplicates the
+    plugin manifest's version and description and must agree with both."""
+    data = load_json(MARKETPLACE_MANIFEST)
+    return next(item for item in data["plugins"] if item.get("name") == "kanban")
 
 
 def iter_tracked_plugin_files():
@@ -1089,6 +1121,278 @@ class NumberKindGuardTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn(PR_RESOLVER_SENTINEL, message)
         self.assertNotIn("is an ISSUE", message)
+
+
+class BundleVersionGateTests(unittest.TestCase):
+    """A change unit that touches this bundle's tracked content must raise
+    its declared version, and the marketplace's duplicate declaration must
+    follow it.
+
+    Claude Code serves this marketplace live from the repository directory,
+    so the version is not a cache key here the way it is for Codex; it is
+    still the one field that records which bundle contents a given install
+    was told about, and it is declared twice, so the two spellings agreeing
+    is a real invariant rather than bookkeeping.
+    """
+
+    def test_the_manifest_declares_a_version_past_the_original(self):
+        version = plugin_bundle_gate.declared_version(
+            load_json(PLUGIN_MANIFEST), PLUGIN_MANIFEST_PATH
+        )
+        self.assertTrue(
+            plugin_bundle_gate.version_increased(version, ORIGINAL_BUNDLE_VERSION),
+            f"{PLUGIN_MANIFEST_PATH} still declares {version!r}, which does not "
+            f"record the bundle contents added since {ORIGINAL_BUNDLE_VERSION}",
+        )
+
+    def test_the_marketplace_entry_declares_the_same_version(self):
+        self.assertEqual(
+            kanban_plugin_entry().get("version"),
+            load_json(PLUGIN_MANIFEST).get("version"),
+            "the marketplace plugin entry and plugin.json declare the same "
+            "bundle; a reader that consults either must see the same version",
+        )
+
+    def test_the_marketplace_entry_repeats_the_plugin_description_verbatim(self):
+        # Both descriptions are parity-checked below, so they cannot drift
+        # from the shipped commands -- but they could still drift from each
+        # other into two differently-worded correct listings.
+        self.assertEqual(
+            kanban_plugin_entry().get("description"),
+            load_json(PLUGIN_MANIFEST).get("description"),
+        )
+
+    def test_the_tracked_tree_owes_no_version_bump(self):
+        failures = plugin_bundle_gate.bundle_version_failures(
+            REPO_ROOT, BUNDLE_PREFIX, BUNDLE_PREFIX, PLUGIN_MANIFEST_PATH
+        )
+        self.assertEqual(failures, [], "\n".join(failures))
+
+
+class PlantedBundleVersionGateTests(unittest.TestCase):
+    """The gate above is silent on an untouched default branch by
+    construction -- no delta, no obligation -- so on master it proves
+    nothing about whether the gate can fail at all.
+
+    These drive the same `bundle_version_failures` entry point against a
+    throwaway Git repository shaped like this bundle, planting each way the
+    gate is supposed to fire and each way it is supposed to stay quiet.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "checkout"
+        self.root.mkdir(parents=True)
+        self.manifest = self.root / PLUGIN_MANIFEST_PATH
+        self.command = self.root / COMMANDS_PREFIX / "solve.md"
+        self.git("init", "-b", "master")
+        self.git("config", "user.email", "bundle-gate@example.invalid")
+        self.git("config", "user.name", "Bundle Gate Fixture")
+        self.git("config", "commit.gpgsign", "false")
+        # `__pycache__/` is ignored in this repository precisely because
+        # running the suite writes one beside the packaged coordinator; the
+        # fixture reproduces that so the ignored-file case is real.
+        (self.root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        self.write_manifest(ORIGINAL_BUNDLE_VERSION)
+        self.command.parent.mkdir(parents=True, exist_ok=True)
+        self.command.write_text("---\ndescription: fixture\n---\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "baseline bundle")
+        # Work happens on a branch, exactly as a change unit does: a commit
+        # made on the default branch itself would move the baseline with it
+        # and leave every delta empty.
+        self.git("checkout", "-q", "-b", "work")
+
+    def git(self, *args: str):
+        subprocess.run(
+            ["git", *args], cwd=self.root, capture_output=True, text=True, check=True
+        )
+
+    def write_manifest(self, version: str):
+        self.manifest.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.write_text(
+            json.dumps({"name": "kanban", "version": version}) + "\n", encoding="utf-8"
+        )
+
+    def failures(self) -> list[str]:
+        return plugin_bundle_gate.bundle_version_failures(
+            self.root, BUNDLE_PREFIX, BUNDLE_PREFIX, PLUGIN_MANIFEST_PATH
+        )
+
+    def test_an_untouched_baseline_owes_nothing(self):
+        self.assertEqual(self.failures(), [])
+
+    def test_a_committed_content_change_without_a_bump_fails(self):
+        self.command.write_text("---\ndescription: revised\n---\n", encoding="utf-8")
+        self.git("commit", "-am", "revise the packaged command")
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn(plugin_bundle_gate.VERSION_BUMP_INSTRUCTION, failures[0])
+        self.assertIn(f"{COMMANDS_PREFIX}/solve.md", failures[0])
+
+    def test_an_uncommitted_working_tree_edit_already_counts(self):
+        # A pull request is judged on the tree it will land, so the gate must
+        # fire before the author commits, not only afterwards.
+        self.command.write_text("---\ndescription: revised\n---\n", encoding="utf-8")
+        self.assertEqual(len(self.failures()), 1)
+
+    def test_a_staged_addition_counts_as_content(self):
+        added = self.root / COMMANDS_PREFIX / "repair.md"
+        added.write_text("---\ndescription: new\n---\n", encoding="utf-8")
+        self.git("add", str(added))
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn(f"{COMMANDS_PREFIX}/repair.md", failures[0])
+
+    def test_a_tracked_deletion_counts_as_content(self):
+        self.git("rm", "-q", str(self.command))
+        self.assertEqual(len(self.failures()), 1)
+
+    def test_untracked_and_ignored_files_are_never_content(self):
+        (self.root / COMMANDS_PREFIX / "scratch.md").write_text("draft", encoding="utf-8")
+        cache = self.root / "claude-plugin" / "plugins" / "kanban" / "scripts" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "review_pr.cpython-312.pyc").write_bytes(b"\x00")
+        self.assertEqual(self.failures(), [])
+
+    def test_content_and_version_changing_together_pass(self):
+        self.command.write_text("---\ndescription: revised\n---\n", encoding="utf-8")
+        self.write_manifest("1.1.0")
+        self.assertEqual(self.failures(), [])
+
+    def test_a_lowered_version_is_not_a_bump(self):
+        self.command.write_text("---\ndescription: revised\n---\n", encoding="utf-8")
+        self.write_manifest("0.9.0")
+        self.assertEqual(len(self.failures()), 1)
+
+    def test_a_change_outside_the_bundle_owes_nothing(self):
+        (self.root / "README.md").write_text("unrelated\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "unrelated change")
+        self.assertEqual(self.failures(), [])
+
+    def test_a_checkout_with_no_default_branch_fails_rather_than_skipping(self):
+        # The failure mode this gate must not have: no baseline, no
+        # complaint, every bundle change waved through.
+        self.command.write_text("---\ndescription: revised\n---\n", encoding="utf-8")
+        self.git("branch", "-D", "master")
+        with self.assertRaises(plugin_bundle_gate.BundleGateError) as raised:
+            self.failures()
+        self.assertIn("fetch-depth: 0", str(raised.exception))
+
+
+class ManifestListingParityTests(unittest.TestCase):
+    """Both manifest descriptions enumerate the workflows this bundle ships,
+    and both had stopped at the eight commands that existed before
+    /process-report and /repair were packaged. The shipped set is derived
+    from the tracked command files rather than restated as a constant, so
+    vendoring a command without describing it fails here."""
+
+    def shipped(self) -> set[str]:
+        return plugin_bundle_gate.tracked_command_names(REPO_ROOT, COMMANDS_PREFIX)
+
+    def enumerating_surfaces(self) -> dict[str, str]:
+        return {
+            f"{PLUGIN_MANIFEST_PATH} description": load_json(PLUGIN_MANIFEST)["description"],
+            f"{MARKETPLACE_MANIFEST_PATH} plugin-entry description": kanban_plugin_entry()["description"],
+        }
+
+    def test_the_tracked_command_files_are_the_pinned_discovery_set(self):
+        # Non-vacuity for every parity assertion below: they compare against
+        # this derived set, so an extraction that silently found nothing
+        # would make all of them pass.
+        self.assertEqual(self.shipped(), EXPECTED_COMMAND_NAMES)
+
+    def test_both_enumerating_descriptions_name_exactly_the_shipped_commands(self):
+        shipped = self.shipped()
+        failures = []
+        for surface, text in self.enumerating_surfaces().items():
+            failures.extend(
+                plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(text, COMMAND_SIGIL),
+                    shipped,
+                )
+            )
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_the_marketplace_description_is_deliberately_non_enumerative(self):
+        # The marketplace's own description is not one of the two checked
+        # surfaces, so it must name no workflow at all rather than sit
+        # beside them as a third, unchecked listing.
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers(
+                load_json(MARKETPLACE_MANIFEST)["description"], COMMAND_SIGIL
+            ),
+            set(),
+        )
+
+    def test_the_parity_check_detects_a_planted_omission_and_a_planted_extra(self):
+        shipped = self.shipped()
+        for surface, text in self.enumerating_surfaces().items():
+            with self.subTest(surface=surface):
+                omitted = text.replace("/process-report", "")
+                self.assertNotEqual(omitted, text, "the planted omission changed nothing")
+                failures = plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(omitted, COMMAND_SIGIL),
+                    shipped,
+                )
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("omits shipped workflow(s): process-report", failures[0])
+
+                spurious = f"{text} It also ships /retired-command."
+                failures = plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(spurious, COMMAND_SIGIL),
+                    shipped,
+                )
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn(
+                    "names workflow(s) the bundle does not ship: retired-command",
+                    failures[0],
+                )
+
+                both = f"{omitted} It also ships /retired-command."
+                self.assertEqual(
+                    len(
+                        plugin_bundle_gate.parity_failures(
+                            surface,
+                            plugin_bundle_gate.workflow_identifiers(both, COMMAND_SIGIL),
+                            shipped,
+                        )
+                    ),
+                    2,
+                )
+
+    def test_identifier_extraction_is_boundary_safe(self):
+        # Overlapping names are the whole risk here: a substring scan would
+        # read /issue out of /issue-review and /pr-review out of
+        # /pr-rereview, making an omission look like a mention.
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers("/issue-review", COMMAND_SIGIL),
+            {"issue-review"},
+        )
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers("/pr-rereview", COMMAND_SIGIL),
+            {"pr-rereview"},
+        )
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers("/issue, /issue-review.", COMMAND_SIGIL),
+            {"issue", "issue-review"},
+        )
+        # A URL or relative path segment is not a workflow mention.
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers(
+                "https://github.com/coghex/kanban", COMMAND_SIGIL
+            ),
+            set(),
+        )
+        self.assertEqual(
+            plugin_bundle_gate.workflow_identifiers("./plugins/kanban", COMMAND_SIGIL),
+            set(),
+        )
 
 
 if __name__ == "__main__":
