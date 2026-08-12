@@ -13,9 +13,11 @@ outgrown.
 
 The arc is now partly tracked. `docs/workflow_audit_findings.md` processed
 WF-7, WF-8, and WF-9 into #239, #240, and #241, after this document's first
-pass was written against an unprocessed report. All three issues are open
-and `reviewed:approve`. This document therefore designs the arc *and*
-records where the filed issues diverge from it — see D-4 and D-6.
+pass was written against an unprocessed report. #239 has since merged; #240
+is open and `reviewed:approve`; #241 was revised in place per D-6 on
+2026-08-12 and is open and `reviewed:revised`. This document therefore
+designs the arc *and* records where the filed issues diverge from it — see
+D-4 and D-6.
 
 Design state: `ready for issue processing`
 
@@ -27,7 +29,7 @@ concrete precondition
 
 - [x] EPIC. Make the document and issue-drafting workflow loops brand-complete — [#260]
 - [x] CDW-1. Merge the decision-authority guardrails into the tracked design workflows — [#239]
-- [ ] CDW-2. Derive Claude counterparts for design-epic and process-design-doc
+- [x] CDW-2. Derive Claude counterparts for design-epic and process-design-doc — [#241]
 - [ ] CDW-3. Package the report write side for both brands
 - [ ] CDW-4. Package issue-rereview for both brands
 
@@ -52,11 +54,12 @@ concrete precondition
 
 ## Current state and evidence
 
-- **Three of the four slices are already filed, approved, and open.** The
+- **Three of the four slices are filed; CDW-1 has landed.** The
   audit report's ledger reads `WF-7 — [#239]`, `WF-8 — [#240]`,
-  `WF-9 — [#241]`; all three carry `agent-workflows` and `reviewed:approve`.
-  #239 covers CDW-1, #240 covers CDW-4, and #241 bundles CDW-2 with the
-  `draft-report` half of CDW-3. The umbrella epic is #260, created
+  `WF-9 — [#241]`; all three carry `agent-workflows`. #239 covers CDW-1 and
+  has merged, #240 covers CDW-4 and is open and `reviewed:approve`, and #241
+  covered CDW-2 bundled with the `draft-report` half of CDW-3 until D-6's
+  revision narrowed it to CDW-2 alone on 2026-08-12. The umbrella epic is #260, created
   2026-08-11 with `epic` and `agent-workflows`; the three older
   `epic`-labeled issues (#79, #122, #159) are closed and cover other arcs.
 - **#239's approved review amended its spec away from a verbatim standard.**
@@ -150,9 +153,11 @@ concrete precondition
   its personal Claude copy, proving the transpose pattern round-trips.
 - **Cross-arc state.** Closed #229 / PR #231 vendored the current
   Codex-only set and defined the SHA-pinned model; closed #79 was the
-  portability epic this extends in spirit; #235 (manifest version bumps)
-  and #237 (coordination-document publication, `blocked`) are open
-  workflow-tooling items every slice here inherits rather than owns.
+  portability epic this extends in spirit; #235 (manifest version bumps) has
+  merged, so `tools/plugin_bundle_gate.py` now requires a bundle version bump
+  in the same change as any bundle edit; #237 (coordination-document
+  publication, `blocked`) remains an open workflow-tooling item every slice
+  here inherits rather than owns.
 
 ## Desired experience
 
@@ -519,8 +524,8 @@ Resolved by D-8.
 - **Scope:** the two SKILL.md bodies; a document-workflow-contract statement
   of the decision-authority boundary with a check that fails when it is
   removed (#239's requirement 3); no declared-set change.
-- **Filed as:** #239 (open, `reviewed:approve`). Covers this slice as
-  written; no revision identified.
+- **Filed as:** #239, merged. Covered this slice as written; no revision was
+  identified. Its landed text is CDW-2's transpose source.
 - **Phase:** 1
 - **Depends on:** none
 - **Ordering:** critical path
@@ -534,6 +539,13 @@ Resolved by D-8.
 - **Open questions:** None
 
 ### CDW-2. Derive Claude counterparts for design-epic and process-design-doc
+
+> **Processed 2026-08-12:** D-6's revision was applied to #241 — narrowed to
+> this slice, requirement 1 rewritten to transpose from the post-#239 tracked
+> Codex text, the old requirement 5 dropped, `depends on #239` added, and the
+> `note-problem` fence removed from `Out of scope`. `reviewed:approve` was
+> replaced with `reviewed:revised`; the spec awaits a fresh opposite-brand
+> review before it is workable.
 
 - **Outcome:** `/design-epic` and `/process-design-doc` exist as tracked
   Claude commands transposed from CDW-1's strengthened text (D-4), and every
@@ -551,8 +563,9 @@ Resolved by D-8.
   - `tools/test_document_workflow_contract.py` — `EXPECTED_DECLARED_PATHS`
     5→7, `CODEX_ONLY_WORKFLOWS` 3→1, cross-brand pairs 1→3, and
     `test_claude_epic_disposition_routes_to_packaged_codex_workflows`
-    (`:328`) inverted: it currently *asserts* the Claude slash commands are
-    absent, so it fails the moment they exist;
+    (`:390`, having moved from `:328` when #239 landed) inverted: it currently
+    *asserts* the Claude slash commands are absent, so it fails the moment they
+    exist;
   - `tools/test_claude_plugin.py` — discovery ten→twelve, with
     `HASKELL_PARITY_COMMAND_NAMES` unchanged at five;
   - `tools/test_agent_workflow_contract.py` — `CLAUDE_PLUGIN_SURFACE_FILES`,
@@ -564,9 +577,9 @@ Resolved by D-8.
     `/process-report`… a declared gap"), `docs/README.md` (`:8`, which
     describes "the declared Codex-only gap"), and the Claude plugin manifest
     description.
-- **Filed as:** #241, which bundles this slice with CDW-3's `draft-report`
-  and specifies the vendoring model D-4 rejects. D-6 narrows it in place; it
-  is not workable until the revised spec clears a fresh review.
+- **Filed as:** #241, revised in place per D-6 on 2026-08-12 and now narrowed
+  to this slice alone. It is not workable until the revised spec clears a
+  fresh review.
 - **Phase:** 2
 - **Depends on:** CDW-1
 - **Ordering:** critical path

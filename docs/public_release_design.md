@@ -17,11 +17,11 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Package Kanban's first public release
-- [ ] PUB-1. Establish the release version and start the changelog
-- [ ] PUB-2. Rewrite the README and install docs for an outsider audience
-- [ ] PUB-3. Produce and embed a fixture-rendered board screenshot
-- [ ] PUB-4. Add a tag-triggered release workflow publishing the verified sdist
+- [x] EPIC. Package Kanban's first public release — [#282]
+- [x] PUB-1. Establish the release version and start the changelog — [#283]
+- [x] PUB-2. Rewrite the README and install docs for an outsider audience — [#287]
+- [x] PUB-3. Produce and embed a fixture-rendered board screenshot — [#288]
+- [x] PUB-4. Add a tag-triggered release workflow publishing the verified sdist — [#289]
 
 ## Epic contract
 

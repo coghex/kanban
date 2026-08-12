@@ -18,11 +18,11 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Make Kanban and its optional components run on Linux
-- [ ] LNX-1. Extract a service-manager backend seam in the drainer tools
+- [x] EPIC. Make Kanban and its optional components run on Linux — [#290]
+- [x] LNX-1. Extract a service-manager backend seam in the drainer tools — [#291]
 - [ ] LNX-2. Add the systemd user-unit backend and lift the darwin gate
 - [ ] LNX-3. Make the Claude probe and process snapshot Linux-correct
-- [ ] LNX-4. Resolve managed install and log paths per platform
+- [x] LNX-4. Resolve managed install and log paths per platform — [no-issue]: split into the managed-paths arc (`docs/managed_paths_design.md`)
 - [ ] LNX-5. State the new platform support in the docs and contracts
 
 ## Epic contract
@@ -33,7 +33,8 @@ concrete precondition
 - **Done when:** the drainer installs, starts, drains, and reports status
   through systemd on Linux with the same durable-record contract launchd
   has; the Claude probe returns snapshots under util-linux `script`; managed
-  paths resolve idiomatically per platform; and the platform claims in
+  paths resolve idiomatically per platform (delivered by the managed-paths arc
+  in `docs/managed_paths_design.md`); and the platform claims in
   README/workflow-setup/pr-drainer match verified reality.
 - **Users and operators:** future Linux users of the public release; Vincent
   if a Linux host enters the fleet; CI (which is already the de facto Linux
@@ -111,13 +112,14 @@ learns the truth per component; nothing claims more than a verified path.
   backend-aware.
 - The Claude probe's `script`-flavor handling and a Linux fixture for the
   `ps` snapshot parse.
-- Per-platform managed install/log path resolution and the §4 contract rows
-  that name them.
 - Platform statements in README, workflow-setup, pr-drainer, and design.md.
 
 ### Out of scope
 
 - Windows or BSD support.
+- Per-platform managed install, record, runtime, and log path resolution and
+  the §4 rows that name them — split out on 2026-08-12 into
+  `docs/managed_paths_design.md`, which owns that arc end to end.
 - Changing drainer semantics (merge policy, autostash, incidents) — WF-11,
   WF-12, and WF-13 own those conversations.
 - The `setup_workflows.py` provider-plugin components (provider CLIs manage
@@ -152,10 +154,15 @@ Proposed shape, pending the open questions:
   (proposal: by OS, with the flavor recorded in the failure diagnostics).
   The `ps` snapshot parse gains a procps `lstart` fixture; any real
   divergence found becomes part of this slice.
-- **Paths (LNX-4, D-2).** Idiomatic per-platform resolution: macOS keeps
-  `~/Library/…`; Linux uses `$XDG_DATA_HOME`/`$XDG_STATE_HOME` homes, with
-  `kanban_config.py` as the single resolver both languages consult. The §4
-  personal-path rows update to name both outputs.
+- **Paths (LNX-4, D-2) — now a separate arc.** Idiomatic per-platform
+  resolution: macOS keeps `~/Library/…`; Linux uses
+  `$XDG_DATA_HOME`/`$XDG_STATE_HOME` homes, with `kanban_config.py` as the
+  single resolver both languages consult. The §4 personal-path rows update to
+  name both outputs. Split out on 2026-08-12 into
+  `docs/managed_paths_design.md`, which carries D-2 forward and settles the
+  questions this bullet left open — which XDG root holds which artifact, how
+  the vendored bundle assets resolve without a resolver, and how a §4 row
+  carries two spellings.
 - **Docs (LNX-5).** `workflow-setup.md:17-18`'s "not a cross-platform
   port" sentence, `pr-drainer.md:51`'s macOS-installer claim, the README
   platform matrix (written by the release epic's PUB-2 under its D-4), and
@@ -191,6 +198,8 @@ unchanged; `tools/kanban_config.py` remains the single resolver every
 consumer consults. The same-spelling-everywhere alternative was rejected
 as alien to Linux users. Consequence: the §4 personal-path rows and their
 test update to name both outputs; existing macOS installs never move.
+Delivery moved on 2026-08-12: this decision is carried forward verbatim as D-1
+of `docs/managed_paths_design.md`, whose arc owns the implementation.
 
 ### D-3. The backend seam lands before the WF drainer issues
 
@@ -227,8 +236,9 @@ Resolved by D-3.
 - Probe portability: captured util-linux `script` transcripts and a procps
   `lstart` sample join the existing fixture families; the BSD paths keep
   their current fixtures.
-- Path resolution: one table-driven test over (platform × component)
-  asserting the resolver's outputs, plus §4 reconciliation staying green.
+- Path resolution: owned by the managed-paths arc
+  (`docs/managed_paths_design.md`), whose verification strategy covers the
+  table-driven resolver test and the §4 reconciliations.
 - Docs land last and only claim what the chosen Q-1 evidence supports.
 
 ## Delivery plan
@@ -285,6 +295,17 @@ Resolved by D-3.
 
 ### LNX-4. Resolve managed install and log paths per platform
 
+> **Disposition 2026-08-12: `[no-issue]`, split into its own arc.** Sizing this
+> slice against the tree showed a surface LNX-4 understates: two managed
+> installs rather than one (`tools/kanban_config.py`'s resolver governs the
+> issue-review backend, not the drainer), twelve packaged spellings across both
+> plugin bundles that cannot consult a resolver, and four §4 `personal-path`
+> rows behind two machine-checked reconciliations — thirty-four tracked files
+> in all. That is more than one reviewable PR. The work now lives in
+> `docs/managed_paths_design.md` as its own epic with four slices, carrying
+> D-2 forward as its D-1. The section below is retained as the record of what
+> this arc originally scoped.
+
 - **Outcome:** install dirs, discovery records, and logs resolve
   per-platform (macOS `~/Library/…`, Linux XDG) from one resolver; §4
   personal-path rows and their test match.
@@ -307,7 +328,9 @@ Resolved by D-3.
 - **Scope:** the four documents; wording bounded by D-1's evidence tier
   ("verified in CI containers").
 - **Phase:** 3
-- **Depends on:** LNX-2, LNX-3, LNX-4
+- **Depends on:** LNX-2, LNX-3, and the managed-paths arc
+  (`docs/managed_paths_design.md`), which is tracked separately rather than as
+  a slice of this one
 - **Ordering:** critical path
 - **Relevant decisions:** D-1
 - **Acceptance signals:** no doc claims a component-platform pair without
