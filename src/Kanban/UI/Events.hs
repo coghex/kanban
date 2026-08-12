@@ -6,6 +6,7 @@ module Kanban.UI.Events
     applyIncidentsAction,
     applyRunningProcessClick,
     boardMouseAction,
+    boardMousePress,
     handleEvent,
     incidentsAction,
     killSelectionNotice,
@@ -197,16 +198,38 @@ boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (ColumnViewport column, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
   _ -> Nothing
 
--- | Carries out one decided press. Total in 'BoardMouseAction', so a press
--- cannot be given a meaning above without deciding here what it does.
+-- | What one decided press does to the dashboard. Total in
+-- 'BoardMouseAction', so a press cannot be given a meaning above without its
+-- effect being decided here — and pure, so the effect a press has can be
+-- taken and inspected without a terminal, a viewport, or a subprocess.
+boardMousePress :: BoardMouseAction -> AppState -> AppState
+boardMousePress = \case
+  TransferSearch column -> transferSearchTo column
+  ToggleDrainerFromClick -> fst . drainerTogglePress
+  ToggleEpicFromClick column row trackerNumber -> toggleTrackerState column row trackerNumber
+  SelectOrOpenCardAt column row -> applyCardClick column row
+  OpenRunningProcessAt column row -> applyRunningProcessClick column row
+  -- Scrolling a viewport is not a state change; all the state carries is that
+  -- this frame must not drag the selection back into view.
+  ScrollColumnBy _ _ -> \state -> state {appEnsureSelectionVisible = False}
+
+-- | Carries out one decided press: its effect on the state, and then the
+-- three things that are not state — the viewport scroll, the controller
+-- handoff a drainer press makes, and the transcript a newly opened session
+-- overlay has to be shown the tail of.
 applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
-applyBoardMouseAction = \case
-  TransferSearch column -> modify (transferSearchTo column)
-  ToggleDrainerFromClick -> toggleDrainer
-  ToggleEpicFromClick column row trackerNumber -> toggleTrackerFromClick column row trackerNumber
-  SelectOrOpenCardAt column row -> selectOrOpenCard column row
-  OpenRunningProcessAt column row -> openRunningProcessOrSelect column row
-  ScrollColumnBy column amount -> scrollColumn column amount
+applyBoardMouseAction action = do
+  before <- get
+  modify (boardMousePress action)
+  case action of
+    ScrollColumnBy column amount -> vScrollBy (viewportScroll (ColumnViewport column)) amount
+    ToggleDrainerFromClick -> runDrainerToggleHandoff before
+    OpenRunningProcessAt _ _ -> do
+      after <- get
+      when (after.appOverlay /= before.appOverlay) $ do
+        presentTranscriptTail
+        armVisibleReviewTicks
+    _ -> pure ()
 
 -- | Carries out one binding from "Kanban.UI.Keys". Total in 'BoardAction', so
 -- a binding cannot be added to that table without deciding here what pressing
@@ -714,14 +737,6 @@ reviewInputHooks =
       sessionHookChoice = chooseReviewOption
     }
 
-scrollColumn :: BoardColumn -> Int -> EventM Name AppState ()
-scrollColumn column amount = do
-  modify (\state -> state {appEnsureSelectionVisible = False})
-  vScrollBy (viewportScroll (ColumnViewport column)) amount
-
-selectOrOpenCard :: BoardColumn -> Int -> EventM Name AppState ()
-selectOrOpenCard column row = modify (applyCardClick column row)
-
 -- | What a left click on a board card does. A click that only selects leaves a
 -- live search running; one that opens details ends it, on the identity it
 -- opened, exactly as Enter does.
@@ -735,15 +750,6 @@ applyCardClick column row state
             (state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing})
         Nothing -> state
   | otherwise = selectCardOnly column row state
-
-openRunningProcessOrSelect :: BoardColumn -> Int -> EventM Name AppState ()
-openRunningProcessOrSelect column row = do
-  before <- get
-  modify (applyRunningProcessClick column row)
-  after <- get
-  when (after.appOverlay /= before.appOverlay) $ do
-    presentTranscriptTail
-    armVisibleReviewTicks
 
 -- | What a right click on a board card does: select it, and open its live
 -- session's overlay if it has one. Opening one ends a live search on the

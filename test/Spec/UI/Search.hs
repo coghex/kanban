@@ -12,8 +12,9 @@
 -- query edits, its selection reconciliation, its move to another column, and
 -- every mouse decision are all pure functions, which is what lets the whole
 -- interaction be covered (docs\/design.md §18). Dispatch is a projection of
--- them: the mouse group states which presses 'searchMouseTransfer' consumes,
--- and the transfer group states what the transition it hands them to does.
+-- them: 'boardMouseAction' decides what a press means and 'boardMousePress'
+-- is the whole of what dispatch then does with the decision, so the mouse
+-- group can take a press rather than assert about the arm that would.
 module Spec.UI.Search (spec) where
 
 import qualified Data.Map.Strict as Map
@@ -22,8 +23,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
+import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
-import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction)
+import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction, boardMousePress)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
@@ -808,16 +810,52 @@ mouseSpec = describe "mouse precedence" $ do
   -- Requirement 6: the drainer button is not a column target, so it is
   -- answered ahead of the transfer and keeps the toggle it has always
   -- dispatched — the search it never sees keeps its target and its query.
-  it "still dispatches the drainer button's toggle while a search is live" $ do
+  --
+  -- Taken rather than asserted about: dispatch decides the press and then
+  -- 'boardMousePress' is the whole of what dispatch does with the decision,
+  -- so running it here is running the press. A drainer press hands its
+  -- controller work off separately, which is what lets this take one without
+  -- a controller subprocess.
+  it "still takes the drainer button's toggle while a search is live" $ do
     searching <- transferring
     plain <- searchState
+    let installed state = state {appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [])}
+        press state = boardMousePress <$> boardMouseAction state DrainerButton Vty.BLeft [] <*> pure (installed state)
     boardMouseAction searching DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
     boardMouseAction plain DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    -- The toggle ran: the drainer is on its way up and the press said so.
+    ((.appDrainerStatus.drainerState) <$> press searching) `shouldBe` Just DrainerStarting
+    ((.appDrainerBusy) <$> press searching) `shouldBe` Just True
+    ((.appNotice) <$> press searching) `shouldBe` Just (Just "Starting PR drainer…")
+    -- And the search is exactly where it was, still on its query.
+    ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
+    ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
+    -- The same press with nothing searching does the same thing, which is
+    -- what "keeps working" means.
+    ((.appDrainerStatus.drainerState) <$> press plain) `shouldBe` Just DrainerStarting
     -- Nothing about that press is a transfer, on any button.
     sequence_
       [ searchMouseTransfer searching DrainerButton button `shouldBe` Nothing
       | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
       ]
+
+  -- The other presses, taken the same way: what dispatch decides, run.
+  it "takes a transferring press as the transfer and a searched-column press as its ordinary action" $ do
+    searching <- transferring
+    let take' name button = boardMousePress <$> boardMouseAction searching name button [] <*> pure searching
+        transferred = take' (EpicTarget Active 1 706) Vty.BLeft
+        ordinary = take' (CardTarget Issues 0) Vty.BLeft
+    -- The epic-header press in Active moved the search and left epic 706 alone.
+    ((.searchColumn) <$> (transferred >>= (.appSearch))) `shouldBe` Just Active
+    ((.searchQuery) <$> (transferred >>= (.appSearch))) `shouldBe` Just ""
+    (Set.member 706 . (.appExpandedTrackers) <$> transferred) `shouldBe` Just False
+    ((.appOverlay) <$> transferred) `shouldBe` Just Nothing
+    -- The card press inside Issues selected the result it landed on and kept
+    -- the query; the selection had been on the other result.
+    selectedRow searching Issues `shouldBe` 1
+    ((.appSearch) <$> ordinary) `shouldBe` Just searching.appSearch
+    ((.appOverlay) <$> ordinary) `shouldBe` Just Nothing
+    (flip selectedRow Issues <$> ordinary) `shouldBe` Just 0
 
   -- The other half of requirement 2, for the press that does transfer: the
   -- epic header a transferring click landed on is not toggled, and the live
