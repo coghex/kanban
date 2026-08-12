@@ -52,7 +52,7 @@ applyBoardRefresh outcome = do
   -- Which result was selected before the refresh, so a live query can be
   -- re-run against the new board and still keep that card selected. Read
   -- here because the refresh below replaces the board it was read off.
-  let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedIdentityIn before
+  let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
   modify $ \state -> case outcome of
     -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
     -- re-verifies it before spawning anything, so a later refresh -- in this

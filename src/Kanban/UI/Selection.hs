@@ -147,12 +147,12 @@ toggleTrackerState column row trackerNumber state
   where
     -- The row is an index into what @column@ is showing, so the raw-board
     -- normalization below is only right while nothing is filtering it. Under
-    -- a live search the toggle is re-seated on the entry it named instead, by
-    -- identity; 'reseatSearch' is a no-op with no search open.
-    toggled = safeIndex row (entriesFor state column)
+    -- a live search the toggle is re-seated on the row it named instead, by
+    -- that row's anchor; 'reseatSearch' is a no-op with no search open.
+    toggled = anchorAt state column row
     retarget expandedTrackers notice =
       reseatSearch
-        (itemId . entryItem <$> toggled)
+        toggled
         state
           { appSelectedColumn = column,
             appExpandedTrackers = expandedTrackers,
@@ -189,7 +189,7 @@ openSearchResult state
   | opened.appOverlay /= state.appOverlay = closeSearchOn anchor opened
   | otherwise = opened
   where
-    anchor = selectedIdentityIn state state.appSelectedColumn
+    anchor = selectedAnchorIn state state.appSelectedColumn
     opened = openSelectedDetailsIn state
 
 selectedItem :: AppState -> Maybe BoardItem

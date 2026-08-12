@@ -370,13 +370,16 @@ an empty column shows. While a non-empty query is live the column heading shows
 the visible result count over the column's full total, with GitHub's `+`
 truncation marker still attached to that total.
 
-Every edit, close, and successful refresh re-seats the searched column by item
-identity, and a tracker header is re-seated by its tracker's issue number
-because a populated header is synthesized from child rows. The identity is kept
-only while it is still selectable in the resulting view: an identity that is
-gone, or that the restored column has collapsed back under its epic, takes the
-first selectable visible entry instead, and a view with nothing in it leaves
-nothing selected.
+Every edit, close, and successful refresh re-seats the searched column by the
+identity of the row that was selected. A row drawing an ordinary card is kept by
+that card's item; a row drawing an epic's header is kept by that epic's issue
+number, and resolves back to its group's first row. That covers a populated
+epic too: a populated header is synthesized from child rows, so while the group
+is collapsed the selected row is its first child even though what is shown and
+acted on is the epic. The anchor is kept only while it is still selectable in
+the resulting view — an anchor that is gone, and a card the restored column has
+collapsed back under its epic, take the first selectable visible entry instead,
+and a view with nothing in it leaves nothing selected.
 
 Every insertion and deletion refilters immediately: no GitHub request, no cache
 write, and no change to board freshness. Rendering, keyboard selection, mouse

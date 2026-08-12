@@ -74,22 +74,24 @@ activeEntries :: [ColumnEntry]
 activeEntries = [standaloneCard 799 "Repair stale world cache invalidation"]
 
 -- | A column whose collapsed tracker group sits below a standalone card, so
--- the first selectable row and the row above a collapsed-away anchor are
--- different rows.
+-- the first selectable row, the row above a collapsed-away anchor, and the
+-- group's own row are all different rows.
+laterGroupEntries :: [ColumnEntry]
+laterGroupEntries =
+  [ standaloneCard 901 "Add repository snapshot cache",
+    trackedChild 700 "Persistence contract rollout" 711 "Adopt the versioned save envelope",
+    trackedChild 700 "Persistence contract rollout" 712 "Migrate the terrain cache reader"
+  ]
+
 laterGroupBoard :: Board
-laterGroupBoard =
-  Board
-    ( Map.fromList
-        ( [(column, []) | column <- [minBound .. maxBound]]
-            <> [ ( Issues,
-                   [ standaloneCard 901 "Add repository snapshot cache",
-                     trackedChild 700 "Persistence contract rollout" 711 "Adopt the versioned save envelope",
-                     trackedChild 700 "Persistence contract rollout" 712 "Migrate the terrain cache reader"
-                   ]
-                 )
-               ]
-        )
-    )
+laterGroupBoard = issuesBoard laterGroupEntries
+
+-- | The same column with one child gone, as a refresh would leave it.
+laterGroupBoardWithout :: Int -> Board
+laterGroupBoardWithout number = issuesBoard (filter ((/= Just number) . entryNumber) laterGroupEntries)
+
+issuesBoard :: [ColumnEntry] -> Board
+issuesBoard entries = Board (Map.fromList ([(column, []) | column <- [minBound .. maxBound]] <> [(Issues, entries)]))
 
 searchBoard :: Board
 searchBoard =
@@ -382,7 +384,7 @@ transitionSpec = describe "transitions" $ do
   it "re-runs the query against a refreshed board and keeps a still-matching item selected" $ do
     searching <- searchingFor "cache"
     let moved = searching {appBoard = boardWithout 712}
-        reseated = reseatSearch (selectedIdentityIn searching Issues) moved
+        reseated = reseatSearch (selectedAnchorIn searching Issues) moved
     -- #712 left the column, so the query's remaining match takes the
     -- selection rather than whatever moved into row 0.
     identityOf reseated `shouldBe` Just "#901  Add repository snapshot cache"
@@ -392,22 +394,75 @@ transitionSpec = describe "transitions" $ do
     searching <- searchingFor "terrain"
     identityOf searching `shouldBe` Just "#712  Migrate the terrain cache reader"
     let relocated = searching {appBoard = boardMoving712ToActive}
-        reseated = reseatSearch (selectedIdentityIn searching Issues) relocated
+        reseated = reseatSearch (selectedAnchorIn searching Issues) relocated
     reseated.appSelectedColumn `shouldBe` Issues
     entriesFor reseated Issues `shouldBe` []
     selectedEntry reseated `shouldBe` Nothing
 
   it "leaves the board and the query untouched when a refresh fails" $ do
     searching <- searchingFor "cache"
-    let unchanged = reseatSearch (selectedIdentityIn searching Issues) searching
+    let unchanged = reseatSearch (selectedAnchorIn searching Issues) searching
     unchanged.appSearch `shouldBe` searching.appSearch
     unchanged.appBoard `shouldBe` searching.appBoard
     selectedRow unchanged Issues `shouldBe` selectedRow searching Issues
 
   it "reconciles a structural tracker header by its tracker issue number" $ do
     ownMatch <- searchingFor "Pointer capture"
-    selectedIdentityIn ownMatch Issues `shouldBe` Just (IssueId 705)
+    selectedAnchorIn ownMatch Issues `shouldBe` Just (AnchorTracker 705)
     identityOf ownMatch `shouldBe` Just "#705  Pointer capture hardening"
+
+  -- A populated epic's header is synthesized from its child rows, so while
+  -- that epic is collapsed the row the user selected is its first child while
+  -- what they see and act on is the epic. Anchoring on the child loses the
+  -- header the moment a query replaces the group with a synthesized
+  -- 'TrackerHeader' — and loses it again on the way back.
+  it "anchors a collapsed populated epic's header on the epic, not on its first child" $ do
+    state <- testAppState laterGroupBoard
+    selectableRows state Issues `shouldBe` [0, 1]
+    anchorAt state Issues 0 `shouldBe` Just (AnchorItem (IssueId 901))
+    anchorAt state Issues 1 `shouldBe` Just (AnchorTracker 700)
+    -- Expanded, that same row is the child card it draws.
+    let expanded = state {appExpandedTrackers = Set.singleton 700}
+    anchorAt expanded Issues 1 `shouldBe` Just (AnchorItem (IssueId 711))
+
+  it "restores a collapsed epic's header after a query that matched the epic alone" $ do
+    state <- testAppState laterGroupBoard
+    -- The header row is selected, and the query matches the epic's own
+    -- identity while matching neither child nor the standalone above it.
+    let selected = state {appSelectedRows = Map.insert Issues 1 state.appSelectedRows}
+        searching = withQuery "persistence contract" (openSearch selected)
+    visibleIdentities searching `shouldBe` ["#700  Persistence contract rollout"]
+    selectedAnchorIn searching Issues `shouldBe` Just (AnchorTracker 700)
+    -- Closing restores the children under the header, and the selection stays
+    -- on that header rather than falling back to the standalone above it.
+    let closed = closeSearch searching
+    closed.appSearch `shouldBe` Nothing
+    selectedRow closed Issues `shouldBe` 1
+    selectedAnchorIn closed Issues `shouldBe` Just (AnchorTracker 700)
+    identityOf closed `shouldBe` Just "#711  Adopt the versioned save envelope"
+
+  it "keeps a collapsed epic's header selected across an edit that narrows to it and back" $ do
+    state <- testAppState laterGroupBoard
+    let selected = state {appSelectedRows = Map.insert Issues 1 state.appSelectedRows}
+        narrowed = withQuery "persistence contract" (openSearch selected)
+        -- Nine deletions leave "persistence", which still matches the epic
+        -- alone, so the header row survives the edit in both directions.
+        widened = Text.foldl' (\current _ -> applySearchInput SearchBackspace current) narrowed (Text.replicate 9 "x")
+    selectedAnchorIn narrowed Issues `shouldBe` Just (AnchorTracker 700)
+    (.searchQuery) <$> widened.appSearch `shouldBe` Just "persistence"
+    visibleIdentities widened `shouldBe` ["#700  Persistence contract rollout"]
+    selectedAnchorIn widened Issues `shouldBe` Just (AnchorTracker 700)
+
+  it "re-seats a collapsed epic's header on a refreshed board" $ do
+    state <- testAppState laterGroupBoard
+    let selected = state {appSelectedRows = Map.insert Issues 1 state.appSelectedRows}
+        searching = withQuery "persistence contract" (openSearch selected)
+        -- The refresh drops the child the header row sat on; the epic and its
+        -- other child remain, so the header must survive.
+        refreshed = searching {appBoard = laterGroupBoardWithout 711}
+        reseated = reseatSearch (selectedAnchorIn searching Issues) refreshed
+    selectedAnchorIn reseated Issues `shouldBe` Just (AnchorTracker 700)
+    selectedRow reseated Issues `shouldBe` 0
 
   it "never puts search state anywhere a snapshot or the cache could reach" $ do
     -- 'AppState' has no serialization instances at all, so this is really a

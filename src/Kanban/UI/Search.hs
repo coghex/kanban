@@ -39,7 +39,11 @@ module Kanban.UI.Search
     columnCountText,
 
     -- * Selection by identity
-    selectedIdentityIn,
+    SearchAnchor (..),
+    anchorAt,
+    anchorFor,
+    anchorRow,
+    selectedAnchorIn,
     seatColumnOn,
     reseatSearch,
     moveSelectionBy,
@@ -205,29 +209,66 @@ columnCountText state column = case activeQueryFor state column of
       Reviewing -> state.appPullRequestsTruncated
       Done -> state.appPullRequestsTruncated
 
--- | The identity of the entry selected in @column@, read off the view that
--- column is showing. A tracker header carries its tracker's issue number,
--- because a populated header is synthesized from child rows and so has no
--- identity of its own to keep.
-selectedIdentityIn :: AppState -> BoardColumn -> Maybe ItemId
-selectedIdentityIn state column = entryIdentity <$> safeIndex (selectedRow state column) (entriesFor state column)
+-- | What a selected row is, for the purpose of finding it again once the view
+-- has changed.
+--
+-- A row that draws as a tracker header is anchored on the tracker's issue
+-- number rather than on the entry beneath it, because a populated group's
+-- header is synthesized from its child rows: while that group is collapsed the
+-- row the user selected /is/ its first child, but what they see and act on is
+-- the epic. Anchoring on the child would lose the header the moment a query
+-- replaced the group with a synthesized 'TrackerHeader' — and lose it again on
+-- the way back, when closing restored the children underneath it.
+data SearchAnchor
+  = -- | An ordinary card row, kept by the item it draws.
+    AnchorItem ItemId
+  | -- | A row that draws an epic's header, kept by that epic's issue number.
+    AnchorTracker Int
+  deriving stock (Eq, Show)
 
-entryIdentity :: ColumnEntry -> ItemId
-entryIdentity = itemId . entryItem
+-- | The anchor for one entry, given the trackers its view treats as expanded.
+anchorFor :: Set Int -> ColumnEntry -> SearchAnchor
+anchorFor expandedTrackers entry = case entry of
+  TrackerHeader tracker -> AnchorTracker tracker.trackerIssue.issueNumber
+  Tracked context _
+    | primaryTrackerNumber context `Set.notMember` expandedTrackers -> AnchorTracker (primaryTrackerNumber context)
+  _ -> AnchorItem (itemId (entryItem entry))
+
+-- | The anchor for one row of what @column@ is showing.
+anchorAt :: AppState -> BoardColumn -> Int -> Maybe SearchAnchor
+anchorAt state column row = anchorFor (expandedTrackersFor state column) <$> safeIndex row (entriesFor state column)
+
+-- | The anchor of the entry selected in @column@, read off the view that
+-- column is showing.
+selectedAnchorIn :: AppState -> BoardColumn -> Maybe SearchAnchor
+selectedAnchorIn state column = anchorAt state column (selectedRow state column)
+
+-- | The row an anchor names in a set of entries, or 'Nothing' when nothing
+-- there answers to it.
+--
+-- A tracker anchor resolves to its group's first row, which is the row that
+-- draws the header while the group is collapsed and its first child once it is
+-- not — and is the one row of the group a collapsed view offers either way. An
+-- item anchor resolves only to its own row: a card the view has since
+-- collapsed away is lost rather than mapped to something near it.
+anchorRow :: [ColumnEntry] -> SearchAnchor -> Maybe Int
+anchorRow entries = \case
+  AnchorTracker number -> findIndex ((== Just number) . entryPrimaryTrackerNumber) entries
+  AnchorItem identity -> findIndex ((== identity) . itemId . entryItem) entries
 
 -- | Seat @column@'s remembered row on the entry @anchor@ names, in whatever
 -- that column shows now, and select that column.
 --
--- The anchor is kept only while it is still /selectable/ in the resulting
--- view, which is an exact membership test rather than a nearest-row one: a
--- child the restored column has collapsed back under its epic is not
--- selectable, and resolving it to that epic's row would land on neither the
--- anchored card nor the first result whenever the group is not the column's
--- first. Anything else — an anchor that is gone, and an anchor the view no
+-- The row 'anchorRow' resolves is kept only while it is still /selectable/ in
+-- the resulting view, which is an exact membership test rather than a
+-- nearest-row one: a card the restored column has collapsed back under its
+-- epic is not selectable, and resolving it to that epic's row would land on
+-- neither the anchored card nor the first result whenever the group is not the
+-- column's first. Anything else — an anchor that is gone, and one the view no
 -- longer offers — takes the first selectable row, and an empty view leaves
 -- nothing selected, which is what a row index no entry answers to already
 -- means.
-seatColumnOn :: BoardColumn -> Maybe ItemId -> AppState -> AppState
+seatColumnOn :: BoardColumn -> Maybe SearchAnchor -> AppState -> AppState
 seatColumnOn column anchor state =
   state
     { appSelectedColumn = column,
@@ -236,7 +277,7 @@ seatColumnOn column anchor state =
     }
   where
     rows = selectableRows state column
-    located = anchor >>= \identity -> findIndex ((== identity) . entryIdentity) (entriesFor state column)
+    located = anchor >>= anchorRow (entriesFor state column)
     seated = case located of
       Just row | row `elem` rows -> row
       _ -> case rows of
@@ -246,7 +287,7 @@ seatColumnOn column anchor state =
 -- | Re-seat the search target column after anything that can change what its
 -- query leaves visible. A no-op with no search live, so every other path keeps
 -- deciding the selection the board's own way.
-reseatSearch :: Maybe ItemId -> AppState -> AppState
+reseatSearch :: Maybe SearchAnchor -> AppState -> AppState
 reseatSearch anchor state = case state.appSearch of
   Nothing -> state
   Just search -> seatColumnOn search.searchColumn anchor state
@@ -284,12 +325,12 @@ openSearch :: AppState -> AppState
 openSearch state =
   seatColumnOn
     Issues
-    (selectedIdentityIn state Issues)
+    (selectedAnchorIn state Issues)
     (state {appSearch = Just (ColumnSearch Issues ""), appNotice = Nothing})
 
 -- | End a live search, restoring the target column complete and keeping
 -- @anchor@ selected by identity rather than by row number.
-closeSearchOn :: Maybe ItemId -> AppState -> AppState
+closeSearchOn :: Maybe SearchAnchor -> AppState -> AppState
 closeSearchOn anchor state = case state.appSearch of
   Nothing -> state
   Just search -> seatColumnOn search.searchColumn anchor (state {appSearch = Nothing, appNotice = Nothing})
@@ -298,7 +339,7 @@ closeSearchOn anchor state = case state.appSearch of
 closeSearch :: AppState -> AppState
 closeSearch state = case state.appSearch of
   Nothing -> state
-  Just search -> closeSearchOn (selectedIdentityIn state search.searchColumn) state
+  Just search -> closeSearchOn (selectedAnchorIn state search.searchColumn) state
 
 -- | What one key press means while search is live.
 --
@@ -370,5 +411,5 @@ editQuery change state = case state.appSearch of
   Nothing -> state
   Just search ->
     reseatSearch
-      (selectedIdentityIn state search.searchColumn)
+      (selectedAnchorIn state search.searchColumn)
       (state {appSearch = Just search {searchQuery = change search.searchQuery}})

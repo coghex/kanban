@@ -689,7 +689,7 @@ applyCardClick column row state
       case safeIndex row (entriesFor state column) of
         Just entry ->
           closeSearchOn
-            (Just (itemId (entryItem entry)))
+            (anchorAt state column row)
             (state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing})
         Nothing -> state
   | otherwise = selectCardOnly column row state
@@ -709,7 +709,7 @@ openRunningProcessOrSelect column row = do
 applyRunningProcessClick :: BoardColumn -> Int -> AppState -> AppState
 applyRunningProcessClick column row state = case clicked >>= runningProcessOverlay state . entryItem of
   Nothing -> selectedState
-  Just overlay -> closeSearchOn (itemId . entryItem <$> clicked) (selectedState {appOverlay = Just overlay})
+  Just overlay -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
   where
     clicked = safeIndex row (entriesFor state column)
     selectedState = selectCardOnly column row state
