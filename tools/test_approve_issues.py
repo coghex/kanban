@@ -8,6 +8,7 @@ have. Unrelated review-semantics logic (spec fingerprints, marker matching,
 reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 """
 
+import argparse
 import json
 import subprocess
 import tempfile
@@ -37,6 +38,27 @@ class SourceRegressionTests(unittest.TestCase):
 
     def test_source_no_longer_defaults_runtime_state_under_home_work(self):
         self.assertNotIn('Path.home() / "work"', BACKEND_SOURCE)
+
+
+class ReviewArgumentTests(unittest.TestCase):
+    def test_review_accepts_one_issue_as_the_existing_shape(self):
+        with mock.patch("sys.argv", ["approve_issues.py", "--review", "7"]):
+            args = approve_issues.parse_args()
+        self.assertEqual(args.review, [7])
+
+    def test_review_preserves_an_explicit_left_to_right_batch(self):
+        with mock.patch(
+            "sys.argv",
+            ["approve_issues.py", "--review", "7", "3", "12", "4"],
+        ):
+            args = approve_issues.parse_args()
+        self.assertEqual(args.review, [7, 3, 12, 4])
+
+    def test_review_rejects_non_positive_issue_numbers(self):
+        for value in ("0", "-4", "not-a-number"):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    approve_issues.positive_issue_number(value)
 
 
 class PortableDefaultPathTests(unittest.TestCase):
@@ -400,6 +422,166 @@ class OpenInvalidIncidentTests(unittest.TestCase):
 class ReachedWork(Exception):
     """Raised from a patched acquire_lock to prove a gate let a call past it,
     without running any of the GitHub work that follows."""
+
+
+class OrderedReviewBatchTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ctx = make_ctx(Path(self.tmp.name))
+
+    def _status(self, number, *, approved):
+        verdict = "APPROVE" if approved else "CHANGES_REQUESTED"
+        return {
+            "approved": approved,
+            "issue": number,
+            "labels": [
+                approve_issues.APPROVE_LABEL
+                if approved
+                else approve_issues.CHANGES_LABEL
+            ],
+            "reasons": (
+                []
+                if approved
+                else ["latest current review verdict is CHANGES_REQUESTED"]
+            ),
+            "review_marker": {"verdict": verdict},
+        }
+
+    def _run(self, numbers, statuses):
+        lock = object()
+        events = []
+
+        def acquire(*args, **kwargs):
+            events.append(("acquire", kwargs))
+            return lock
+
+        def review(ctx, number, *, legacy_policy):
+            events.append(("review", number))
+            return statuses[number]
+
+        def release(handle):
+            self.assertIs(handle, lock)
+            events.append(("release", None))
+
+        with (
+            mock.patch.object(approve_issues, "acquire_lock", side_effect=acquire),
+            mock.patch.object(approve_issues, "release_lock", side_effect=release),
+            mock.patch.object(approve_issues, "ensure_verdict_labels") as ensure,
+            mock.patch.object(
+                approve_issues, "_review_one_locked", side_effect=review
+            ),
+        ):
+            result = approve_issues.review_batch(
+                self.ctx, numbers, legacy_policy="dual"
+            )
+        ensure.assert_called_once_with(self.ctx)
+        return result, events
+
+    def test_holds_one_lock_while_reviewing_every_issue_in_input_order(self):
+        numbers = [7, 3, 12, 4]
+        statuses = {number: self._status(number, approved=True) for number in numbers}
+        result, events = self._run(numbers, statuses)
+        self.assertEqual(
+            events,
+            [
+                ("acquire", {"mode": "batch", "issue_numbers": numbers}),
+                ("review", 7),
+                ("review", 3),
+                ("review", 12),
+                ("review", 4),
+                ("release", None),
+            ],
+        )
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["processed_issues"], numbers)
+        self.assertEqual(result["remaining_issues"], [])
+        self.assertIsNone(result["stopped_at"])
+
+    def test_stops_at_the_first_changes_requested_result(self):
+        numbers = [7, 3, 12, 4]
+        statuses = {
+            7: self._status(7, approved=True),
+            3: self._status(3, approved=False),
+            12: self._status(12, approved=True),
+            4: self._status(4, approved=True),
+        }
+        result, events = self._run(numbers, statuses)
+        self.assertEqual(
+            [event for event in events if event[0] == "review"],
+            [("review", 7), ("review", 3)],
+        )
+        self.assertFalse(result["approved"])
+        self.assertEqual(result["processed_issues"], [7, 3])
+        self.assertEqual(result["remaining_issues"], [12, 4])
+        self.assertEqual(result["stopped_at"], 3)
+        self.assertEqual(result["stop_reason"], "changes_requested")
+
+    def test_releases_the_lock_and_fails_on_an_indeterminate_nonapproval(self):
+        numbers = [7, 3]
+        statuses = {
+            7: self._status(7, approved=True),
+            3: {
+                "approved": False,
+                "issue": 3,
+                "labels": [],
+                "reasons": ["spec changed during review"],
+                "review_marker": None,
+            },
+        }
+        lock = object()
+        with (
+            mock.patch.object(
+                approve_issues, "blocking_pipeline_incident", return_value=None
+            ),
+            mock.patch.object(approve_issues, "acquire_lock", return_value=lock),
+            mock.patch.object(approve_issues, "release_lock") as release,
+            mock.patch.object(approve_issues, "ensure_verdict_labels"),
+            mock.patch.object(
+                approve_issues,
+                "_review_one_locked",
+                side_effect=[statuses[7], statuses[3]],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                approve_issues.ApproveError,
+                "did not reach an approved or changes-requested state",
+            ):
+                approve_issues.review_batch(self.ctx, numbers, legacy_policy="dual")
+        release.assert_called_once_with(lock)
+
+    def test_a_stale_changes_marker_is_a_terminal_nonapproval(self):
+        numbers = [7, 3]
+        stale = self._status(3, approved=False)
+        stale["reasons"] = ["no current opposite-agent v2 review marker matches this spec"]
+        lock = object()
+        with (
+            mock.patch.object(approve_issues, "acquire_lock", return_value=lock),
+            mock.patch.object(approve_issues, "release_lock") as release,
+            mock.patch.object(approve_issues, "ensure_verdict_labels"),
+            mock.patch.object(
+                approve_issues,
+                "_review_one_locked",
+                side_effect=[self._status(7, approved=True), stale],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                approve_issues.ApproveError,
+                "did not reach an approved or changes-requested state",
+            ):
+                approve_issues.review_batch(self.ctx, numbers, legacy_policy="dual")
+        release.assert_called_once_with(lock)
+
+    def test_lock_owner_names_the_full_ordered_batch(self):
+        owner = {
+            "pid": 123,
+            "mode": "batch",
+            "issues": [7, 3, 12, 4],
+        }
+        self.assertEqual(
+            approve_issues.describe_lock_owner(owner),
+            "ordered issue-review batch #7, #3, #12, #4 (PID 123)",
+        )
 
 
 class IncidentScopeTests(unittest.TestCase):

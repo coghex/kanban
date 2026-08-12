@@ -75,7 +75,7 @@ DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
 INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 # Optional: unset by default. No private endpoint ships as a tracked default
 # (docs/agent-workflow-contract.md §5); a reviewer-model failure or a
-# singular INVALID verdict is simply not pushed anywhere until the user sets
+# manual INVALID verdict is simply not pushed anywhere until the user sets
 # this themselves.
 NTFY_URL = os.environ.get("KANBAN_ISSUE_REVIEW_NTFY_URL")
 MAX_CONSECUTIVE_QUEUE_FAILURES = 3
@@ -1522,6 +1522,13 @@ def describe_lock_owner(owner: dict[str, Any] | None) -> str:
         return f"single-issue review #{owner['issue']}{suffix}"
     if owner.get("mode") == "rereview" and isinstance(owner.get("issue"), int):
         return f"single-issue rereview #{owner['issue']}{suffix}"
+    issues = owner.get("issues")
+    if owner.get("mode") == "batch" and isinstance(issues, list) and issues:
+        rendered = ", ".join(
+            f"#{number}" for number in issues if isinstance(number, int)
+        )
+        if rendered:
+            return f"ordered issue-review batch {rendered}{suffix}"
     if owner.get("mode") == "daemon":
         return f"the background approval daemon{suffix}"
     return f"another approval process{suffix}"
@@ -1532,6 +1539,7 @@ def acquire_lock(
     *,
     mode: str,
     issue_number: int | None = None,
+    issue_numbers: list[int] | None = None,
 ):
     path = ctx.path / ".git" / "approve_issues.lock"
     # Never truncate before flock: a losing contender must not erase the
@@ -1549,6 +1557,7 @@ def acquire_lock(
         "pid": os.getpid(),
         "mode": mode,
         "issue": issue_number,
+        "issues": issue_numbers,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "command": sys.argv,
     }
@@ -1625,6 +1634,54 @@ def daemon_loop(
         release_lock(lock)
 
 
+def _review_one_locked(
+    ctx: RepoContext,
+    number: int,
+    *,
+    legacy_policy: str,
+) -> dict[str, Any]:
+    incident = blocking_pipeline_incident(ctx.path, number)
+    if incident is not None:
+        raise pipeline_halt_error(incident)
+    issue = get_issue(ctx, number)
+    comments = get_comments(ctx, number)
+    origin = issue_origin(issue.get("body") or "")
+    reviewers = reviewers_for_origin(origin, legacy_policy)
+    if not reviewers:
+        raise ApproveError(
+            f"Issue #{number} has no origin marker and legacy review is disabled"
+        )
+    spec_sha = spec_fingerprint(issue, comments)
+    record = latest_review_record(comments)
+    marker = record[1] if record is not None else None
+    if review_record_matches(
+        comments,
+        record,
+        spec_sha=spec_sha,
+        origin=origin,
+        legacy_policy=legacy_policy,
+    ):
+        assert marker is not None
+        if marker.get("verdict") == "INVALID":
+            raise InvalidIssueError(
+                number,
+                f"Issue #{number} remains INVALID at {marker.get('comment_url')}"
+            )
+        log(f"Issue #{number}: current cross-agent review already exists")
+        set_verdict_label(ctx, number, marker.get("verdict") or "CHANGES_REQUESTED")
+    else:
+        process_issue(ctx, issue, comments, reviewers)
+    refreshed = get_issue(ctx, number)
+    refreshed_comments = get_comments(ctx, number)
+    return apply_pipeline_circuit_breaker(
+        current_gate_status(
+            refreshed, refreshed_comments, legacy_policy=legacy_policy
+        ),
+        ctx.path,
+        issue_number=number,
+    )
+
+
 def review_one(
     ctx: RepoContext,
     number: int,
@@ -1637,45 +1694,60 @@ def review_one(
     lock = acquire_lock(ctx, mode="single", issue_number=number)
     try:
         ensure_verdict_labels(ctx)
-        issue = get_issue(ctx, number)
-        comments = get_comments(ctx, number)
-        origin = issue_origin(issue.get("body") or "")
-        reviewers = reviewers_for_origin(origin, legacy_policy)
-        if not reviewers:
-            raise ApproveError(
-                f"Issue #{number} has no origin marker and legacy review is disabled"
-            )
-        spec_sha = spec_fingerprint(issue, comments)
-        record = latest_review_record(comments)
-        marker = record[1] if record is not None else None
-        if review_record_matches(
-            comments,
-            record,
-            spec_sha=spec_sha,
-            origin=origin,
-            legacy_policy=legacy_policy,
-        ):
-            assert marker is not None
-            if marker.get("verdict") == "INVALID":
-                raise InvalidIssueError(
-                    number,
-                    f"Issue #{number} remains INVALID at {marker.get('comment_url')}"
-                )
-            log(f"Issue #{number}: current cross-agent review already exists")
-            set_verdict_label(ctx, number, marker.get("verdict") or "CHANGES_REQUESTED")
-        else:
-            process_issue(ctx, issue, comments, reviewers)
-        refreshed = get_issue(ctx, number)
-        refreshed_comments = get_comments(ctx, number)
-        return apply_pipeline_circuit_breaker(
-            current_gate_status(
-                refreshed, refreshed_comments, legacy_policy=legacy_policy
-            ),
-            ctx.path,
-            issue_number=number,
-        )
+        return _review_one_locked(ctx, number, legacy_policy=legacy_policy)
     finally:
         release_lock(lock)
+
+
+def review_batch(
+    ctx: RepoContext,
+    numbers: list[int],
+    *,
+    legacy_policy: str,
+) -> dict[str, Any]:
+    if len(numbers) < 2:
+        raise ApproveError("An ordered review batch requires at least two issue numbers")
+
+    lock = acquire_lock(ctx, mode="batch", issue_numbers=numbers)
+    results: list[dict[str, Any]] = []
+    stopped_at: int | None = None
+    try:
+        ensure_verdict_labels(ctx)
+        for number in numbers:
+            status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
+            results.append(status)
+            if status["approved"]:
+                continue
+            marker = status.get("review_marker")
+            verdict = marker.get("verdict") if isinstance(marker, dict) else None
+            current_changes_reason = (
+                "latest current review verdict is CHANGES_REQUESTED"
+            )
+            if (
+                verdict != "CHANGES_REQUESTED"
+                or current_changes_reason not in status["reasons"]
+            ):
+                reasons = "; ".join(status["reasons"])
+                raise ApproveError(
+                    f"Issue #{number} did not reach an approved or "
+                    f"changes-requested state: {reasons}"
+                )
+            stopped_at = number
+            break
+    finally:
+        release_lock(lock)
+
+    processed_numbers = [status["issue"] for status in results]
+    return {
+        "approved": stopped_at is None and len(results) == len(numbers),
+        "batch": True,
+        "requested_issues": numbers,
+        "processed_issues": processed_numbers,
+        "remaining_issues": numbers[len(results):],
+        "stopped_at": stopped_at,
+        "stop_reason": "changes_requested" if stopped_at is not None else None,
+        "results": results,
+    }
 
 
 def rereview_one(
@@ -2193,6 +2265,16 @@ def resolve_effective_config_path(explicit_config_path: str | None) -> str | Non
     return explicit_config_path if explicit_config_path is not None else installed_config_reference()
 
 
+def positive_issue_number(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("issue numbers must be integers") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("issue numbers must be positive")
+    return number
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Continuously cross-review GitHub issues before autonomous solving."
@@ -2219,9 +2301,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--check", type=int, metavar="ISSUE", help="Check one issue gate.")
     parser.add_argument(
         "--review",
-        type=int,
+        type=positive_issue_number,
+        nargs="+",
         metavar="ISSUE",
-        help="Synchronously run the required cross-agent review for one issue.",
+        help=(
+            "Synchronously review one issue, or an ordered list held under one "
+            "queue lock until all approve or one requests changes."
+        ),
     )
     parser.add_argument(
         "--rereview",
@@ -2324,11 +2410,24 @@ def main() -> None:
                     print(f"- {reason}")
             raise SystemExit(0 if status["approved"] else 2)
         if args.review is not None:
-            status = review_one(
-                ctx, args.review, legacy_policy=args.legacy_policy
-            )
+            if len(args.review) == 1:
+                status = review_one(
+                    ctx, args.review[0], legacy_policy=args.legacy_policy
+                )
+            else:
+                status = review_batch(
+                    ctx, args.review, legacy_policy=args.legacy_policy
+                )
             if args.json:
                 print(json.dumps(status, indent=2, sort_keys=True))
+            elif status.get("batch"):
+                for result in status["results"]:
+                    print(
+                        f"#{result['issue']}: "
+                        + ("approved" if result["approved"] else "not approved")
+                    )
+                if status["stopped_at"] is not None:
+                    print(f"stopped at issue #{status['stopped_at']}: requests changes")
             else:
                 print("approved" if status["approved"] else "not approved")
                 for reason in status["reasons"]:
@@ -2372,7 +2471,7 @@ def main() -> None:
                     ctx, exc.issue_number, f"approve-issues.py INVALID ISSUE: {exc}"
                 )
                 log(
-                    "Singular INVALID review opened incident "
+                    "INVALID review opened incident "
                     + str(incident.get("incident_id"))
                 )
             except OSError as incident_exc:
