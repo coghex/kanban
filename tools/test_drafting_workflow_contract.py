@@ -13,6 +13,14 @@ origin-marker literal cannot drift from what tools/approve_issues.py parses,
 and the document cannot silently drop the Claude-only /draft-issues boundary
 or the non-hunting, unpackaged arc-decomposition boundary.
 
+Issue #240 added the eighth and ninth assets: the issue-rereview repair loop
+both bundles now package. Its own contract (§3.6) is guarded here too — gate
+state established through the canonical backend, the timeline read only through
+that bundle's vendored trusted-comment helper, revision only after explicit
+user signoff, resubmission that refuses an unchanged spec, and verdict
+publication and label mutation left entirely to the backend — along with the
+brand-specific routing each issue-review asset now owes it.
+
 Also guards issue #116's scope gate: the canonical document and the five
 assets that perform or drive discretionary candidate discovery must state the
 same gate and exemption rules, every gate instruction must be conditional on
@@ -28,6 +36,7 @@ dependency manifest by tools/test_agent_workflow_contract.py.
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -40,16 +49,24 @@ CODEX_SKILLS_ROOT = REPO_ROOT / "codex-plugin" / "plugins" / "kanban" / "skills"
 # Workflow names that are drafting or issue-review workflows rather than the
 # solve/PR-flow workflows Kanban's own CLI spawns. Any asset under either
 # plugin whose workflow name is in this set must be declared in §2.
-DRAFTING_WORKFLOW_NAMES = {"issue", "draft-issues", "autoissue", "issue-review"}
+DRAFTING_WORKFLOW_NAMES = {
+    "issue",
+    "draft-issues",
+    "autoissue",
+    "issue-review",
+    "issue-rereview",
+}
 
 EXPECTED_DECLARED_PATHS = {
     "claude-plugin/plugins/kanban/commands/issue.md",
     "claude-plugin/plugins/kanban/commands/draft-issues.md",
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
 }
 
 # The exact literals tools/approve_issues.py's ORIGIN_RE parses and
@@ -61,8 +78,10 @@ CODEX_ORIGIN_MARKER = "<!-- issue-origin:codex -->"
 ORIGIN_MARKER_BY_BRAND = {"claude": CLAUDE_ORIGIN_MARKER, "codex": CODEX_ORIGIN_MARKER}
 
 # The drafting assets that actually create issues, and therefore must carry
-# their brand's origin marker. The issue-review workflows never create an
-# issue, so they are deliberately exempt.
+# their brand's origin marker. The issue-review and issue-rereview workflows
+# never create an issue, so they are deliberately exempt: issue-rereview edits
+# an existing body and preserves whatever marker it already carries (§5), which
+# requiring one of its own would rewrite rather than record.
 ISSUE_CREATING_ASSETS = {
     "claude-plugin/plugins/kanban/commands/issue.md": "claude",
     "claude-plugin/plugins/kanban/commands/draft-issues.md": "claude",
@@ -81,6 +100,77 @@ ISSUE_REVIEW_BACKEND_ASSETS = (
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
 )
 
+# Issue #240's repair loop, keyed by the sigil its own brand invokes it with.
+ISSUE_REREVIEW_ASSETS = {
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md": "/",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": "$",
+}
+
+# Every packaged asset that resolves the canonical backend directly. The
+# rereview assets do it twice — --check for gate state, --rereview to
+# resubmit — so they are held to exactly the §6 resolution the gate is.
+BACKEND_RESOLVING_ASSETS = ISSUE_REVIEW_BACKEND_ASSETS + tuple(
+    sorted(ISSUE_REREVIEW_ASSETS)
+)
+
+# §3.6's four responsibilities, as prose both packaged rereview assets state.
+# Lowercase: compared against canonical() output, so the same rule may start a
+# sentence in one asset and sit mid-sentence in the other.
+REREVIEW_PROTOCOL_RULES = (
+    # Specification-only: this workflow is not a solver.
+    "edit the issue specification only; do not solve the issue or change "
+    "repository code",
+    # Gate state comes from the backend, not from the label.
+    "--check <issue>",
+    # The repaired spec goes back through the backend's own rereview route.
+    "--rereview <issue>",
+    # Revision only after explicit signoff.
+    "then stop and wait for explicit user approval. do not edit github on "
+    "inferred or partial approval",
+    "after explicit signoff, update only the approved title/body/labels",
+    # An unchanged spec is never resubmitted.
+    "do not rerun unchanged text; the backend refuses an unchanged spec "
+    "fingerprint",
+    # Publication and labels belong to the backend alone.
+    "never independently post a review, manually add/remove reviewed:approve "
+    "or reviewed:changes, or override a model verdict",
+    "only the canonical backend manages verdict comments and labels",
+    # Reviewer selection is the backend's (§6).
+    "do not pin a reviewer model, reasoning effort, or display name for this "
+    "run",
+)
+
+# The marker sentence §5 requires of a workflow that repairs rather than
+# creates: preserve what is there, including nothing.
+REREVIEW_MARKER_PRESERVATION = (
+    "preserve the issue's existing <!-- issue-origin:claude --> or "
+    "<!-- issue-origin:codex --> marker exactly. do not add, remove, or change "
+    "provenance; an unmarked legacy issue stays unmarked"
+)
+
+# The exact helper lookup each rereview asset uses, matching the solve
+# workflows issue #238 vendored these copies for. Asserted raw rather than
+# canonicalized: ${CLAUDE_PLUGIN_ROOT} is a literal Claude Code substitutes,
+# and case-folding it would let a lowercase misspelling pass.
+CODEX_HELPER_LOOKUP = (
+    'find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+    "-path '*/kanban/*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
+)
+CLAUDE_HELPER_REFERENCE = '"${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py"'
+REREVIEW_HELPER_REFERENCES = {
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md": CLAUDE_HELPER_REFERENCE,
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": CODEX_HELPER_LOOKUP,
+}
+
+# The unfiltered sources a rereview asset must forbid, so the helper is the
+# only view of the timeline it has.
+FORBIDDEN_COMMENT_SOURCES = (
+    "never fall back to another comment source",
+    "gh issue view",
+    "the graphql api",
+    "every other unfiltered source are forbidden here",
+)
+
 # Issue #116: the assets that perform or drive discretionary candidate
 # discovery, and therefore carry the §4 scope gate. The autoissue assets are
 # included because they drive discovery through their delegate.
@@ -92,9 +182,10 @@ SCOPE_GATE_ASSETS = (
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
 )
 
-# The issue-review workflows judge an already-filed issue rather than hunting
-# candidates, so the gate must not reach them (§4).
-SCOPE_GATE_FREE_ASSETS = ISSUE_REVIEW_BACKEND_ASSETS
+# The issue-review and issue-rereview workflows judge or repair an
+# already-filed issue rather than hunting candidates, so the gate must not
+# reach them (§4).
+SCOPE_GATE_FREE_ASSETS = BACKEND_RESOLVING_ASSETS
 
 # One rule per requirement of issue #116, asserted against every scope-gate
 # asset AND the document, so the two can never state different gate or
@@ -210,34 +301,64 @@ def parse_declared_assets():
     return rows
 
 
-def discovered_drafting_assets():
-    """Every drafting or issue-review asset actually present under either
-    plugin, as repository-relative paths."""
+def discovered_drafting_assets(
+    claude_commands_root=CLAUDE_COMMANDS_ROOT,
+    codex_skills_root=CODEX_SKILLS_ROOT,
+    repo_root=REPO_ROOT,
+):
+    """Every drafting, issue-review, or issue-rereview asset actually present
+    under either plugin, as repository-relative paths. Parameterized by root so
+    the completeness tests below can be driven against a planted tree rather
+    than only against the tree that already passes."""
     found = set()
-    for command_md in sorted(CLAUDE_COMMANDS_ROOT.glob("*.md")):
-        if command_md.stem in DRAFTING_WORKFLOW_NAMES:
-            found.add(command_md.relative_to(REPO_ROOT).as_posix())
-    if CODEX_SKILLS_ROOT.is_dir():
-        for skill_dir in sorted(CODEX_SKILLS_ROOT.iterdir()):
+    if claude_commands_root.is_dir():
+        for command_md in sorted(claude_commands_root.glob("*.md")):
+            if command_md.stem in DRAFTING_WORKFLOW_NAMES:
+                found.add(command_md.relative_to(repo_root).as_posix())
+    if codex_skills_root.is_dir():
+        for skill_dir in sorted(codex_skills_root.iterdir()):
             if skill_dir.is_dir() and skill_dir.name in DRAFTING_WORKFLOW_NAMES:
-                found.add((skill_dir / "SKILL.md").relative_to(REPO_ROOT).as_posix())
+                found.add((skill_dir / "SKILL.md").relative_to(repo_root).as_posix())
     return found
+
+
+def missing_declared_assets(declared, repo_root=REPO_ROOT):
+    """Declared paths absent from `repo_root`. Parameterized for the same
+    reason: an absence check that only ever runs against a complete tree
+    proves nothing about what it would report."""
+    return sorted(path for path in declared if not (repo_root / path).is_file())
 
 
 class DeclaredAssetTests(unittest.TestCase):
     def setUp(self):
         self.declared = parse_declared_assets()
 
-    def test_declared_assets_are_exactly_the_seven_packaged_workflows(self):
+    def test_declared_assets_are_exactly_the_nine_packaged_workflows(self):
         self.assertEqual(set(self.declared), EXPECTED_DECLARED_PATHS)
 
     def test_every_declared_asset_exists_in_the_tracked_tree(self):
-        missing = [path for path in self.declared if not (REPO_ROOT / path).is_file()]
+        missing = missing_declared_assets(self.declared)
         self.assertEqual(
             missing,
             [],
             f"declared in docs/drafting-workflow-contract.md §2 but absent: {missing}",
         )
+
+    def test_a_deleted_declared_asset_is_reported(self):
+        # The absence check is load-bearing rather than decorative: point it at
+        # a tree where one declared asset is gone and it names that asset. The
+        # planted one is issue #240's Codex rereview skill, the newest row and
+        # so the one a bundle-trimming edit would drop first.
+        planted = "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            for path in EXPECTED_DECLARED_PATHS - {planted}:
+                target = repo_root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("---\nname: x\n---\n", encoding="utf-8")
+            self.assertEqual(
+                missing_declared_assets(self.declared, repo_root=repo_root), [planted]
+            )
 
     def test_no_undeclared_drafting_or_issue_review_asset_exists(self):
         undeclared = sorted(discovered_drafting_assets() - set(self.declared))
@@ -247,6 +368,36 @@ class DeclaredAssetTests(unittest.TestCase):
             "drafting/issue-review assets exist under a plugin without a §2 row "
             f"in docs/drafting-workflow-contract.md: {undeclared}",
         )
+
+    def test_an_undeclared_asset_added_to_either_plugin_is_reported(self):
+        # The realistic regression: a Codex $draft-issues appearing beside the
+        # Claude-only breadth workflow (§3.2), or a rereview asset landing in
+        # one bundle without a §2 row. A workflow outside this contract's
+        # names — solve — must still not be reported, or the check would drag
+        # every packaged asset into §2.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            commands = repo_root / "claude-plugin" / "plugins" / "kanban" / "commands"
+            skills = repo_root / "codex-plugin" / "plugins" / "kanban" / "skills"
+            commands.mkdir(parents=True)
+            (skills / "draft-issues").mkdir(parents=True)
+            (skills / "issue-rereview").mkdir(parents=True)
+            (commands / "issue-rereview.md").write_text("---\n---\n", encoding="utf-8")
+            (commands / "solve.md").write_text("---\n---\n", encoding="utf-8")
+            (skills / "draft-issues" / "SKILL.md").write_text("x\n", encoding="utf-8")
+            (skills / "issue-rereview" / "SKILL.md").write_text("x\n", encoding="utf-8")
+            found = discovered_drafting_assets(
+                claude_commands_root=commands,
+                codex_skills_root=skills,
+                repo_root=repo_root,
+            )
+        self.assertEqual(
+            sorted(found - EXPECTED_DECLARED_PATHS),
+            ["codex-plugin/plugins/kanban/skills/draft-issues/SKILL.md"],
+        )
+        # Non-vacuity for the planted pair: the two declared rereview assets
+        # were discovered, they simply have §2 rows.
+        self.assertLessEqual(set(ISSUE_REREVIEW_ASSETS), found)
 
     def test_declared_brand_and_invocation_match_the_assets_own_plugin_and_name(self):
         for path, row in sorted(self.declared.items()):
@@ -518,10 +669,12 @@ class PortableBackendTests(unittest.TestCase):
     """Requirement 6 of issue #118: the packaged issue-review workflows,
     including autoissue's immediate review handoff, must resolve the
     Kanban-managed install path rather than the pre-migration personal
-    launcher."""
+    launcher. Issue #240 puts the two issue-rereview assets under the same
+    rule — they reach the same backend for gate state and resubmission, so a
+    second resolution convention there would be a second contract."""
 
     def test_issue_review_assets_resolve_the_kanban_managed_install_path(self):
-        for path in ISSUE_REVIEW_BACKEND_ASSETS:
+        for path in BACKEND_RESOLVING_ASSETS:
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
             self.assertIn(BACKEND_ENV_OVERRIDE, text, path)
             self.assertIn(BACKEND_DEFAULT_PATH, text, path)
@@ -529,7 +682,7 @@ class PortableBackendTests(unittest.TestCase):
             self.assertIn("python3 tools/install_issue_review.py", text, path)
 
     def test_issue_review_assets_resolve_through_the_installer_record(self):
-        for path in ISSUE_REVIEW_BACKEND_ASSETS:
+        for path in BACKEND_RESOLVING_ASSETS:
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
             self.assertIn(BACKEND_RECORD_PATH, text, path)
             self.assertIn(BACKEND_RECORD_FIELD, text, path)
@@ -570,6 +723,114 @@ class PortableBackendTests(unittest.TestCase):
         source = (REPO_ROOT / "tools" / "approve_issues.py").read_text(encoding="utf-8")
         self.assertIn('PRIMARY_CLAUDE_MODEL = "claude-opus-5"', source)
         self.assertIn('os.environ.get("APPROVE_ISSUES_CLAUDE_MODEL", PRIMARY_CLAUDE_MODEL)', source)
+
+
+class IssueRereviewProtocolTests(unittest.TestCase):
+    """§3.6's repair loop. Like the scope gate above, there is no behavioral
+    prompt-testing harness here, so the reviewable property is the contract
+    text: both packaged assets must state the same four responsibilities, read
+    the timeline only through their own bundle's vendored helper, and leave
+    every verdict and label to the backend."""
+
+    def setUp(self):
+        self.raw = {
+            path: (REPO_ROOT / path).read_text(encoding="utf-8")
+            for path in ISSUE_REREVIEW_ASSETS
+        }
+        self.assets = {path: canonical(text) for path, text in self.raw.items()}
+
+    def test_both_bundles_package_a_rereview_asset(self):
+        for path in sorted(ISSUE_REREVIEW_ASSETS):
+            self.assertTrue((REPO_ROOT / path).is_file(), path)
+        self.assertLessEqual(set(ISSUE_REREVIEW_ASSETS), EXPECTED_DECLARED_PATHS)
+
+    def test_every_rereview_asset_states_every_protocol_rule(self):
+        missing = []
+        for path in sorted(ISSUE_REREVIEW_ASSETS):
+            for rule in REREVIEW_PROTOCOL_RULES:
+                if rule not in self.assets[path]:
+                    missing.append(f"{path}: missing §3.6 rule {rule!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_the_document_states_every_protocol_rule_it_can(self):
+        # The document owes the responsibilities, not the assets' exact
+        # wording; these four are the ones §3.6 states verbatim, so the
+        # contract and its assets cannot describe different loops.
+        document = canonical(contract_text())
+        for statement in (
+            "they never solve the issue, change repository code, hunt for or "
+            "create issues",
+            "revises the specification only with explicit user signoff",
+            "an unchanged spec is never resubmitted",
+            "publishes no verdict of its own",
+        ):
+            self.assertIn(statement, document, statement)
+
+    def test_each_rereview_asset_reads_the_timeline_through_its_own_helper(self):
+        for path, reference in sorted(REREVIEW_HELPER_REFERENCES.items()):
+            self.assertIn(
+                reference,
+                self.raw[path],
+                f"{path} must resolve its own bundle's vendored "
+                "trusted_issue_spec.py, not a personal or checkout-relative copy",
+            )
+            self.assertIn("trusted_issue_spec.py", self.raw[path], path)
+
+    def test_no_rereview_asset_reaches_the_opposite_bundles_helper(self):
+        other = {
+            "claude-plugin/plugins/kanban/commands/issue-rereview.md": CODEX_HELPER_LOOKUP,
+            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": CLAUDE_HELPER_REFERENCE,
+        }
+        for path, reference in sorted(other.items()):
+            self.assertNotIn(reference, self.raw[path], path)
+
+    def test_every_rereview_asset_forbids_an_unfiltered_comment_source(self):
+        missing = []
+        for path in sorted(ISSUE_REREVIEW_ASSETS):
+            for phrase in FORBIDDEN_COMMENT_SOURCES:
+                if phrase not in self.assets[path]:
+                    missing.append(f"{path}: does not forbid {phrase!r}")
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_every_rereview_asset_preserves_rather_than_emits_an_origin_marker(self):
+        for path in sorted(ISSUE_REREVIEW_ASSETS):
+            self.assertIn(REREVIEW_MARKER_PRESERVATION, self.assets[path], path)
+            # Preservation means naming both literals; a single-brand mention
+            # would read as "stamp this one".
+            for marker in (CLAUDE_ORIGIN_MARKER, CODEX_ORIGIN_MARKER):
+                self.assertIn(marker, self.raw[path], f"{path}: {marker}")
+
+    def test_the_rereview_assets_are_exempt_from_the_issue_creating_marker_rule(self):
+        # The exemption is the point of the preservation rule above: a
+        # workflow that only edits an existing body must not be held to
+        # emitting a marker, or repairing a Codex-origin issue from the Claude
+        # command would rewrite its provenance.
+        for path in ISSUE_REREVIEW_ASSETS:
+            self.assertNotIn(path, ISSUE_CREATING_ASSETS, path)
+
+    def test_each_issue_review_asset_routes_to_its_own_brands_rereview(self):
+        # §3.4: the gate reports CHANGES_REQUESTED and hands off. Before issue
+        # #240 both assets named a bare, unpackaged `issue-rereview`; each must
+        # now name the invocation its own brand actually ships.
+        for path, sigil in (
+            ("claude-plugin/plugins/kanban/commands/issue-review.md", "/"),
+            ("codex-plugin/plugins/kanban/skills/issue-review/SKILL.md", "$"),
+        ):
+            text = normalized((REPO_ROOT / path).read_text(encoding="utf-8"))
+            self.assertIn(f"{sigil}issue-rereview <issue>", text, path)
+            self.assertNotIn(
+                "deliberately outside this bundle's packaged set",
+                text,
+                f"{path} still calls the rereview workflow unpackaged",
+            )
+
+    def test_no_issue_review_asset_routes_to_the_opposite_brands_rereview(self):
+        for path, wrong in (
+            ("claude-plugin/plugins/kanban/commands/issue-review.md", "$issue-rereview"),
+            ("codex-plugin/plugins/kanban/skills/issue-review/SKILL.md", "/issue-rereview"),
+        ):
+            text = (REPO_ROOT / path).read_text(encoding="utf-8")
+            self.assertNotIn(wrong, text, path)
 
 
 if __name__ == "__main__":

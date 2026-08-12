@@ -37,14 +37,16 @@ claude | /issue | claude-plugin/plugins/kanban/commands/issue.md
 claude | /draft-issues | claude-plugin/plugins/kanban/commands/draft-issues.md
 claude | /autoissue | claude-plugin/plugins/kanban/commands/autoissue.md
 claude | /issue-review | claude-plugin/plugins/kanban/commands/issue-review.md
+claude | /issue-rereview | claude-plugin/plugins/kanban/commands/issue-rereview.md
 codex | $issue | codex-plugin/plugins/kanban/skills/issue/SKILL.md
 codex | $autoissue | codex-plugin/plugins/kanban/skills/autoissue/SKILL.md
 codex | $issue-review | codex-plugin/plugins/kanban/skills/issue-review/SKILL.md
+codex | $issue-rereview | codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md
 ```
 
-The list above is exhaustive. A drafting or issue-review asset that exists in
-either plugin without a row here fails the completeness check in §8, and so
-does a row whose path is missing from the tracked tree.
+The list above is exhaustive. A drafting, issue-review, or issue-rereview
+asset that exists in either plugin without a row here fails the completeness
+check in §8, and so does a row whose path is missing from the tracked tree.
 
 ## 3. Responsibility matrix
 
@@ -54,6 +56,7 @@ does a row whose path is missing from the tracked tree.
 | `/draft-issues` | **Claude only** | **Many** candidates surveyed per run | Only the candidates the user selects, after a stop-and-ask | No |
 | `/autoissue`, `$autoissue` | Claude and Codex | Delegates to the one-candidate workflow | Via its delegate, after signoff | Yes — immediately, with no second confirmation |
 | `/issue-review`, `$issue-review` | Claude and Codex | One numbered issue | No | Is the review itself |
+| `/issue-rereview`, `$issue-rereview` | Claude and Codex | One numbered changes-requested issue | No — repairs an existing one | Yes — resubmits the repaired spec through the backend |
 
 ### 3.1 One candidate: `/issue` and `$issue`
 
@@ -110,9 +113,11 @@ or create issues. Each delegates the whole verdict to the canonical backend
 (§6) so that a manual review and the managed daemon produce identical
 provenance, structured comment, fingerprint, and labels; neither may post a
 competing review or set a verdict label itself. On `CHANGES_REQUESTED` they
-report and route the issue to the separate `issue-rereview` repair workflow,
-which is deliberately **not** part of this packaged set, rather than rerunning
-an unchanged spec.
+report and route the issue to the separate `issue-rereview` repair workflow
+(§3.6), naming their own brand's packaged invocation — `/issue-rereview` from
+the Claude command, `$issue-rereview` from the Codex skill — rather than
+rerunning an unchanged spec. That repair loop is **packaged** in both bundles;
+what stays separate is the responsibility, not the distribution.
 
 ### 3.5 Not a candidate-hunting workflow: arc decomposition
 
@@ -129,6 +134,46 @@ created epic trees directly was retired 2026-08-11 in that pipeline's favor.
 `/issue`, `$issue`, and `/draft-issues` are the discretionary hunters; arc
 decomposition only works an arc the user supplied.
 
+### 3.6 The repair loop: `/issue-rereview` and `$issue-rereview`
+
+`/issue-rereview` and `$issue-rereview` repair one issue whose canonical
+readiness gate returned `CHANGES_REQUESTED` and resubmit the revision to that
+gate. They edit an issue specification and nothing else: they never solve the
+issue, change repository code, hunt for or create issues, or fold the gate's
+own job into themselves. Each:
+
+1. **Establishes the current gate state** through the canonical backend (§6)
+   with `--check`, and reads the issue's title, body, labels, and comment
+   timeline only through its own bundle's vendored trusted-comment helper
+   (`skills/solve/scripts/trusted_issue_spec.py` for the Codex skill,
+   `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py` for the Claude
+   command). No fallback to an unfiltered issue-comment source is permitted,
+   on the same terms
+   [agent-workflow-contract.md §2.1](agent-workflow-contract.md#21-issue-solve-solve--solve)
+   sets for the solve workflows.
+   An already-approved issue, a missing canonical review, or an open pipeline
+   incident stops the run rather than starting one.
+2. **Revises the specification only with explicit user signoff.** The proposed
+   title, labels, and full body are presented verbatim before any `gh issue
+   edit`, and one coherent open product decision is discussed at a time. The
+   issue's existing origin marker (§5) is preserved exactly — this workflow
+   creates no issue, so it is exempt from emitting one, and an unmarked legacy
+   issue stays unmarked.
+3. **Resubmits through the backend** with `--rereview` until the backend itself
+   applies `reviewed:approve`, returning to step 2 on each new
+   `CHANGES_REQUESTED`. An unchanged spec is never resubmitted; the backend
+   refuses one, and the workflow must not try.
+4. **Publishes no verdict of its own.** It never posts a review comment,
+   never adds or removes `reviewed:approve` or `reviewed:changes`, and never
+   overrides a model verdict; the backend owns publication, label mutation,
+   and reviewer selection.
+
+The gate (§3.4) and this repair loop stay separate workflows so that judging a
+filed issue and rewriting one remain separately auditable, and so the
+don't-rerun-an-unchanged-spec rule has somewhere to live. Like the gate, this
+workflow judges or repairs an already-filed issue rather than hunting
+candidates, so the §4 scope gate does not reach it.
+
 ## 4. Scope gate
 
 Candidate selection is **ungated by default**. A consuming project that is in
@@ -142,9 +187,10 @@ discretionary candidate discovery — `/issue`, `$issue`, `/draft-issues`,
 `/autoissue`, and `$autoissue`. The `autoissue` workflows carry them because
 they drive discovery through their delegate (§3.3); each must surface the
 deferrals its delegate reports and pass a user override back to it rather
-than resolving one itself. `/issue-review` and `$issue-review` judge an
-already-filed issue instead of hunting candidates, so the gate does not reach
-them, and arc decomposition is excluded for the same reason it is unpackaged
+than resolving one itself. `/issue-review`, `$issue-review`,
+`/issue-rereview`, and `$issue-rereview` judge or repair an already-filed
+issue instead of hunting candidates, so the gate does not reach them, and
+arc decomposition is excluded for the same reason it is unpackaged
 (§3.5): it
 decomposes a user-supplied arc rather than independently selecting what work
 is worth doing.
@@ -217,17 +263,22 @@ are a hard contract, not a formatting preference:
 - Codex-created issue bodies end with `<!-- issue-origin:codex -->`.
 
 Each `autoissue` workflow preserves the marker produced by its delegated
-drafting workflow. The marker is invisible routing metadata, never a
+drafting workflow, and each `issue-rereview` workflow preserves whichever
+marker the issue it repairs already carries — including none, for an unmarked
+legacy issue. Neither the review nor the rereview workflows create an issue, so
+neither is required to emit a marker; requiring one of a workflow that only
+edits an existing body would rewrite provenance rather than record it. The
+marker is invisible routing metadata, never a
 requirement of the issue itself. `tools/test_drafting_workflow_contract.py`
 asserts these exact literals appear in the packaged assets of the matching
 brand, so drift from the parser's accepted format fails CI.
 
 ## 6. Portable canonical backend
 
-The packaged issue-review workflows — including `autoissue`'s immediate
-review handoff — resolve the canonical backend the same way
-`Kanban.Review.resolveCanonicalIssueReviewer` and the packaged `solve`
-workflows do:
+The packaged issue-review and issue-rereview workflows — including
+`autoissue`'s immediate review handoff — resolve the canonical backend the
+same way `Kanban.Review.resolveCanonicalIssueReviewer` and the packaged
+`solve` workflows do:
 
 ```bash
 RECORD="$HOME/Library/Application Support/kanban/issue-review/config.json"
@@ -329,11 +380,20 @@ runs) parses §2 and fails if:
 - a discretionary-discovery asset states a gate instruction ahead of the
   absent-gate guard that conditions it, which is the mechanical form of §4.2's
   requirement that every gate instruction be conditional on a gate;
-- an `issue-review` asset grows scope-gate language, which would mean the gate
-  had leaked into a workflow that judges filed issues rather than hunting
-  candidates (§4);
-- a packaged issue-review or `autoissue` asset resolves the backend anywhere
-  other than the documented Kanban-managed install path (§6).
+- an `issue-review` or `issue-rereview` asset grows scope-gate language, which
+  would mean the gate had leaked into a workflow that judges or repairs filed
+  issues rather than hunting candidates (§4);
+- a packaged issue-review, issue-rereview, or `autoissue` asset resolves the
+  backend anywhere other than the documented Kanban-managed install path (§6);
+- an `issue-review` asset's `CHANGES_REQUESTED` routing stops naming its own
+  brand's packaged rereview invocation (§3.4), or an `issue-rereview` asset
+  drops one of §3.6's four responsibilities: backend-established gate state
+  read through its own bundle's vendored trusted-comment helper, revision only
+  after explicit user signoff, resubmission that refuses an unchanged spec, and
+  verdict publication and label mutation left entirely to the backend;
+- an `issue-rereview` asset stops preserving the issue's existing origin marker
+  (§5), or starts requiring one of its own — it creates no issue, so the
+  marker requirement in §5 is deliberately not extended to it.
 
 The discovery, frontmatter, and no-personal-path coverage for these assets
 lives with the rest of each plugin's structural coverage in

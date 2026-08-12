@@ -8,11 +8,12 @@ the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
-Since issue #118 that plugin surface also covers the seven vendored drafting
-and canonical issue-review assets (docs/drafting-workflow-contract.md §2),
-including a markdown counterpart of the Haskell home-relative-path check so
-the user-scoped install path those assets name is reconciled against the same
-`personal-path` manifest rows.
+Since issue #118 that plugin surface also covers the vendored drafting and
+canonical issue-review assets (docs/drafting-workflow-contract.md §2) — nine of
+them since issue #240 added the issue-rereview repair loop — including a
+markdown counterpart of the Haskell home-relative-path check so the user-scoped
+paths those assets name are reconciled against the same `personal-path`
+manifest rows.
 
 Issue #229 added the five design and report document workflows
 (docs/document-workflow-contract.md §2) on the same terms. The plugin surfaces
@@ -68,6 +69,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
     "codex-plugin/plugins/kanban/skills/repair/SKILL.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
@@ -91,6 +93,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/draft-issues.md",
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     "claude-plugin/plugins/kanban/commands/repair.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
@@ -107,23 +110,44 @@ TRUSTED_SPEC_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
 }
 
-# The seven drafting and canonical issue-review assets vendored by issue #118.
-# All seven are scanned for external commands via the lists above — the bash
+# The seven drafting and canonical issue-review assets vendored by issue #118,
+# plus the two issue-rereview repair assets vendored by issue #240. All nine
+# are scanned for external commands via the lists above — the bash
 # fence extractor simply returns an empty set for an asset with no ```bash
 # fence, so a prose-only contract is covered rather than exempted — and all
-# seven are scanned here for user-scoped paths. Scoped to these assets
+# nine are scanned here for user-scoped paths. Scoped to these assets
 # deliberately: the pre-existing packaged workflows build home-relative paths
-# (worktrees roots, $CODEX_HOME coordinator lookups) that predate this check
-# and are not part of this contract's surface.
+# (worktrees roots) that predate this check and are not part of this contract's
+# surface. $issue-rereview's own $CODEX_HOME lookup does not get that
+# grandfathering: it is a declared asset, so its cache root is declared too.
 DRAFTING_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/issue.md",
     "claude-plugin/plugins/kanban/commands/draft-issues.md",
     "claude-plugin/plugins/kanban/commands/autoissue.md",
     "claude-plugin/plugins/kanban/commands/issue-review.md",
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     "codex-plugin/plugins/kanban/skills/issue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
 ]
+
+# What the two issue-rereview assets' bash fences actually invoke, pinned the
+# way DOCUMENT_SURFACE_EXPECTED_COMMANDS pins the document workflows': the
+# completeness loop below passes trivially against an asset the extractor
+# recovers nothing from. Both resolve the backend and the repository root; the
+# Codex skill additionally locates its bundle's vendored trusted-comment helper
+# with find/head, which the Claude command reaches through
+# ${CLAUDE_PLUGIN_ROOT}.
+REREVIEW_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/issue-rereview.md": {"python3", "git"},
+    "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md": {
+        "python3",
+        "git",
+        "find",
+        "head",
+    },
+}
 
 # The five design and report document-workflow assets vendored by issue #229
 # (docs/document-workflow-contract.md §2), covered exactly the way the drafting
@@ -744,10 +768,11 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
 
     def test_every_drafting_asset_bash_command_is_documented(self):
-        # Requirement 8 of issue #118: the check must scan all seven vendored
-        # drafting/issue-review assets. They are already members of the two
-        # plugin surface lists above; this pins the seven explicitly so a
-        # future edit to those lists cannot silently drop one.
+        # Requirement 8 of issue #118, extended by issue #240: the check must
+        # scan all nine vendored drafting, issue-review, and issue-rereview
+        # assets. They are already members of the two plugin surface lists
+        # above; this pins the nine explicitly so a future edit to those lists
+        # cannot silently drop one.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
@@ -779,6 +804,50 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     f"{relative_path} names an undocumented user-scoped path "
                     f"segment {segment!r}; declare it in the manifest",
                 )
+
+    def test_rereview_asset_command_discovery_is_not_vacuous(self):
+        # Issue #240's assets reach the completeness loops above by being
+        # listed, and a loop over an asset the extractor recovers nothing from
+        # reports no undocumented command for the same reason a loop over
+        # nothing does. Pin what each one actually invokes so a rewrite that
+        # drops the backend call or the helper lookup fails here.
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path, expected in sorted(REREVIEW_SURFACE_EXPECTED_COMMANDS.items()):
+            self.assertIn(relative_path, DRAFTING_SURFACE_FILES)
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            found = discovered_commands_for_plugin_file(relative_path, content)
+            self.assertEqual(found, expected, relative_path)
+            for name in found:
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    undocumented_command_message(relative_path, name),
+                )
+
+    def test_the_codex_plugin_cache_root_is_declared_for_the_rereview_skill(self):
+        # The Codex rereview skill is the first declared drafting asset to
+        # resolve anything under $CODEX_HOME, so its cache root needs a
+        # personal-path row rather than the grandfathering the pre-existing
+        # packaged workflows get by being outside DRAFTING_SURFACE_FILES.
+        by_id = {row["id"]: row for row in self.manifest}
+        self.assertIn("codex-plugin-cache-root", by_id)
+        entry = by_id["codex-plugin-cache-root"]
+        self.assertEqual(entry["kind"], "personal-path")
+        # Codex owns $CODEX_HOME; Kanban consumes it and never creates it.
+        self.assertEqual(entry["owner"], "external")
+        self.assertEqual(entry["mandatory"], "no")
+        self.assertIn(
+            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
+            entry["files"],
+        )
+        # Load-bearing rather than decorative: without the row, the skill's own
+        # segment is undeclared.
+        skill = (
+            REPO_ROOT / "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(entry["token"], markdown_home_relative_segments(skill))
 
     def test_every_declared_document_asset_is_scanned_for_external_commands(self):
         # Requirement 6 of issue #229 and its review correction: the two plugin
@@ -882,6 +951,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
             "claude-plugin/plugins/kanban/commands/solve.md",
             "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+            "claude-plugin/plugins/kanban/commands/issue-rereview.md",
+            "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
         ):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = markdown_home_relative_segments(content)
@@ -1170,7 +1241,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and five consumers across
+        # tools/install_issue_review.py writes it and seven consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -1191,6 +1262,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "claude-plugin/plugins/kanban/commands/issue-review.md",
                 "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
                 "claude-plugin/plugins/kanban/commands/solve.md",
+                "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
+                "claude-plugin/plugins/kanban/commands/issue-rereview.md",
             ],
         )
         for relative_path in entry["files"]:
