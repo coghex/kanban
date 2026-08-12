@@ -1,10 +1,13 @@
 module Kanban.UI.Session
   ( BoardWorkLocation (..),
+    EpicReviewRefusal (..),
     IncidentActivation (..),
+    ReviewTarget (..),
     agentSessionEntries,
     drainerSourceState,
     incidentEntries,
     incidentSourceLabel,
+    itemReviewRefusal,
     liveReviewSessions,
     locateBoardWork,
     pullRequestSessionReusable,
@@ -25,6 +28,7 @@ module Kanban.UI.Session
     reviewTurnInterruptible,
     selectedReviewIssue,
     selectedReviewItem,
+    selectedReviewTarget,
     sessionAlreadyResolved,
     solveIncidentPhase,
     solvePhaseActive,
@@ -713,3 +717,55 @@ selectedReviewItem state = case selectedEntry state of
   Just (Standalone item) -> Just item
   Just (TrackerHeader tracker) -> Just (IssueItem tracker.trackerIssue)
   Nothing -> Nothing
+
+-- | Why the review key refuses a selection 'selectedReviewItem' still
+-- promotes to a tracker's own issue.
+--
+-- An epic is structure rather than reviewable work: it carries no
+-- Requirements or Acceptance for the canonical @issue-review:v2@ gate to
+-- read, so a session started against one only ever leaves a badge on a
+-- header. Solve, autosolve, and the kill binding keep the promotion — they
+-- act on the epic issue deliberately — which is why this is a separate
+-- resolution rather than a change to 'selectedReviewItem'.
+data EpicReviewRefusal
+  = -- | A collapsed tracker. Its children are reviewable, but only once the
+    -- header is expanded and one of them can be selected.
+    CollapsedEpicGroup
+  | -- | A 'TrackerHeader': a tracker with no visible children at all, so
+    -- there is no child to redirect to.
+    StructuralEpicHeader
+  deriving stock (Eq, Show)
+
+-- | What pressing the review key on the board acts on.
+data ReviewTarget
+  = ReviewTargetItem BoardItem
+  | ReviewTargetRefused EpicReviewRefusal
+  | ReviewTargetNone
+  deriving stock (Eq, Show)
+
+-- | The board selection resolved for review. This deliberately diverges from
+-- 'selectedReviewItem' on the two epic-header shapes and agrees with it
+-- everywhere else.
+selectedReviewTarget :: AppState -> ReviewTarget
+selectedReviewTarget state = case selectedEntry state of
+  Just (Tracked context item)
+    | primaryTrackerNumber context `Set.notMember` state.appExpandedTrackers ->
+        ReviewTargetRefused CollapsedEpicGroup
+    | otherwise -> ReviewTargetItem item
+  Just (Standalone item) -> ReviewTargetItem item
+  Just (TrackerHeader _) -> ReviewTargetRefused StructuralEpicHeader
+  Nothing -> ReviewTargetNone
+
+-- | The same refusal for an item a details overlay already holds, where the
+-- board selection has been resolved away and only the 'BoardItem' is left.
+-- An empty header's overlay is the reachable case: 'openSelectedDetails'
+-- answers a collapsed group with a notice instead of opening one, so a
+-- tracker with visible children never reaches an overlay of its own.
+itemReviewRefusal :: AppState -> BoardItem -> Maybe EpicReviewRefusal
+itemReviewRefusal state (IssueItem issue)
+  | any headerFor (concat (Map.elems state.appBoard.boardColumns)) = Just StructuralEpicHeader
+  | otherwise = Nothing
+  where
+    headerFor (TrackerHeader tracker) = tracker.trackerIssue.issueNumber == issue.issueNumber
+    headerFor _ = False
+itemReviewRefusal _ (PullRequestItem _) = Nothing

@@ -19,6 +19,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The plugin bundle version gate in tools/test_claude_plugin.py and
+          # tools/test_codex_plugin.py measures a change unit against its
+          # default-branch merge base. The default depth-1 checkout has no
+          # such base, and that gate fails rather than skipping when the
+          # baseline is missing, so the history has to actually be here.
+          fetch-depth: 0
 
       - uses: haskell-actions/setup@v2
         with:

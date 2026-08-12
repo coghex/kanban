@@ -13,6 +13,7 @@ module Kanban.UI.Review
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
     chooseReviewOption,
+    epicReviewRefusalNotice,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
@@ -356,13 +357,33 @@ whenReviewOverlayOpen action = do
 startSelectedReview :: EventM Name AppState ()
 startSelectedReview = do
   state <- get
-  case selectedReviewItem state of
-    Nothing -> setNotice ("Select an issue or PR before pressing " <> actionKeyText ReviewSelection)
-    Just item -> startItemReview item
+  case selectedReviewTarget state of
+    ReviewTargetNone -> setNotice ("Select an issue or PR before pressing " <> actionKeyText ReviewSelection)
+    ReviewTargetRefused refusal -> setNotice (epicReviewRefusalNotice refusal)
+    ReviewTargetItem item -> startItemReview item
 
+-- | The details overlay presses the review key against the item it already
+-- holds, so the board resolution above has nothing left to refuse on. Both
+-- paths therefore meet here, and the refusal is a plain notice: the overlay
+-- stays open and 'appReviewSessions' is left exactly as it was, so no badge
+-- appears on the header and no unrelated session is disturbed.
 startItemReview :: BoardItem -> EventM Name AppState ()
-startItemReview (IssueItem issue) = startIssueReview issue
-startItemReview (PullRequestItem pullRequest) = startPullRequestReview pullRequest
+startItemReview item = do
+  state <- get
+  case itemReviewRefusal state item of
+    Just refusal -> setNotice (epicReviewRefusalNotice refusal)
+    Nothing -> case item of
+      IssueItem issue -> startIssueReview issue
+      PullRequestItem pullRequest -> startPullRequestReview pullRequest
+
+-- | Why the review key did nothing, in the shape 'openSelectedDetails' set
+-- for the same headers: name the reason, and name the key that reaches the
+-- reviewable work whenever there is one to reach.
+epicReviewRefusalNotice :: EpicReviewRefusal -> Text
+epicReviewRefusalNotice CollapsedEpicGroup =
+  "An epic header is not reviewable; press " <> actionKeyText ToggleEpic <> " to expand it and select a child"
+epicReviewRefusalNotice StructuralEpicHeader =
+  "An epic header is not reviewable; it is board structure, not work"
 
 startIssueReview :: Issue -> EventM Name AppState ()
 startIssueReview issue = do
