@@ -2,15 +2,15 @@
 
 These entries contain focused repository evidence for later disposition with `process-report`.
 
-`[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without an issue · `[deferred]` blocked on a concrete precondition
+Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without an issue · `[deferred]` blocked on a concrete precondition
 
 ## Status
 
-- [ ] BUG-1. Review key starts an epic review from collapsed or empty headers
+- [x] BUG-1. Review key starts an epic review from collapsed or empty headers — [#254]
 
 ## 1. Keyboard interaction
 
-### BUG-1. Review key starts an epic review from collapsed or empty headers
+### [#254] BUG-1. Review key starts an epic review from collapsed or empty headers
 
 > **Captured note:** when i hit r and an epic tracker is selected, it gives an error and puts a red cross next to it, that's not right, hitting r on an empty tracker, or a tracker that is collapsed should simply do nothing
 
