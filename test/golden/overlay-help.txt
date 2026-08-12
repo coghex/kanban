@@ -27,10 +27,10 @@
 ║┃                          ┃┃  │ Empty modal areas ┃ d / click            start or stop PR drainer                                               ┃───────╯ ┃                                         ┃║
 ║┃                          ┃┃  │ pointer events to ┃ m                    merge the selected approved PR in Done                                 ┃         ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃  │ pages. This is vis┃ c                    collapse / expand sidebar                                              ┃         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ╰───────────────────┃ s                    settings                                                               ┃         ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  ╰───────────────────┃ o                    settings                                                               ┃         ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                      ┃ ?                    this help overlay                                                      ┃         ┃  │  reviewed:approve   feature        │ ┃║
 ║┃                          ┃┃  ╭───────────────────┃ Ctrl-L               repaint                                                                ┃         ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the pe┃ q                    quit                                                                   ┃         ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ #756 Define the pe┃ q / Ctrl-C           quit                                                                   ┃         ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract          ┃ Tab                  next session in an open solve/PR/review overlay                        ┃         ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │  architecture     ┃ Ctrl-C               interrupt agent turn; guidance resumes it, r restarts canonical review ┃         ┃  │ versioned envelope and reports a   │ ┃║
 ║┃                          ┃┃  │ unassigned · updat┃ left click           select card; click selected card for details                           ┃         ┃  │ truncated payload.                 │ ┃║

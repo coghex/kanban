@@ -103,7 +103,7 @@ Kanban reads the repository's GitHub remote and uses your existing GitHub CLI lo
 | `i` | Show everything needing attention, and go to it |
 | `m` | Merge the selected approved pull request in Done |
 | `?` | Show all controls |
-| `q` | Quit |
+| `q` / `Ctrl-C` | Quit |
 
 Mouse selection, scrolling, and details are also supported.
 

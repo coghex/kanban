@@ -248,7 +248,7 @@ scrollable four-column board.
 ║ ┃ drain_prs.py ┃    ║              ║              ║              ║              ║
 ║ ┗━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  s settings  ? help  q quit
+ j/Down next  k/Up previous  x kill  h/l column  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
 Responsive behavior:
@@ -292,12 +292,12 @@ Initial bindings:
 | `d` or click | Start or stop the launchd-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
-| `s` | Open settings, including chat-output verbosity |
+| `o` | Open settings, including chat-output verbosity |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
 | `Tab` | In an open solve, PR, or review overlay, show the next in-memory session of that kind |
 | `Ctrl-C` | Interrupt the current turn in an open live-agent overlay — a resumable session then accepts user guidance; a canonical review stage's process is killed instead, landing the session in its interrupted terminal state, and restarts fresh via `r` |
-| `q` | Quit and restore the terminal |
+| `q` / `Ctrl-C` | Quit and restore the terminal |
 
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a

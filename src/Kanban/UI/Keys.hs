@@ -210,7 +210,7 @@ binding action = case action of
     KeyBinding action [key 'c'] [BoardScope] Nothing "sidebar" "collapse / expand sidebar"
       "Collapse or expand the usage sidebar"
   ShowSettings ->
-    KeyBinding action [key 's'] [BoardScope] Nothing "settings" "settings"
+    KeyBinding action [key 'o'] [BoardScope] Nothing "options" "settings"
       "Open settings, including chat-output verbosity"
   ShowHelp ->
     KeyBinding action [key '?'] [BoardScope] Nothing "help" "this help overlay"
@@ -219,7 +219,7 @@ binding action = case action of
     KeyBinding action [chord (Vty.KChar 'l') [Vty.MCtrl]] [BoardScope] Nothing "repaint" "repaint"
       "Force a terminal repaint without a network request"
   QuitDashboard ->
-    KeyBinding action [key 'q'] [BoardScope, DetailsScope, HelpScope] Nothing "quit" "quit"
+    KeyBinding action [key 'q', chord (Vty.KChar 'c') [Vty.MCtrl]] [BoardScope, DetailsScope, HelpScope] Nothing "quit" "quit"
       "Quit and restore the terminal"
   where
     key character = chord (Vty.KChar character) []
