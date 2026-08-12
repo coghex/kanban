@@ -94,7 +94,7 @@ Kanban reads the repository's GitHub remote and uses your existing GitHub CLI lo
 | --- | --- |
 | `j` / `k` | Move between cards |
 | `h` / `l` | Move between columns |
-| `s` | Search the Issues column by number and title; type to filter, `Esc` to clear |
+| `s` | Search a column by number and title, starting on Issues; type to filter, Left/Right or a click move the search to another column, `Esc` to clear |
 | `Enter` | Open card details |
 | `u` | Refresh the board and usage information |
 | `r` | Review or revise the selected item, or repair a pull request in Done that has a problem |

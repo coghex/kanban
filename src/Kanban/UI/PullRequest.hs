@@ -4,10 +4,12 @@ module Kanban.UI.PullRequest
     applyDrainerToggle,
     applyPullRequestFlowEvent,
     drainerErrorStatus,
+    drainerTogglePress,
     interruptPullRequestSession,
     mergeItemDoneCard,
     mergeSelectedDoneCard,
     modifyAutoSolveForPullRequest,
+    runDrainerToggleHandoff,
     startPullRequestReview,
     startPullRequestReviewWithVisibility,
     submitPullRequestInput,
@@ -32,6 +34,7 @@ import Kanban.Drainer
     DirectMergeEffect (..),
     DirectMergeOutcome,
     DrainerActivity (..),
+    DrainerController,
     DrainerIncident (..),
     DrainerObservation (..),
     DrainerState (..),
@@ -296,34 +299,53 @@ interruptPullRequestSession number = do
       | otherwise -> setNotice "This PR workflow has no live turn to interrupt"
     _ -> setNotice "This PR workflow has no live process to interrupt"
 
+-- | What pressing the drainer toggle does to the dashboard, and the
+-- controller work it hands off — which this deliberately does not run.
+--
+-- Splitting the two is what lets the press be exercised: every observable
+-- effect of the toggle is the state this returns, so a test can take the
+-- press without a controller subprocess ever being spawned, and dispatch has
+-- no second copy of it to drift from.
+drainerTogglePress :: AppState -> (AppState, Maybe (DrainerController, Bool))
+drainerTogglePress state = case drainerToggle state.appDrainerBusy state.appDrainerStatus of
+  DrainerToggleBusy notice -> (noticed notice, Nothing)
+  decision -> case state.appDrainerController of
+    Left message -> (noticed ("PR drainer control unavailable: " <> sanitizeText message), Nothing)
+    Right controller ->
+      let shouldRun = decision == StartDrainer
+          transition =
+            if shouldRun
+              then DrainerStatus DrainerStarting "starting…" DrainerServiceStarting Nothing
+              else DrainerStatus DrainerStopping "stopping…" DrainerServiceStopping Nothing
+       in ( state
+              { appDrainerStatus = transition,
+                -- Mid-transition, the last poll's set describes a drainer
+                -- that is being started or stopped underneath it.
+                appDrainerIncidents = Nothing,
+                appDrainerBusy = True,
+                appNotice = Just (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
+              },
+            Just (controller, shouldRun)
+          )
+  where
+    noticed notice = state {appNotice = Just notice}
+
 toggleDrainer :: EventM Name AppState ()
 toggleDrainer = do
   state <- get
-  case drainerToggle state.appDrainerBusy state.appDrainerStatus of
-    DrainerToggleBusy notice -> setNotice notice
-    decision -> case state.appDrainerController of
-      Left message -> setNotice ("PR drainer control unavailable: " <> sanitizeText message)
-      Right controller -> do
-        let shouldRun = decision == StartDrainer
-            transition =
-              if shouldRun
-                then DrainerStatus DrainerStarting "starting…" DrainerServiceStarting Nothing
-                else DrainerStatus DrainerStopping "stopping…" DrainerServiceStopping Nothing
-        modify
-          ( \current ->
-              current
-                { appDrainerStatus = transition,
-                  -- Mid-transition, the last poll's set describes a drainer
-                  -- that is being started or stopped underneath it.
-                  appDrainerIncidents = Nothing,
-                  appDrainerBusy = True,
-                  appNotice = Just (if shouldRun then "Starting PR drainer…" else "Stopping PR drainer…")
-                }
-          )
-        void
-          . liftIO
-          . forkIO
-          $ setDrainerRunning controller shouldRun >>= writeBChan state.appEventChannel . DrainerToggleFinished
+  put (fst (drainerTogglePress state))
+  runDrainerToggleHandoff state
+
+-- | Start the controller work a press handed off, if it handed any off. Read
+-- off the state the press was taken from, so the decision is made once.
+runDrainerToggleHandoff :: AppState -> EventM Name AppState ()
+runDrainerToggleHandoff state = case snd (drainerTogglePress state) of
+  Nothing -> pure ()
+  Just (controller, shouldRun) ->
+    void
+      . liftIO
+      . forkIO
+      $ setDrainerRunning controller shouldRun >>= writeBChan state.appEventChannel . DrainerToggleFinished
 
 applyDrainerStatus :: Either Text DrainerObservation -> EventM Name AppState ()
 applyDrainerStatus result = modify $ \state ->

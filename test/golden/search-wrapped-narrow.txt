@@ -35,6 +35,6 @@
 ║┃                                ┃║
 ║┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
-║ j/↓ next  k/↑ previous  x kill   ║
+║ h/l/any letter type  backspace d ║
 ║ board: updated 3h ago            ║
 ╚══════════════════════════════════╝

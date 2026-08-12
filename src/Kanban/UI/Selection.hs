@@ -16,6 +16,7 @@ module Kanban.UI.Selection
     selectedItem,
     toggleSelectedTracker,
     toggleTrackerFromClick,
+    toggleTrackerState,
     visibleSelectionRows,
   )
 where

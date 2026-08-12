@@ -44,7 +44,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 - [x] DW-1. Coordination-document mutations stop at the local worktree — [#237]
 - [x] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout — [#223]
-- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: precondition met by #229, ready to process
+- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: #237 must merge first
 
 ### Cursor integrity and ownership
 
@@ -63,7 +63,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 ### Workflow ownership and routing
 
-- [ ] DW-10. Coordination-document workflows infer ownership from the current checkout — [deferred]: precondition met by #229, ready to process
+- [x] DW-10. Coordination-document workflows infer ownership from the current checkout — [#278]
 - [x] DW-11. The design and report workflows remain untracked personal assets — [#229]
 
 ### Review safety
@@ -161,18 +161,19 @@ The appropriate mechanism—such as a shared short-lived lock, an isolated workt
 
 ### [deferred] DW-3. Tracker mutations and ledger publication are not one recoverable transaction
 
-> **Deferred:** The reconciliation step belongs to `process-design-doc`, which
-> existed only at `~/.codex/skills/process-design-doc/SKILL.md`, and unlike DW-2
-> this finding had no kanban-owned counterpart in the tracked tree — so no
-> reviewable PR could carry it. Clears on the same precondition as DW-1: the
-> four document workflows tracked as plugin assets.
+> **Deferred:** #237 reserves this work by name — its Out of scope reads
+> "Making the tracker mutation, document edit, local commit, and remote
+> publication one recoverable transaction; that remains DW-3." Two of those four
+> steps do not exist until #237 lands, so Acceptance written now would target an
+> absent mechanism, and the fix edits the same §6 partial-failure paragraph
+> (`codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md:304-307`)
+> that #237 requirement 6 rewrites.
 >
-> **Precondition met.** #229 (PR #231) landed them as rows in
-> `docs/document-workflow-contract.md` §2 — a dedicated contract, not
-> `docs/drafting-workflow-contract.md` §2 as this note originally predicted —
-> with files present under `codex-plugin/plugins/kanban/skills/` and
-> `claude-plugin/plugins/kanban/commands/`. Verify those rows and files, then
-> process this finding normally.
+> **Prior precondition met.** #229 (PR #231) landed the four workflows as §2 rows
+> with files present; the Evidence below cites the retired personal copy, and the
+> tracked equivalent is `:277-307`. Clears when #237 merges — which needs DW-10
+> filed and its ownership contract landed first, per #237's own blocking
+> prerequisite.
 
 #### Observation
 
@@ -536,25 +537,7 @@ No unreviewed document should be deleted merely because it is untracked or stran
 
 ## Chapter 5: Workflow ownership and routing
 
-### [deferred] DW-10. Coordination-document workflows infer ownership from the current checkout
-
-> **Deferred:** The four workflows were untracked personal files, so no
-> reviewable PR could add an ownership-resolution step. Clears when DW-11's
-> vendoring lands: `design-epic`, `process-design-doc`, `draft-report`, and
-> `process-report` tracked as plugin assets.
->
-> **Precondition met.** #229 (PR #231) landed them as rows in
-> `docs/document-workflow-contract.md` §2 — a dedicated contract, not
-> `docs/drafting-workflow-contract.md` §2 as this note originally predicted —
-> with files present under `codex-plugin/plugins/kanban/skills/` and
-> `claude-plugin/plugins/kanban/commands/`. Verify those rows and files, then
-> process this finding normally.
->
-> One consideration survives into that run rather than blocking it: the durable
-> source for the ownership declaration is still unchosen (see this finding's
-> Remaining uncertainty). §7 of `docs/agent-workflow-contract.md`, the
-> machine-checked document classification #225 landed, is now a candidate it
-> did not have at audit time.
+### [#278] DW-10. Coordination-document workflows infer ownership from the current checkout
 
 #### Observation
 
