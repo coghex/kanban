@@ -119,12 +119,13 @@ arithmetic, which §2.3 owns.
   `PullRequestRepair`),
   optional resumed session/user message.
 - **Outputs:** a session log; the canonical workflow itself publishes the
-  `reviewed:*` label and review comment — Kanban never sets a verdict label
-  directly.
+  `reviewed:*` label and review comment, and an approval marks a draft PR ready
+  for review so it enters Done without waiting for CI — Kanban never sets a
+  verdict label or changes draft state directly.
 - **Failure semantics:** the same missing-executable and
   `KANBAN_NEEDS_INPUT` handoff pattern as solve.
-- **Required authority:** GitHub write on the PR (labels, comments,
-  pushes). No action in this surface ever merges a PR.
+- **Required authority:** GitHub write on the PR (labels, comments, draft
+  readiness, pushes). No action in this surface ever merges a PR.
 - **Durable state:** session log; the isolated worktree `pr-revise` works in,
   and the head-branch worktree `repair` selects or creates (§2.7).
 - **Mandatory/optional:** optional — only exercised by the `r` key.
@@ -136,7 +137,8 @@ arithmetic, which §2.3 owns.
   `codexEffort`/`claudeModel`/`claudeEffort` before invoking it). A packaged
   workflow implementing this action must have that already-correct session
   perform the review itself and use its bundled coordinator only to publish
-  the result safely (gate/head/race checks, comment, label) — not spawn a
+  the result safely (gate/head/race checks, comment, label, and approval-only
+  draft readiness) — not spawn a
   further, unpinned nested reviewer that would both waste and be unable to
   verify Kanban's guarantee.
   `pr-revise` and `repair` are the genuine exceptions: each runs on the PR's

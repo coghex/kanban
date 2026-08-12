@@ -42,8 +42,8 @@ Read the returned `"status"`, exactly as in `/pr-review`:
 
 - `"reviewed"`: the coordinator already spawned and published a dual rereview (unknown/external origin only; Kanban's own invocation never routes here). Dual rereview approval must be unanimous.
 
-Neither a specific model nor reasoning effort is pinned or verified anywhere in this flow; for the normal self-reviewed case the reviewer identity is exactly this session, the one Kanban's own invocation already selected and configured. Only the coordinator publishes the consolidated `pr-review:v2` verdict and switches exactly one matching `reviewed:*` label, after stable-head and current-issue-gate checks.
+Neither a specific model nor reasoning effort is pinned or verified anywhere in this flow; for the normal self-reviewed case the reviewer identity is exactly this session, the one Kanban's own invocation already selected and configured. Only the coordinator publishes the consolidated `pr-review:v2` verdict and switches exactly one matching `reviewed:*` label, after stable-head and current-issue-gate checks. An approving rereview also marks a draft PR ready for review and verifies that transition; changes requested leaves draft state untouched.
 
 After the coordinator publishes, remove `reviewed:revised` if it is still present on the PR (`gh pr edit <pr> --remove-label reviewed:revised`); Kanban's label state machine routes a PR back through rereview while that label lingers, and removing it is the one label mutation a review-only workflow is required to make.
 
-Return the PR number, origin or unknown status, issue-gate evidence, reviewer route, verdict, reviewed head, prior-concern status and new blockers, comment URL/status, and label state.
+Return the PR number, origin or unknown status, issue-gate evidence, reviewer route, verdict, reviewed head, prior-concern status and new blockers, comment URL/status, label state, and ready-for-review state.

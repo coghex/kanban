@@ -953,7 +953,13 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         ), mock.patch.object(
             module, "post_comment", return_value="https://github.com/coghex/kanban/pull/89#issuecomment-1"
         ), mock.patch.object(module, "set_verdict_label"), mock.patch.object(
-            module, "verify_publication", return_value={"comment_url": "url", "labels": ["reviewed:approve"]}
+            module,
+            "verify_publication",
+            return_value={
+                "comment_url": "url",
+                "labels": ["reviewed:approve"],
+                "ready_for_review": True,
+            },
         ):
             module.workflow(REPO_ROOT, 89, rereview=False, dry_run=False, allow_no_issue=False)
 
