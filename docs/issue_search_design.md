@@ -7,14 +7,23 @@ can move to another workflow column without becoming a detached overlay.
 
 Design state: `ready for issue processing`
 
+> Decomposition history: `/process-design-doc` stopped on 2026-08-11 before
+> creating the umbrella because the delivery plan had collapsed to a single
+> slice, which cannot carry an epic. The nine signed-off decisions D-1…D-9 were
+> unchanged and not relitigated; D-10 split the arc into three dependency-ordered
+> slices and D-11 settled the one behavior question that decomposition created.
+> Readiness re-signed off 2026-08-11.
+
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
 concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add live column-scoped card search to the board
-- [ ] SRCH-1. Add the adaptive search bar and safe live card filtering
+- [x] EPIC. Add live column-scoped card search to the board — [#261]
+- [x] SRCH-1. Move Settings to `o options` and add a second board quit chord — [#262]
+- [x] SRCH-2. Add the column-scoped search mode on Issues with safe filtering — [#263]
+- [x] SRCH-3. Transfer the active search between columns — [#264]
 
 ## Epic contract
 
@@ -94,7 +103,59 @@ concrete precondition
 - **No overlapping tracker arc was found.** Three repo-scoped open-and-closed
   searches for board search/filter, hotkey search, and live card filtering
   found no matching issue or epic as of 2026-08-11; the same searches were
-  rerun at readiness with the same result.
+  rerun at readiness with the same result, and again during decomposition
+  against all twelve open issues.
+- **The proposed `ui` arc label does not exist.** `gh label list` reports
+  `agent-workflows` and `merge-repair` as the only arc labels beside `epic`,
+  `blocked`, and the `reviewed:*` workflow set, so the arc label is still a
+  creation, not an adoption.
+
+### Decomposition evidence (2026-08-11)
+
+These facts were gathered to find real slice seams and are recorded whatever
+decomposition is chosen.
+
+- **Rendered rows are raw entry indices, not visible positions.** `drawColumn`
+  renders `zip [0 ..] (entriesFor state column)` and hands those indices to
+  `CardTarget`/`EpicTarget`; mouse dispatch reads them back with `safeIndex row
+  (entriesFor state column)` (`src/Kanban/UI/Board.hs:258-260,295-303`,
+  `src/Kanban/UI/Events.hs:148-152,662,677`). Collapsed epics are handled by
+  skipping rows while drawing and by `visibleSelectionRows` skipping indices,
+  never by renumbering (`src/Kanban/UI/Board.hs:263-279`,
+  `src/Kanban/UI/Selection.hs:184-194`). A filtered view that renumbers breaks
+  every existing mouse address; one that carries each entry's original index
+  leaves the address space intact. Which of those an implementation picks is
+  the solver's call, but it is exactly where D-1's safety requirement bites, so
+  filtering and interaction cannot land in separate pull requests.
+- **`entriesFor` is a narrow choke point.** Seven call sites consume it:
+  drawing and tracker grouping (`Board.hs:260,469`), selection
+  (`Selection.hs:134,182`), mouse dispatch (`Events.hs:662,677`), and the
+  column heading count (`Util.hs:236`). The raw accessor `entriesForBoard` is
+  separately consumed by selection normalization, `AutoSolve.hs:331`, and
+  `Session.hs:491`, all of which must keep seeing the unfiltered board.
+- **The heading count already has one owner.** `columnCountText` computes both
+  the count and the `+` truncation marker in one function
+  (`src/Kanban/UI/Util.hs:234-242`), so D-9's result/total form has a single
+  site rather than four per-column ones.
+- **Board input has one insertion point.** Base-board keys dispatch from a
+  single arm, `(Nothing, VtyEvent keyEvent) | Just action <- boardAction
+  BoardScope keyEvent`, placed after every overlay arm
+  (`src/Kanban/UI/Events.hs:143-144`). A search decoder immediately before it
+  inherits the priority D-5 requires without touching overlay handling.
+  `applyBoardAction` is total over `BoardAction` (`Events.hs:165-189`), so a
+  new registry action forces an explicit decision there.
+- **Multi-chord and Ctrl bindings already exist.** `KeyBinding` holds a chord
+  list, `NextCard` renders as `j/↓`, and `RepaintTerminal` is `Ctrl-L`
+  (`src/Kanban/UI/Keys.hs:219,299-300,355`), so `q`/`Ctrl-C` needs no new
+  registry mechanism. The live-agent interrupt stays ahead of it
+  (`src/Kanban/UI/SessionCore.hs:273,282`).
+- **`o` is unclaimed.** `KChar 'o'` appears in no file under `src/` or `test/`.
+- **The D-8 rename has a small golden blast radius.** The footer is one clipped
+  line projected from `scopeBindings BoardScope`
+  (`src/Kanban/UI/Board.hs:574-575`). `ShowSettings` sits twentieth of
+  twenty-three in the `BoardAction` order (`src/Kanban/UI/Keys.hs:101-122`),
+  and the widest golden already clips mid-`d drainer`, so of the eight frames
+  in `test/golden/` only `overlay-help.txt:30` carries the `s settings` text.
 
 ## Desired experience
 
@@ -295,6 +356,57 @@ result/total distinction was rejected because a filtered count could otherwise
 look like a complete GitHub column; an unbounded query was rejected because
 the input participates directly in board height.
 
+### D-10. Deliver the arc as three dependency-ordered slices
+
+User signoff 2026-08-11. The design's original single slice carried the whole
+arc, which both prevented an honest umbrella epic and bundled a keybinding
+remap with a new feature against `CLAUDE.md`'s one-concern-per-pull-request
+rule. The adopted decomposition, in work order:
+
+1. **SRCH-1 — Move Settings to `o options` and add `Ctrl-C` as a second board
+   quit chord.** Decisions D-8 and D-5's quit-chord half. No search code, no
+   `s` binding: `s` is simply left unbound and the registry, footer, help,
+   README, user guide, and design.md §7 describe only `o options` and the
+   second quit chord. Depends on nothing and can land first; everything after
+   it needs `s` free. Only `test/golden/overlay-help.txt` changes among the
+   golden frames.
+2. **SRCH-2 — Add the column-scoped search mode on Issues with safe filtered
+   selection.** Decisions D-1, D-3, D-6, D-9, D-2's open-on-Issues half, D-4,
+   D-5's input-priority half, and D-7's in-target-column result interaction.
+   `s` opens the wrapped box above the Issues cards, editing filters live, the
+   heading shows result/total, `s`/`Esc` restores the full column, and Up/Down,
+   Enter, and clicks inside the target column all resolve to the item actually
+   shown. Depends on SRCH-1; critical path. This is the smallest slice that is
+   both useful and safe — per the decomposition evidence, filtering the view
+   without simultaneously fixing selection and mouse dispatch would let a
+   visible card act on a different underlying entry, so those cannot be
+   separated.
+3. **SRCH-3 — Transfer the active search between columns.** D-2's transfer half
+   and D-7's transfer-click half. Clicking another column, or Left/Right, moves
+   the box there and clears the query; the first transferring click is consumed
+   so it cannot also open details, toggle an epic, or start a session; wheel
+   events keep scrolling without transferring. Depends on SRCH-2; critical
+   path.
+
+Rejected decompositions and why: a pure-only slice landing `SearchState`, the
+matcher, and the derived view with no consumer would be unreachable code and is
+a predictable canonical-review blocker; a rendering-only slice landing the box
+before filtering would show an input that does nothing; splitting result
+interaction out of SRCH-2 would ship the exact dispatch hazard D-1 exists to
+prevent; and folding SRCH-3 back into SRCH-2 was rejected in favor of the
+smaller reviewable pull requests, accepting one intermediate release in which
+search cannot leave the Issues column.
+
+### D-11. Left/Right are inert while search is active until transfer lands
+
+User signoff 2026-08-11, resolving Q-5. In SRCH-2, Left and Right do nothing
+while search is active, so the search target and the selected column can never
+disagree. SRCH-3 then gives those keys their D-7 transfer meaning without
+changing behavior a user already learned. Letting them keep moving the column
+selection was rejected because it would create a searched-column/selected-column
+split that no part of this design describes, and would change the same keys'
+meaning twice across two releases.
+
 ## Open questions
 
 ### Q-1. What replaces the existing board-level `q` quit binding?
@@ -314,6 +426,12 @@ Resolved by D-7.
 ### Q-4. Which key should open Settings after search takes `s`?
 
 Resolved by D-8.
+
+### Q-5. What do Left/Right do while search is active, before transfer exists?
+
+Raised during the D-10 decomposition on 2026-08-11: D-7 gives Left/Right the
+column-transfer meaning, but transfer lands in SRCH-3, so SRCH-2 had to define
+them for one intermediate release. Resolved by D-11.
 
 ## Verification strategy
 
@@ -340,27 +458,100 @@ Resolved by D-8.
 - Search exercises no GitHub command or cache write; fake/network integration
   coverage is unnecessary.
 
+Distribution across D-10's slices: the key-registry, contract-parity, and
+quit-chord families land with SRCH-1; the matching, transition, event-precedence
+and layout/golden families land with SRCH-2; the mouse matrix and its transfer
+cases land with SRCH-3, which also re-records the frames SRCH-2 established.
+
 ## Delivery plan
 
-### SRCH-1. Add the adaptive search bar and safe live card filtering
+### SRCH-1. Move Settings to `o options` and add a second board quit chord
 
-- **Outcome:** `s` opens a visible, wrapped search input on Issues; edits
-  filter the target column immediately; search transfers between columns and
-  closes cleanly; matching results remain safe to select and activate under
-  keyboard and mouse.
-- **Scope:** ephemeral state, pure matching/view derivation, selection
-  reconciliation, event priority, Settings-key replacement, the additional
-  board quit chord, adaptive board layout, column/result counts, mouse
-  transfer, key/help/footer/contract/docs updates, and pure/event/golden tests.
+- **Outcome:** Settings opens on `o` instead of `s`, board-scoped `Ctrl-C`
+  quits through the same guarded path as `q`, and `s` is left unbound and free
+  for SRCH-2. Live-agent overlays keep their higher-priority `Ctrl-C`
+  interrupt.
+- **Scope:** the `ShowSettings` key and label in the central binding registry,
+  the added `QuitDashboard` chord, and the footer, help overlay, README,
+  `docs/user-guide.md`, and design.md §7 text that projects from or documents
+  them, plus `test/Spec/UI/Keys.hs` registry/contract/help/footer parity and
+  the one affected golden frame.
 - **Phase:** 1
 - **Depends on:** none
+- **Ordering:** can land first; critical path, because SRCH-2 needs `s` free
+- **Relevant decisions:** D-5 (quit-chord half), D-8, D-10
+- **Acceptance signals:** `o` opens Settings and `s` does nothing on the base
+  board; `q` and `Ctrl-C` both reach the existing guarded dashboard-quit path;
+  `Ctrl-C` inside a solve, review, or pull-request overlay still interrupts the
+  turn rather than quitting; `test/Spec/UI/Keys.hs` and design.md §7 remain in
+  exact parity; the golden suite passes with `overlay-help.txt` re-recorded.
+- **Out of scope:** all search behavior, including any `s` binding, search
+  state, or search rendering.
+- **Open questions:** None
+
+### SRCH-2. Add the column-scoped search mode on Issues with safe filtering
+
+- **Outcome:** `s` opens an empty one-line search box directly below the Issues
+  header and above its cards; typing filters the column on every edit; the
+  heading shows result count over column total; `s` or `Esc` clears the query,
+  removes the box, and restores the full column; and every visible row still
+  resolves to the item shown under both keyboard and mouse.
+- **Scope:** the ephemeral `SearchState` on `AppState`, the pure case-folded
+  matcher over `#number` plus title, the one derived visible-entry authority
+  consumed by drawing, tracker grouping, selection, mouse dispatch, and the
+  heading count, identity-based selection reconciliation across edit, close,
+  and refresh, the search-input decoder ahead of `BoardScope`, the wrapped box
+  in normal column layout with its 256-code-point bound, the `No matches` row,
+  result/total counts, in-target-column result interaction (Up/Down, Enter,
+  clicks), and the pure, event, golden, and documentation updates for all of
+  it.
+- **Phase:** 2
+- **Depends on:** SRCH-1
 - **Ordering:** critical path
-- **Relevant decisions:** D-1, D-2, D-3, D-4, D-5, D-6, D-7, D-8, D-9
-- **Acceptance signals:** the verification matrix passes at wide and narrow
-  widths; typing never dispatches a board action; every visible mouse/keyboard
-  target resolves to the item shown; result/total counts and the input bound
-  are deterministic; exit restores the full target column; no network or
-  persistence behavior changes.
-- **Out of scope:** cross-column/global queries, fuzzy/regex search, saved
-  searches, match highlighting, configurable bindings.
+- **Relevant decisions:** D-1, D-2 (open-on-Issues half), D-3, D-4, D-5
+  (input-priority half), D-6, D-7 (in-target-column result interaction), D-9,
+  D-10, D-11
+- **Acceptance signals:** typing `r`, `S`, `u`, or `d` while search is active
+  inserts characters instead of dispatching a board action, while `q` and
+  `Ctrl-C` still quit and application events still reconcile; no visible
+  mouse or keyboard target dispatches to a different raw entry at any query;
+  a collapsed epic's matching children appear without mutating the saved
+  expansion set, and exit restores the previous collapsed view; the heading
+  reads result/total with the `+` truncation marker still on the total; the
+  query stops accepting input at 256 code points; Left and Right do nothing
+  while search is active; golden frames cover empty, wrapped, filtered,
+  no-result, and collapsed-epic-match states at wide, narrow, open-border, and
+  ASCII settings, with the box above the cards, inside its column, and never
+  over the footer; no GitHub command, cache write, or freshness change occurs.
+- **Out of scope:** moving search to another column by any means, which is
+  SRCH-3; cross-column or global queries; fuzzy or regex matching; saved
+  searches; match highlighting; configurable bindings.
+- **Open questions:** None
+
+### SRCH-3. Transfer the active search between columns
+
+- **Outcome:** clicking another column while search is active, or pressing Left
+  or Right, moves the box to that column's top, clears the query, and reveals
+  and selects that column; the first transferring click is consumed so it
+  cannot also open details, toggle an epic, or start a session; wheel events
+  keep scrolling the column under the pointer without transferring.
+- **Scope:** the target-column change and shared query-clearing function, the
+  first-click consumption rule, the Left/Right transfer binding that replaces
+  D-11's inert behavior, wheel-versus-click discrimination, selection
+  reconciliation into the newly targeted column, and the pure, event, mouse,
+  golden, and documentation updates for the transfer path.
+- **Phase:** 3
+- **Depends on:** SRCH-2
+- **Ordering:** critical path
+- **Relevant decisions:** D-2 (transfer half), D-7 (transfer half), D-10, D-11
+- **Acceptance signals:** a left click on a card, an epic header, or whitespace
+  in a non-target column transfers search and performs no other action, and a
+  second click there behaves normally; Left and Right transfer and clear the
+  query; a wheel event in either a target or non-target column only scrolls;
+  the query is cleared by the same function on every transfer path; golden
+  frames show the box in a transferred column; README, `docs/user-guide.md`,
+  and design.md §6/§7 describe transfer.
+- **Out of scope:** searching more than one column at once, persisting a query
+  across transfers or restarts, and any change to the matching rule settled in
+  D-6.
 - **Open questions:** None

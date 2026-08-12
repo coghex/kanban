@@ -1,12 +1,12 @@
-# Issue approval queue control design
+# Persistent issue approval service design
 
 Kanban has a canonical one-issue review action and a canonical Python backend,
-but it has no explicit dashboard action for walking the open issue backlog in
-order. This design defines a bounded operator-started queue that reuses that
-authority, stops at the first issue needing human repair, and makes the stop
-visible beside the existing PR drainer control.
+but it has no persistent operator-controlled service for walking the open issue
+backlog in order. This design adds that service, makes the oldest unresolved
+issue an ordering barrier, and presents its lifecycle directly above the
+existing PR drainer control.
 
-Design state: `exploring`
+Design state: `ready for issue processing`
 
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
@@ -14,23 +14,29 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add an operator-controlled canonical issue approval queue
-- [ ] IAQ-1. Add a bounded review-queue mode to the canonical backend
-- [ ] IAQ-2. Integrate the queue process and result contract with Kanban
-- [ ] IAQ-3. Add the issue approval queue sidebar control
+- [ ] EPIC. Add a persistent canonical issue approval service
+- [ ] IAQ-1. Add an ordered barrier-aware queue mode to the canonical backend
+- [ ] IAQ-2. Build the persistent issue approval controller and runtime
+- [ ] IAQ-3. Install per-repository issue approval LaunchAgents
+- [ ] IAQ-4. Expose issue approval service status and control to Kanban
+- [ ] IAQ-5. Add the approve_issues.py sidebar control
+- [ ] IAQ-6. Document local installation, operation, and recovery
 
 ## Epic contract
 
-- **Goal:** Let an operator start one canonical pass over open GitHub issues
-  from the Kanban sidebar, reviewing eligible issues in ascending issue-number
-  order and stopping visibly at the first issue that requests changes.
-- **Done when:** The queue uses the installed canonical `approve_issues.py`
-  backend, never bypasses an earlier blocking issue, publishes the same v2
-  review state as the existing one-issue action, stops safely on
-  changes-requested or failure outcomes, and exposes its lifecycle through a
-  keyboard-accessible button immediately above `drain_prs.py`.
+- **Goal:** Let an operator turn on a persistent canonical issue approval
+  service from Kanban that considers open issues in ascending issue-number
+  order and halts visibly at the first issue requesting changes.
+- **Done when:** The service uses the installed canonical `approve_issues.py`
+  backend, outlives the dashboard after an explicit start like the PR drainer,
+  never auto-starts merely because it was installed or the user logged in, never
+  bypasses a lower-numbered changes-requested issue, publishes the same v2
+  review state as the existing one-issue action, records actionable status and
+  incidents, and is controlled by an `approve_issues.py` button immediately
+  above `drain_prs.py` using the drainer's established presentation vocabulary.
 - **Users and operators:** A Kanban operator preparing issues for autonomous
-  solving, plus maintainers of the canonical review backend and TUI.
+  solving on the current macOS host, plus maintainers of the canonical review
+  backend and local services.
 - **Arc label:** `agent-workflows` proposed.
 
 ## Current state and evidence
@@ -38,108 +44,133 @@ concrete precondition
 ### Verified current state
 
 - `tools/approve_issues.py` is already Kanban's canonical issue-review backend.
-  It owns reviewer routing, review worktrees, `issue-review:v2` comments,
-  verdict-label transitions, the per-checkout `approve_issues.lock`, and
-  `--review`, `--rereview`, and `--check` one-issue modes.
-- Its existing no-action queue path calls `get_open_issues`, which runs
-  `gh issue list --limit 500` and sorts that bounded result by
-  `(createdAt, number)`. `select_candidate` chooses one stale or unreviewed
-  issue per pass, deliberately skips any issue whose latest canonical marker
-  says `CHANGES_REQUESTED`, and continues to later issues. Both behaviors are
-  incompatible with the requested ordered barrier: the fixed inventory can
-  omit an earlier issue when more than 500 are open, and the skip crosses a
-  barrier that was returned.
-- `src/Kanban/Review/Canonical.hs` resolves the installed backend through
-  `KANBAN_ISSUE_REVIEW_INSTALL_DIR` or the installer-written discovery record,
-  invokes it as a bounded process, captures its process group, and parses the
-  one-issue JSON result. The board's `r` action already uses this path.
+  It owns reviewer routing, temporary review worktrees, `issue-review:v2`
+  comments, verdict-label transitions, the per-checkout
+  `approve_issues.lock`, and `--review`, `--rereview`, and `--check` one-issue
+  modes.
+- Its existing no-action queue path sorts `get_open_issues` by
+  `(createdAt, number)`. `select_candidate` deliberately skips an issue whose
+  latest canonical marker is `CHANGES_REQUESTED` and continues to later
+  issues. That behavior conflicts with the requested numeric barrier.
+- No tracked issue-approval service or installer exists. Workflow setup
+  installs the canonical backend but explicitly does not start or configure an
+  approval daemon.
+- The PR drainer already has the analogous persistent-service seams:
+  `tools/drain_prs_service.py`, `tools/install_drainer.py`, versioned status and
+  incident files, dated logs, a per-repository discovery record and LaunchAgent,
+  and status/control code in `src/Kanban/Drainer.hs`.
+- The drainer's persistence is operator-started rather than resident:
+  `RunAtLoad` and `KeepAlive` are false and there is no `StartInterval`.
+  Installation loads a stopped job; `start` creates a polling run that
+  outlives Kanban until an explicit stop or unexpected exit. Its exact healthy
+  and warning text is `on` and `on · unresolved incident · <summary>`.
+- `src/Kanban/Review/Canonical.hs` resolves the installed issue-review backend
+  through `KANBAN_ISSUE_REVIEW_INSTALL_DIR` or its installer record, invokes it
+  as a bounded process, and parses the one-issue JSON result. The board's `r`
+  action already uses this path.
 - `src/Kanban/UI/Board.hs` renders `drain_prs.py` as the bottom control in the
-  28-cell usage sidebar. `DrainerButton`, `ToggleDrainer`, and the event
-  handlers in `UI.Types`, `UI.Keys`, and `UI.Events` provide the corresponding
-  mouse and keyboard path.
-- The current review contract says direct review never starts an approval
-  daemon. Workflow setup installs the canonical backend but deliberately does
-  not install or start an approval service.
-- A tracker search on 2026-08-11 found no open or closed issue that already
-  owns this queue-control arc. Closed portability work such as #75 and #155
-  owns backend installation and discovery, not an ordered sidebar-triggered
-  pass.
-- Under `docs/agent-workflow-contract.md` section 7, a new design document is
-  `pr-atomic` until that authoritative classification explicitly admits it to
-  the coordination lane. This document's first tracked publication therefore
-  lands atomically with its `coordination | audit-report` row; before that
-  commit it remained in the `docs-wip` worktree and was not eligible for
-  direct publication.
+  28-cell usage sidebar. `DrainerButton`, `ToggleDrainer`, and the handlers in
+  `UI.Types`, `UI.Keys`, and `UI.Events` supply mouse and keyboard control.
+- The readiness tracker search on 2026-08-11 found no existing issue or epic
+  that owns this persistent ordered approval-service arc. Closed portability
+  issues such as #75 and #155 own backend installation and discovery, not this
+  service; current workflow issues returned by the broad search likewise own
+  packaged review or drainer behavior rather than this queue.
+- The current `docs/agent-workflow-contract.md` section 7 already lists this
+  path among the fourteen `coordination` documents, so this design's status
+  ledger is eligible for the repository's direct-document publication lane.
+  The draft still lives and changes only in the `docs-wip` worktree.
 
 ## Desired experience
 
-1. The operator presses the queue key or clicks an `approve_issues.py` control
-   immediately above the `drain_prs.py` control.
-2. Kanban launches exactly one foreground queue process against the repository
-   identity and configuration already resolved by the dashboard. The button
-   becomes amber and reports that the queue is running.
-3. The canonical backend considers open issues in ascending numeric order.
-   Issues with a current approval for their current specification do not cause
-   another model call. Each issue that needs an initial review is reviewed by
-   the same canonical v2 path used by the one-issue action.
-4. After an approval, the backend advances to the next number. It never reviews
-   a later issue after encountering an earlier changes-requested barrier.
-5. If a reviewed issue returns `CHANGES_REQUESTED`, the process stops normally.
-   Kanban leaves the control amber with a durable session-state warning such as
-   `stopped · issue #254 requests changes`, and refreshes the board so the
-   label change is visible.
-6. If no issue needs attention, the pass completes and the control reports a
-   successful terminal state. A backend, model, GitHub, lock, malformed-state,
-   or outcome-unknown failure stops the pass and is shown as an error rather
-   than allowing later issues to run.
+1. The operator presses the service key or clicks an `approve_issues.py`
+   control immediately above the `drain_prs.py` control.
+2. Kanban starts the installed per-repository LaunchAgent. The control follows
+   the drainer's format and text: `starting…`, then green `on` while the service
+   is healthy and running.
+3. The service considers live open issues in ascending numeric order. A current
+   approval for the issue's current specification needs no model call. An issue
+   needing initial review goes through the same canonical v2 path used by the
+   selected-card action.
+4. A lower-numbered issue already carrying a current `CHANGES_REQUESTED`
+   verdict is an immediate barrier. The service does not review any higher
+   number.
+5. When review newly produces `CHANGES_REQUESTED`, the service stops review
+   processing but stays enabled and records a yellow, self-clearing incident.
+   Its exact detail follows the drainer: `on · unresolved incident · Issue #254
+   requests changes`. No higher issue runs.
+6. The operator uses the existing issue `r` workflow to revise and canonically
+   rereview the named issue. The controller polls only that barrier's read-only
+   gate while blocked, clears the incident when the issue has a current
+   approval, and resumes with the next numeric issue.
+7. Turning the service off uses the drainer's `stopping…`, then `off`, text and
+   transition behavior. Its status persists independently of the dashboard.
+8. Backend, model, GitHub, lock, malformed-state, or outcome-unknown failures
+   stop processing and surface as red errors rather than allowing later issues
+   to run.
 
-The initial release does not automatically revise an issue or bypass the
-barrier. The operator uses the existing issue `r` workflow to revise/rereview
-the named issue, then starts a new queue pass.
+Detailed live progress such as `reviewing issue #N` is deliberately deferred.
+After this epic is done, a separate extension design document will explore a
+trustworthy progress protocol and richer in-flight presentation.
 
 ## Scope
 
 ### In scope
 
-- An explicit finite queue mode in the existing canonical backend.
-- Ascending numeric ordering over the backend's live open-issue inventory.
-- Reuse of current provenance routing, spec fingerprints, configured labels,
-  incidents, worktree cleanup, and locking.
-- A versioned machine-readable terminal result that distinguishes completed,
-  changes-requested, and failed/outcome-unknown runs.
-- A non-overlapping Kanban process lifecycle for the queue.
-- A mouse-clickable and keyboard-accessible sidebar control immediately above
-  `drain_prs.py`, including idle, running, complete, warning, and error states.
-- Board refresh after any pass that may have published comments or labels.
-- Pure, fixture, process, event, and golden-frame coverage following the
-  repository's existing test patterns.
-- Contract updates required by the behavior change in the implementation PRs.
+- Ascending numeric queue ordering and a strict pre-existing or newly produced
+  changes-requested barrier in the existing canonical backend.
+- A persistent, operator-started, per-repository, launchd-managed approval
+  service following the PR drainer's controller, installer, discovery, status,
+  incident, log, and start/stop conventions where their semantics match.
+- Reuse of canonical provenance routing, spec fingerprints, configured labels,
+  incidents, review worktrees, repository identity, and locking.
+- Versioned machine-readable status and incident documents with atomic writes.
+- Kanban discovery, monitoring, and lifecycle control for the service.
+- A mouse-clickable and keyboard-accessible `approve_issues.py` control
+  immediately above `drain_prs.py`, using the same frame and state text.
+- Green healthy-running state, yellow changes-requested warning naming `#N`,
+  and red failures.
+- Pure, fixture, service, installer, process, event, and golden-frame tests.
+- Required updates to the authoritative design, workflow contract, setup guide,
+  development guide, package inventory, and dependency manifest.
+- A dedicated `tools/install_issue_approval.py` installer and
+  `tools/approve_issues_service.py` controller, using a separate
+  `issue-approval` install/runtime namespace while resolving the existing
+  canonical backend from `issue-review`.
 
 ### Out of scope
 
-- A second reviewer implementation or a second copy of `approve_issues.py`.
-- Automatic specification revision, automatic rereview after revision, issue
-  editing, issue closing, issue solving, PR review, or merging.
-- A polling daemon, LaunchAgent, background service installer, notification
-  service, or queue work that survives Kanban exiting unless Q-2 changes the
-  lifecycle.
+- A second reviewer implementation or second copy of `approve_issues.py`.
+- Automatic specification revision, automatic issue editing, closing, solving,
+  PR review, or merging.
 - Parallel issue reviews or continuing past a changes-requested barrier.
 - Replacing the existing selected-card `r` workflow.
-- Persisting historical queue runs across dashboard restarts.
+- Live current-issue/model progress in the button; this is reserved for the
+  follow-on progress-extension design.
+- Cross-platform service management beyond a clear unsupported diagnostic on
+  non-macOS hosts.
+- A generalized `setup_workflows.py` component, public deployment workflow,
+  system-wide daemon, multi-user host policy, or automatic login start. The
+  first service only needs a safe manual installer for the operator's current
+  macOS machine.
 
 ## Design
 
-### Authority and command boundary
+### Authority and process boundaries
 
-The queue is a new finite mode of `tools/approve_issues.py`, not a new script.
-The Python backend remains the only component that enumerates live issues,
-interprets canonical review records, chooses reviewers, and mutates GitHub.
-The Haskell dashboard resolves and invokes the installed backend; it does not
-derive a queue from the cached board, whose issue set may be truncated and
-whose records do not contain the review comments needed to validate a v2
+The queue behavior remains a mode of `tools/approve_issues.py`; no second
+reviewer script is introduced. The backend is the only component that
+enumerates live issues, reads canonical review comments, validates
+fingerprints, chooses reviewers, and mutates GitHub.
+
+A focused approval-service controller owns persistence, polling, status,
+incidents, logs, and child-process supervision. The LaunchAgent invokes the
+controller, not the backend directly. Kanban talks only to the controller and
+its durable documents; it never derives the queue from its cached board,
+because that data may be truncated and lacks the comments needed for a v2
 fingerprint.
 
-The proposed command shape is:
+The service invokes a finite backend pass using an explicit mode such as:
 
 ```console
 python3 <installed>/approve_issues.py \
@@ -152,88 +183,155 @@ python3 <installed>/approve_issues.py \
 ```
 
 `--review-queue` is mutually exclusive with `--check`, `--review`, and
-`--rereview`. It is finite: it exits when the eligible queue is exhausted, at
-the first ordered barrier, or on the first failure. The existing per-checkout
-approval lock is held for the whole pass so an interactive review, a second
-dashboard, and the legacy daemon cannot interleave canonical publications.
+`--rereview`. One invocation scans in numeric order but advances at most one
+issue: it returns immediately after confirming the queue is idle, finding the
+first barrier, publishing and rechecking one review, or encountering a
+failure. The controller starts another invocation immediately after a verified
+advance and applies the idle/barrier polling policy otherwise. This releases
+the canonical lock between issues instead of letting one child own it for the
+whole backlog.
 
 ### Queue classification and ordering
 
-The backend fetches the complete live open-issue inventory once per selection
-pass and sorts it by integer issue number. It must page through the provider
-until the terminal page rather than reuse the current fixed `--limit 500`
-result; a truncated, malformed, or otherwise incomplete inventory stops before
-any review because the no-bypass guarantee cannot be established. Pull
-requests remain excluded. For each issue in that order it classifies the
-current effective specification and canonical record before taking any action:
+The backend fetches the live open-issue inventory and sorts it by integer issue
+number. Pull requests remain excluded. For each issue in order:
 
-- a current `APPROVE` record is already complete and is skipped;
-- an issue needing initial review is reviewed synchronously and then
-  reclassified from live GitHub state;
-- a current `CHANGES_REQUESTED` handoff is an ordered barrier, with the exact
-  treatment of a barrier present before the run governed by Q-1;
-- an invalid marker, blocking pipeline incident, inconsistent verdict state,
-  or inability to establish current state stops as an error;
+- a current `APPROVE` record is complete and skipped;
+- an issue needing initial review is reviewed synchronously, then re-read from
+  GitHub and classified again;
+- a current `CHANGES_REQUESTED` verdict is an immediate ordered barrier whether
+  it predates this pass or was just published;
+- an invalid marker, blocking incident, inconsistent verdict state, or
+  inability to establish current state stops as an error;
 - an unmarked legacy issue uses the existing `dual` policy passed by Kanban.
 
-The pass never snapshots a list of candidates and blindly runs it: each
-publication can change labels/comments, and the current backend already
-rechecks the issue specification after model work before publishing. A
-candidate whose specification changes during review must not be counted as
-approved or permit the pass to claim that it crossed that number.
+The pass never snapshots candidates and blindly reviews them. Each publication
+can change comments and labels, and a specification can change during model
+work. A stale result cannot count as crossing that issue number.
 
-### Result contract
+### Backend pass result
 
-Stdout stays reserved for one bounded JSON document; diagnostics and the
-existing dated log stay off stdout. A proposed v1 result contains:
+Stdout stays reserved for one bounded JSON document; diagnostics and dated logs
+stay off stdout. The result contains a schema version, an outcome (`idle`,
+`advanced`, `changes_requested`, or `retry`), the positive issue number for
+every non-idle outcome, whether this invocation made a model call, and
+caller-displayable text. All four observed outcomes are normal backend
+completions. A specification that changes during review cannot return
+`advanced`; it returns `retry`, and the controller applies bounded backoff
+before re-reading live state. Failures are non-zero and must not be mistaken
+for an idle, retryable, or advanced queue.
 
-- `version`;
-- `outcome`: `complete` or `changes_requested` for observed terminal states;
-- `reviewed_count` and `approved_count` for this invocation;
-- `issue`: the changes-requested barrier number, otherwise absent;
-- `message`: sanitized caller-displayable text.
+The result schema rejects unknown versions, an issue on `idle`, a non-idle
+outcome without a positive issue number, an `advanced` outcome without a
+current approval, or any contradictory model-call claim. There is no per-issue
+streaming protocol in this epic.
 
-Both observed outcomes exit successfully and are distinguished by JSON. A
-failure uses a non-zero exit and the bounded diagnostic path. This mirrors the
-existing one-issue Haskell boundary: a legitimate `CHANGES_REQUESTED` verdict
-is not a process failure. The schema must reject unknown versions,
-contradictory counts/outcomes, or a missing issue number for
-`changes_requested`.
+### Persistent service topology
 
-This first pass proposes no live per-issue event protocol. While the subprocess
-runs, the sidebar reports `running…`; detailed issue/model progress remains in
-the canonical backend log. Q-3 decides whether that is sufficient or whether
-the initial feature needs a separate bounded progress channel.
+The approval service mirrors the PR drainer's supported local topology:
+
+- one LaunchAgent per canonical GitHub repository;
+- one discovery record keyed by normalized `owner/name`;
+- one runtime directory per repository for atomic status and incident files;
+- one dated log directory per repository;
+- one installer-managed approval-service directory containing stable links to
+  the controller and its companion assets, while the controller resolves the
+  already-installed canonical backend through the issue-review discovery
+  record rather than installing a competing backend;
+- explicit repository path, canonical identity, remote/config selections, and
+  an identity check before any GitHub mutation;
+- serialized discovery-record writes so concurrent installs for different
+  repositories cannot lose entries;
+- refusal to replace ordinary user files or silently fall through from a
+  selected but missing install.
+
+The first implementation names the new tracked assets
+`tools/approve_issues_service.py` and `tools/install_issue_approval.py`. The
+installer uses the Kanban-owned `issue-approval` namespace under Application
+Support and Logs, with a discovery record separate from the global
+`issue-review/config.json`. It validates and resolves the canonical backend
+through that existing issue-review record; if the backend is absent, it refuses
+with the existing `tools/install_issue_review.py` remediation rather than
+creating another backend installation.
+
+This is deliberately a local macOS contract. The source and pure tests remain
+CI-portable, and Kanban reports service control as unsupported elsewhere, but
+the arc does not design another service manager or a provider-neutral daemon
+abstraction.
+
+The approval and PR-drainer services remain distinct jobs with distinct locks,
+runtime roots, discovery records, and status types. Similarity is deliberate,
+but their incidents mean different things and neither controller owns the
+other's process.
+
+Before starting or installing a supported run, the controller checks the
+canonical backend lock. A legacy personal approval daemon holding it is not
+adopted, killed, or treated as this service. Installation/start refuses with a
+diagnostic naming the conflicting owner so the operator can stop it manually;
+otherwise that daemon's skip-past-changes behavior could violate this service's
+numeric barrier while both appeared enabled.
+
+### Status, incidents, and restart behavior
+
+Installation loads but does not start the job. The plist follows the drainer's
+non-resident contract: `RunAtLoad=false`, `KeepAlive=false`, and no periodic
+launchd trigger. Once explicitly started, the controller runs its own bounded
+poll loop and outlives Kanban until explicitly stopped or until it exits
+unexpectedly.
+
+The controller publishes a versioned status document sufficient to distinguish
+at least checking/starting, healthy running, intentional stop, ordered barrier,
+child failure, controller failure, and unknown/unreadable state. It records the
+current repository identity and process ownership needed to reject a foreign
+or stale observation.
+
+A changes-requested barrier is durable, issue-scoped, and self-clearing. It
+names the positive issue number and the summary `Issue #N requests changes`.
+It is warning severity, not a reviewer or process failure. While it is open,
+the controller does no model work and checks only that issue's read-only gate
+at the ordinary idle interval. A current canonical approval resolves the
+incident and resumes the numeric queue. Stopping the service does not resolve
+the barrier, just as stopping the drainer does not resolve a merge-conflict
+incident; the next start rechecks it. A manual acknowledgement may dismiss the
+record for bookkeeping but cannot let the queue cross an issue that still has
+current changes-requested state. Error incidents cover unexpected exits,
+malformed backend results, model/GitHub failures, and outcome-unknown runs.
 
 ### Dashboard lifecycle and concurrency
 
-A focused module should own queue status, command arguments, result decoding,
-and rendering vocabulary rather than extending `Kanban.Drainer`: the two
-controls share placement, not authority or lifecycle. `AppState` holds one
-optional managed queue process and one status value. App events announce
-process start and terminal result.
+Kanban discovers the approval controller at startup, polls it on the same
+event-driven cadence as the PR drainer, and stores its last observation
+separately. Click/key actions use controller start/stop operations and show
+optimistic transition states until an authoritative observation returns.
 
-Kanban performs the same preflight and installed-backend resolution used by
-selected-card canonical review. It refuses a second click while a run is in
-flight. The Python lock remains the cross-process authority; the UI's busy
-flag is only immediate local feedback. Because selected-card review and the
-queue use the same backend lock, a race fails closed with a diagnostic rather
-than publishing overlapping results.
+The backend approval lock remains the cross-process authority between the
+service, selected-card `r`, another dashboard, and legacy invocations. The
+service must not turn ordinary lock contention into a red pipeline incident:
+it waits/retries with bounded backoff and status text that remains truthful.
+At a changes-requested barrier the selected-card `r` workflow remains
+available: its revision stage performs no canonical backend review, and its
+eventual rereview can acquire the lock because the service is only performing
+read-only gate checks. For any other issue while the service owns a live
+canonical review, Kanban refuses a competing canonical stage with a notice to
+wait or stop the service. The service holds the approval lock for at most one
+issue review, releasing it between issues and before every idle/barrier wait,
+so explicit work never waits behind an entire backlog.
 
-Any queue completion triggers a board refresh because even an errored or
-outcome-unknown run may have published a comment or label before the dashboard
-lost observability. The queue's terminal status is not overwritten by the
-ordinary refresh result. A later explicit queue run replaces it.
+Any service result that may have changed GitHub requests a board refresh. A
+refresh never overwrites the service's durable warning/error state.
 
-### Sidebar and interaction
+### Sidebar presentation and interaction
 
-The bottom of the usage sidebar becomes a two-control stack:
+The bottom of the usage sidebar becomes a two-control stack. The approval
+control is immediately above the drainer and deliberately reuses the same
+button frame, padding, border policy, and status vocabulary:
 
 ```text
 ╭─────────────────╮
 │ approve_issues.py │
 ╰─────────────────╯
-stopped · issue #254
+on · unresolved
+incident · Issue #254
 requests changes
 
 ╭─────────────╮
@@ -242,177 +340,292 @@ requests changes
 off
 ```
 
-The queue control uses neutral styling before a run, amber while running,
-green after a complete pass, amber after `changes_requested`, and red for an
-error or outcome-unknown result. The warning persists in dashboard state and
-names the issue number; it is not only a transient notice that `Esc` can erase.
-The proposed board shortcut is lowercase `a`, paired with click, while
-uppercase `A` remains autosolve. The authoritative key table, help text,
-footer, mouse routing, and golden layouts change together.
+The ordinary states use the drainer's text exactly: `checking…`, `starting…`,
+green `on`, `stopping…`, and `off`. The issue barrier uses the drainer's exact
+`on · unresolved incident · <summary>` composition and is yellow. Clicking or
+pressing the key while yellow stops the enabled service, exactly as the drainer
+button does; the durable barrier remains and a stopped service therefore uses
+the drainer's red `stopped · unresolved incident · <summary>` composition.
+Red also covers genuine error and unknown states. Lowercase `a` toggles the
+approval service, while uppercase `A` remains the selected-issue autosolve
+action.
 
 ## Decisions
 
 ### D-1. Extend the canonical backend instead of adding a second script
 
-The requested `approve_issues.py` behavior belongs in the already tracked and
-installed `tools/approve_issues.py`. Kanban invokes that installation and no
-other reviewer owns comments or verdict labels.
+The requested behavior belongs in the tracked and installed
+`tools/approve_issues.py`. No other reviewer owns canonical comments or labels.
 
 ### D-2. Numeric issue order is the queue order
 
-The queue considers open issues by ascending integer issue number, not
-`createdAt`, board column, update time, or cached display order.
+The service considers open issues by ascending integer issue number, not
+creation timestamp, update time, board position, or cached display order.
 
-### D-3. Changes requested is a stop barrier
+### D-3. Any current changes-requested issue is an ordered barrier
 
-Once an issue in the ordered pass produces `CHANGES_REQUESTED`, no greater
-issue number is reviewed in that invocation.
+An earlier issue already in canonical `CHANGES_REQUESTED` state stops the pass
+immediately. No greater issue number is reviewed until the barrier clears.
 
-### D-4. The stopped issue is a persistent amber sidebar warning
+### D-4. The service is persistent
 
-The button's terminal warning includes the issue number and survives ordinary
-board refreshes until another queue run replaces it.
+This is a per-repository managed service, not a foreground pass owned by one
+dashboard. It follows the PR drainer's install/discovery/controller/status/log
+conventions and survives Kanban exit.
 
-### D-5. Queue review reuses canonical v2 semantics
+### D-5. The button follows the drainer's presentation conventions
+
+The approval control uses the same frame, placement style, transition words,
+and green `on`/neutral `off` presentation as `drain_prs.py`. A
+changes-requested state is yellow and names the issue number.
+
+### D-6. Rich live progress is a follow-on design
+
+This epic does not add `reviewing issue #N` or reviewer/model progress. After
+the persistent service is complete, create a separate extension design
+document for a progress protocol and richer in-flight UI.
+
+### D-7. Queue review reuses canonical v2 semantics
 
 Reviewer routing, models, legacy policy, spec fingerprints, worktrees,
-comments, labels, incidents, configuration, repository identity, and the
-approval lock remain owned by the existing backend rather than reimplemented
-in Haskell.
+comments, labels, incidents, configuration, identity, and the approval lock
+remain owned by the existing backend rather than reimplemented in Haskell.
 
-## Proposals
+### D-8. A barrier pauses work without disabling the service
 
-### P-1. Make the queue an explicit foreground, finite action
+The approval service remains on and yellow, with exact detail
+`on · unresolved incident · Issue #N requests changes`. It performs no model
+work, checks only the barrier's read-only gate, clears the incident and resumes
+automatically after canonical approval, and retains the barrier across an
+intentional stop or restart.
 
-An operator click starts one pass; Kanban owns its process, blocks dashboard
-quit while it is live, and does not install a service. This matches the
-existing direct-review lifecycle and the current no-daemon product contract.
+### D-9. Persistence matches the drainer's non-resident lifecycle
 
-### P-2. Use lowercase `a` as the keyboard equivalent
+Installation loads a stopped LaunchAgent and never starts work at install or
+login. An explicit start creates a polling run that outlives Kanban until an
+explicit stop or unexpected exit.
 
-Every mouse action needs a keyboard path. Lowercase `a` reads as “approve
-queue” and remains distinct from uppercase `A` autosolve.
+### D-10. Explicit barrier repair remains available while the service is on
 
-### P-3. Keep stdout to one final JSON result
+The selected barrier issue's `r` workflow may revise and rereview it while the
+service is paused on read-only checks. Competing canonical review of another
+issue is refused while the service has a review in flight. The service releases
+the backend lock between individual issues rather than owning it for its whole
+lifetime.
 
-The initial UI shows a running state without per-issue progress. This keeps
-the process boundary bounded and lets the existing capture discipline be
-reused instead of introducing a streaming protocol solely for the sidebar.
+### D-11. The service has a separate installer and namespace
+
+Use `tools/install_issue_approval.py` for the per-repository service and
+`tools/approve_issues_service.py` for its controller. Store its discovery,
+runtime, incidents, and logs under a distinct `issue-approval` namespace. The
+installer resolves the one global canonical backend through the existing
+`issue-review` record and never makes another reviewer installation. Combining
+service installation with `install_issue_review.py` was rejected because that
+global backend is required by ordinary review workflows whose installation
+must not create a repository LaunchAgent.
+
+### D-12. The first runtime target is the operator's current macOS machine
+
+Implement and document the launchd path needed locally. Keep pure code and
+fixtures CI-portable and fail clearly on unsupported hosts, but do not add a
+cross-platform service abstraction, generalized workflow-setup component, or
+automatic login start in this epic.
+
+### D-13. A legacy approval daemon is a conflict, not a migration source
+
+The supported installer/controller never adopts or terminates an untracked
+personal daemon. If one owns the canonical backend lock, install/start refuses
+with a diagnostic so the operator can stop it manually before enabling the new
+ordered service.
+
+### D-14. Lowercase a toggles approval; uppercase A remains autosolve
+
+Lowercase `a` starts or stops the persistent approval service from board scope,
+with click invoking the identical action. Uppercase `A` retains its existing
+selected-issue autosolve meaning, so the two workflows remain distinct in the
+key table, footer, help overlay, and event routing.
+
+### D-15. One backend invocation advances at most one issue
+
+`--review-queue` scans from the lowest open number on every invocation, but it
+performs model work for no more than the first issue that needs it. It then
+returns `advanced`, `changes_requested`, `retry`, or `idle` to the controller.
+The controller owns repetition. This preserves the ordered barrier while
+releasing the canonical lock between issues, as D-10 requires.
 
 ## Open questions
 
-### Q-1. Does a pre-existing changes-requested issue stop the pass immediately?
+### Q-1. Does a pre-existing changes-requested issue stop immediately?
 
-The strongest reading of numeric order says yes: if issue #120 already has a
-canonical changes-requested handoff, the queue reports #120 and reviews
-nothing numbered above it. The alternative is to stop only when this run
-newly produces that verdict, which preserves the old daemon's ability to work
-around unresolved issues but weakens the requested one-by-one barrier. This
-changes the queue's safety and usefulness and must be decided before IAQ-1.
+Resolved by D-3.
 
-### Q-2. Is the queue foreground and cancelable, or a persistent service?
+### Q-2. Is the queue foreground or persistent?
 
-P-1 proposes a foreground process owned by the dashboard, with a repeat click
-disabled and quit blocked until the operator cancels or the current canonical
-review ends. A persistent service would require installation, discovery,
-status, incident, and shutdown contracts comparable to the PR drainer and
-would materially enlarge the arc. The desired lifetime must be decided before
-IAQ-2.
+Resolved by D-4.
 
-### Q-3. Must the button show the current issue while the queue is running?
+### Q-3. Must the first release show the current issue while running?
 
-P-3 shows only `running…` until a final result and preserves detailed progress
-in logs. Showing `reviewing issue #N` live would require a trustworthy bounded
-progress protocol or status document in addition to the final JSON result.
-This affects IAQ-1 and IAQ-2 but not the stop warning.
+Resolved by D-6. Preserve this as the seed for a follow-on progress-extension
+design after the current epic is complete.
+
+### Q-4. How does a persistent service recover from the ordered barrier?
+
+Resolved by D-8.
+
+### Q-5. What happens when the operator presses `r` while the service is on?
+
+Resolved by D-10.
+
+### Q-6. Should the service installer be separate from install_issue_review.py?
+
+Resolved by D-11.
+
+### Q-7. Which keyboard shortcut controls the approval service?
+
+Resolved by D-14.
 
 ## Verification strategy
 
-- Python pure/fixture tests prove complete pagination beyond 500 open issues,
-  numeric ordering, current-approval skips, current and newly produced
-  changes-requested barriers, fail-closed incomplete inventory, incident and
-  invalid stops, legacy dual routing, lock exclusion, no later model invocation
-  after a barrier, and exact result/exit semantics.
-- Python CLI tests use fake `gh`, `codex`, and `claude` executables and
-  temporary Git repositories; no real account, network, or terminal is needed.
-- Haskell pure tests prove command construction, discovery/config forwarding,
-  result decoding, schema contradictions, state/color mapping, repeated-click
-  refusal, and outcome-unknown wording.
-- Haskell process fixtures cover start, completion, changes requested, malformed
-  stdout, non-zero exit, timeout, process-group cancellation, and lock-holder
-  diagnostics with a fake installed backend.
-- UI event tests cover click and keyboard parity, process-start races, refresh
-  after every terminal result, preservation of terminal status across refresh,
-  and interaction with selected-card canonical review.
-- Golden frames cover the expanded sidebar in normal, narrow, running,
-  complete, warning, and error states under supported border/color policies.
-- Contract tests keep `docs/design.md`'s key and lifecycle tables,
-  `docs/agent-workflow-contract.md`'s authority/dependency descriptions, and
-  the implementation synchronized. The new design document's publication
-  lane must be resolved before it is tracked or published.
+- Python backend tests prove numeric ordering, current-approval skips,
+  pre-existing and newly produced barriers, no higher model invocation,
+  incidents/invalid stops, legacy dual routing, lock exclusion, and exact
+  result/exit semantics.
+- Service/controller fixtures use fake `gh`, `codex`, and `claude`, temporary
+  Git repositories, fake backend results, and temporary runtime/log roots to
+  exercise idle polling, barriers, recovery, crashes, malformed results,
+  signals, and status atomicity without a real account or network.
+- Installer tests cover per-repository labels/plists, discovery-record locking,
+  upgrades, custom install/config paths, identity collisions, ordinary-file
+  refusal, idempotent reinstall, and uninstall behavior.
+- Haskell pure/process tests cover discovery, status decoding, controller
+  start/stop, timeout/process-group cleanup, transition races, warning/error
+  mapping, configured identity, and unsupported platforms.
+- UI event tests cover click/key parity, repeat-click refusal, monitor refresh,
+  barrier persistence, board refresh after mutations, and selected-card review
+  interaction.
+- Golden frames cover approval off/on/starting/stopping/warning/error states
+  above the drainer under supported sizes, borders, and color policies.
+- Contract and packaging tests keep authoritative docs, dependency manifest,
+  release inventory, installed assets, and both service boundaries in sync.
 
 ## Delivery plan
 
-### IAQ-1. Add a bounded review-queue mode to the canonical backend
+### IAQ-1. Add an ordered barrier-aware queue mode to the canonical backend
 
-- **Outcome:** The installed canonical Python backend can run one finite,
-  numerically ordered pass and return a validated terminal result without
-  continuing past a changes-requested barrier.
-- **Scope:** Add `--review-queue`; enumerate the complete open-issue inventory;
-  refactor queue classification away from the daemon-only cap and skip
-  behavior; hold the existing lock for the pass; define the v1 JSON result and
-  exit semantics; add Python tests and backend contract documentation.
+- **Outcome:** `approve_issues.py` runs one finite numeric pass and returns a
+  validated result without continuing past any current changes-requested issue.
+- **Scope:** Add `--review-queue`; separate ordered queue classification from
+  legacy daemon selection; define the JSON result/exit contract; preserve the
+  canonical lock, routing, publications, and cleanup; add Python tests.
 - **Phase:** 1 — backend contract.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-5`.
-- **Acceptance signals:** Fake-executable tests with more than 500 open issues
-  show complete enumeration and ascending numeric calls; incomplete inventory
-  starts no review; no call occurs above a barrier; canonical comments/labels
-  remain unchanged in shape; stdout contains one bounded result; and concurrent
-  lock ownership fails.
-- **Out of scope:** Haskell integration, sidebar rendering, service
-  installation, and issue revision.
-- **Open questions:** `Q-1`, `Q-3`; stop for those decisions before drafting
-  the issue because they alter the command contract.
+- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-7`, `D-15`.
+- **Acceptance signals:** Fake-executable tests show ascending numeric calls,
+  at most one model-reviewed issue per invocation, no call above a barrier,
+  unchanged v2 publications, validated idle/advanced/changes/retry results, and
+  safe handling of concurrent lock ownership.
+- **Out of scope:** Persistent supervision, Haskell, sidebar UI, and revision.
+- **Open questions:** `None`.
 
-### IAQ-2. Integrate the queue process and result contract with Kanban
+### IAQ-2. Build the persistent issue approval controller and runtime
 
-- **Outcome:** Kanban can resolve, launch, observe, stop if authorized, and
-  safely classify one queue pass independently of selected-card review.
-- **Scope:** Add the focused Haskell queue domain/invocation module, argument
-  and JSON schema validation, managed-process lifecycle, app state/events,
-  preflight, concurrency notices, completion refresh, and process fixtures.
-- **Phase:** 2 — application lifecycle.
+- **Outcome:** A foreground controller run can supervise repeated bounded
+  backend passes with durable per-repository status, incidents, and logs.
+- **Scope:** Add the controller/service loop, repository identity and runtime
+  roots, atomic status/incident schemas, child process-group supervision,
+  intentional-stop handling, barrier self-resolution, polling/backoff, and
+  hermetic Python tests. Expose controller `run` and read-only `status`
+  commands without installing a LaunchAgent yet.
+- **Phase:** 2 — service runtime.
 - **Depends on:** `IAQ-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-4`, `D-5`.
-- **Acceptance signals:** Hermetic tests observe every terminal outcome,
-  process-group cleanup, no duplicate local start, safe conflict with the
-  backend lock, board refresh after possible mutation, and no false claim of
-  completion after malformed or incomplete output.
-- **Out of scope:** Final sidebar rendering and a persistent launchd service.
-- **Open questions:** `Q-2`, `Q-3`; the chosen lifetime and progress surface
-  must be settled before this slice is drafted.
+- **Relevant decisions:** `D-3`, `D-4`, `D-7`, `D-8`, `D-9`, `D-10`, `D-15`.
+- **Acceptance signals:** Fixture runs remain alive across idle polls, review at
+  most one issue under each backend lock, pause without model work at the
+  barrier, auto-resolve only after a current approval, preserve the barrier on
+  intentional stop, record unexpected exits, and write every runtime document
+  atomically.
+- **Out of scope:** LaunchAgent installation/discovery, Haskell, sidebar UI,
+  live progress, and automatic specification repair.
+- **Open questions:** `None`.
 
-### IAQ-3. Add the issue approval queue sidebar control
+### IAQ-3. Install per-repository issue approval LaunchAgents
 
-- **Outcome:** Operators can start and understand the queue from a new control
-  immediately above `drain_prs.py`, with keyboard parity and a numbered amber
-  stop warning.
-- **Scope:** Render the control stack; add clickable name and board action;
-  connect the selected shortcut and notices; map idle/running/complete/warning/
-  error states to theme attributes; update help/footer and authoritative docs;
-  add interaction and golden-frame tests.
-- **Phase:** 3 — operator experience.
+- **Outcome:** Each canonical repository can load one stopped approval-service
+  job and explicitly start/stop it through an installed controller.
+- **Scope:** Add the dedicated installer and controller install/start/stop/
+  uninstall operations; stable managed links; one normalized job label, plist,
+  runtime/log root, and discovery-record entry per repository; serialized
+  discovery updates; identity and same-repository/multiple-checkout guards;
+  dry-run, upgrade, refusal, and installer fixtures.
+- **Phase:** 3 — installation and lifecycle control.
 - **Depends on:** `IAQ-2`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-4`.
-- **Acceptance signals:** Click and keyboard start the identical action;
-  a changes result leaves an amber detail naming `#N`; complete is green;
-  failure/outcome unknown is red; the control remains above the drainer in
-  supported widths and border policies; all key-table and golden tests pass.
-- **Out of scope:** Automatic navigation into issue repair, persistent run
-  history, and service management.
-- **Open questions:** `Q-2` if cancel interaction changes the button behavior;
-  otherwise `None`.
+- **Relevant decisions:** `D-4`, `D-7`, `D-8`, `D-9`, `D-11`, `D-12`, `D-13`.
+- **Acceptance signals:** Two repository installs coexist; a second checkout of
+  one identity is refused while its job runs; install and login start nothing;
+  explicit start outlives its caller; stop is intentional; reinstallation
+  converges; ordinary files are preserved; custom config and install paths are
+  rediscoverable without inherited environment.
+- **Out of scope:** Haskell, sidebar UI, workflow-setup integration, and live
+  progress.
+- **Open questions:** `None`.
+
+### IAQ-4. Expose issue approval service status and control to Kanban
+
+- **Outcome:** Kanban can discover, monitor, start, and stop the correct
+  repository's approval service and truthfully classify every service state.
+- **Scope:** Add a focused Haskell service domain, discovery/status decoding,
+  launchctl control, app state/events, monitor lifecycle, identity validation,
+  concurrency notices, selected-card review policy, board refresh after
+  possible mutation, and process fixtures.
+- **Phase:** 4 — application lifecycle.
+- **Depends on:** `IAQ-3`.
+- **Ordering:** `critical path`.
+- **Relevant decisions:** `D-4`, `D-5`, `D-7`, `D-8`, `D-9`, `D-10`, `D-12`.
+- **Acceptance signals:** Hermetic tests cover every state and malformed record,
+  transition race, wrong-repository refusal, controller timeout/process-group
+  cleanup, unsupported host, barrier repair with `r`, and refusal of competing
+  canonical work while one service review is live.
+- **Out of scope:** Sidebar drawing and live per-issue progress.
+- **Open questions:** `None`.
+
+### IAQ-5. Add the approve_issues.py sidebar control
+
+- **Outcome:** Operators control and understand the persistent service from a
+  new button immediately above `drain_prs.py`.
+- **Scope:** Render the matching control; add clickable name, keyboard action,
+  event routing, transition/refusal notices, theme mapping, help/footer text,
+  authoritative key-contract updates, and golden/UI tests.
+- **Phase:** 5 — operator experience.
+- **Depends on:** `IAQ-4`.
+- **Ordering:** `critical path`.
+- **Relevant decisions:** `D-5`, `D-6`, `D-8`, `D-9`, `D-14`.
+- **Acceptance signals:** Click/key parity; exact `checking…`, `starting…`, green
+  `on`, `stopping…`, and `off`; exact yellow
+  `on · unresolved incident · Issue #N requests changes`; red stopped/error
+  states; and stable stacking above the drainer at supported sizes.
+- **Out of scope:** Progress-extension UI and automatic navigation to repair.
+- **Open questions:** `None`.
+
+### IAQ-6. Document local installation, operation, and recovery
+
+- **Outcome:** Operators can install, diagnose, stop, recover, upgrade, and
+  remove the approval service without relying on implementation knowledge.
+- **Scope:** Finalize the local installer/status commands, service guide,
+  agent-workflow authority and durable-state contract, development/release
+  inventories, manual legacy-daemon conflict remedy, failure recovery, and the
+  handoff to a future progress-extension design. Mention the service in
+  workflow setup without adding it as a generalized setup component.
+- **Phase:** 6 — operability and contract closure.
+- **Depends on:** `IAQ-3`, `IAQ-4`, `IAQ-5`.
+- **Ordering:** `critical path`.
+- **Relevant decisions:** `D-4`, `D-5`, `D-6`, `D-8`, `D-9`, `D-10`, `D-11`, `D-12`, `D-13`.
+- **Acceptance signals:** Source-distribution tests contain every supported
+  asset; the manual installer loads but starts no service; documentation names
+  every local runtime path, command, and barrier-recovery rule; unsupported
+  hosts get a clear diagnostic; the legacy launcher/daemon is not mistaken for
+  the supported service.
+- **Out of scope:** Implementing the progress extension itself.
+- **Open questions:** `None`.

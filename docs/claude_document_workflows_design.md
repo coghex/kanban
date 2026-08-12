@@ -25,8 +25,8 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Make the document and issue-drafting workflow loops brand-complete
-- [ ] CDW-1. Merge the decision-authority guardrails into the tracked design workflows
+- [x] EPIC. Make the document and issue-drafting workflow loops brand-complete — [#260]
+- [x] CDW-1. Merge the decision-authority guardrails into the tracked design workflows — [#239]
 - [ ] CDW-2. Derive Claude counterparts for design-epic and process-design-doc
 - [ ] CDW-3. Package the report write side for both brands
 - [ ] CDW-4. Package issue-rereview for both brands
@@ -56,8 +56,19 @@ concrete precondition
   audit report's ledger reads `WF-7 — [#239]`, `WF-8 — [#240]`,
   `WF-9 — [#241]`; all three carry `agent-workflows` and `reviewed:approve`.
   #239 covers CDW-1, #240 covers CDW-4, and #241 bundles CDW-2 with the
-  `draft-report` half of CDW-3. No epic covers the arc — the three
-  `epic`-labeled issues (#79, #122, #159) are all closed.
+  `draft-report` half of CDW-3. The umbrella epic is #260, created
+  2026-08-11 with `epic` and `agent-workflows`; the three older
+  `epic`-labeled issues (#79, #122, #159) are closed and cover other arcs.
+- **#239's approved review amended its spec away from a verbatim standard.**
+  Its cross-agent review (GPT-5.6-Sol, base `0d32e974`, verdict APPROVE)
+  records that "the behavioral clauses enumerated in requirement 1 govern;
+  implementation does not depend on access to untracked personal Claude
+  files," naming the reconciliation with this document's D-3/CDW-1 wording
+  explicitly. Verified independently: the personal authority text appears in
+  no tracked path — the only in-repo hit for "Human interaction and decision
+  authority" is this design document naming the section, so the verbatim
+  standard was unevaluable by any tracked test or by CI. D-3's amendment
+  adopts the behavioral standard.
 - **#241's vendoring model conflicts with this design (D-4).** Its
   requirement 1 vendors `design-epic.md` and `process-design-doc.md`
   byte-for-byte from the personal Claude sources, and its requirement 5
@@ -115,6 +126,24 @@ concrete precondition
   new drafting asset. The backend already supports rereview
   (`tools/approve_issues.py --rereview`), and #240's stated prerequisite
   #238 has merged (PR #244), so nothing blocks it.
+- **The declared-inventory surface is wider than one contract file (D-9).**
+  Verified: `docs/document-workflow-contract.md` §3's responsibility matrix
+  marks `$design-epic`, `$process-design-doc`, and `$draft-report` **Codex
+  only** in its own table, so amending §§3.4-3.5 alone leaves the contract
+  self-contradictory. `claude-plugin/…/commands/process-report.md` routes its
+  Epic disposition to Codex's `$design-epic`/`$process-design-doc`
+  (`:262-263`, `:274-276`), and
+  `test_claude_epic_disposition_routes_to_packaged_codex_workflows`
+  (`tools/test_document_workflow_contract.py:328`) *asserts* the Claude slash
+  commands are absent — it fails the moment they exist.
+  `tools/test_agent_workflow_contract.py` enumerates its plugin surfaces
+  rather than globbing them (`:85`, `:135`, `:149`). The Claude plugin ships
+  ten commands, and `claude-plugin/README.md:232` pins "exactly the ten
+  packaged workflows"; `codex-plugin/README.md:108` calls the Claude gap
+  declared; `docs/README.md:8` describes "the declared Codex-only gap".
+  `HASKELL_PARITY_COMMAND_NAMES` is exactly five
+  (`tools/test_claude_plugin.py:74`) and stays five — every workflow here is
+  user-invoked.
 - **The Claude command format is settled.** `claude-plugin/…/commands/*.md`
   frontmatter (`description`, `argument-hint`) plus `$ARGUMENTS` and the
   docs-worktree resolution block; `process-report.md` is byte-identical to
@@ -178,11 +207,12 @@ Proposed shape, pending the open questions:
   the `drain-prs` pair alone. §3.5's rationale is satisfied in the order it
   demands, and its statements (test-pinned verbatim) are amended in CDW-2
   to declare whatever remains Codex-only — nothing, once CDW-3 lands.
-- **Authority text policy (D-3).** Strict wins uniformly: the personal
-  copies' authority sections land verbatim in both brands' design pair,
-  and the permissive uncertainty sentence is replaced by "Never bury a
-  blocking ambiguity in the document and proceed." One policy, both
-  brands.
+- **Authority text policy (D-3).** Strict wins uniformly: both brands'
+  design pair carries an authority section equivalent in force to the
+  personal copies', stated as enumerated behavioral clauses rather than as
+  a byte-copy of an untracked file, and the permissive uncertainty sentence
+  is replaced by "Never bury a blocking ambiguity in the document and
+  proceed." One policy, both brands.
 - **Report write side (CDW-3, D-1).** `draft-report` transposes to a
   Claude command from its tracked Codex text (already byte-stable across
   its copies). `note-problem` vendors into the Codex plugin from the
@@ -238,13 +268,29 @@ Consequence: §2 grows to nine rows and the issue-review assets'
 
 ### D-3. Strict authority text wins uniformly
 
-User signoff 2026-08-10. The personal copies' "Human interaction and
-decision authority" sections land verbatim (modulo brand tokens) in both
-brands' design pair, and "Leave lesser uncertainty in the document instead
-of blocking useful progress" is replaced by "Never bury a blocking
-ambiguity in the document and proceed." Keeping the permissive sentence
-and brand-divergent policy were rejected. Consequence: CDW-1 is a pure
+User signoff 2026-08-10. Both brands' design pair carries a "Human
+interaction and decision authority" section equivalent in force to the
+personal copies', and "Leave lesser uncertainty in the document instead of
+blocking useful progress" is replaced by "Never bury a blocking ambiguity
+in the document and proceed." Keeping the permissive sentence and
+brand-divergent policy were rejected. Consequence: CDW-1 is a pure
 strengthening; the cross-brand parity claim covers the authority text.
+
+**Amended 2026-08-11 (user signoff):** the standard is behavioral
+equivalence via enumerated clauses, not a verbatim copy of the personal
+sections. The original wording — "land verbatim (modulo brand tokens)" —
+made acceptance depend on `~/.claude/commands/design-epic.md` and
+`process-design-doc.md`, which exist in no tracked path, so neither a
+tracked test nor CI can evaluate it; #239's approved review reached the
+same conclusion independently and amended its spec to say the enumerated
+behavioral clauses govern. The rejected alternative was to hold the
+verbatim standard and revise #239 back to it. Nothing about the *substance*
+changes: the same guardrails land and the same permissive sentence goes.
+The amendment also removes a tension with D-4, whose whole rationale is
+that parity comes from deriving off tracked text rather than chasing
+personal lineages — an acceptance criterion pointing back at an untracked
+personal file cut against that. D-4 itself is unaffected, because CDW-2
+derives from the tracked Codex text under either standard.
 
 ### D-4. The Claude design pair derives from the strengthened tracked Codex text
 
@@ -299,10 +345,28 @@ Closing #241 and refiling two issues was rejected: revision preserves the
 number, the review history, and the audit report's `WF-9 — [#241]` link,
 which a refile would have to repoint.
 
-Consequence: the edited spec re-enters the gate as `reviewed:revised` for
-opposite-brand rereview, so #241 is not workable until that rereview
-approves it. This is a tracker mutation, applied by `/process-design-doc`
-under its own signoff, never by a design session.
+Consequence: the edited spec re-enters the gate, so #241 is not workable
+until a fresh review approves it. This is a tracker mutation, applied by
+`/process-design-doc` under its own signoff, never by a design session.
+
+**Amended 2026-08-11 (user signoff):** the mechanism stated above was wrong,
+and the correction carries a hazard worth naming. Editing the body changes
+the spec fingerprint — `tools/approve_issues.py` computes it from the body
+and excludes the three workflow labels (`:501`) — so `current_gate_status`
+stops matching the existing marker, reports "no current opposite-agent v2
+review marker matches this spec", and flips the gate to not-approved. But
+nothing removes the `reviewed:approve` label: the script strips those labels
+only at publication (`:1382-1387`), and `Kanban.Domain` (`:427`) reads
+`approvalLabel = "reviewed:approve"`, so the board would go on showing #241
+as ready to solve against a spec its review no longer covers. Nor is this a
+"rereview" in the backend's sense: `rereview_reviewers` raises "Issue
+rereview requires a CHANGES_REQUESTED parent review" (`:681`) and #241's
+marker is `verdict=APPROVE`, so the path is a fresh **initial** review,
+routed to Codex by the claude origin marker. Therefore, when the revision is
+applied, `reviewed:approve` is removed and `reviewed:revised` added — the
+label whose own description is "Specification amended and awaiting
+opposite-brand rereview" — and the next publication clears it automatically
+(`:1383`).
 
 ### D-7. CDW-3 is serialized behind CDW-2
 
@@ -328,6 +392,35 @@ processing run could read the stale note as authority.
 
 Consequence: one direct-to-master edit, with its exact text approved before
 the push. It belongs to no slice and does not enter the epic's checklist.
+
+### D-9. The slice scopes carry the full declared-inventory surface
+
+User signoff 2026-08-11. D-5's split and D-7's serialization both stand.
+What changes is the recorded scope: #241's approved review enumerated
+surfaces this document's one-line scopes never named, and each one is
+verified present in the tree. Every slice now lists them, with the counts it
+must land.
+
+Counts, verified today: the Claude plugin ships ten commands, §2 declares
+five assets, and `process-report` is the sole cross-brand pair. CDW-2 takes
+those to twelve, seven, and three; CDW-3 to fourteen, ten, and five.
+`HASKELL_PARITY_COMMAND_NAMES` stays at five throughout, because every
+workflow this arc adds is user-invoked and never Kanban-spawned.
+
+The review's own numbers — "eight declared assets and four cross-brand
+workflow pairs", "thirteen commands" — assume all three Claude commands land
+in one PR *and* predate D-1 adding `note-problem`, so they are stale under
+any arc shape and are superseded by the per-slice counts above.
+
+Rejected: reverting the split to inherit the review's amendments unchanged.
+It would not have restored the reviewed shape anyway — `note-problem` joined
+the arc after that review — and it would have merged a critical-path slice
+with one deliberately off it.
+
+Consequence: §3.5 closes in two steps rather than one. CDW-2 reduces the
+Codex-only set to `$draft-report` alone; CDW-3 empties it. Both slices still
+fit one PR each: the bulk is two, then two more, Markdown assets plus
+mechanical count updates across roughly six files.
 
 ## Open questions
 
@@ -398,7 +491,11 @@ Resolved by D-8.
   declared-set change lands with its expectation change, and the suites
   prove no undeclared asset and no dangling declaration.
 - `tools/test_claude_plugin.py` / `tools/test_codex_plugin.py` validate
-  frontmatter and body shape of every vendored asset.
+  frontmatter and body shape of every packaged asset, and pin the Claude
+  command count and the five-name Haskell-parity set.
+- `tools/test_agent_workflow_contract.py` is the third pinned inventory and
+  the easiest to miss: its plugin surfaces are enumerated, not globbed, so a
+  new asset is invisible to it until it is listed by hand (D-9).
 - Cross-brand parity: for each packaged pair, a diff modulo the known brand
   transpose set (tool names, invocation tokens, origin markers) is empty —
   the same property `process-report` already exhibits, asserted as a fixture
@@ -428,49 +525,94 @@ Resolved by D-8.
 - **Depends on:** none
 - **Ordering:** critical path
 - **Relevant decisions:** D-3, D-4 (this slice produces D-4's source text)
-- **Acceptance signals:** plugin suite green; the authority section reads
-  identically to the personal source modulo brand tokens; the permissive
-  sentence is gone.
+- **Acceptance signals:** plugin suite green; both tracked design skills
+  carry an authority section satisfying D-3's enumerated behavioral
+  clauses, verifiable without reference to any untracked file; the
+  permissive sentence is gone; the contract check fails when the authority
+  statement is deleted.
 - **Out of scope:** any Claude-side file; §2/§3.5 changes.
 - **Open questions:** None
 
 ### CDW-2. Derive Claude counterparts for design-epic and process-design-doc
 
 - **Outcome:** `/design-epic` and `/process-design-doc` exist as tracked
-  Claude commands transposed from CDW-1's strengthened text (D-4); §2 gains
-  their rows; §3.5 is amended; test expectations updated.
-- **Scope:** two new command files, contract rows and statements, test
-  constants, plugin manifest description.
+  Claude commands transposed from CDW-1's strengthened text (D-4), and every
+  declared inventory, contract statement, and documentation claim that counts
+  or brands the document workflows moves with them.
+- **Scope (each item verified against the tree, D-9):**
+  - two new command files under `claude-plugin/plugins/kanban/commands/`;
+  - `docs/document-workflow-contract.md` — §2 gains two rows; §3's
+    responsibility matrix flips two **Codex only** cells; §3.4's
+    "only cross-brand pair" language; §3.5 records a *partial* closure,
+    leaving `$draft-report` the sole remaining Codex-only workflow;
+  - `claude-plugin/…/commands/process-report.md` — its Epic disposition
+    hands off to Codex's `$design-epic`/`$process-design-doc` (`:262-263`,
+    `:274-276`) and must name the Claude commands instead;
+  - `tools/test_document_workflow_contract.py` — `EXPECTED_DECLARED_PATHS`
+    5→7, `CODEX_ONLY_WORKFLOWS` 3→1, cross-brand pairs 1→3, and
+    `test_claude_epic_disposition_routes_to_packaged_codex_workflows`
+    (`:328`) inverted: it currently *asserts* the Claude slash commands are
+    absent, so it fails the moment they exist;
+  - `tools/test_claude_plugin.py` — discovery ten→twelve, with
+    `HASKELL_PARITY_COMMAND_NAMES` unchanged at five;
+  - `tools/test_agent_workflow_contract.py` — `CLAUDE_PLUGIN_SURFACE_FILES`,
+    `DOCUMENT_SURFACE_FILES`, and `DOCUMENT_SURFACE_EXPECTED_COMMANDS` are
+    enumerated rather than globbed, plus `docs/agent-workflow-contract.md`'s
+    matching prose;
+  - `claude-plugin/README.md` (`:8`, `:91`, `:232` "exactly the ten packaged
+    workflows"), `codex-plugin/README.md` (`:90`, `:108` "only
+    `/process-report`… a declared gap"), `docs/README.md` (`:8`, which
+    describes "the declared Codex-only gap"), and the Claude plugin manifest
+    description.
 - **Filed as:** #241, which bundles this slice with CDW-3's `draft-report`
-  and specifies the vendoring model D-4 rejects. D-6 narrows it in place;
-  it is not workable until that revision clears rereview.
+  and specifies the vendoring model D-4 rejects. D-6 narrows it in place; it
+  is not workable until the revised spec clears a fresh review.
 - **Phase:** 2
 - **Depends on:** CDW-1
 - **Ordering:** critical path
-- **Relevant decisions:** D-1, D-4, D-5
-- **Acceptance signals:** document-workflow and Claude-plugin suites green;
-  transpose-parity diff against the post-CDW-1 Codex text empty; the
-  pinned-source rationale in §3.5 is satisfied, not deleted.
-- **Out of scope:** report workflows; issue-rereview.
+- **Relevant decisions:** D-1, D-4, D-5, D-6, D-9
+- **Acceptance signals:** `python3 -m unittest discover -s tools -p 'test_*.py'`
+  green; transpose-parity diff against the post-CDW-1 Codex text empty; §3.5
+  reads as a partial closure naming its pinned source rather than a deletion;
+  no tracked file still claims ten Claude commands or a single cross-brand
+  pair.
+- **Out of scope:** `draft-report` and `note-problem` (CDW-3); issue-rereview
+  (CDW-4); emptying §3.5's Codex-only set.
 - **Open questions:** None
 
 ### CDW-3. Package the report write side for both brands
 
 - **Outcome:** `/draft-report` exists as a Claude command; `note-problem`
-  exists in both plugins as a cross-brand pair; §2,
-  `DOCUMENT_WORKFLOW_NAMES`, and the tests are updated.
-- **Scope:** the new command/skill files, §2 rows, the workflow-name set
-  extension, a §3.4-style status compatibility statement for the write
-  pair, test constants.
+  exists in both plugins as a cross-brand pair; the declared sets, the
+  workflow-name set, and §3.5's closure all complete.
+- **Scope (each item verified against the tree, D-9):**
+  - `claude-plugin/…/commands/draft-report.md`, transposed from the tracked
+    Codex skill, pinned by commit and SHA-256 at implementation time;
+  - `codex-plugin/…/skills/note-problem/SKILL.md`, vendored from the personal
+    skill without its `agents/` sidecar, plus an authored Claude
+    `note-problem.md`;
+  - `docs/document-workflow-contract.md` — §2 gains three rows; §3's matrix
+    gains `note-problem` and flips `$draft-report`; a §3.4-style status
+    compatibility statement for the write pair; §3.5's closure completes and
+    the Codex-only set empties;
+  - `tools/test_document_workflow_contract.py` — `DOCUMENT_WORKFLOW_NAMES`
+    4→5, `EXPECTED_DECLARED_PATHS` 7→10, `CODEX_ONLY_WORKFLOWS` emptied,
+    cross-brand pairs 3→5, and `note-problem` carrying only the unchecked
+    checklist form under §4, as `$design-epic` and `$draft-report` do;
+  - `tools/test_claude_plugin.py` discovery twelve→fourteen with parity still
+    five; `tools/test_agent_workflow_contract.py`'s enumerated surfaces and
+    `docs/agent-workflow-contract.md`; the three READMEs and the manifest.
 - **Filed as:** not filed. D-6 removes this slice's work from #241, so it
   becomes a new issue.
 - **Phase:** 2
 - **Depends on:** CDW-1, CDW-2 (D-7)
 - **Ordering:** not on the critical path
-- **Relevant decisions:** D-1, D-5
-- **Acceptance signals:** suites green; a report created by either brand's
-  draft-report is processable by either brand's process-report; the
-  `agents/` sidecar is absent from the vendored `note-problem`.
+- **Relevant decisions:** D-1, D-5, D-9
+- **Acceptance signals:** `python3 -m unittest discover -s tools -p 'test_*.py'`
+  green; a report created by either brand's draft-report is processable by
+  either brand's process-report; the `agents/` sidecar is absent from the
+  vendored `note-problem`; §3.5's Codex-only set is empty and the section
+  reads as a completed closure record rather than a deletion.
 - **Out of scope:** `backlog` (stays personal, D-1).
 - **Open questions:** None
 
