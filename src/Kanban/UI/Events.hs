@@ -1,9 +1,11 @@
 module Kanban.UI.Events
-  ( IncidentsAction (..),
+  ( BoardMouseAction (..),
+    IncidentsAction (..),
     OverlayMouseAction (..),
     applyCardClick,
     applyIncidentsAction,
     applyRunningProcessClick,
+    boardMouseAction,
     handleEvent,
     incidentsAction,
     killSelectionNotice,
@@ -151,24 +153,60 @@ handleEvent event = do
       | Just input <- searchInput state.appSearch keyEvent -> handleSearchInput input
     (Nothing, VtyEvent keyEvent)
       | Just action <- boardAction BoardScope keyEvent -> applyBoardAction action
-    (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
-    -- A live search claims a left or right press aimed at any column but the
-    -- one it is searching, wherever in that column it landed: the search moves
-    -- there and the press does nothing else, so none of the arms below sees
-    -- it. Everything the transfer declines — the wheel, the middle button, and
-    -- every press inside the searched column — falls through to them.
-    (Nothing, MouseDown name button _ _)
-      | Just column <- searchMouseTransfer state name button -> modify (transferSearchTo column)
-    (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
-    (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _) -> toggleTrackerFromClick column row trackerNumber
-    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _) -> openRunningProcessOrSelect column row
-    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _) -> selectOrOpenCard column row
-    (Nothing, MouseDown (CardTarget column _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
-    (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
-    (Nothing, MouseDown (ColumnViewport column) Vty.BScrollDown _ _) -> scrollColumn column 3
+    (Nothing, MouseDown name button modifiers _)
+      | Just action <- boardMouseAction state name button modifiers -> applyBoardMouseAction action
     _ -> pure ()
+
+-- | What one mouse press on the base board means.
+--
+-- The whole precedence, decided in one place rather than spread over the arms
+-- that carry it out, for the same reason the key table in "Kanban.UI.Keys"
+-- is: a press whose meaning depends on what else is open — and under a live
+-- search every column press does — cannot be reasoned about, or tested, one
+-- arm at a time.
+data BoardMouseAction
+  = -- | Move the live search to this column, consuming the press.
+    TransferSearch BoardColumn
+  | ToggleDrainerFromClick
+  | ToggleEpicFromClick BoardColumn Int Int
+  | SelectOrOpenCardAt BoardColumn Int
+  | OpenRunningProcessAt BoardColumn Int
+  | ScrollColumnBy BoardColumn Int
+  deriving stock (Eq, Show)
+
+-- | The press's meaning, or 'Nothing' when the board claims nothing for it.
+--
+-- A live search outranks every column press: a left or right press aimed at
+-- any column but the searched one moves the search there and does nothing
+-- else, wherever in that column it landed. It does not outrank the drainer
+-- button, which is not a column target at all and is answered first, and it
+-- claims neither the wheel — which retargets nothing, so it keeps scrolling
+-- whatever is under the pointer — nor the middle button.
+boardMouseAction :: AppState -> Name -> Vty.Button -> [Vty.Modifier] -> Maybe BoardMouseAction
+boardMouseAction state name button modifiers = case (name, button, modifiers) of
+  (DrainerButton, Vty.BLeft, []) -> Just ToggleDrainerFromClick
+  _ | Just column <- searchMouseTransfer state name button -> Just (TransferSearch column)
+  (EpicTarget column _ _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
+  (EpicTarget column _ _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
+  (EpicTarget column row trackerNumber, Vty.BLeft, _) -> Just (ToggleEpicFromClick column row trackerNumber)
+  (CardTarget column row, Vty.BRight, _) -> Just (OpenRunningProcessAt column row)
+  (CardTarget column row, Vty.BLeft, _) -> Just (SelectOrOpenCardAt column row)
+  (CardTarget column _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
+  (CardTarget column _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
+  (ColumnViewport column, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
+  (ColumnViewport column, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
+  _ -> Nothing
+
+-- | Carries out one decided press. Total in 'BoardMouseAction', so a press
+-- cannot be given a meaning above without deciding here what it does.
+applyBoardMouseAction :: BoardMouseAction -> EventM Name AppState ()
+applyBoardMouseAction = \case
+  TransferSearch column -> modify (transferSearchTo column)
+  ToggleDrainerFromClick -> toggleDrainer
+  ToggleEpicFromClick column row trackerNumber -> toggleTrackerFromClick column row trackerNumber
+  SelectOrOpenCardAt column row -> selectOrOpenCard column row
+  OpenRunningProcessAt column row -> openRunningProcessOrSelect column row
+  ScrollColumnBy column amount -> scrollColumn column amount
 
 -- | Carries out one binding from "Kanban.UI.Keys". Total in 'BoardAction', so
 -- a binding cannot be added to that table without deciding here what pressing

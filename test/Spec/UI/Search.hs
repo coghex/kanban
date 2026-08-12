@@ -23,7 +23,7 @@ import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Workflow (entryItem)
-import Kanban.UI.Events (applyCardClick, applyRunningProcessClick)
+import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
@@ -759,48 +759,61 @@ shouldBe' actual expected =
 
 mouseSpec :: Spec
 mouseSpec = describe "mouse precedence" $ do
-  -- The whole matrix §7 names, as the decision dispatch makes: three things a
-  -- press can land on, two buttons that transfer and one wheel that never
-  -- does, inside the searched column and outside it. 'Nothing' is what sends
-  -- a press on to the ordinary arms; 'Just' consumes it as a transfer.
+  -- The whole matrix §7 names, stated against the decision dispatch actually
+  -- makes rather than against the classifier feeding it: three things a press
+  -- can land on, two buttons that transfer and a wheel that never does,
+  -- inside the searched column and outside it.
   it "transfers a left or right press anywhere in a column it is not searching" $ do
     searching <- transferring
     sequence_
-      [ (landing, button, searchMouseTransfer searching name button) `shouldBe` (landing, button, Just Active)
+      [ (landing, button, boardMouseAction searching name button [])
+          `shouldBe` (landing, button, Just (TransferSearch Active))
       | (landing, name) <- columnLandings Active,
         button <- [Vty.BLeft, Vty.BRight]
       ]
 
-  it "leaves a press inside the searched column to its ordinary meaning" $ do
+  it "gives a press inside the searched column the meaning it has with no search open" $ do
     searching <- transferring
+    plain <- searchState
     sequence_
-      [ (landing, button, searchMouseTransfer searching name button) `shouldBe` (landing, button, Nothing)
+      [ (landing, button, boardMouseAction searching name button [])
+          `shouldBe` (landing, button, boardMouseAction plain name button [])
       | (landing, name) <- columnLandings Issues,
         button <- [Vty.BLeft, Vty.BRight]
       ]
+    -- And that meaning is an action, not the absence of one, for the three
+    -- presses §7 gives the searched column.
+    boardMouseAction searching (CardTarget Issues 0) Vty.BLeft [] `shouldBe` Just (SelectOrOpenCardAt Issues 0)
+    boardMouseAction searching (CardTarget Issues 0) Vty.BRight [] `shouldBe` Just (OpenRunningProcessAt Issues 0)
+    boardMouseAction searching (EpicTarget Issues 1 700) Vty.BLeft [] `shouldBe` Just (ToggleEpicFromClick Issues 1 700)
 
-  it "never transfers on the wheel, in the searched column or out of it" $ do
+  it "keeps the wheel scrolling the column under it, searched or not" $ do
     searching <- transferring
     sequence_
-      [ (column, landing, button, searchMouseTransfer searching name button) `shouldBe` (column, landing, button, Nothing)
+      [ (column, landing, button, boardMouseAction searching name button [])
+          `shouldBe` (column, landing, button, Just (ScrollColumnBy column amount))
       | column <- [Issues, Active],
         (landing, name) <- columnLandings column,
-        button <- [Vty.BScrollUp, Vty.BScrollDown]
+        (button, amount) <- [(Vty.BScrollUp, -3), (Vty.BScrollDown, 3)]
       ]
 
-  it "never transfers on the middle button, which the board gives no meaning" $ do
+  it "claims nothing at all for the middle button" $ do
     searching <- transferring
     sequence_
-      [ (column, landing, searchMouseTransfer searching name Vty.BMiddle) `shouldBe` (column, landing, Nothing)
+      [ (column, landing, boardMouseAction searching name Vty.BMiddle []) `shouldBe` (column, landing, Nothing)
       | column <- [Issues, Active],
         (landing, name) <- columnLandings column
       ]
 
-  -- Requirement 6: the drainer button is dispatched by a name of its own, so
-  -- a press on it is not a column press at all and its toggle keeps running
-  -- with the search untouched.
-  it "never transfers on the drainer button" $ do
+  -- Requirement 6: the drainer button is not a column target, so it is
+  -- answered ahead of the transfer and keeps the toggle it has always
+  -- dispatched — the search it never sees keeps its target and its query.
+  it "still dispatches the drainer button's toggle while a search is live" $ do
     searching <- transferring
+    plain <- searchState
+    boardMouseAction searching DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    boardMouseAction plain DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    -- Nothing about that press is a transfer, on any button.
     sequence_
       [ searchMouseTransfer searching DrainerButton button `shouldBe` Nothing
       | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]

@@ -441,8 +441,10 @@ column, clamped rather than wrapped like the ordinary board's column movement,
 so a press at the leftmost or rightmost column changes nothing at all: the query
 survives, the selection survives, and no notice is raised. The wheel never
 moves a search — over any column, searched or not, it scrolls that column and
-does nothing else — and the middle button keeps its existing no-op, as does a
-click on the drainer button, which is dispatched by a name of its own.
+does nothing else — and the middle button keeps its existing no-op. The drainer
+button is not a column target at all: a left click on it starts or stops the
+drainer exactly as it does with no search open, moving neither the search nor
+the query.
 
 A move empties the query and draws the box at the top of the new target, which
 therefore shows all of its entries, and both headings return to the ordinary
