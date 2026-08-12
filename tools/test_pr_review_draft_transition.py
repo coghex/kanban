@@ -211,6 +211,68 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                 restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
                 self.assertIn("draft state was restored", str(excinfo.exception))
 
+    def test_failed_ready_command_reconciles_and_restores_a_server_side_transition(self):
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.pr(draft=True)
+                before = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:approve"],
+                    "ready_for_review": False,
+                }
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module, pr, "APPROVE", [before]
+                )
+
+                def transition_then_fail(*_args):
+                    pr["isDraft"] = False
+                    raise module.WorkflowError("gh pr ready failed after applying the transition")
+
+                ready.side_effect = transition_then_fail
+                with stack, self.assertRaises(module.WorkflowError) as excinfo:
+                    self.publish(module, pr, "APPROVE")
+
+                ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 1)
+                clear.assert_called_once_with(
+                    Path("/fake-repo"),
+                    "coghex/kanban",
+                    89,
+                    "reviewed:approve",
+                    "reviewed:changes",
+                )
+                restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertIn("draft state was restored", str(excinfo.exception))
+
+    def test_failed_ready_command_does_not_restore_when_the_pr_remains_a_draft(self):
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = self.pr(draft=True)
+                before = {
+                    "comment_url": "https://example.test/comment",
+                    "labels": ["reviewed:approve"],
+                    "ready_for_review": False,
+                }
+                stack, verify, ready, restore, clear = self.publication_context(
+                    module, pr, "APPROVE", [before]
+                )
+                ready.side_effect = module.WorkflowError("gh pr ready failed before the transition")
+
+                with stack, self.assertRaises(module.WorkflowError) as excinfo:
+                    self.publish(module, pr, "APPROVE")
+
+                ready.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
+                self.assertEqual(verify.call_count, 1)
+                clear.assert_called_once_with(
+                    Path("/fake-repo"),
+                    "coghex/kanban",
+                    89,
+                    "reviewed:approve",
+                    "reviewed:changes",
+                )
+                restore.assert_not_called()
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
+
     def test_ready_and_restore_use_github_draft_commands(self):
         for brand, module in self.modules.items():
             with self.subTest(brand=brand), mock.patch.object(module, "run") as run:

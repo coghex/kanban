@@ -1160,6 +1160,7 @@ def publish_results(
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
+    ready_transition_attempted = False
     made_ready = False
     try:
         require_current_review_state(
@@ -1187,6 +1188,7 @@ def publish_results(
             config_path=config_path,
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
+            ready_transition_attempted = True
             mark_ready_for_review(root, repo, number)
             made_ready = True
             verified = verify_publication(
@@ -1211,6 +1213,11 @@ def publish_results(
             clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             cleanup_errors.append(f"verdict-label cleanup failed ({cleanup_exc})")
+        if ready_transition_attempted and not made_ready:
+            try:
+                made_ready = not bool(pr_view(root, repo, number).get("isDraft"))
+            except WorkflowError as cleanup_exc:
+                cleanup_errors.append(f"draft-state reconciliation failed ({cleanup_exc})")
         if made_ready:
             try:
                 restore_draft(root, repo, number)
