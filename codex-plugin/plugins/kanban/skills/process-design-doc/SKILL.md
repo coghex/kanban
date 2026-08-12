@@ -13,6 +13,39 @@ The first entry is the umbrella epic. Every later entry is one child issue or
 one explicit disposition. Never draft, approve, or create a second entry in the
 same run.
 
+## Human interaction and decision authority
+
+This is a human-led tracker-design workflow, not an autonomous issue generator.
+Read-only investigation can establish facts, but the user owns every
+interpretation, design choice, issue boundary, disposition, and external
+mutation.
+
+- Agent-authored directions are **Proposals**, never **Decisions**, and this
+  workflow changes a `D-N` entry only on explicit user approval — never as a
+  side effect of drafting. If repository or tracker evidence exposes an
+  unresolved choice or contradicts a signed-off decision, stop and return the
+  document to `$design-epic` instead of quietly repairing the design inside an
+  issue.
+- A serious decision needs its own explicit signoff checkpoint: present the
+  complete verbatim artifact, its side effects, and the exact choice at stake,
+  then stop. Signoff may cover a clearly enumerated set of decisions, but never
+  an unstated or inferred one.
+- Silence, continued conversation, approval of a document edit, or a request
+  for revisions is not signoff. Neither is approval of the underlying design or
+  a broad instruction such as "process the epic". A revised artifact is
+  re-presented in full and signed off on its own.
+- Any ambiguity about the user's intent, the design contract, artifact
+  selection, or a proposed action requires user input before drafting or
+  mutating anything. That includes ambiguity about behavior, scope, ownership,
+  compatibility, migration, persistence, determinism, dependencies, ordering,
+  labels, acceptance, issue boundaries, disposition, or tracker edits. Do not
+  classify an ambiguity as minor, and do not pick the most likely
+  interpretation to keep moving — state the competing readings and their
+  consequences, and ask.
+- When clarification is required, ask at most three focused questions at a time
+  and stop. Continue after the user answers; ask another batch if further
+  ambiguities remain.
+
 ## Where files go
 
 Never leave uncommitted files in the repository's PRIMARY checkout. The PR
