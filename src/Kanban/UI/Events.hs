@@ -152,14 +152,18 @@ handleEvent event = do
     (Nothing, VtyEvent keyEvent)
       | Just action <- boardAction BoardScope keyEvent -> applyBoardAction action
     (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
+    -- A live search claims a left or right press aimed at any column but the
+    -- one it is searching, wherever in that column it landed: the search moves
+    -- there and the press does nothing else, so none of the arms below sees
+    -- it. Everything the transfer declines — the wheel, the middle button, and
+    -- every press inside the searched column — falls through to them.
+    (Nothing, MouseDown name button _ _)
+      | Just column <- searchMouseTransfer state name button -> modify (transferSearchTo column)
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _)
-      | searchClickAllowed state column -> toggleTrackerFromClick column row trackerNumber
-    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _)
-      | searchClickAllowed state column -> openRunningProcessOrSelect column row
-    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _)
-      | searchClickAllowed state column -> selectOrOpenCard column row
+    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _) -> toggleTrackerFromClick column row trackerNumber
+    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _) -> openRunningProcessOrSelect column row
+    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _) -> selectOrOpenCard column row
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)

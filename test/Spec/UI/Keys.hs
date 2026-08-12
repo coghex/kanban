@@ -15,7 +15,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified Graphics.Vty as Vty
-import Kanban.UI.Board (footerHintLine)
+import Kanban.UI.Board (footerHintLine, searchFooterHintLine)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (helpLines, mouseHelpEntries)
 import Kanban.UI.SessionCore (noSessionInputCaps, sessionInputEvent, sessionInputHelp)
@@ -105,6 +105,41 @@ spec = describe "keybinding table" $ do
       sequence_
         [ (label, label `elem` Text.splitOn "  " footerHintLine) `shouldBe` (label, True)
           | label <- ["g first", "G last", "esc close", "m merge", "Ctrl-L repaint"]
+        ]
+
+  -- §7 gives `h`, `l`, Left, and Right a different meaning while a search is
+  -- open: the letters are text and the arrows move the search. The base line
+  -- states the opposite pairing — `h`/Left is one chip, `l`/Right another —
+  -- so a search showing it would state both wrongly, and this is the group
+  -- that holds the two lines apart.
+  describe "search presentation" $ do
+    it "names the arrows for the transfer and the letters for the query" $
+      sequence_
+        [ (fragment, fragment `Text.isInfixOf` searchFooterHintLine) `shouldBe` (fragment, True)
+          | fragment <- ["h/l", "type", "←/→ move search", "↑/↓ select", "s/esc close"]
+        ]
+
+    it "reuses no chip of the board's own column movement" $
+      sequence_
+        [ (chip, chip `Text.isInfixOf` searchFooterHintLine) `shouldBe` (chip, False)
+          | chip <- map (footerHint . binding) [PreviousColumn, NextColumn]
+        ]
+
+    it "leaves the board's line saying what it always said" $
+      sequence_
+        [ (chip, chip `Text.isInfixOf` footerHintLine) `shouldBe` (chip, True)
+          | chip <- map (footerHint . binding) [PreviousColumn, NextColumn]
+        ]
+
+    it "describes the transfer in the help overlay too, on the search binding's own row" $ do
+      let row = rowOf (bindingHelpEntry (binding OpenSearch))
+      sequence_
+        [ (fragment, fragment `Text.isInfixOf` row) `shouldBe` (fragment, True)
+          | fragment <- ["h/l type into the query", "Left/Right move the search"]
+        ]
+      sequence_
+        [ (fragment, any (Text.isInfixOf fragment) helpLines) `shouldBe` (fragment, True)
+          | fragment <- ["h/l type into the query", "Left/Right move the search"]
         ]
 
   describe "help projection" $ do

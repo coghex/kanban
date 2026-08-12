@@ -178,8 +178,8 @@ binding action = case action of
   -- open box is decoded by "Kanban.UI.Search" ahead of this table, because a
   -- printable key there is text rather than a shortcut.
   OpenSearch ->
-    KeyBinding action [key 's'] [BoardScope] Nothing "search" "search the Issues column"
-      "Open the Issues column card search; printable keys filter it and Esc or s closes it"
+    KeyBinding action [key 's'] [BoardScope] Nothing "search" "search a column; h/l type into the query, Left/Right move the search"
+      "Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, and Esc or s closes it"
   ToggleEpic ->
     KeyBinding action [key 'e'] [BoardScope] Nothing "epic" "expand / collapse focused epic"
       "Expand or collapse the focused epic"

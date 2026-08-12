@@ -303,7 +303,15 @@ Responsive behavior:
   the column's inner width, occupies one content line for an empty query, and
   grows by exactly the height its wrapped query needs, moving the cards below it
   down by that amount. It is never an overlay, never leaves its column, and a
-  resize rewraps both the box and the cards under it.
+  resize rewraps both the box and the cards under it. Moving the search to
+  another column moves the box with it, drawn the same way in its new column.
+- While a search is open the footer's hint line is replaced by search's own,
+  because the board's line names `h`/`l` and the arrows for column movement and
+  a search gives both a different meaning:
+
+  ```text
+  h/l/any letter type  backspace delete  ←/→ move search  ↑/↓ select  enter details  s/esc close
+  ```
 
 ## 7. Keyboard interaction
 
@@ -318,7 +326,7 @@ Initial bindings:
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
 | `G` | Select last visible item in the column |
-| `s` | Open the Issues column card search; printable keys filter it and Esc or s closes it |
+| `s` | Open the card search on the Issues column; printable keys including h and l filter it, Left and Right move it to another column, and Esc or s closes it |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
@@ -377,9 +385,10 @@ search declines:
   input at 256 code points and accepts it again once a Backspace makes room.
 - Any chord carrying Ctrl, Meta, or Alt keeps its ordinary board meaning, so
   `Ctrl-C` reaches the same guarded quit and `Ctrl-L` repaints.
-- Up and Down move the selection among the visible results. Left and Right do
-  nothing: moving a search to another column is separate work, and the searched
-  and selected columns must not disagree.
+- Up and Down move the selection among the visible results. Left and Right move
+  the search itself one column, described below. `h` and `l` are printable, so
+  they type into the query; only the arrows move the search, which is what keeps
+  the searched and the selected column from ever disagreeing.
 - Enter opens the selected result's details and ends search, keeping that item
   selected on the restored column.
 - `s` or `Esc` clears the query, removes the box, and restores the complete
@@ -419,9 +428,31 @@ target resolution, card actions, and boundary movement all read the same visible
 entries, so a row the user can see or select never dispatches to a different
 underlying card. Clicks inside the searched column keep their ordinary meaning
 on the cards and epic headers actually displayed, and one that opens details or
-a live session ends search the way Enter does; a non-scroll click on another
-column is consumed instead, while the wheel keeps scrolling any column. A
-successful refresh re-runs the query against the new board and keeps a
+a live session ends search the way Enter does.
+
+A search moves to another column by a click or an arrow key, and both reach one
+transition, so the state is the same however it was reached. A left or right
+click aimed at any column but the searched one moves the search there, and does
+nothing else: it does not open details, toggle an epic's expansion, open a live
+session's overlay, or change that column's selected row, and the rule is
+identical for a card, an epic's header, and the column's whitespace — reaching a
+specific card there takes a second click. Left and Right move the search one
+column, clamped rather than wrapped like the ordinary board's column movement,
+so a press at the leftmost or rightmost column changes nothing at all: the query
+survives, the selection survives, and no notice is raised. The wheel never
+moves a search — over any column, searched or not, it scrolls that column and
+does nothing else — and the middle button keeps its existing no-op, as does a
+click on the drainer button, which is dispatched by a name of its own.
+
+A move empties the query and draws the box at the top of the new target, which
+therefore shows all of its entries, and both headings return to the ordinary
+count form. The column being left is re-seated by the identity of the result
+that was selected in it, so restoring it complete cannot leave a row number
+selecting a different card; the column being entered keeps exactly the row it
+remembered. Closing a moved search restores that column complete, exactly as
+closing an unmoved one does.
+
+A successful refresh re-runs the query against the new board and keeps a
 still-matching selected item selected, falling back to the first visible result
 otherwise; a failed refresh leaves the board and the query untouched. Search
 state is presentation state only: never cached, never part of a board snapshot,
