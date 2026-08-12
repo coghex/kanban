@@ -955,12 +955,13 @@ never direct-master eligible: the table below is an allowlist for the
 `coordination` lane alone, so a tracked Markdown file matching no row is a
 check failure rather than a document that publishes directly.
 
-The fourteen `coordination` documents are
+The fifteen `coordination` documents are
 `docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
 `docs/drainer-bugs.md`, `docs/issue_approval_queue_design.md`,
 `docs/issue_search_design.md`,
-`docs/linux_portability_design.md`, `docs/multi_repo_boards_design.md`,
+`docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
+`docs/multi_repo_boards_design.md`,
 `docs/pipeline-hardening.md`, `docs/public_release_design.md`,
 `docs/ui-bugs.md`, `docs/usage_awareness_design.md`, and
 `docs/workflow_audit_findings.md`. **Every other tracked
@@ -1027,6 +1028,7 @@ docs/drainer-bugs.md | coordination | audit-report
 docs/issue_approval_queue_design.md | coordination | audit-report
 docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report
+docs/managed_paths_design.md | coordination | audit-report
 docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
