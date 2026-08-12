@@ -184,7 +184,7 @@ binding action = case action of
       "Close an overlay or dismiss a transient error"
   ReviewSelection ->
     KeyBinding action [key 'r'] [BoardScope, DetailsScope] Nothing "review/revise" "review/revise/repair selected issue or PR"
-      "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session"
+      "Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header"
   SolveSelection ->
     KeyBinding action [key 'S'] [BoardScope, DetailsScope] Nothing "solve" "solve selected issue (choose model brand)"
       "Choose Codex or Claude and start/reopen an issue solve through PR creation"
