@@ -42,6 +42,16 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   pr-atomic too — that default fails closed, so a new document never publishes directly
   until section 7 says it may.
 
+### Manual docs-worktree publication
+
+- A user-directed request to publish the docs worktree is an explicit exception to the
+  publication lanes above. When its diff is documentation-only, integrate the docs
+  commit into an up-to-date local `master` and push `master` straight to
+  `origin/master`; do not open a pull request or require a review. This exception
+  includes `docs/design.md` and root instruction documents. If the diff contains source,
+  application, test, tooling, workflow, or other implementation changes, keep those
+  changes in the normal pull-request lane instead.
+
 ## Quality gates
 
 - Warning-clean builds are mandatory. `cabal.project` applies `-Werror` to package
