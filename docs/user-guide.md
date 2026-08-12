@@ -81,14 +81,14 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `e` | Expand or collapse an epic |
 | `u` | Refresh GitHub, Codex usage, and Claude usage |
 | `c` | Hide or show the sidebar |
-| `s` | Change how much agent output is shown |
+| `o` | Change how much agent output is shown |
 | `p` | Open the jobs and processes list |
 | `i` | Open the list of everything needing attention |
 | `x` | Stop the selected running job |
 | `d` | Start or stop the optional PR drainer |
 | `m` | Merge the selected approved pull request in Done |
 | `?` | Open built-in help |
-| `q` | Quit |
+| `q` / `Ctrl-C` | Quit |
 
 The footer in the application shows the main controls.
 
