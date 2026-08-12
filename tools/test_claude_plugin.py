@@ -17,9 +17,10 @@ Issue #118 added four more packaged commands — the drafting and canonical
 issue-review workflows /issue, /draft-issues, /autoissue, and /issue-review —
 so discovery and Haskell name parity are now two separate concepts here, and
 issue #229 added /process-report, the one design/report document workflow with
-a Claude counterpart.
+a Claude counterpart, and issue #240 added /issue-rereview, the drafting
+contract's repair loop for a changes-requested issue.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all ten); HASKELL_PARITY_COMMAND_NAMES is the strictly
+commands directory (all eleven); HASKELL_PARITY_COMMAND_NAMES is the strictly
 smaller set Kanban's own Haskell code spawns by name (the five above). The
 drafting and document workflows are user- or daemon-invoked and are
 deliberately excluded from that parity pinning; see
@@ -98,10 +99,17 @@ REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Kanban does not spawn.
 HASKELL_PARITY_COMMAND_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
 
-# The drafting and canonical issue-review workflows vendored by issue #118.
-# User- or daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# The drafting and canonical issue-review workflows vendored by issue #118,
+# plus the issue-rereview repair loop vendored by issue #240. User- or
+# daemon-invoked, never spawned by Kanban's CLI, so they are packaged
 # and policy-checked but excluded from Haskell name parity above.
-DRAFTING_COMMAND_NAMES = {"issue", "draft-issues", "autoissue", "issue-review"}
+DRAFTING_COMMAND_NAMES = {
+    "issue",
+    "draft-issues",
+    "autoissue",
+    "issue-review",
+    "issue-rereview",
+}
 
 # The design and report document workflows vendored by issue #229. Also user-
 # invoked and excluded from Haskell name parity. Only /process-report has a
@@ -270,7 +278,7 @@ class CommandDiscoveryTests(unittest.TestCase):
         # is pinned by parity like the other spawned workflows — and it is
         # still not part of the declared drafting surface
         # docs/drafting-workflow-contract.md and
-        # tools/test_drafting_workflow_contract.py pin at exactly seven assets.
+        # tools/test_drafting_workflow_contract.py pin at exactly nine assets.
         self.assertIn("repair", HASKELL_PARITY_COMMAND_NAMES)
         self.assertNotIn("repair", DRAFTING_COMMAND_NAMES)
 
