@@ -502,7 +502,7 @@ arithmetic, which §2.3 owns.
 | `gh`, signed in via `gh auth login` | Yes | The board's GitHub data and every write action depend on it. |
 | `git` | Yes | Repository identity, worktree creation, and status. |
 | `python3` | No | Only needed for the canonical issue-review backend and the Python tool suite. |
-| `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Worker.hs`) runs it unconditionally. |
+| `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
 | `launchctl` | No | Only needed to install and control the optional drainer's LaunchAgent; `/usr/bin/plutil` below only reads the job it installs. |
 | `/usr/bin/plutil` | No | Only needed to read the drainer's LaunchAgent status. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
@@ -878,12 +878,13 @@ runs) parses the manifest in §4 and:
   because the split in #160 left `Kanban.GitHub` a re-export façade and moved
   the `gh` spawn into `Kanban.GitHub.Run`, which is the only module under
   `src/Kanban/GitHub/` that resolves or starts an executable;
-- fails if any of the tracked Codex plugin's packaged `SKILL.md` files
-  (`codex-plugin/plugins/kanban/skills/*/SKILL.md`) or the tracked Claude
-  plugin's packaged `commands/*.md` files
-  (`claude-plugin/plugins/kanban/commands/*.md`) invoke a command, inside a
-  fenced ```` ```bash ```` block, that has no matching `executable` manifest
-  entry;
+- fails if any of the tracked Codex plugin's packaged `SKILL.md` files or the
+  tracked Claude plugin's packaged `commands/*.md` files invoke a command,
+  inside a fenced ```` ```bash ```` block, that has no matching `executable`
+  manifest entry — each of those two surfaces is the enumerated list named in
+  §4 (`PLUGIN_SURFACE_FILES` and `CLAUDE_PLUGIN_SURFACE_FILES` in that module)
+  rather than a directory glob, so a newly packaged asset is scanned only once
+  it is added to its list;
 - fails if either packaged plugin's own bundled coordinator
   (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py` or
   `claude-plugin/plugins/kanban/scripts/review_pr.py`) invokes a command, as
@@ -929,8 +930,12 @@ runs) parses the manifest in §4 and:
   missing from the manifest or is not marked `kanban`-owned and `supported`,
   or if a `codex-approve-issues-skill` entry still exists, so the manifest
   cannot silently regress to the pre-migration boundary described in §3;
-- fails if the drainer LaunchAgent plist is marked anything other than a
-  `kanban`-owned `supported` path.
+- fails if the drainer LaunchAgent label entry (`drainer-launchagent-label`)
+  is missing from the manifest or is marked anything other than a
+  `kanban`-owned `supported` `personal-path`. What that entry declares is the
+  shared label prefix described above, not the plist file: the plist's own
+  directory has no manifest row, because §5 keeps its paths and labels as a
+  Kanban-owned convention rather than a personal path.
 
 Both machine-readable fences in this document are parsed anchored to their own
 heading — §4's to `## 4. Dependency manifest` and §7's to
