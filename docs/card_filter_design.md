@@ -102,13 +102,15 @@ position preserves the actual dependency order.
   concurrently could lose one group's durable record. A single repository
   refresh coordinator is therefore a safety boundary, not merely an
   optimization (D-17).
-- **The current whole fetch has one 30-second deadline.** All sequential pages
-  and the cache write run under the configured GitHub timeout
-  (`src/Kanban/UI/Refresh.hs:115-146`, `src/Kanban/Config.hs:95-108`). Uncapping
-  both live and historical connections requires per-page/process cleanup and
-  generation cancellation rather than putting an unbounded traversal behind
-  one deadline. This repository alone has 116 closed issues as of 2026-08-11,
-  already exceeding the rejected proposed cap of 100.
+- **The current provider traversal has one 30-second deadline.** All sequential
+  GitHub pages run inside one configured timeout, but a successful fetch writes
+  the cache only after that timed action returns; the timeout does not bound the
+  cache write (`src/Kanban/UI/Refresh.hs:115-145`,
+  `src/Kanban/Config.hs:95-108`). Uncapping both live and historical
+  connections requires per-page/process cleanup and generation cancellation
+  rather than putting an unbounded traversal behind one deadline. This
+  repository alone has 116 closed issues as of 2026-08-11, already exceeding
+  the rejected proposed cap of 100.
 - **Uncapped history must cooperate with GitHub's resource budget.** GitHub's
   GraphQL API charges points per query, reports `cost`, `remaining`, and
   `resetAt`, imposes node/resource limits, and warns clients not to retry until
