@@ -75,14 +75,19 @@ fixtures remain for subsequent slices.
 The automated release foundation is already present: `.github/workflows/ci.yml`
 builds and runs both test suites on Linux, `docs/development.md` defines the
 source-distribution check, and the clean-install exercise recorded in milestone
-9 has passed. As of 2026-08-11, `kanban.cabal` still declares version `0.1.0.0`,
-the remote has no tags or GitHub Releases, and the final tracker search found no
-open issue or epic owning this release-readiness arc. The only open epics found
-were #260 and #261, which concern agent workflows and card search respectively.
-Closed issue #203 covers the source distribution rather than these manual
-gates. Issue #225, which owned the remaining document-classification failure,
-closed on 2026-08-11; the readiness run of
-`python3 -m unittest tools.test_source_distribution` then passed all 11 tests.
+9 has passed. As of 2026-08-12, `kanban.cabal` still declares version `0.1.0.0`,
+the repository has no tags and the remote no GitHub Releases, and `ci.yml` and
+`review-gate.yml` remain the only tracked workflows, so no release workflow
+exists yet. Open epic #268 now owns this release-readiness arc; closed issue
+#203 covers the source distribution rather than these manual gates. The
+document classification that gated publication is in place: PR #227 (commit
+518a3de) added `docs/document_workflow_findings.md` to
+`EXCLUDED_TRACKED_PATHS` in `tools/test_source_distribution.py`, and PR #232
+(commit 4146f43) closed #225 by adding the section 7 publication lanes to
+`docs/agent-workflow-contract.md`, which classify that document as
+`coordination`. The 2026-08-12 readiness run of
+`python3 -m unittest tools.test_source_distribution` executed all 11 tests
+without skipping and passed.
 
 A 2026-08-12 audit of the measurement surface found the manual gates
 underspecified against the code they measure. `startApplication` forks

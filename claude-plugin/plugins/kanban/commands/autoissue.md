@@ -26,6 +26,6 @@ The user's explicit approval of the issue draft authorizes its creation. The ori
 2. Immediately run `/issue-review <issue>` and follow its canonical `approve_issues.py` procedure verbatim, including its Kanban-managed backend resolution through `KANBAN_ISSUE_REVIEW_INSTALL_DIR`. Do not independently review, comment, retry, substitute a model, or set readiness labels.
 3. Preserve `/issue-review` stop conditions:
    - Report a held queue lock with its structured owner and do not start a concurrent review.
-   - On `CHANGES_REQUESTED`, report the result and direct the issue through the `issue-rereview` workflow; do not rerun the unchanged issue. That repair-and-rereview workflow is deliberately outside this bundle's packaged set; Kanban's own `docs/drafting-workflow-contract.md` records the boundary.
+   - On `CHANGES_REQUESTED`, report the result and direct the issue through `/issue-rereview <issue>`; do not rerun the unchanged issue. That repair-and-rereview workflow is this bundle's own packaged command; Kanban's `docs/drafting-workflow-contract.md` declares it and keeps the readiness gate separate from repair.
    - On INVALID or model failure, stop exactly as `/issue-review` requires.
 4. Return the created issue number and URL plus the review state, route, model or models, review comment URL when present, and all blocking reasons.
