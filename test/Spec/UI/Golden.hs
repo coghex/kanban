@@ -40,6 +40,7 @@ import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (.
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
+import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
 import Kanban.UI.Theme
   ( approvedAttr,
     pendingAttr,
@@ -156,6 +157,65 @@ spec = describe "golden frames" $ do
     rendered <- frameText <$> renderCase wideCase
     ("▸ #701" `isInfixOf` rendered, "#721" `isInfixOf` rendered) `shouldBe` (True, False)
 
+  -- §6: the search box is part of the Issues column's own layout flow. It
+  -- sits above the cards, moves them down by exactly its own height, stays
+  -- inside its column, and never reaches the footer.
+  it "draws the search box above the cards, inside the Issues column, clear of the footer" $ do
+    plain <- renderCase wideCase
+    searched <- renderCase searchEmptyCase
+    let box = searchBox searched
+        height = box.searchBoxBottom - box.searchBoxTop + 1
+
+    -- Two border rows around one content line, which is what an empty query
+    -- occupies.
+    height `shouldBe` 3
+
+    -- Above the cards, which moved down by the box and the blank row it keeps
+    -- between itself and them.
+    box.searchBoxBottom `shouldSatisfy` (< firstCardRow searched box)
+    firstCardRow searched box - firstCardRow plain box `shouldBe` height + 1
+
+    -- Inside the column: every cell it draws lies between the board rule that
+    -- opens Issues and the one that closes it.
+    let (columnLeft, columnRight) = issuesColumnBounds searched
+    (columnLeft < box.searchBoxLeft, box.searchBoxRight < columnRight) `shouldBe` (True, True)
+
+    -- And nothing outside that column moved.
+    fst (frameTextAt searched "#799") `shouldBe` fst (frameTextAt plain "#799")
+
+    -- Clear of the footer's hint line, which the board never draws over.
+    box.searchBoxBottom `shouldSatisfy` (< fst (frameTextAt searched "x kill"))
+
+  it "grows the box by exactly the rows its wrapped query needs" $ do
+    empty <- renderCase searchEmptyCase
+    filtered <- renderCase searchFilteredCase
+    wrapped <- renderCase (frameCaseNamed "search-wrapped-narrow")
+    let rowsOf frame = (searchBox frame).searchBoxBottom - (searchBox frame).searchBoxTop - 1
+    -- The wide column holds this query on one line; the 32-cell minimum
+    -- column does not, so its box is taller by exactly the rows it needs.
+    (rowsOf empty, rowsOf filtered) `shouldBe` (1, 1)
+    rowsOf wrapped `shouldSatisfy` (> 1)
+    -- The query wrapped, and the card it matched is drawn under the box.
+    (isInfixOf "repository" (frameText wrapped), isInfixOf "#901" (frameText wrapped)) `shouldBe` (True, True)
+
+  it "counts the results over the column's total while a query is live" $ do
+    empty <- frameText <$> renderCase searchEmptyCase
+    filtered <- frameText <$> renderCase searchFilteredCase
+    (isInfixOf "ISSUES  5" empty, isInfixOf "ISSUES  5/5" empty) `shouldBe` (True, False)
+    (isInfixOf "ISSUES  1/5" filtered, isInfixOf "envelope" filtered) `shouldBe` (True, True)
+
+  it "shows No matches, not No items, for a query nothing matched" $ do
+    missing <- frameText <$> renderCase (frameCaseNamed "search-no-matches")
+    (isInfixOf "No matches" missing, isInfixOf "No items" missing) `shouldBe` (True, False)
+
+  it "exposes a match under the collapsed epic without expanding the saved set" $ do
+    exposed <- frameText <$> renderCase (frameCaseNamed "search-collapsed-child")
+    -- #721 lives under epic #701, which the resting state leaves collapsed
+    -- and the wide frame therefore hides.
+    (isInfixOf "#701" exposed, isInfixOf "#721" exposed) `shouldBe` (True, True)
+    wide <- frameText <$> renderCase wideCase
+    isInfixOf "#721" wide `shouldBe` False
+
 -- | Text the frames, taken together, have to contain. This is what stops a
 -- fixture state from counting as covered while it sits below a column
 -- viewport's fixed height, never rendered.
@@ -233,8 +293,83 @@ frameCases =
         frameCaseHeight = 48,
         frameCaseSummary = "the help overlay over the wide board",
         frameCaseState = \state -> state {appOverlay = Just HelpOverlay}
+      },
+    searchEmptyCase,
+    searchFilteredCase,
+    FrameCase
+      { frameCaseName = "search-collapsed-child",
+        frameCaseWidth = 200,
+        frameCaseHeight = 64,
+        frameCaseSummary = "a match under the collapsed epic, exposed without expanding it",
+        frameCaseState = searching "pointer"
+      },
+    FrameCase
+      { frameCaseName = "search-no-matches",
+        frameCaseWidth = 200,
+        frameCaseHeight = 64,
+        frameCaseSummary = "a query nothing matches, distinct from an empty column",
+        frameCaseState = searching "no such card"
+      },
+    FrameCase
+      { frameCaseName = "search-wrapped-narrow",
+        frameCaseWidth = 36,
+        frameCaseHeight = 40,
+        frameCaseSummary = "a query too long for one line, wrapped in the narrowest column",
+        frameCaseState = \state -> searching wrappingQuery state {appSidebarVisible = False}
+      },
+    FrameCase
+      { frameCaseName = "search-open-borders",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "--border open, the box between the column rule and its cards",
+        frameCaseState = searching "envelope" . withOptions (\options -> options {optionBorder = BorderOpen})
+      },
+    FrameCase
+      { frameCaseName = "search-ascii",
+        frameCaseWidth = 164,
+        frameCaseHeight = 48,
+        frameCaseSummary = "--ascii, the box drawn without box glyphs",
+        frameCaseState = searching "envelope" . withOptions (\options -> options {optionAscii = True})
       }
   ]
+
+-- | An open, empty search box over the wide board.
+searchEmptyCase :: FrameCase
+searchEmptyCase =
+  FrameCase
+    { frameCaseName = "search-empty",
+      frameCaseWidth = 200,
+      frameCaseHeight = 64,
+      frameCaseSummary = "an open search box with an empty query, over the complete column",
+      frameCaseState = searching ""
+    }
+
+-- | The same board with a query that leaves one card standing.
+searchFilteredCase :: FrameCase
+searchFilteredCase =
+  FrameCase
+    { frameCaseName = "search-filtered",
+      frameCaseWidth = 200,
+      frameCaseHeight = 64,
+      frameCaseSummary = "a query that filters Issues to one result under a tracker header",
+      frameCaseState = searching "envelope"
+    }
+
+-- | Long enough to wrap in the 32-cell minimum column §6 names, so the box
+-- there is more than one content line tall — and still a match, so that frame
+-- shows the taller box with the card it left standing under it.
+wrappingQuery :: Text
+wrappingQuery = "add repository snapshot cache"
+
+-- | Open search on Issues and type @query@ into it, exactly as the
+-- transitions do, so a frame can never show a query state the interaction
+-- cannot reach.
+searching :: Text -> AppState -> AppState
+searching query state =
+  Data.Text.foldl'
+    (\current character -> applySearchInput (SearchInsert character) current)
+    (openSearch state)
+    query
 
 -- | The reference frame: wider than the four-column threshold, with the
 -- approved issue selected so the §10 split border is in it.
@@ -279,6 +414,7 @@ restingState channel =
       appSelectedRows = Map.insert Issues (fixtureRow Issues 812) (Map.fromList [(column, 0) | column <- [minBound .. maxBound]]),
       appEnsureSelectionVisible = True,
       appExpandedTrackers = Set.singleton 700,
+      appSearch = Nothing,
       appSidebarVisible = True,
       appSettings = defaultSettings,
       appLogRoot = "/fixture/logs",
@@ -399,6 +535,67 @@ rowOf frame fromRow columnIndex character =
   case [row | (row, _) <- drop (fromRow + 1) (zip [0 ..] frame), frameCellCharacter (cellAt frame row columnIndex) == character] of
     row : _ -> row
     [] -> error ("no " <> [character] <> " below row " <> show fromRow <> " in column " <> show columnIndex)
+
+-- | Where the search box's own border runs in a frame.
+data SearchBoxExtent = SearchBoxExtent
+  { searchBoxTop :: Int,
+    searchBoxBottom :: Int,
+    searchBoxLeft :: Int,
+    searchBoxRight :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | The box, located from its label and then followed down its own left edge.
+-- Its square corners are its alone: §10 cards draw rounded ones, so nothing
+-- else in a frame can be mistaken for it.
+searchBox :: [[FrameCell]] -> SearchBoxExtent
+searchBox frame = SearchBoxExtent top (rowOf frame top left '└') left (columnOf frame top left '┐')
+  where
+    top = fst (frameTextAt frame "SEARCH")
+    left = columnOf frame top (-1) '┌'
+
+-- | The row the first card in the Issues column starts on, found by its
+-- rounded top-left corner inside the cells the search box occupies.
+firstCardRow :: [[FrameCell]] -> SearchBoxExtent -> Int
+firstCardRow frame box = case rows of
+  row : _ -> row
+  [] -> error "the frame draws no card in the Issues column"
+  where
+    rows =
+      [ rowIndex
+      | (rowIndex, row) <- zip [0 ..] frame,
+        (columnIndex, cell) <- zip [0 ..] row,
+        columnIndex >= box.searchBoxLeft,
+        columnIndex <= box.searchBoxRight,
+        frameCellCharacter cell == '╭'
+      ]
+
+-- | The cells the Issues column is bounded by, read off the board's own top
+-- rule: the corner that opens the board and the junction that closes its
+-- first column.
+issuesColumnBounds :: [[FrameCell]] -> (Int, Int)
+issuesColumnBounds frame = (left, columnOf frame boardTop left '┳')
+  where
+    boardTop = fst (frameTextAt frame "ISSUES")
+    left = columnOf frame boardTop (-1) '┏'
+
+-- | Where a piece of text first appears: its row, and the cell it starts at.
+frameTextAt :: [[FrameCell]] -> Text -> (Int, Int)
+frameTextAt frame needle = case locations of
+  location : _ -> location
+  [] -> error ("the frame does not contain " <> Data.Text.unpack needle)
+  where
+    locations =
+      [ (rowIndex, Data.Text.length leading)
+      | (rowIndex, row) <- zip [0 ..] frame,
+        let (leading, trailing) = Data.Text.breakOn needle (frameRowText row),
+        not (Data.Text.null trailing)
+      ]
+
+frameCaseNamed :: String -> FrameCase
+frameCaseNamed name = case filter ((== name) . frameCaseName) frameCases of
+  frameCase : _ -> frameCase
+  [] -> error ("no frame case named " <> name)
 
 -- | The attribute of the card border right of @heading@: the status half of
 -- the §10 split, which an unselected card draws all the way round and a

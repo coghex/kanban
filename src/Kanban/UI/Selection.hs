@@ -6,13 +6,14 @@ module Kanban.UI.Selection
     moveColumn,
     normalizeCollapsedRow,
     normalizeSelectedRowsAfterToggle,
+    openSearchResult,
     openSelectedDetails,
+    openSelectedDetailsIn,
     preserveSelection,
     refreshOverlay,
     selectBoundary,
     selectedEntry,
     selectedItem,
-    selectedRow,
     toggleSelectedTracker,
     toggleTrackerFromClick,
     visibleSelectionRows,
@@ -32,6 +33,7 @@ import Kanban.Workflow (entryItem )
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.Search
 
 preserveSelection :: AppState -> Board -> (BoardColumn, Map BoardColumn Int)
 preserveSelection state board =
@@ -103,14 +105,7 @@ findEntryWithLocation board target = firstMatch allColumns
             Nothing -> firstMatch rest
 
 moveCard :: Int -> EventM Name AppState ()
-moveCard delta = modify $ \state ->
-  let column = state.appSelectedColumn
-      rows = visibleSelectionRows state.appExpandedTrackers state.appBoard column
-      currentPosition = maybe 0 id (findIndex (== selectedRow state column) rows)
-      nextPosition = max 0 (min (length rows - 1) (currentPosition + delta))
-   in case safeIndex nextPosition rows of
-        Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
-        Just nextRow -> state {appSelectedRows = Map.insert column nextRow state.appSelectedRows, appEnsureSelectionVisible = True, appNotice = Nothing}
+moveCard delta = modify (moveSelectionBy delta)
 
 moveColumn :: Int -> EventM Name AppState ()
 moveColumn delta = modify $ \state ->
@@ -122,7 +117,7 @@ moveColumn delta = modify $ \state ->
 selectBoundary :: Bool -> EventM Name AppState ()
 selectBoundary selectLast = modify $ \state ->
   let column = state.appSelectedColumn
-      rows = visibleSelectionRows state.appExpandedTrackers state.appBoard column
+      rows = selectableRows state column
       target = if selectLast then safeLast rows else safeIndex 0 rows
    in case target of
         Nothing -> state {appEnsureSelectionVisible = True, appNotice = Nothing}
@@ -150,30 +145,52 @@ toggleTrackerState column row trackerNumber state
   | otherwise =
       retarget (Set.insert trackerNumber state.appExpandedTrackers) ("Expanded epic #" <> showText trackerNumber)
   where
+    -- The row is an index into what @column@ is showing, so the raw-board
+    -- normalization below is only right while nothing is filtering it. Under
+    -- a live search the toggle is re-seated on the entry it named instead, by
+    -- identity; 'reseatSearch' is a no-op with no search open.
+    toggled = safeIndex row (entriesFor state column)
     retarget expandedTrackers notice =
-      state
-        { appSelectedColumn = column,
-          appExpandedTrackers = expandedTrackers,
-          appSelectedRows =
-            normalizeSelectedRowsAfterToggle
-              expandedTrackers
-              state.appBoard
-              (Map.insert column row state.appSelectedRows),
-          appEnsureSelectionVisible = True,
-          appNotice = Just notice
-        }
+      reseatSearch
+        (itemId . entryItem <$> toggled)
+        state
+          { appSelectedColumn = column,
+            appExpandedTrackers = expandedTrackers,
+            appSelectedRows =
+              normalizeSelectedRowsAfterToggle
+                expandedTrackers
+                state.appBoard
+                (Map.insert column row state.appSelectedRows),
+            appEnsureSelectionVisible = True,
+            appNotice = Just notice
+          }
 
 openSelectedDetails :: EventM Name AppState ()
-openSelectedDetails = modify $ \state ->
+openSelectedDetails = modify openSelectedDetailsIn
+
+openSelectedDetailsIn :: AppState -> AppState
+openSelectedDetailsIn state =
   case selectedEntry state of
     Just entry@(Tracked trackingContext _)
-      | primaryTrackerNumber trackingContext `Set.notMember` state.appExpandedTrackers ->
+      | primaryTrackerNumber trackingContext `Set.notMember` expandedTrackersFor state state.appSelectedColumn ->
           state {appNotice = Just ("Press " <> actionKeyText ToggleEpic <> " to expand this epic")}
-      | otherwise -> openEntry state entry
-    Just entry -> openEntry state entry
+      | otherwise -> openEntry entry
+    Just entry -> openEntry entry
     Nothing -> state {appNotice = Just "No item is selected in this column"}
   where
-    openEntry state entry = state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
+    openEntry entry = state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
+
+-- | Enter on a search result: open its details the way the board always does,
+-- then end search on the identity that was opened, so the restored column is
+-- positioned on the same card. A press that opened nothing — a collapsed
+-- epic's header — leaves search running, because nothing was gone to.
+openSearchResult :: AppState -> AppState
+openSearchResult state
+  | opened.appOverlay /= state.appOverlay = closeSearchOn anchor opened
+  | otherwise = opened
+  where
+    anchor = selectedIdentityIn state state.appSelectedColumn
+    opened = openSelectedDetailsIn state
 
 selectedItem :: AppState -> Maybe BoardItem
 selectedItem state = entryItem <$> selectedEntry state
@@ -181,17 +198,8 @@ selectedItem state = entryItem <$> selectedEntry state
 selectedEntry :: AppState -> Maybe ColumnEntry
 selectedEntry state = safeIndex (selectedRow state state.appSelectedColumn) (entriesFor state state.appSelectedColumn)
 
+-- | Which rows of a raw column the selection may land on. What the user can
+-- actually reach is 'Kanban.UI.Search.selectableRows', which asks the same
+-- question of the view a live query leaves visible.
 visibleSelectionRows :: Set Int -> Board -> BoardColumn -> [Int]
-visibleSelectionRows expandedTrackers board column = collect (zip [0 ..] (entriesForBoard board column))
-  where
-    collect [] = []
-    collect indexedEntries@((row, entry) : rest) = case entryPrimaryTrackerNumber entry of
-      Nothing -> row : collect rest
-      Just trackerNumber ->
-        let (groupEntries, remaining) = span ((== Just trackerNumber) . entryPrimaryTrackerNumber . snd) indexedEntries
-         in if trackerNumber `Set.member` expandedTrackers
-              then map fst groupEntries <> collect remaining
-              else row : collect remaining
-
-selectedRow :: AppState -> BoardColumn -> Int
-selectedRow state column = Map.findWithDefault 0 column state.appSelectedRows
+visibleSelectionRows expandedTrackers board column = visibleRowsIn expandedTrackers (entriesForBoard board column)

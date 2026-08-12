@@ -248,7 +248,7 @@ scrollable four-column board.
 ║ ┃ drain_prs.py ┃    ║              ║              ║              ║              ║
 ║ ┗━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
 ╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
- j/Down next  k/Up previous  x kill  h/l column  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
+ j/Down next  k/Up previous  x kill  h/l column  s search  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
 Responsive behavior:
@@ -266,6 +266,12 @@ Responsive behavior:
 - Moving with `h`/`l` scrolls the selected column into view.
 - Very narrow terminals may show one board column at a time.
 - Resize events reflow cards and excerpts without a network refresh.
+- An open card search (section 7) draws a labelled box in its column's own
+  layout flow, below the column heading and above the first card. The box spans
+  the column's inner width, occupies one content line for an empty query, and
+  grows by exactly the height its wrapped query needs, moving the cards below it
+  down by that amount. It is never an overlay, never leaves its column, and a
+  resize rewraps both the box and the cards under it.
 
 ## 7. Keyboard interaction
 
@@ -280,6 +286,7 @@ Initial bindings:
 | `l` / Right | Select next column |
 | `g` | Select first visible item in the column |
 | `G` | Select last visible item in the column |
+| `s` | Open the Issues column card search; printable keys filter it and Esc or s closes it |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
@@ -319,6 +326,63 @@ Mouse interaction is intentionally complete but narrow:
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
+
+### Column card search
+
+`s` opens a card search over the Issues column. It selects that column, brings
+it into the board viewport if it was scrolled out, and draws an empty search box
+in the column's own layout flow — never an overlay — between the column heading
+and its first card, described in section 6.
+
+While the box is open the base board's key table is consulted only for what
+search declines:
+
+- A printable character typed without Ctrl, Meta, or Alt appends to the query,
+  so `r`, `S`, `u`, `d`, and every other letter is text rather than a shortcut.
+  The two exceptions are `s`, which closes search, and `q`, which reaches the
+  guarded dashboard quit — so the letter `q` cannot be typed into a query.
+- Backspace removes one Unicode code point. The query stops accepting printable
+  input at 256 code points and accepts it again once a Backspace makes room.
+- Any chord carrying Ctrl, Meta, or Alt keeps its ordinary board meaning, so
+  `Ctrl-C` reaches the same guarded quit and `Ctrl-L` repaints.
+- Up and Down move the selection among the visible results. Left and Right do
+  nothing: moving a search to another column is separate work, and the searched
+  and selected columns must not disagree.
+- Enter opens the selected result's details and ends search, keeping that item
+  selected on the restored column.
+- `s` or `Esc` clears the query, removes the box, and restores the complete
+  column, keeping the previously selected result selected by item identity
+  rather than by row number.
+
+A card matches when the case-folded query occurs as a substring of the
+case-folded `#number` and title shown on the card, with runs of whitespace
+normalized. Bodies, labels, assignees, branches, and status text never
+contribute. An epic's header is kept when its own identity matches or any of its
+children match, and only matching children are shown beneath it — a matching
+child renders even under a collapsed epic, and an epic that matches alone shows
+its header without leaking a child that does not. Search never writes to the
+saved expanded-tracker set, so closing it restores the column's collapsed and
+expanded view exactly.
+
+An empty query shows the column complete beneath the empty box. A non-empty
+query with no matches shows a `No matches` row, distinct from the `No items` row
+an empty column shows. While a non-empty query is live the column heading shows
+the visible result count over the column's full total, with GitHub's `+`
+truncation marker still attached to that total.
+
+Every insertion and deletion refilters immediately: no GitHub request, no cache
+write, and no change to board freshness. Rendering, keyboard selection, mouse
+target resolution, card actions, and boundary movement all read the same visible
+entries, so a row the user can see or select never dispatches to a different
+underlying card. Clicks inside the searched column keep their ordinary meaning
+on the cards and epic headers actually displayed, and one that opens details or
+a live session ends search the way Enter does; a non-scroll click on another
+column is consumed instead, while the wheel keeps scrolling any column. A
+successful refresh re-runs the query against the new board and keeps a
+still-matching selected item selected, falling back to the first visible result
+otherwise; a failed refresh leaves the board and the query untouched. Search
+state is presentation state only: never cached, never part of a board snapshot,
+and never restored on restart.
 
 ### Embedded issue reviews
 

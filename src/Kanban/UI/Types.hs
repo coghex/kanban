@@ -8,6 +8,7 @@ module Kanban.UI.Types
     AutoSolveStage (..),
     BoardRefreshOutcome (..),
     ChatTranscript (..),
+    ColumnSearch (..),
     DirectMergeReport (..),
     DrainerSourceState (..),
     IncidentClickOutcome (..),
@@ -428,6 +429,11 @@ data AppState = AppState
     appSelectedRows :: Map BoardColumn Int,
     appEnsureSelectionVisible :: Bool,
     appExpandedTrackers :: Set Int,
+    -- | The live column-scoped card search, if one is open. See
+    -- "Kanban.UI.Search": every consumer of a column's entries reads the view
+    -- this filters, so a row the user can see never dispatches to a different
+    -- underlying card.
+    appSearch :: Maybe ColumnSearch,
     appSidebarVisible :: Bool,
     appSettings :: Settings,
     appLogRoot :: FilePath,
@@ -476,6 +482,18 @@ data AppState = AppState
     appOptions :: Options,
     appConfig :: ResolvedConfig
   }
+
+-- | A live card search over one board column: which column it filters, and
+-- the query typed into that column's search box so far.
+--
+-- Presentation state and nothing else. 'AppState' has no serialization
+-- instances, so a query cannot reach the snapshot cache or a board snapshot,
+-- and a restart never restores one.
+data ColumnSearch = ColumnSearch
+  { searchColumn :: BoardColumn,
+    searchQuery :: Text
+  }
+  deriving stock (Eq, Show)
 
 -- | A landed merge's result, together with the notice it was last shown as.
 --

@@ -76,6 +76,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `h` / Left | Previous column |
 | `l` / Right | Next column |
 | `g` / `G` | First or last visible card |
+| `s` | Search the Issues column |
 | `Enter` | Open details |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
@@ -91,6 +92,29 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `q` / `Ctrl-C` | Quit |
 
 The footer in the application shows the main controls.
+
+## Searching the Issues column
+
+Press `s` to search the Issues column. A search box appears under that column's
+heading and the cards move down to make room for it; the column filters as each
+character lands, and the heading shows how many cards are left over how many the
+column has.
+
+While the box is open, letters and digits are typed into it rather than being
+shortcuts — so `r`, `S`, and `u` do nothing but add a character. The exceptions
+are `s`, which closes the search, and `q`, which still quits. Chords keep
+working too: `Ctrl-C` quits and `Ctrl-L` repaints.
+
+A card matches on the `#number` and title shown on the card, ignoring case.
+Nothing else about it is searched. An epic is kept when its own title matches or
+any of its children do, and matching children are shown even if that epic was
+collapsed — closing the search puts every epic back the way you had it.
+
+Up and Down move between the results, Enter opens the selected card's details
+and ends the search, and `Esc` or `s` clears the query and brings the whole
+column back with the same card still selected. Left and Right do nothing while
+the box is open. Nothing is sent to GitHub, and the query is gone when Kanban
+restarts.
 
 ## Merging one pull request
 

@@ -1,0 +1,64 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━ ISSUES  1/5 ━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
+║┃ Codex                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃ ┌─────────────── SEARCH ───────────────┐ ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃         Thu 16:05        ┃┃ │ pointer                              │ ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃ └──────────────────────────────────────┘ ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃         Tue 09:00        ┃┃                                          ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude                   ┃┃                                          ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃  ▾ #701  Input routing hardening  0/1    ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃         Thu 17:30        ┃┃  complete                                ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃ ▌└─ ╭──────────────────────────────────╮ ┃     │  code-health                    │ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃         Sat 09:10        ┃┃     │ B1 · tracker #701                │ ┃     │ @codex-agent · updated 4h ago   │ ┃  │ small modules while preserving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃     │ #721 Probe pointer capture       │ ┃     │ Read through the envelope and   │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃     │ ownership                        │ ┃     │ reject a payload whose recorded │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃     │  ui                              │ ┃     │ length disagrees with the file. │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     │ unassigned · updated 4h ago      │ ┃     ╰─────────────────────────────────╯ ┃                                         ┃                                         ┃║
+║┃                          ┃┃     │ Record which layer owns the      │ ┃                                         ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃     │ pointer before the overlay       │ ┃  STANDALONE                             ┃  │ DRAFT #847 Prototype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃     │ opens, so release restores it.   │ ┃  ╭────────────────────────────────────╮ ┃  │ sub-issue import                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃     ╰──────────────────────────────────╯ ┃  │ #799 Repair stale world cache      │ ┃  │  experimental                      │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃                                          ┃  │ invalidation                       │ ┃  │ #756 · agent-name → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃                                          ┃  │  blocked   bug                     │ ┃  │ updated 3h ago                     │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃                                          ┃  │ @codex-agent · updated 4h ago      │ ┃  │ An early draft of the native       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃                                          ┃  │ A stale cache survives a save      │ ┃  │ GitHub sub-issue membership        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃                                          ┃  │ reload and exposes old terrain     │ ┃  │ adapter.                           │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃                                          ┃  │ data to the renderer.              │ ┃  │ ? CI unknown · calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃                                          ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                          ┃  ╭────────────────────────────────────╮ ┃                                         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃                                          ┃  │ #833 Improve notification category │ ┃                                         ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃                                          ┃  │ defaults                           │ ┃                                         ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃                                          ┃  │  code-health                       │ ┃                                         ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃                                          ┃  │ @claude-agent · updated 4h ago     │ ┃                                         ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃                                          ┃  │ Make the fresh-install behavior    │ ┃                                         ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃                                          ┃  │ explicit and keep local state      │ ┃                                         ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃                                          ┃  │ outside the tracked template.      │ ┃                                         ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃                                          ┃  ╰────────────────────────────────────╯ ┃                                         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i attention  u up ║
+║ board: updated 3h ago                                                                                                                                                                                ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

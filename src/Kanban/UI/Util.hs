@@ -3,12 +3,10 @@ module Kanban.UI.Util
     agentFailureNotice,
     allColumns,
     cacheEnabled,
-    columnCountText,
     columnName,
     countedSource,
     directMergeNoticeFor,
     directMergeReportAfterRefresh,
-    entriesFor,
     entriesForBoard,
     entryPrimaryTrackerNumber,
     failureActivity,
@@ -29,6 +27,7 @@ module Kanban.UI.Util
     rightOrNothing,
     safeIndex,
     safeLast,
+    selectedRow,
     shortSessionId,
     showText,
     timedActivity,
@@ -231,22 +230,15 @@ unknownAssigneesText, unknownLinksText :: Text
 unknownAssigneesText = "assignees unknown"
 unknownLinksText = "LINKS UNKNOWN"
 
-columnCountText :: AppState -> BoardColumn -> Text
-columnCountText state column =
-  showText (length (entriesFor state column)) <> if columnMayBeTruncated then "+" else ""
-  where
-    columnMayBeTruncated = case column of
-      Issues -> state.appIssuesTruncated
-      Active -> state.appIssuesTruncated
-      Reviewing -> state.appPullRequestsTruncated
-      Done -> state.appPullRequestsTruncated
-
 countedSource :: Text -> Int -> Bool -> Text
 countedSource noun count truncated =
   showText count <> (if truncated then "+" else "") <> " " <> noun <> if count == 1 then "" else "s"
 
-entriesFor :: AppState -> BoardColumn -> [ColumnEntry]
-entriesFor state column = Map.findWithDefault [] column state.appBoard.boardColumns
+-- | The row a column has remembered. It indexes whatever that column is
+-- showing, which under a live search is the filtered view
+-- ("Kanban.UI.Search"), so it must never be resolved against the raw board.
+selectedRow :: AppState -> BoardColumn -> Int
+selectedRow state column = Map.findWithDefault 0 column state.appSelectedRows
 
 -- | The report still worth carrying, given what is on screen now: 'Nothing'
 -- once anything has replaced or cleared the notice this last wrote.
