@@ -283,7 +283,7 @@ Initial bindings:
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
 | `Esc` | Close an overlay or dismiss a transient error |
-| `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session |
+| `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
 | `S` | Choose Codex or Claude and start/reopen an issue solve through PR creation |
 | `A` | Choose Codex or Claude and start/reopen the full autosolve review loop |
 | `p` | Open the process/session inspector; Enter opens a session and `x` kills its live process tree |
@@ -325,8 +325,14 @@ or pointer-only behavior.
 Pressing `r` on an issue or from its open details starts its label-selected
 review stage, or reopens the issue's existing session. Canonical review and
 rereview use the synchronous v2 reviewer; interactive revision uses one
-persistent Codex app-server. Pressing `r` on a collapsed epic targets the epic
-itself. On a PR, `r` is the unified
+persistent Codex app-server. Pressing `r` on an epic header is a no-op that
+sets a notice instead: an epic is structure rather than reviewable work, so
+neither a collapsed tracker nor a childless header — from the board or from
+that header's own details overlay — starts a session, opens the review
+overlay, or acquires a review badge. A collapsed tracker's notice names `e`,
+because expanding it is what makes its reviewable children selectable. `S`,
+`A`, and `x` still resolve both header shapes to the epic issue. On a PR,
+`r` is the unified
 review/revise/repair key: it starts review, revision, or rereview according to
 the durable review labels, except on a card that is both in Done and reporting
 a problem status, which starts a repair instead. App-server starts on demand and one process hosts all
