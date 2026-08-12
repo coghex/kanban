@@ -6,6 +6,7 @@ module Kanban.UI.Board
     drawCardFrame,
     drawLiveActivity,
     footerHintLine,
+    searchFooterHintLine,
     pullRequestPhaseGlyph,
     pullRequestPhaseGlyphFor,
     reviewPhaseGlyph,
@@ -596,7 +597,7 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    $ [ withAttr footerAttr (txt footerHintLine),
+    $ [ withAttr footerAttr (txt (maybe footerHintLine (const searchFooterHintLine) state.appSearch)),
         withAttr dimAttr (txt (boardFreshnessText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
@@ -613,6 +614,25 @@ drawFooter state =
 -- is the one that has to stay readable.
 footerHintLine :: Text
 footerHintLine = Text.intercalate "  " (map footerHint (scopeBindings BoardScope))
+
+-- | The hint line a live search shows in place of the board's.
+--
+-- Written here rather than projected from the table in "Kanban.UI.Keys"
+-- because none of these keys is a binding: while the box is open @h@ and @l@
+-- are text, and the arrows move the search rather than the column selection.
+-- The board's line names those keys the other way round — @h/← prev column@,
+-- @l/→ next column@ — so showing it here would state both of them wrongly.
+searchFooterHintLine :: Text
+searchFooterHintLine =
+  Text.intercalate
+    "  "
+    [ "h/l/any letter type",
+      "backspace delete",
+      "←/→ move search",
+      "↑/↓ select",
+      "enter details",
+      "s/esc close"
+    ]
 
 boardFreshnessText :: AppState -> Text
 boardFreshnessText state = "board: " <> case state.appBoardFreshness of

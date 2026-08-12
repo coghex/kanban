@@ -43,6 +43,6 @@
  ┗━━━━━━━━━━━━━━┛
  off
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  e epic  enter details  esc close  r review/revise  S solve  A autosol
+ h/l/any letter type  backspace delete  ←/→ move search  ↑/↓ select  enter details  s/esc close
  board: updated 3h ago
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

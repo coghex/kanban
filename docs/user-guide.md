@@ -76,7 +76,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `h` / Left | Previous column |
 | `l` / Right | Next column |
 | `g` / `G` | First or last visible card |
-| `s` | Search the Issues column |
+| `s` | Search a column, starting with Issues |
 | `Enter` | Open details |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
@@ -93,7 +93,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 
 The footer in the application shows the main controls.
 
-## Searching the Issues column
+## Searching a column
 
 Press `s` to search the Issues column. A search box appears under that column's
 heading and the cards move down to make room for it; the column filters as each
@@ -112,9 +112,24 @@ collapsed — closing the search puts every epic back the way you had it.
 
 Up and Down move between the results, Enter opens the selected card's details
 and ends the search, and `Esc` or `s` clears the query and brings the whole
-column back with the same card still selected. Left and Right do nothing while
-the box is open. Nothing is sent to GitHub, and the query is gone when Kanban
-restarts.
+column back with the same card still selected. Nothing is sent to GitHub, and
+the query is gone when Kanban restarts.
+
+### Moving the search to another column
+
+The box does not have to stay on Issues. Left and Right move the search one
+column over, and clicking anywhere in another column — a card, an epic's header,
+or the empty space below them — moves it to that column. Either way the query is
+emptied and the whole of the new column comes back into view, ready for a fresh
+one; the column you left comes back complete with the card you had selected
+still selected. `h` and `l` are typed into the query like every other letter, so
+the arrows are what move the search.
+
+A click that moves the search does nothing else — it will not open a card, open
+or close an epic, or change which card is selected in the column it lands in, so
+picking a card there takes a second click. Left at the leftmost column and Right
+at the rightmost do nothing at all and leave what you have typed alone, and the
+mouse wheel always just scrolls the column under the pointer.
 
 ## Merging one pull request
 

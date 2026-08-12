@@ -183,8 +183,10 @@ spec = describe "golden frames" $ do
     -- And nothing outside that column moved.
     fst (frameTextAt searched "#799") `shouldBe` fst (frameTextAt plain "#799")
 
-    -- Clear of the footer's hint line, which the board never draws over.
-    box.searchBoxBottom `shouldSatisfy` (< fst (frameTextAt searched "x kill"))
+    -- Clear of the footer's hint line, which the board never draws over. The
+    -- line an open search shows is its own, so this names a chip of that one
+    -- rather than of the base board's.
+    box.searchBoxBottom `shouldSatisfy` (< fst (frameTextAt searched "s/esc close"))
 
   it "grows the box by exactly the rows its wrapped query needs" $ do
     empty <- renderCase searchEmptyCase
@@ -203,6 +205,26 @@ spec = describe "golden frames" $ do
     filtered <- frameText <$> renderCase searchFilteredCase
     (isInfixOf "ISSUES  5" empty, isInfixOf "ISSUES  5/5" empty) `shouldBe` (True, False)
     (isInfixOf "ISSUES  1/5" filtered, isInfixOf "envelope" filtered) `shouldBe` (True, True)
+
+  -- §7: a transfer moves the box out of Issues, empties the query, and leaves
+  -- both columns whole again — so the frame that proves it has to be read for
+  -- where the box is, not only for what it contains.
+  it "draws the box in the column a transfer moved it to, with both headings whole" $ do
+    filtered <- renderCase searchFilteredCase
+    transferred <- renderCase searchTransferredCase
+    let box = searchBox transferred
+        (_, issuesRight) = issuesColumnBounds transferred
+    -- Out of Issues entirely, and inside the column ACTIVE heads.
+    box.searchBoxLeft `shouldSatisfy` (> issuesRight)
+    snd (frameTextAt transferred "ACTIVE") `shouldSatisfy` (< box.searchBoxRight)
+    -- Empty, where the frame it moved from still shows what was typed.
+    boxContent filtered `shouldBe` "envelope"
+    boxContent transferred `shouldBe` ""
+    -- And both columns are counted whole, including the card the query had
+    -- filtered away, back on the board.
+    let rendered = frameText transferred
+    (isInfixOf "ISSUES  5" rendered, isInfixOf "ISSUES  1/5" rendered) `shouldBe` (True, False)
+    (isInfixOf "ACTIVE  3" rendered, isInfixOf "#901" rendered) `shouldBe` (True, True)
 
   it "shows No matches, not No items, for a query nothing matched" $ do
     missing <- frameText <$> renderCase (frameCaseNamed "search-no-matches")
@@ -296,6 +318,7 @@ frameCases =
       },
     searchEmptyCase,
     searchFilteredCase,
+    searchTransferredCase,
     FrameCase
       { frameCaseName = "search-collapsed-child",
         frameCaseWidth = 200,
@@ -353,6 +376,19 @@ searchFilteredCase =
       frameCaseHeight = 64,
       frameCaseSummary = "a query that filters Issues to one result under a tracker header",
       frameCaseState = searching "envelope"
+    }
+
+-- | The same search moved on to Active, which is where §7's transfer leaves
+-- it: the box drawn in a column that is not Issues, with the query it was
+-- carrying emptied and both columns complete again.
+searchTransferredCase :: FrameCase
+searchTransferredCase =
+  FrameCase
+    { frameCaseName = "search-transferred",
+      frameCaseWidth = 200,
+      frameCaseHeight = 64,
+      frameCaseSummary = "a search moved on to Active, its query cleared and both columns whole",
+      frameCaseState = applySearchInput (SearchTransfer 1) . searching "envelope"
     }
 
 -- | Long enough to wrap in the 32-cell minimum column §6 names, so the box
@@ -553,6 +589,16 @@ searchBox frame = SearchBoxExtent top (rowOf frame top left '└') left (columnO
   where
     top = fst (frameTextAt frame "SEARCH")
     left = columnOf frame top (-1) '┌'
+
+-- | The query the box is showing, read off the cells inside its own border.
+boxContent :: [[FrameCell]] -> Text
+boxContent frame =
+  Data.Text.strip . Data.Text.pack $
+    [ frameCellCharacter (cellAt frame rowIndex columnIndex)
+    | let box = searchBox frame,
+      rowIndex <- [box.searchBoxTop + 1 .. box.searchBoxBottom - 1],
+      columnIndex <- [box.searchBoxLeft + 1 .. box.searchBoxRight - 1]
+    ]
 
 -- | The row the first card in the Issues column starts on, found by its
 -- rounded top-left corner inside the cells the search box occupies.

@@ -14,7 +14,7 @@
 ║┃                          ┃┃     │ of the payload ┃ l / Right            next column                                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
 ║┃                          ┃┃     │ write is detect┃ g                    first visible item in the column                                       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰────────────────┃ G                    last visible item in the column                                        ┃         ┃                                         ┃║
-║┃                          ┃┃                      ┃ s                    search the Issues column                                               ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                      ┃ s                    search a column; h/l type into the query, Left/Right move the search   ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                      ┃ e                    expand / collapse focused epic                                         ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routin┃ Enter                details                                                                ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete            ┃ Esc                  close overlay or dismiss a notice                                      ┃       │ ┃  │ #812 · agent-name → master ·       │ ┃║

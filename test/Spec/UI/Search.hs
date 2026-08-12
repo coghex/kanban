@@ -9,9 +9,12 @@
 -- resolves to the entry the renderer drew there.
 --
 -- Nothing here needs a terminal or an @EventM@. Search's key decoder, its
--- query edits, its selection reconciliation, and the two mouse decisions are
--- all pure functions, which is what lets the whole interaction be covered
--- (docs\/design.md §18).
+-- query edits, its selection reconciliation, its move to another column, and
+-- every mouse decision are all pure functions, which is what lets the whole
+-- interaction be covered (docs\/design.md §18). Dispatch is a projection of
+-- them: 'boardMouseAction' decides what a press means and 'boardMousePress'
+-- is the whole of what dispatch then does with the decision, so the mouse
+-- group can take a press rather than assert about the arm that would.
 module Spec.UI.Search (spec) where
 
 import qualified Data.Map.Strict as Map
@@ -20,8 +23,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
+import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
-import Kanban.UI.Events (applyCardClick, applyRunningProcessClick)
+import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction, boardMousePress)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
@@ -36,6 +40,7 @@ spec = describe "column card search" $ do
   matchingSpec
   viewSpec
   transitionSpec
+  transferSpec
   precedenceSpec
   mouseSpec
 
@@ -70,8 +75,14 @@ issuesEntries =
     standaloneCard 812 "Modal input leaks through overlay"
   ]
 
+-- | Active, in board order: a standalone card and an epic with one child, left
+-- collapsed. A transfer into this column therefore has a card, an epic header,
+-- and whitespace to land on, and a remembered row that is not its first.
 activeEntries :: [ColumnEntry]
-activeEntries = [standaloneCard 799 "Repair stale world cache invalidation"]
+activeEntries =
+  [ standaloneCard 799 "Repair stale world cache invalidation",
+    trackedChild 706 "Session recovery hardening" 731 "Reattach an orphaned worker"
+  ]
 
 -- | A column whose collapsed tracker group sits below a standalone card, so
 -- the first selectable row, the row above a collapsed-away anchor, and the
@@ -201,7 +212,7 @@ matchingSpec = describe "matching" $ do
     columnCountText filtered Issues `shouldBe` "1/5"
     columnCountText filtered {appIssuesTruncated = True} Issues `shouldBe` "1/5+"
     -- Every other column's heading is unchanged.
-    columnCountText filtered Active `shouldBe` "1"
+    columnCountText filtered Active `shouldBe` "2"
 
   it "counts a synthesized tracker header as the one entry it is" $ do
     ownMatch <- searchingFor "Persistence contract"
@@ -476,6 +487,135 @@ transitionSpec = describe "transitions" $ do
 identityOf :: AppState -> Maybe Text
 identityOf state = entryIdentityText <$> selectedEntry state
 
+-- | The identity of the row @column@ has selected, whether or not that column
+-- is the selected one — which is exactly what a transfer moves.
+identityIn :: AppState -> BoardColumn -> Maybe Text
+identityIn state column = entryIdentityText <$> safeIndex (selectedRow state column) (entriesFor state column)
+
+-- ---------------------------------------------------------------------------
+
+-- | Moving a live search to another column, by either path.
+--
+-- The state a transfer reaches is the whole contract, so the click cases and
+-- the key cases below are the same assertions over the same transition: a
+-- click decides /whether/ to transfer ('searchMouseTransfer', covered in the
+-- mouse group) and Left and Right decide /where/, and both then hand over to
+-- 'transferSearchTo'.
+transferSpec :: Spec
+transferSpec = describe "transferring to another column" $ do
+  it "moves the box, clears the query, and selects and reveals the new column" $ do
+    searching <- transferring
+    let moved = transferSearchTo Active searching
+    (.searchColumn) <$> moved.appSearch `shouldBe` Just Active
+    (.searchQuery) <$> moved.appSearch `shouldBe` Just ""
+    moved.appSelectedColumn `shouldBe` Active
+    moved.appEnsureSelectionVisible `shouldBe` True
+    -- The box is drawn in Active and nowhere else, and both headings are back
+    -- to the ordinary count form over complete columns.
+    searchQueryFor moved Active `shouldBe` Just ""
+    searchQueryFor moved Issues `shouldBe` Nothing
+    entriesFor moved Active `shouldBe` activeEntries
+    entriesFor moved Issues `shouldBe` issuesEntries
+    (columnCountText moved Active, columnCountText moved Issues) `shouldBe` ("2", "5")
+
+  it "reaches the same state through a click, through Left, and through Right" $ do
+    searching <- transferring
+    -- Right from Issues, a click anywhere in Active, and the transition the
+    -- two share: one state, three ways to it.
+    let byKey = applySearchInput (SearchTransfer 1) searching
+        byClick = maybe searching (`transferSearchTo` searching) (searchMouseTransfer searching (CardTarget Active 0) Vty.BLeft)
+    byKey `shouldBe'` transferSearchTo Active searching
+    byClick `shouldBe'` transferSearchTo Active searching
+    -- And back again by the opposite arrow, which is a transfer like any
+    -- other rather than an undo: the query it cleared does not return.
+    let back = applySearchInput (SearchTransfer (-1)) byKey
+    back `shouldBe'` transferSearchTo Issues byKey
+    (.searchColumn) <$> back.appSearch `shouldBe` Just Issues
+    (.searchQuery) <$> back.appSearch `shouldBe` Just ""
+
+  it "restores the column it left complete, keeping its selected result selected by identity" $ do
+    searching <- transferring
+    -- #901 is the second result of "cache" and the fourth row of the complete
+    -- column, so a re-seat by row number would leave row 1 — #712's child
+    -- row — selected instead.
+    identityIn searching Issues `shouldBe` Just "#901  Add repository snapshot cache"
+    selectedRow searching Issues `shouldBe` 1
+    let moved = transferSearchTo Active searching
+    selectedRow moved Issues `shouldBe` 3
+    identityIn moved Issues `shouldBe` Just "#901  Add repository snapshot cache"
+
+  it "leaves the column it enters on the row that column remembered" $ do
+    searching <- transferring
+    -- Active's remembered row is its collapsed epic's header, not its first
+    -- row, so a transfer that re-seated the destination would move it.
+    selectedRow searching Active `shouldBe` 1
+    selectedAnchorIn searching Active `shouldBe` Just (AnchorTracker 706)
+    let moved = transferSearchTo Active searching
+    selectedRow moved Active `shouldBe` 1
+    selectedAnchorIn moved Active `shouldBe` Just (AnchorTracker 706)
+    -- The entry beneath that row is the epic's first child, which is what a
+    -- collapsed populated group's header row is made of; the anchor above is
+    -- what the row draws and what acting on it acts on.
+    identityIn moved Active `shouldBe` Just "#731  Reattach an orphaned worker"
+
+  it "does nothing else: no overlay, no epic toggled, no session touched" $ do
+    searching <- transferring
+    let moved = transferSearchTo Active searching
+    moved.appOverlay `shouldBe` Nothing
+    moved.appExpandedTrackers `shouldBe` searching.appExpandedTrackers
+    expandedTrackersFor moved Active `shouldBe` expandedTrackersFor searching Active
+    Map.keys moved.appReviewSessions `shouldBe` Map.keys searching.appReviewSessions
+    moved.appBoard `shouldBe` searching.appBoard
+
+  it "keeps the query, the selection, and a notice when it cannot move" $ do
+    searching <- transferring
+    -- Issues is the leftmost column and Done the rightmost, so these two
+    -- presses resolve to the column already searched.
+    let noticed = searching {appNotice = Just "Collapsed epic #700"}
+        atLeft = applySearchInput (SearchTransfer (-1)) noticed
+        onDone = transferSearchTo Done noticed
+        atRight = applySearchInput (SearchTransfer 1) onDone
+    atLeft `shouldBe'` noticed
+    atLeft.appNotice `shouldBe` Just "Collapsed epic #700"
+    (.searchColumn) <$> onDone.appSearch `shouldBe` Just Done
+    atRight `shouldBe'` onDone
+
+  it "closes on the column it moved to, restoring that column complete" $ do
+    searching <- transferring
+    let moved = transferSearchTo Active searching
+        typed = withQuery "orphaned" moved
+        closed = applySearchInput SearchClose typed
+    -- The query filters its new target, and closing restores it.
+    visibleIn typed Active `shouldBe` ["#731  Reattach an orphaned worker"]
+    closed.appSearch `shouldBe` Nothing
+    entriesFor closed Active `shouldBe` activeEntries
+    closed.appSelectedColumn `shouldBe` Active
+    columnCountText closed Active `shouldBe` "2"
+
+  it "transfers nothing when no search is open" $ do
+    plain <- searchState
+    transferSearchTo Active plain `shouldBe'` plain
+    transferSearchBy 1 plain `shouldBe'` plain
+    sequence_
+      [ searchMouseTransfer plain (CardTarget column 0) button `shouldBe` Nothing
+      | column <- [minBound .. maxBound],
+        button <- [Vty.BLeft, Vty.BRight]
+      ]
+
+-- | A live search on Issues, with everything a transfer into Active must
+-- either move or leave alone: the second result selected in the searched
+-- column, a live review session on Active's standalone card, and Active
+-- remembering its collapsed epic's header rather than its first row.
+transferring :: IO AppState
+transferring = do
+  searching <- searchingFor "cache"
+  let onSecondResult = applySearchInput (SearchMove 1) searching
+      seated = onSecondResult {appSelectedRows = Map.insert Active 1 onSecondResult.appSelectedRows}
+  pure (withReviewSession (titledIssue 799 "Repair stale world cache invalidation") ReviewRunning seated)
+
+visibleIn :: AppState -> BoardColumn -> [Text]
+visibleIn state column = map entryIdentityText (entriesFor state column)
+
 boardWithout :: Int -> Board
 boardWithout number =
   Board
@@ -553,15 +693,28 @@ precedenceSpec = describe "key precedence" $ do
         modifiers <- [[Vty.MCtrl], [Vty.MMeta], [Vty.MAlt], [Vty.MCtrl, Vty.MShift]]
       ]
 
-  it "moves with Up and Down and consumes Left and Right without acting" $ do
+  it "moves the selection with Up and Down and the search itself with Left and Right" $ do
     searchInput liveSearch (Vty.EvKey Vty.KUp []) `shouldBe` Just (SearchMove (-1))
     searchInput liveSearch (Vty.EvKey Vty.KDown []) `shouldBe` Just (SearchMove 1)
-    searchInput liveSearch (Vty.EvKey Vty.KLeft []) `shouldBe` Just SearchIgnore
-    searchInput liveSearch (Vty.EvKey Vty.KRight []) `shouldBe` Just SearchIgnore
+    searchInput liveSearch (Vty.EvKey Vty.KLeft []) `shouldBe` Just (SearchTransfer (-1))
+    searchInput liveSearch (Vty.EvKey Vty.KRight []) `shouldBe` Just (SearchTransfer 1)
 
-  it "leaves the selected column and rows alone for Left and Right" $ do
+  -- Requirement 8: only the arrows transfer. `h` and `l` are printable, so
+  -- they were claimed as text above — the case that walks every board
+  -- shortcut covers both of them — and the board's own column movement is
+  -- what they would otherwise have fired.
+  it "types h and l rather than moving anything with them" $ do
     searching <- searchingFor "cache"
-    applySearchInput SearchIgnore searching `shouldBe'` searching
+    sequence_
+      [ (character, searchInput liveSearch event, boardAction BoardScope event)
+          `shouldBe` (character, Just (SearchInsert character), Just action)
+      | (character, action) <- [('h', PreviousColumn), ('l', NextColumn)],
+        let event = Vty.EvKey (Vty.KChar character) []
+      ]
+    let typed = applySearchInput (SearchInsert 'l') searching
+    (.searchQuery) <$> typed.appSearch `shouldBe` Just "cachel"
+    (.searchColumn) <$> typed.appSearch `shouldBe` Just Issues
+    typed.appSelectedColumn `shouldBe` Issues
 
   it "opens details on Enter and ends search on the identity it opened" $ do
     searching <- searchingFor "modal"
@@ -601,20 +754,125 @@ precedenceSpec = describe "key precedence" $ do
 -- 'AppState' itself has no 'Eq'.
 shouldBe' :: AppState -> AppState -> Expectation
 shouldBe' actual expected =
-  (actual.appSearch, actual.appSelectedColumn, actual.appSelectedRows, actual.appExpandedTrackers, actual.appOverlay)
-    `shouldBe` (expected.appSearch, expected.appSelectedColumn, expected.appSelectedRows, expected.appExpandedTrackers, expected.appOverlay)
+  (actual.appSearch, actual.appSelectedColumn, actual.appSelectedRows, actual.appExpandedTrackers, actual.appOverlay, actual.appNotice)
+    `shouldBe` (expected.appSearch, expected.appSelectedColumn, expected.appSelectedRows, expected.appExpandedTrackers, expected.appOverlay, expected.appNotice)
 
 -- ---------------------------------------------------------------------------
 
 mouseSpec :: Spec
 mouseSpec = describe "mouse precedence" $ do
-  it "allows clicks on the searched column and consumes them everywhere else" $ do
-    searching <- searchingFor "cache"
+  -- The whole matrix §7 names, stated against the decision dispatch actually
+  -- makes rather than against the classifier feeding it: three things a press
+  -- can land on, two buttons that transfer and a wheel that never does,
+  -- inside the searched column and outside it.
+  it "transfers a left or right press anywhere in a column it is not searching" $ do
+    searching <- transferring
+    sequence_
+      [ (landing, button, boardMouseAction searching name button [])
+          `shouldBe` (landing, button, Just (TransferSearch Active))
+      | (landing, name) <- columnLandings Active,
+        button <- [Vty.BLeft, Vty.BRight]
+      ]
+
+  it "gives a press inside the searched column the meaning it has with no search open" $ do
+    searching <- transferring
     plain <- searchState
-    searchClickAllowed searching Issues `shouldBe` True
-    sequence_ [searchClickAllowed searching column `shouldBe` False | column <- [Active, Reviewing, Done]]
-    -- With nothing searching, every column is clickable as before.
-    sequence_ [searchClickAllowed plain column `shouldBe` True | column <- [minBound .. maxBound]]
+    sequence_
+      [ (landing, button, boardMouseAction searching name button [])
+          `shouldBe` (landing, button, boardMouseAction plain name button [])
+      | (landing, name) <- columnLandings Issues,
+        button <- [Vty.BLeft, Vty.BRight]
+      ]
+    -- And that meaning is an action, not the absence of one, for the three
+    -- presses §7 gives the searched column.
+    boardMouseAction searching (CardTarget Issues 0) Vty.BLeft [] `shouldBe` Just (SelectOrOpenCardAt Issues 0)
+    boardMouseAction searching (CardTarget Issues 0) Vty.BRight [] `shouldBe` Just (OpenRunningProcessAt Issues 0)
+    boardMouseAction searching (EpicTarget Issues 1 700) Vty.BLeft [] `shouldBe` Just (ToggleEpicFromClick Issues 1 700)
+
+  it "keeps the wheel scrolling the column under it, searched or not" $ do
+    searching <- transferring
+    sequence_
+      [ (column, landing, button, boardMouseAction searching name button [])
+          `shouldBe` (column, landing, button, Just (ScrollColumnBy column amount))
+      | column <- [Issues, Active],
+        (landing, name) <- columnLandings column,
+        (button, amount) <- [(Vty.BScrollUp, -3), (Vty.BScrollDown, 3)]
+      ]
+
+  it "claims nothing at all for the middle button" $ do
+    searching <- transferring
+    sequence_
+      [ (column, landing, boardMouseAction searching name Vty.BMiddle []) `shouldBe` (column, landing, Nothing)
+      | column <- [Issues, Active],
+        (landing, name) <- columnLandings column
+      ]
+
+  -- Requirement 6: the drainer button is not a column target, so it is
+  -- answered ahead of the transfer and keeps the toggle it has always
+  -- dispatched — the search it never sees keeps its target and its query.
+  --
+  -- Taken rather than asserted about: dispatch decides the press and then
+  -- 'boardMousePress' is the whole of what dispatch does with the decision,
+  -- so running it here is running the press. A drainer press hands its
+  -- controller work off separately, which is what lets this take one without
+  -- a controller subprocess.
+  it "still takes the drainer button's toggle while a search is live" $ do
+    searching <- transferring
+    plain <- searchState
+    let installed state = state {appDrainerController = Right (DrainerController "/nonexistent/kanban-test-drainer" [])}
+        press state = boardMousePress <$> boardMouseAction state DrainerButton Vty.BLeft [] <*> pure (installed state)
+    boardMouseAction searching DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    boardMouseAction plain DrainerButton Vty.BLeft [] `shouldBe` Just ToggleDrainerFromClick
+    -- The toggle ran: the drainer is on its way up and the press said so.
+    ((.appDrainerStatus.drainerState) <$> press searching) `shouldBe` Just DrainerStarting
+    ((.appDrainerBusy) <$> press searching) `shouldBe` Just True
+    ((.appNotice) <$> press searching) `shouldBe` Just (Just "Starting PR drainer…")
+    -- And the search is exactly where it was, still on its query.
+    ((.appSearch) <$> press searching) `shouldBe` Just searching.appSearch
+    ((.appSelectedColumn) <$> press searching) `shouldBe` Just searching.appSelectedColumn
+    -- The same press with nothing searching does the same thing, which is
+    -- what "keeps working" means.
+    ((.appDrainerStatus.drainerState) <$> press plain) `shouldBe` Just DrainerStarting
+    -- Nothing about that press is a transfer, on any button.
+    sequence_
+      [ searchMouseTransfer searching DrainerButton button `shouldBe` Nothing
+      | button <- [Vty.BLeft, Vty.BRight, Vty.BMiddle, Vty.BScrollUp, Vty.BScrollDown]
+      ]
+
+  -- The other presses, taken the same way: what dispatch decides, run.
+  it "takes a transferring press as the transfer and a searched-column press as its ordinary action" $ do
+    searching <- transferring
+    let take' name button = boardMousePress <$> boardMouseAction searching name button [] <*> pure searching
+        transferred = take' (EpicTarget Active 1 706) Vty.BLeft
+        ordinary = take' (CardTarget Issues 0) Vty.BLeft
+    -- The epic-header press in Active moved the search and left epic 706 alone.
+    ((.searchColumn) <$> (transferred >>= (.appSearch))) `shouldBe` Just Active
+    ((.searchQuery) <$> (transferred >>= (.appSearch))) `shouldBe` Just ""
+    (Set.member 706 . (.appExpandedTrackers) <$> transferred) `shouldBe` Just False
+    ((.appOverlay) <$> transferred) `shouldBe` Just Nothing
+    -- The card press inside Issues selected the result it landed on and kept
+    -- the query; the selection had been on the other result.
+    selectedRow searching Issues `shouldBe` 1
+    ((.appSearch) <$> ordinary) `shouldBe` Just searching.appSearch
+    ((.appOverlay) <$> ordinary) `shouldBe` Just Nothing
+    (flip selectedRow Issues <$> ordinary) `shouldBe` Just 0
+
+  -- The other half of requirement 2, for the press that does transfer: the
+  -- epic header a transferring click landed on is not toggled, and the live
+  -- session under a right click is not opened.
+  it "consumes the action a transferring press would ordinarily have performed" $ do
+    searching <- transferring
+    let onEpic = transferSearchTo Active searching
+    Set.member 706 onEpic.appExpandedTrackers `shouldBe` False
+    Set.member 706 (expandedTrackersFor onEpic Active) `shouldBe` False
+    onEpic.appOverlay `shouldBe` Nothing
+    -- What the same press would have done without the transfer, so the case
+    -- above is a real constraint: the epic expands, and the right click on
+    -- Active's card opens its live session.
+    let toggled = applyCardClick Active 0 (applyCardClick Active 0 searching {appSearch = Nothing})
+        opened = applyRunningProcessClick Active 0 searching {appSearch = Nothing}
+    toggled.appOverlay `shouldBe` Just (DetailsOverlay (IssueItem (titledIssue 799 "Repair stale world cache invalidation")))
+    opened.appOverlay `shouldBe` Just (ReviewOverlay 799)
 
   it "selects without ending search when the click only selects" $ do
     searching <- searchingFor "cache"
@@ -653,3 +911,14 @@ mouseSpec = describe "mouse precedence" $ do
     (entryNumber <$> safeIndex 1 (entriesForBoard searching.appBoard Issues)) `shouldBe` Just (Just 712)
     let clicked = applyCardClick Issues 1 (applyCardClick Issues 1 searching)
     clicked.appOverlay `shouldBe` Just (DetailsOverlay (IssueItem (titledIssue 901 "Add repository snapshot cache")))
+
+-- | The three things a press can land on inside one column: a card, an epic's
+-- header, and the column's own whitespace. Requirement 3 is that all three
+-- transfer identically, so every mouse case above is stated over this list
+-- rather than over one of them.
+columnLandings :: BoardColumn -> [(String, Name)]
+columnLandings column =
+  [ ("card", CardTarget column 0),
+    ("epic header", EpicTarget column 1 706),
+    ("whitespace", ColumnViewport column)
+  ]

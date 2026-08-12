@@ -51,10 +51,12 @@ module Kanban.UI.Search
     -- * Transitions
     SearchInput (..),
     searchInput,
-    searchClickAllowed,
+    searchMouseTransfer,
     openSearch,
     closeSearch,
     closeSearchOn,
+    transferSearchTo,
+    transferSearchBy,
     applySearchInput,
     insertQueryChar,
     backspaceQuery,
@@ -309,14 +311,39 @@ moveSelectionBy amount state = case safeIndex nextPosition rows of
     currentPosition = maybe 0 id (findIndex (== selectedRow state column) rows)
     nextPosition = max 0 (min (length rows - 1) (currentPosition + amount))
 
--- | Whether a click on @column@ may act while search is live.
+-- | The board column a mouse press landed in, for the one question a live
+-- search asks of a press: which column was it aimed at?
 --
--- A non-scroll click on another column is consumed instead: moving the
--- selection there would leave the searched column and the selected column
--- disagreeing, which is the same reason Left and Right are inert in this
--- phase. Wheel scrolling is not routed through this — it retargets nothing.
-searchClickAllowed :: AppState -> BoardColumn -> Bool
-searchClickAllowed state column = maybe True ((== column) . (.searchColumn)) state.appSearch
+-- Only the three names a column draws answer. The drainer button is its own
+-- 'Name' dispatched by its own arm, and every overlay target belongs to
+-- something that is not a column, so neither can transfer a search.
+mouseColumn :: Name -> Maybe BoardColumn
+mouseColumn = \case
+  CardTarget column _ -> Just column
+  EpicTarget column _ _ -> Just column
+  ColumnViewport column -> Just column
+  _ -> Nothing
+
+-- | The column a mouse press moves a live search to, or 'Nothing' when the
+-- press is not a transfer and dispatch decides it the ordinary way.
+--
+-- A left or right press aimed at any column but the searched one transfers,
+-- whether it landed on a card, on an epic's header, or on the column's
+-- whitespace — the three are one rule, which is what makes the rule
+-- predictable. Everything else is left alone: a press with no search open, one
+-- inside the searched column, the wheel in any column — it retargets nothing,
+-- so it keeps scrolling whatever is under the pointer — and the middle button,
+-- which the board has never given a meaning.
+searchMouseTransfer :: AppState -> Name -> Vty.Button -> Maybe BoardColumn
+searchMouseTransfer state name button = do
+  search <- state.appSearch
+  column <- mouseColumn name
+  if transfers && column /= search.searchColumn then Just column else Nothing
+  where
+    transfers = case button of
+      Vty.BLeft -> True
+      Vty.BRight -> True
+      _ -> False
 
 -- | Open search on the Issues column with an empty query. That column becomes
 -- the selected one and is brought into the board viewport, and the card that
@@ -335,6 +362,49 @@ closeSearchOn anchor state = case state.appSearch of
   Nothing -> state
   Just search -> seatColumnOn search.searchColumn anchor (state {appSearch = Nothing, appNotice = Nothing})
 
+-- | Move a live search to @column@, with an empty query, selecting and
+-- revealing that column.
+--
+-- This is the whole transfer, and every path that transfers — a click, Left,
+-- and Right — is this one transition, so the state each reaches is the same
+-- state. A transfer to the column already searched is not a move at all and
+-- leaves everything untouched, which is what a Left at the leftmost column
+-- resolves to: the query, the selection, and any notice on screen survive a
+-- press that visibly does nothing.
+--
+-- Both columns are re-seated by identity rather than by row number, for
+-- reasons that differ. The column being left is showing a filtered view, so
+-- its remembered row is an index into results; restoring it complete would
+-- otherwise leave that number selecting a different card. The column being
+-- entered keeps exactly the row it remembered — the anchor it is re-seated on
+-- is its own current selection, and the view it is read from is the same
+-- unfiltered view either side of the transfer — because a transferring click
+-- moves the search and nothing else, and choosing a row there is the second
+-- click's business.
+transferSearchTo :: BoardColumn -> AppState -> AppState
+transferSearchTo column state = case state.appSearch of
+  Nothing -> state
+  Just search
+    | search.searchColumn == column -> state
+    | otherwise ->
+        seatColumnOn column (selectedAnchorIn state column)
+          . seatColumnOn search.searchColumn (selectedAnchorIn state search.searchColumn)
+          $ state {appSearch = Just (ColumnSearch column ""), appNotice = Nothing}
+
+-- | Move a live search one column left (@-1@) or right (@1@).
+--
+-- Clamped rather than wrapped, exactly as 'Kanban.UI.Selection.moveColumn'
+-- clamps the ordinary board: at the leftmost or rightmost column the
+-- destination resolves to the column already searched, which 'transferSearchTo'
+-- leaves alone.
+transferSearchBy :: Int -> AppState -> AppState
+transferSearchBy delta state = case state.appSearch of
+  Nothing -> state
+  Just search -> transferSearchTo (shiftColumn delta search.searchColumn) state
+
+shiftColumn :: Int -> BoardColumn -> BoardColumn
+shiftColumn delta column = toEnum (max 0 (min (fromEnum (maxBound :: BoardColumn)) (fromEnum column + delta)))
+
 -- | 'closeSearchOn' anchored on whatever result is selected now.
 closeSearch :: AppState -> AppState
 closeSearch state = case state.appSearch of
@@ -352,7 +422,9 @@ data SearchInput
   | SearchClose
   | SearchOpenDetails
   | SearchMove Int
-  | SearchIgnore
+  | -- | Move the search one column left or right, by the same clamped step
+    -- the ordinary board's column movement takes.
+    SearchTransfer Int
   deriving stock (Eq, Show)
 
 searchInput :: Maybe ColumnSearch -> Vty.Event -> Maybe SearchInput
@@ -371,11 +443,12 @@ searchInput (Just _) (Vty.EvKey key modifiers)
       Vty.KEnter -> Just SearchOpenDetails
       Vty.KUp -> Just (SearchMove (-1))
       Vty.KDown -> Just (SearchMove 1)
-      -- Consumed rather than passed on: the epic's last child gives these the
-      -- column-transfer meaning, and moving the column selection now would
-      -- leave the searched and selected columns disagreeing.
-      Vty.KLeft -> Just SearchIgnore
-      Vty.KRight -> Just SearchIgnore
+      -- The arrows move the search itself rather than the column selection
+      -- beneath it, which is what keeps the searched and the selected column
+      -- from ever disagreeing. `h` and `l` are printable, so they were claimed
+      -- above as text: only the arrows transfer.
+      Vty.KLeft -> Just (SearchTransfer (-1))
+      Vty.KRight -> Just (SearchTransfer 1)
       _ -> Nothing
 searchInput _ _ = Nothing
 
@@ -401,8 +474,8 @@ applySearchInput = \case
   SearchBackspace -> editQuery backspaceQuery
   SearchClose -> closeSearch
   SearchMove amount -> moveSelectionBy amount
+  SearchTransfer delta -> transferSearchBy delta
   SearchOpenDetails -> id
-  SearchIgnore -> id
 
 -- | Refilter the target column after a query edit, keeping whichever result
 -- was selected before it selected afterwards.
