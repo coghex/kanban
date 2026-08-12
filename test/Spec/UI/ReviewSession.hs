@@ -26,18 +26,25 @@ import Kanban.UI.Review
   ( ReviewCancelAction (..),
     ReviewDigitAction (..),
     canonicalReviewCompletionSuperseded,
+    epicReviewRefusalNotice,
     resolveReviewCancelAction,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
   )
 import Kanban.UI.Session
-  ( liveReviewSessions,
+  ( EpicReviewRefusal (..),
+    ReviewTarget (..),
+    itemReviewRefusal,
+    liveReviewSessions,
     resolveProcessClick,
     resolveProcessSelection,
     reviewAgentSessionEntry,
     reviewSessionLive,
     reviewSessionReusable,
     reviewTurnInterruptible,
+    selectedReviewIssue,
+    selectedReviewItem,
+    selectedReviewTarget,
   )
 import Kanban.UI.SessionCore
   ( SessionTickArm (..),
@@ -61,6 +68,7 @@ import Kanban.UI.Types
   ( AgentSession (..),
     AgentSessionEntry (..),
     AgentSessionRef (..),
+    AppState (..),
     ChatTranscript (..),
     Name (..),
     Overlay (..),
@@ -73,7 +81,15 @@ import Kanban.UI.Types
     withSessionDetail,
   )
 import Kanban.Worker (WorkerId (..))
-import Spec.Support.Fixtures (baseIssue)
+import Spec.Support.App (testAppState)
+import Spec.Support.Fixtures
+  ( baseIssue,
+    basePullRequest,
+    fixtureBoard,
+    fixtureStandaloneEntry,
+    fixtureTracker,
+    fixtureTrackedEntry,
+  )
 import Test.Hspec
 
 spec :: Spec
@@ -776,3 +792,74 @@ spec = do
       -- must not discard a deliberate scrollback.
       followAfterTurnStarted False (Just "turn-1") "turn-1" `shouldBe` False
       followAfterTurnStarted True (Just "turn-1") "turn-1" `shouldBe` True
+
+  describe "the review key on an epic header" $ do
+    -- Issue #254. 'selectedReviewItem' promotes both epic-header shapes to
+    -- the tracker's own issue, which is exactly what solve, autosolve and
+    -- the kill binding want. Review does not: an epic carries no
+    -- Requirements or Acceptance for the canonical gate to read, so @r@ on a
+    -- header used to open an overlay, launch a session, and leave a badge on
+    -- board structure. The refusal is a notice only, so 'appReviewSessions'
+    -- is never written and no badge can appear.
+    let epicHeaderRow = 0
+        collapsedChildRow = 1
+        ordinaryIssueRow = 3
+        pullRequest = basePullRequest 42 [] False []
+        board =
+          fixtureBoard
+            [ ( Issues,
+                [ TrackerHeader (fixtureTracker 700),
+                  fixtureTrackedEntry 800 [] 811,
+                  fixtureTrackedEntry 800 [] 812,
+                  fixtureStandaloneEntry 10
+                ]
+              ),
+              (Reviewing, [Standalone (PullRequestItem pullRequest)])
+            ]
+        selectedState column row = do
+          state <- testAppState board
+          pure state {appSelectedColumn = column, appSelectedRows = Map.insert column row state.appSelectedRows}
+        withExpandedTracker state = state {appExpandedTrackers = Set.fromList [800]}
+
+    it "refuses a collapsed epic group and a childless epic header" $ do
+      collapsed <- selectedState Issues collapsedChildRow
+      header <- selectedState Issues epicHeaderRow
+      selectedReviewTarget collapsed `shouldBe` ReviewTargetRefused CollapsedEpicGroup
+      selectedReviewTarget header `shouldBe` ReviewTargetRefused StructuralEpicHeader
+
+    it "explains each refusal, naming the expand key when there is a child to reach" $ do
+      -- Requirement 3 follows 'openSelectedDetails', which answers Enter on
+      -- a collapsed header with the key that makes its children selectable.
+      epicReviewRefusalNotice CollapsedEpicGroup
+        `shouldBe` "An epic header is not reviewable; press e to expand it and select a child"
+      epicReviewRefusalNotice StructuralEpicHeader
+        `shouldBe` "An epic header is not reviewable; it is board structure, not work"
+
+    it "refuses a childless header from its open details overlay too" $ do
+      -- The details path presses the key against the item the overlay
+      -- already holds, so it cannot reach the board resolution above and
+      -- needs the same refusal of its own.
+      state <- testAppState board
+      itemReviewRefusal state (IssueItem (baseIssue 700 [])) `shouldBe` Just StructuralEpicHeader
+      itemReviewRefusal state (IssueItem (baseIssue 10 [])) `shouldBe` Nothing
+      itemReviewRefusal state (PullRequestItem pullRequest) `shouldBe` Nothing
+
+    it "leaves solve, autosolve, and kill resolving the epic issue from both headers" $ do
+      -- Requirement 6: 'selectedReviewIssue' and 'selectedReviewItem' are
+      -- shared with 'openSelectedSolveChooser' and
+      -- 'killSelectedWorkingProcess', so the refusal above must not have
+      -- moved what those two see.
+      collapsed <- selectedState Issues collapsedChildRow
+      header <- selectedState Issues epicHeaderRow
+      selectedReviewItem collapsed `shouldBe` Just (IssueItem (baseIssue 800 []))
+      selectedReviewItem header `shouldBe` Just (IssueItem (baseIssue 700 []))
+      ((.issueNumber) <$> selectedReviewIssue collapsed) `shouldBe` Just 800
+      ((.issueNumber) <$> selectedReviewIssue header) `shouldBe` Just 700
+
+    it "still reviews an ordinary issue, an expanded tracker's child, and a pull request" $ do
+      ordinary <- selectedState Issues ordinaryIssueRow
+      child <- withExpandedTracker <$> selectedState Issues collapsedChildRow
+      selectedPullRequest <- selectedState Reviewing 0
+      selectedReviewTarget ordinary `shouldBe` ReviewTargetItem (IssueItem (baseIssue 10 []))
+      selectedReviewTarget child `shouldBe` ReviewTargetItem (IssueItem (baseIssue 811 []))
+      selectedReviewTarget selectedPullRequest `shouldBe` ReviewTargetItem (PullRequestItem pullRequest)
