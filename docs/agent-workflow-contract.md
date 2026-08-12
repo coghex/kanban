@@ -65,7 +65,12 @@ everything else.
   their coordinator; the Claude command resolves its own at
   `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`. Neither resolves a
   checkout-relative or personal-skill path, because Kanban spawns the workflow
-  with the worked repository as the working directory.
+  with the worked repository as the working directory. The packaged
+  `issue-rereview` assets
+  ([drafting-workflow-contract.md §3.6](drafting-workflow-contract.md#36-the-repair-loop-issue-rereview-and-issue-rereview))
+  read the timeline through the same two vendored copies, resolved the same
+  two ways and under the identical no-unfiltered-fallback rule; they are the
+  only other consumers, and they add no third copy.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
@@ -651,8 +656,8 @@ module under `tools/`, in addition to the Haskell invocation surface — a
 command a packaged workflow or a repository tool shells out to is as
 undocumented-if-missing as one Kanban's own Haskell code spawns. Each plugin
 surface is an enumerated list in that module rather than a glob, so a packaged
-asset reaches the scan only by being listed: the seven drafting and canonical
-issue-review assets declared in
+asset reaches the scan only by being listed: the nine drafting, canonical
+issue-review, and issue-rereview assets declared in
 [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)
 and the five design and report document workflows declared in
 [document-workflow-contract.md §2](document-workflow-contract.md#2-declared-assets)
@@ -680,19 +685,20 @@ Columns: `id | kind | token | files | owner | status | mandatory`.
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/Review.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/Review/Tools.hs;src/Kanban/Solve.hs;src/Kanban/PullRequestFlow.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/drain_prs_service.py;tools/install_drainer.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
-find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
-head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
+codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | external | supported | no
 awk-cli | executable | awk | codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 ```
@@ -712,20 +718,29 @@ GitHub repository rather than one for the account. The bare prefix is also the
 label of the machine-wide singleton that predates per-repository jobs, which
 `tools/drain_prs_service.py` retires rather than installs.
 
+`codex-plugin-cache-root` is the only user-scoped path this repository declares
+that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's own
+directory, and the Codex bundle's `find`-based lookups below are rooted at the
+`plugins/cache` tree inside it. It is `external`/`mandatory: no` for that
+reason — Kanban never creates it, and every workflow that consults it is an
+optional user- or Kanban-invoked action. The Claude bundle declares no
+counterpart, for the reason the next paragraph gives.
+
 `find-cli` and `head-cli` are `mandatory: no`: they are only needed to locate
 one of the installed Codex plugin's own vendored scripts from inside a workflow
-Kanban spawned with the worked repository as its working directory — the shared
-review coordinator for `$pr-review`, `$pr-rereview`, `$pr-revise`, and
-`$repair`, and the trusted-comment issue-spec helper for `$solve` (§2.1) —
-themselves optional AI actions, and every supported macOS/Linux shell already
-provides both. The Claude plugin's equivalent workflows need neither: Claude
+whose working directory is the worked repository rather than the plugin's own
+install location — the shared review coordinator for `$pr-review`,
+`$pr-rereview`, `$pr-revise`, and `$repair`, and the trusted-comment issue-spec
+helper for `$solve` (§2.1) and `$issue-rereview` — themselves optional AI
+actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
 `/pr-review`, `/pr-rereview`, `/pr-revise`, and `/repair` resolve their bundled
 coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`, and
-`/solve` its bundled helper at
+`/solve` and `/issue-rereview` their bundled helper at
 `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`, without a filesystem
 search. That plugin bundles its own copy of both, so it never depends on the
-Codex plugin being installed.
+Codex plugin being installed, and it declares no `personal-path` row of its
+own because it names no home-relative bundle path at all.
 
 `awk-cli` and `rg-cli` are `mandatory: no` because nothing outside the
 document workflows declared in
@@ -883,11 +898,11 @@ runs) parses the manifest in §4 and:
   real ones. It is executable-only: the home-relative
   paths these modules build are not scanned, so the bullet above does not
   extend to `tools/`;
-- fails if any of the seven drafting and canonical issue-review assets
-  declared in
+- fails if any of the nine drafting, canonical issue-review, and
+  issue-rereview assets declared in
   [drafting-workflow-contract.md §2](drafting-workflow-contract.md#2-declared-assets)
   names a `$HOME/`- or `~/`-prefixed path with no matching `personal-path`
-  manifest entry. All seven are scanned for external commands too; the bash
+  manifest entry. All nine are scanned for external commands too; the bash
   fence extractor simply yields nothing for a prose-only contract, so an asset
   with no executable surface is covered rather than exempted;
 - fails, identically, for the five design and report document workflows

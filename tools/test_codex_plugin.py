@@ -14,9 +14,11 @@ Issue #118 added three more packaged skills — the drafting and canonical
 issue-review workflows $issue, $autoissue, and $issue-review — so discovery
 and Haskell name parity are now two separate concepts here, and issue #229
 added four more with the design and report document workflows $design-epic,
-$process-design-doc, $draft-report, and $process-report.
+$process-design-doc, $draft-report, and $process-report. Issue #240 added
+$issue-rereview, the drafting contract's repair loop for a changes-requested
+issue.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twelve); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all thirteen); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Both later sets are user- or
 daemon-invoked and are deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -102,12 +104,13 @@ REVIEW_HS = REPO_ROOT / "src" / "Kanban" / "Review" / "Canonical.hs"
 # Kanban does not spawn.
 HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", "repair"}
 
-# The drafting and canonical issue-review workflows vendored by issue #118.
-# User- or daemon-invoked, never spawned by Kanban's CLI, so they are packaged
+# The drafting and canonical issue-review workflows vendored by issue #118,
+# plus the issue-rereview repair loop vendored by issue #240. User- or
+# daemon-invoked, never spawned by Kanban's CLI, so they are packaged
 # and policy-checked but excluded from Haskell name parity above. draft-issues
 # is deliberately absent: it is a Claude-only breadth workflow
 # (docs/drafting-workflow-contract.md §3.2).
-DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review"}
+DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review", "issue-rereview"}
 
 # The design and report document workflows vendored by issue #229. Also user-
 # invoked and excluded from Haskell name parity. Three of the four are
@@ -323,7 +326,7 @@ class SkillDiscoveryTests(unittest.TestCase):
         # is pinned by parity like the other spawned workflows — and it is
         # still not part of the declared drafting surface
         # docs/drafting-workflow-contract.md and
-        # tools/test_drafting_workflow_contract.py pin at exactly seven assets.
+        # tools/test_drafting_workflow_contract.py pin at exactly nine assets.
         self.assertIn("repair", HASKELL_PARITY_SKILL_NAMES)
         self.assertNotIn("repair", DRAFTING_SKILL_NAMES)
 
@@ -1694,7 +1697,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twelve as one that reads only the
+    short description must see the same thirteen as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.
