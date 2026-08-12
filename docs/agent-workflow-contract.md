@@ -192,10 +192,18 @@ arithmetic, which §2.3 owns.
     the installer's default: a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`
     wins, then the backend path the installer recorded, then — only when the
     record names none — the directory that record lives in (see §3 and §5).
-    It then runs
+    It then runs the single-issue form
     `python3 <resolved path> --path <repository root> --review|--rereview
     <issue> --legacy-policy dual --json`. It writes the `issue-review:v2`
     comment and verdict labels; Kanban's own code never runs `--check`.
+  - The backend's manual `--review` form also accepts two or more issue
+    numbers. It processes that explicit list from left to right under one
+    approval lock, stops normally at the first `CHANGES_REQUESTED` verdict,
+    and never starts the remaining numbers. A model failure, invalid verdict,
+    incident, or indeterminate non-approval is terminal rather than permission
+    to cross the affected issue. One issue retains the original result shape;
+    a batch returns ordered per-issue results plus the processed, remaining,
+    and stopped-at issue numbers.
   - The solve readiness gate is a separate, **read-only** invocation that
     Kanban's Haskell code does not run itself. The solve prompt
     (`src/Kanban/Solve.hs:251`) explicitly forbids the spawned solving agent
@@ -207,9 +215,11 @@ arithmetic, which §2.3 owns.
     itself, via its own shell access, before claiming an issue
     (`tools/approve_issues.py --help`: "`--check ISSUE` Check one issue
     gate.").
-- **Inputs:** issue number, review stage or gate check, repository root.
+- **Inputs:** issue number or explicit ordered initial-review list, review stage
+  or gate check, repository root.
 - **Outputs:** for `--review`/`--rereview`, an `issue-review:v2` comment
-  with the verdict and updated `reviewed:*` labels; for `--check`, a
+  with the verdict and updated `reviewed:*` labels; a multi-issue `--review`
+  additionally returns one ordered batch JSON result; for `--check`, a
   structured JSON approval decision with no GitHub mutation.
 - **Failure semantics:** `"Canonical issue reviewer was not found at
   <path>. Run \`python3 tools/install_issue_review.py\` from the Kanban
@@ -570,8 +580,9 @@ arithmetic, which §2.3 owns.
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
-CLI flags (`--path`, `--review`/`--rereview`/`--check`, `--legacy-policy
-dual`, `--json`), its JSON/comment/label output contract, its role as the
+CLI flags (`--path`, `--review ISSUE [ISSUE ...]`/`--rereview`/`--check`,
+`--legacy-policy dual`, `--json`), its JSON/comment/label output contract, its
+role as the
 sole source of truth for both the interactive review workflow and the solve
 readiness gate, and — since the vendoring migration this section now
 describes — its implementation and every runtime component its supported
