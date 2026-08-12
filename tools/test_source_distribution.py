@@ -112,6 +112,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/issue_approval_queue_design.md",
     "docs/issue_search_design.md",
     "docs/linux_portability_design.md",
+    "docs/managed_paths_design.md",
     "docs/multi_repo_boards_design.md",
     "docs/pipeline-hardening.md",
     "docs/public_release_design.md",
