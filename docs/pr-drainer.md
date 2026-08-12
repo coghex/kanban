@@ -148,6 +148,26 @@ notification sent` and writes no incident. That line is exactly what separates
 an intentional stop from an unexpected exit, which does write a crash incident
 and does notify.
 
+#### What the run says about the code it is running
+
+The installed scripts are symlinks into the checkout you develop in, so a run
+executes whatever is on disk there. Each run opens by comparing those three
+sources against that checkout's local `origin/master` and, when they differ,
+writes one line naming each differing file and why:
+
+```text
+[2026-08-12 07:08:57] PR drainer source advisory: executing sources differ from
+refs/remotes/origin/master: tools/drain_prs.py (working-tree edit, non-master
+HEAD (agent/issue-1)). Report only; the drain proceeds.
+```
+
+It is the record of what a run actually behaved as, which is worth having when
+triaging one that misbehaved. It never holds anything up: a matching checkout
+says nothing, and a comparison that cannot be made — a broken link, a missing
+`origin/master`, no git at all — writes at most one `source advisory
+unavailable` line and the run proceeds exactly as it would have. Nothing here
+refuses a dirty checkout; the drainer is meant to keep working while you work.
+
 #### Approvals that land between runs
 
 Nothing merges while no run is up. A pull request approved after an intentional
