@@ -10,6 +10,36 @@ Optimize for a good design conversation, not issue-shaped prose. Leave tracker
 drafting, deduplication, approval, and creation to later `process-design-doc`
 runs.
 
+## Human interaction and decision authority
+
+This is a human-led design conversation, not an autonomous specification pass.
+Repository evidence can establish current facts, but only the user can choose
+the intended behavior or approve a serious design decision.
+
+- Agent-authored directions are **Proposals**, never **Decisions**. Record or
+  change a `D-N` entry only on explicit user approval of that exact choice.
+- A serious decision needs its own explicit signoff checkpoint. Present the
+  choice, its rationale, its consequences, and the affected slices, then stop.
+  Signoff may cover a clearly enumerated set of decisions, but never an
+  unstated or inferred one.
+- Silence, continued conversation, approval of a document edit, or a request
+  for revisions is not signoff. A revised choice is re-presented and signed off
+  on its own.
+- Any ambiguity about the user's intent, supplied notes, or desired outcome
+  requires user input before design work advances. That includes ambiguity
+  about behavior, scope, ownership, compatibility, migration, persistence,
+  determinism, delivery order, issue boundaries, verification, or an important
+  non-goal. Do not classify an ambiguity as minor, and do not pick the most
+  likely interpretation to keep moving — state the competing readings and their
+  consequences, and ask.
+- When clarification is required, ask at most three focused questions at a time
+  and stop. Continue after the user answers; ask another batch if further
+  ambiguities remain.
+- Record established facts and the user's own material before asking, but do
+  not continue into dependent design, slice decomposition, or readiness until
+  every blocking ambiguity and serious decision has been answered and signed
+  off.
+
 ## Where files go
 
 Never leave uncommitted files in the repository's PRIMARY checkout. The PR
@@ -80,10 +110,12 @@ brain dump, correction, preference, or answer to an earlier question.
 6. When an open question is answered, create or update the corresponding
    decision and preserve the question ID as `Resolved by D-N` rather than
    leaving a dangling reference or erasing useful history.
-7. Ask at most three high-leverage questions after recording everything already
-   known. Prefer questions that distinguish user-visible behavior, ownership,
-   compatibility, scope, or delivery order. Leave lesser uncertainty in the
-   document instead of blocking useful progress.
+7. Ask at most three high-leverage questions at a time, after recording
+   everything already known. Prefer questions that distinguish user-visible
+   behavior, ownership, compatibility, scope, or delivery order. Batching paces
+   the asking; it does not license settling the rest. Carry any remaining
+   ambiguity forward as an open question and ask the next batch rather than
+   deciding it under the authority rules above.
 
 Use `apply_patch` for every document edit. Preserve unrelated user edits and
 stable identifiers across revisions.

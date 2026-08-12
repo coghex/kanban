@@ -11,8 +11,10 @@ Reconciles the responsibility matrix in docs/document-workflow-contract.md
 against the tracked Claude and Codex plugin trees, so a declared asset cannot
 vanish, an undeclared design or report workflow cannot appear, the document
 cannot silently drop the declared Codex-only asymmetry or the design-pipeline
-epic-planner boundary, and the status vocabulary the two process-report
-variants must share cannot drift. The two variants are deliberately not
+epic-planner boundary, the decision-authority clauses of §5.1 cannot regress out
+of either tracked design workflow (issue #239), and the status vocabulary the
+two process-report variants must share cannot drift. The two variants are
+deliberately not
 reconciled into one text (requirement 3 of issue #229): what is pinned here is
 the surface a report started by one brand and resumed by the other depends on,
 not their wording.
@@ -113,7 +115,57 @@ CONTRACT_STATEMENTS = {
     "epic-stays-unpackaged": "remains unpackaged in both plugins",
     "one-artifact-per-invocation": "One artifact per invocation",
     "stop-for-explicit-approval": "Stop for explicit approval",
+    "design-decision-authority": "the user owns every design decision",
+    "design-authority-proposals": "Proposals and never Decisions",
+    "design-authority-ambiguity-stops": (
+        "stops for user input rather than being classified as minor"
+    ),
 }
+
+# Issue #239: the design pair's decision-authority section, as the load-bearing
+# fragments both assets must state. §5's approval stop governs the external
+# mutation; these govern the choice that mutation encodes, which is settled
+# earlier in the conversation and has no artifact to withhold. Compared against
+# canonical() output, so reflowing a paragraph, bolding a term, or starting a
+# sentence with a clause that appears mid-sentence in the other file does not
+# fail CI. §5.1 of the contract summarizes the same boundary; that summary is
+# pinned in CONTRACT_STATEMENTS above, and pinning it there alone would let the
+# assets regress while the document kept describing them.
+DESIGN_AUTHORITY_CLAUSES = {
+    "human-led": "this is a human-led",
+    "proposals-never-decisions": (
+        "agent-authored directions are proposals, never decisions"
+    ),
+    "decision-entry-needs-approval": "a d-n entry only on explicit user approval",
+    "serious-decision-checkpoint": (
+        "a serious decision needs its own explicit signoff checkpoint"
+    ),
+    "enumerated-signoff-only": (
+        "signoff may cover a clearly enumerated set of decisions, but never an "
+        "unstated or inferred one"
+    ),
+    "silence-is-not-signoff": (
+        "silence, continued conversation, approval of a document edit, or a "
+        "request for revisions is not signoff"
+    ),
+    "ambiguity-is-never-minor": "do not classify an ambiguity as minor",
+    "three-question-batching": "ask at most three focused questions at a time",
+}
+
+DESIGN_AUTHORITY_ASSETS = (
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+)
+
+# Requirement 2 of issue #239: $design-epic's step 7 used to close with "Leave
+# lesser uncertainty in the document instead of blocking useful progress",
+# which states the opposite of the ambiguity clause above. Pinned as forbidden
+# prose so the permissive instruction cannot return beside the section that
+# replaced it.
+DESIGN_EPIC_FORBIDDEN_PROSE = (
+    "leave lesser uncertainty in the document",
+    "instead of blocking useful progress",
+)
 
 DECLARED_ASSET_ROW_RE = re.compile(
     r"^(?P<brand>claude|codex)\s*\|\s*(?P<invocation>[/$][\w-]+)\s*\|\s*(?P<path>\S+)$"
@@ -199,6 +251,16 @@ def missing_contract_statements(text):
         key
         for key, statement in CONTRACT_STATEMENTS.items()
         if statement not in document
+    )
+
+
+def missing_design_authority_clauses(text):
+    """The decision-authority clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key
+        for key, clause in DESIGN_AUTHORITY_CLAUSES.items()
+        if clause not in asset
     )
 
 
@@ -367,6 +429,53 @@ class DocumentedBoundaryTests(unittest.TestCase):
         document = normalized(contract_text())
         self.assertIn("One artifact per invocation", document)
         self.assertIn("the durable cursor", document)
+
+
+class DesignDecisionAuthorityTests(unittest.TestCase):
+    """Issue #239: retiring the owner-maintained personal copies must not
+    silently swap the stricter design-signoff policy they carried for the
+    permissive one the tracked Codex lineage grew up with. The clauses are
+    asserted in the packaged assets themselves, not only in the contract prose
+    describing them, because the assets are what an agent actually reads."""
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_both_design_workflows_state_every_authority_clause(self):
+        for path in DESIGN_AUTHORITY_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_design_authority_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states the decision-authority clauses "
+                    f"docs/document-workflow-contract.md §5.1 pins: {missing}",
+                )
+
+    def test_removing_a_clause_from_a_design_workflow_is_reported(self):
+        # The check above is load-bearing rather than decorative: delete one
+        # clause at a time from each asset and confirm exactly that key is
+        # reported. canonical() is idempotent, so mutating its output is the
+        # same planted-violation shape the boundary tests above use.
+        for path in DESIGN_AUTHORITY_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in DESIGN_AUTHORITY_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    mutated = asset.replace(clause, "")
+                    self.assertEqual(missing_design_authority_clauses(mutated), [key])
+
+    def test_design_epic_no_longer_defers_lesser_uncertainty(self):
+        text = canonical(
+            self.asset_text("codex-plugin/plugins/kanban/skills/design-epic/SKILL.md")
+        )
+        for phrase in DESIGN_EPIC_FORBIDDEN_PROSE:
+            self.assertNotIn(
+                phrase,
+                text,
+                "$design-epic must not instruct leaving an ambiguity in the "
+                "document in place of asking; it contradicts the "
+                f"ambiguity-is-never-minor clause (§5.1): {phrase!r}",
+            )
 
 
 class SharedStatusVocabularyTests(unittest.TestCase):
