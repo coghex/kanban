@@ -1,0 +1,40 @@
+╔══════════ coghex/kanban ═════════╗
+║┏━━━━━━━━━━ ISSUES  1/5 ━━━━━━━━━┳║
+║┃                                ┃║
+║┃ ┌────────── SEARCH ──────────┐ ┃║
+║┃ │ add repository snapshot    │ ┃║
+║┃ │ cache                      │ ┃║
+║┃ └────────────────────────────┘ ┃║
+║┃                                ┃║
+║┃  STANDALONE                    ┃║
+║┃ ▌╭───────────────────────────╮ ┃║
+║┃  │ #901 Add repository       │ ┃║
+║┃  │ snapshot cache            │ ┃║
+║┃  │  feature                  │ ┃║
+║┃  │ unassigned · updated 4h   │ ┃║
+║┃  │ ago                       │ ┃║
+║┃  │ Load the last good GitHub │ ┃║
+║┃  │ snapshot at startup and   │ ┃║
+║┃  │ replace it atomically…    │ ┃║
+║┃  ╰───────────────────────────╯ ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
+║ j/↓ next  k/↑ previous  x kill   ║
+║ board: updated 3h ago            ║
+╚══════════════════════════════════╝

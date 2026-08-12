@@ -58,7 +58,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                 ┃                                ┃                                ┃                                ┃║
 ║┃ off                      ┃┃                                 ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p pr ║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  e epic  enter details  esc close  r review/revise  S solve  A autos ║
 ║ board: updated 3h ago                                                                                                                                            ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

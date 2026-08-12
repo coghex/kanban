@@ -38,6 +38,7 @@ import Kanban.UI.Util
 import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.AutoSolve
+import Kanban.UI.Search
 import Kanban.UI.Selection
 import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
@@ -48,6 +49,10 @@ import Kanban.UI.Worker
 applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
 applyBoardRefresh outcome = do
   before <- get
+  -- Which result was selected before the refresh, so a live query can be
+  -- re-run against the new board and still keep that card selected. Read
+  -- here because the refresh below replaces the board it was read off.
+  let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
   modify $ \state -> case outcome of
     -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
     -- re-verifies it before spawning anything, so a later refresh -- in this
@@ -89,6 +94,13 @@ applyBoardRefresh outcome = do
               appPullRequestsTruncated = snapshot.snapshotPullRequestsTruncated,
               appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
             }
+  -- The query is re-run against the new board by 'entriesFor' itself; what
+  -- needs deciding is where the selection lands in the result. The target
+  -- column stays both the searched and the selected one whatever the refresh
+  -- did to the item, because the generic 'preserveSelection' above is allowed
+  -- to move columns and this phase's search cannot follow it. A no-op with no
+  -- search open, and a no-op after a failed refresh, which changes no board.
+  modify (reseatSearch searchAnchor)
   -- Applied over whichever notice the outcome above produced, so a merge that
   -- landed is still reported once the refresh it required has published --
   -- above all a merge whose post-merge work then failed, which this is the

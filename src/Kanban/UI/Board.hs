@@ -58,7 +58,7 @@ import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, foote
 import Kanban.UI.SessionCore
 import Kanban.UI.Util
 import Kanban.UI.Theme
-import Kanban.UI.Selection
+import Kanban.UI.Search
 
 drawBase :: AppState -> Widget Name
 drawBase state
@@ -253,30 +253,70 @@ drawColumn state columnWidth column =
     . viewport (ColumnViewport column) Vertical
     . padTop (Pad 1)
     . vBox
-    $ if null entries
-      then [padAll 1 (withAttr dimAttr (txt "No items"))]
-      else drawColumnEntries state column (zip [0 ..] entries)
+    $ searchRows <> entryRows
   where
     entries = entriesFor state column
+    -- The box is part of this column's ordinary layout flow rather than an
+    -- overlay: it is drawn first, so the cards below move down by exactly its
+    -- rendered height and a resize rewraps both.
+    searchRows = maybe [] (pure . drawSearchBox state columnWidth) (searchQueryFor state column)
+    entryRows
+      | null entries = [padAll 1 (withAttr dimAttr (txt emptyColumnText))]
+      | otherwise = drawColumnEntries state (expandedTrackersFor state column) column (zip [0 ..] entries)
+    -- A column a query emptied is not the same thing as an empty column, and
+    -- §7 keeps the two rows distinct.
+    emptyColumnText = maybe "No items" (const "No matches") (activeQueryFor state column)
     columnVisibility = if state.appSelectedColumn == column then visible else id
 
-drawColumnEntries :: AppState -> BoardColumn -> [(Int, ColumnEntry)] -> [Widget Name]
-drawColumnEntries _ _ [] = []
-drawColumnEntries state column indexedEntries@((row, entry) : remainingEntries) = case entry of
+-- | The one-line label naming the box a query is typed into.
+searchBoxLabel :: Text
+searchBoxLabel = " SEARCH "
+
+-- | Cells the search box spends on itself in a column: the one-cell padding
+-- either side of the box, its two border columns, and the one-cell padding
+-- either side of its content.
+searchBoxOverhead :: Int
+searchBoxOverhead = 6
+
+-- | The query as the rows the box draws, always at least one row so an empty
+-- query still shows a box with a line to type into.
+--
+-- Wrapping is 'wrappedLines', which rebuilds from 'Data.Text.words' and so
+-- collapses runs of whitespace rather than echoing them. That is the same
+-- normalization the match itself applies, so what the box shows is what the
+-- query is being compared as.
+searchBoxLines :: Int -> Text -> [Text]
+searchBoxLines innerWidth query = map pad (case wrappedLines innerWidth query of [] -> [" "]; rows -> rows)
+  where
+    pad row = row <> Text.replicate (max 0 (innerWidth - displayWidth row)) " "
+
+drawSearchBox :: AppState -> Int -> Text -> Widget Name
+drawSearchBox state columnWidth query =
+  padLeftRight 1
+    . padBottom (Pad 1)
+    . withBorderStyle (cardBorderStyle state.appOptions)
+    . borderWithLabel (withAttr headingAttr (txt searchBoxLabel))
+    . padLeftRight 1
+    . vBox
+    $ map (withAttr cardTitleAttr . txt) (searchBoxLines (max 0 (columnWidth - searchBoxOverhead)) query)
+
+drawColumnEntries :: AppState -> Set.Set Int -> BoardColumn -> [(Int, ColumnEntry)] -> [Widget Name]
+drawColumnEntries _ _ _ [] = []
+drawColumnEntries state expandedTrackers column indexedEntries@((row, entry) : remainingEntries) = case entry of
   TrackerHeader tracker ->
-    let expanded = tracker.trackerIssue.issueNumber `Set.member` state.appExpandedTrackers
-     in drawTrackerHeader state column row tracker expanded : drawColumnEntries state column remainingEntries
+    let expanded = tracker.trackerIssue.issueNumber `Set.member` expandedTrackers
+     in drawTrackerHeader state column row tracker expanded : drawColumnEntries state expandedTrackers column remainingEntries
   Tracked trackingContext _ ->
     let trackerNumber = primaryTrackerNumber trackingContext
         (groupEntries, remaining) = span ((== Just trackerNumber) . entryPrimaryTrackerNumber . snd) indexedEntries
         tracker = trackingContext.trackingPrimary.membershipTracker
-        expanded = trackerNumber `Set.member` state.appExpandedTrackers
+        expanded = trackerNumber `Set.member` expandedTrackers
         children = if expanded then map (uncurry (drawCard state column)) groupEntries else []
-     in drawTrackerHeader state column row tracker expanded : children <> drawColumnEntries state column remaining
+     in drawTrackerHeader state column row tracker expanded : children <> drawColumnEntries state expandedTrackers column remaining
   Standalone _ ->
     let (standaloneEntries, remaining) = span ((== Nothing) . entryPrimaryTrackerNumber . snd) indexedEntries
         header = padLeftRight 2 (withAttr dimAttr (txt "STANDALONE"))
-     in header : map (uncurry (drawCard state column)) standaloneEntries <> drawColumnEntries state column remaining
+     in header : map (uncurry (drawCard state column)) standaloneEntries <> drawColumnEntries state expandedTrackers column remaining
 
 boardTopLeft, boardTopRight, boardTopJunction :: AppState -> Text
 boardBottomLeft, boardBottomRight, boardBottomJunction :: AppState -> Text

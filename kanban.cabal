@@ -114,6 +114,7 @@ library
     Kanban.UI.Reconcile
     Kanban.UI.Refresh
     Kanban.UI.Review
+    Kanban.UI.Search
     Kanban.UI.Selection
     Kanban.UI.Session
     Kanban.UI.SessionCore
@@ -233,6 +234,7 @@ test-suite kanban-test
     Spec.UI.Keys
     Spec.UI.Layout
     Spec.UI.ReviewSession
+    Spec.UI.Search
     Spec.UI.SessionCore
     Spec.UI.SolveChooser
     Spec.UI.Text

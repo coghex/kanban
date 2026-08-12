@@ -1,7 +1,9 @@
 module Kanban.UI.Events
   ( IncidentsAction (..),
     OverlayMouseAction (..),
+    applyCardClick,
     applyIncidentsAction,
+    applyRunningProcessClick,
     handleEvent,
     incidentsAction,
     killSelectionNotice,
@@ -46,6 +48,7 @@ import Kanban.UI.Keys
 import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.Transcript
+import Kanban.UI.Search
 import Kanban.UI.Selection
 import Kanban.UI.Session
 import Kanban.UI.SessionEvents
@@ -140,14 +143,23 @@ handleEvent event = do
     (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, _) -> pure ()
+    -- A live search decodes the base board's key presses first, so a printable
+    -- key types into the query instead of firing the binding that letter
+    -- ordinarily carries. It claims nothing carrying Ctrl, Meta, or Alt, and
+    -- nothing it declines reaches the table below with its ordinary meaning.
+    (Nothing, VtyEvent keyEvent)
+      | Just input <- searchInput state.appSearch keyEvent -> handleSearchInput input
     (Nothing, VtyEvent keyEvent)
       | Just action <- boardAction BoardScope keyEvent -> applyBoardAction action
     (Nothing, MouseDown DrainerButton Vty.BLeft [] _) -> toggleDrainer
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (EpicTarget column _ _) Vty.BScrollDown _ _) -> scrollColumn column 3
-    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _) -> toggleTrackerFromClick column row trackerNumber
-    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _) -> openRunningProcessOrSelect column row
-    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _) -> selectOrOpenCard column row
+    (Nothing, MouseDown (EpicTarget column row trackerNumber) Vty.BLeft _ _)
+      | searchClickAllowed state column -> toggleTrackerFromClick column row trackerNumber
+    (Nothing, MouseDown (CardTarget column row) Vty.BRight _ _)
+      | searchClickAllowed state column -> openRunningProcessOrSelect column row
+    (Nothing, MouseDown (CardTarget column row) Vty.BLeft _ _)
+      | searchClickAllowed state column -> selectOrOpenCard column row
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollUp _ _) -> scrollColumn column (-3)
     (Nothing, MouseDown (CardTarget column _) Vty.BScrollDown _ _) -> scrollColumn column 3
     (Nothing, MouseDown (ColumnViewport column) Vty.BScrollUp _ _) -> scrollColumn column (-3)
@@ -184,6 +196,7 @@ applyBoardAction = \case
   MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
   ShowSettings -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
+  OpenSearch -> modify openSearch
   ShowHelp -> modify (\current -> current {appOverlay = Just HelpOverlay})
   RepaintTerminal -> forceTerminalRepaint
   QuitDashboard -> requestDashboardQuit
@@ -193,6 +206,14 @@ applyBoardAction = \case
       case state.appOverlay of
         Just (DetailsOverlay item) -> onItem item
         _ -> onBoard
+
+-- | Carries out one decoded search key press. Every input is a pure
+-- transition: 'applySearchInput' decides all but Enter, which is
+-- 'openSearchResult' because opening a card's details is the board's own
+-- transition and search only ends beneath it.
+handleSearchInput :: SearchInput -> EventM Name AppState ()
+handleSearchInput SearchOpenDetails = modify openSearchResult
+handleSearchInput input = modify (applySearchInput input)
 
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
@@ -657,29 +678,41 @@ scrollColumn column amount = do
   vScrollBy (viewportScroll (ColumnViewport column)) amount
 
 selectOrOpenCard :: BoardColumn -> Int -> EventM Name AppState ()
-selectOrOpenCard column row = modify $ \state ->
-  if state.appSelectedColumn == column && selectedRow state column == row
-    then case safeIndex row (entriesFor state column) of
-      Just entry -> state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing}
-      Nothing -> state
-    else
-      state
-        { appSelectedColumn = column,
-          appSelectedRows = Map.insert column row state.appSelectedRows,
-          appEnsureSelectionVisible = True,
-          appNotice = Nothing
-        }
+selectOrOpenCard column row = modify (applyCardClick column row)
+
+-- | What a left click on a board card does. A click that only selects leaves a
+-- live search running; one that opens details ends it, on the identity it
+-- opened, exactly as Enter does.
+applyCardClick :: BoardColumn -> Int -> AppState -> AppState
+applyCardClick column row state
+  | state.appSelectedColumn == column && selectedRow state column == row =
+      case safeIndex row (entriesFor state column) of
+        Just entry ->
+          closeSearchOn
+            (anchorAt state column row)
+            (state {appOverlay = Just (DetailsOverlay (entryItem entry)), appNotice = Nothing})
+        Nothing -> state
+  | otherwise = selectCardOnly column row state
 
 openRunningProcessOrSelect :: BoardColumn -> Int -> EventM Name AppState ()
 openRunningProcessOrSelect column row = do
-  state <- get
-  let selectedState = selectCardOnly column row state
-  case safeIndex row (entriesFor state column) >>= runningProcessOverlay state . entryItem of
-    Nothing -> put selectedState
-    Just overlay -> do
-      put (selectedState {appOverlay = Just overlay})
-      presentTranscriptTail
-      armVisibleReviewTicks
+  before <- get
+  modify (applyRunningProcessClick column row)
+  after <- get
+  when (after.appOverlay /= before.appOverlay) $ do
+    presentTranscriptTail
+    armVisibleReviewTicks
+
+-- | What a right click on a board card does: select it, and open its live
+-- session's overlay if it has one. Opening one ends a live search on the
+-- identity it opened, the same way Enter and a details click do.
+applyRunningProcessClick :: BoardColumn -> Int -> AppState -> AppState
+applyRunningProcessClick column row state = case clicked >>= runningProcessOverlay state . entryItem of
+  Nothing -> selectedState
+  Just overlay -> closeSearchOn (anchorAt state column row) (selectedState {appOverlay = Just overlay})
+  where
+    clicked = safeIndex row (entriesFor state column)
+    selectedState = selectCardOnly column row state
 
 selectCardOnly :: BoardColumn -> Int -> AppState -> AppState
 selectCardOnly column row state =

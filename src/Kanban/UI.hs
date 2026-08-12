@@ -92,6 +92,9 @@ runDashboard options config repository = do
             appSelectedRows = Map.fromList [(column, 0) | column <- allColumns],
             appEnsureSelectionVisible = True,
             appExpandedTrackers = Set.empty,
+            -- Search is presentation state, so a restart always starts with
+            -- no query and the complete board.
+            appSearch = Nothing,
             appSidebarVisible = True,
             appSettings = initialSettings,
             appLogRoot = logRoot,

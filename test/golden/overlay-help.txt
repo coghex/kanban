@@ -5,16 +5,16 @@
 ║┃         Thu 16:05        ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
 ║┃         Tue 09:00        ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃ Claude                   ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃         Thu 17:30        ┃┃     │ envelope       ┃                                                                                             ┃       │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature       ┃ j / Down             next card                                                              ┃to     │ ┃  │ Updates the branch after the       │ ┃║
-║┃         Sat 09:10        ┃┃     │ unassigned · up┃ k / Up               previous card                                                          ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the envel┃ x                    kill selected working process tree                                     ┃       │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payload ┃ h / Left             previous column                                                        ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is detect┃ l / Right            next column                                                            ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────┃ g                    first visible item in the column                                       ┃         ┃                                         ┃║
-║┃                          ┃┃                      ┃ G                    last visible item in the column                                        ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ Claude                   ┃┃     │ A1 · tracker #7┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the ┃                                                                                             ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃         Thu 17:30        ┃┃     │ envelope       ┃ j / Down             next card                                                              ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature       ┃ k / Up               previous card                                                          ┃to     │ ┃  │ Updates the branch after the       │ ┃║
+║┃         Sat 09:10        ┃┃     │ unassigned · up┃ x                    kill selected working process tree                                     ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃     │ Write the envel┃ h / Left             previous column                                                        ┃       │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃     │ of the payload ┃ l / Right            next column                                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃     │ write is detect┃ g                    first visible item in the column                                       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰────────────────┃ G                    last visible item in the column                                        ┃         ┃                                         ┃║
+║┃                          ┃┃                      ┃ s                    search the Issues column                                               ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                      ┃ e                    expand / collapse focused epic                                         ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routin┃ Enter                details                                                                ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete            ┃ Esc                  close overlay or dismiss a notice                                      ┃       │ ┃  │ #812 · agent-name → master ·       │ ┃║
@@ -42,7 +42,7 @@
 ║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i attention  u update  d dr ║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  e epic  enter details  esc close  r review/revise  S solve  A autosolve  p processes  i attention  u up ║
 ║ board: updated 3h ago                                                                                                                                                                                ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

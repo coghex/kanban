@@ -58,6 +58,7 @@ testAppState board = do
         appSelectedRows = Map.fromList [(column, 0) | column <- [minBound .. maxBound]],
         appEnsureSelectionVisible = False,
         appExpandedTrackers = Set.empty,
+        appSearch = Nothing,
         appSidebarVisible = True,
         appSettings = defaultSettings,
         appLogRoot = "/tmp/example-project/logs",
