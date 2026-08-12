@@ -149,7 +149,7 @@ spelling.
 
 ## Design
 
-Proposed shape, pending the open questions below.
+The settled design is:
 
 - **One resolver per language, not per component.** `tools/kanban_config.py`
   becomes the single Python resolver for both managed installs, with the
@@ -209,8 +209,8 @@ User signoff 2026-08-12. Epic #290's LNX-2 lands first and may temporarily
 create `~/Library/…` directories on a Linux host; this arc relocates them.
 Waiting for this arc before the systemd backend was rejected as stretching
 #290's critical path behind a multi-issue arc. Consequence: this arc inherits
-whatever spelling LNX-2 ships on Linux, and Q-4 decides whether it migrates
-such an install or simply supersedes it.
+whatever spelling LNX-2 ships on Linux, and D-9 requires migrating that install
+rather than merely superseding it.
 
 ### D-3. Managed paths are their own arc, not an LNX-2 fold
 
@@ -231,7 +231,7 @@ copies of one decision that the §4 check cannot police — it catches an
 undeclared literal, not a wrong branch. Moving the record to one
 platform-independent location was rejected because it would move a live macOS
 install. Consequence: PATH-4 changes twelve assets to a two-location probe,
-the §4 rows declare both literals, and Q-5 must fix the order.
+the §4 rows declare both literals, and D-7 fixes the order as XDG-first.
 
 ### D-5. Install directories and records go to the data home, logs to the state home
 
@@ -383,7 +383,7 @@ reconciliation fails closed on a spelling whose row is missing.
   with the new sibling rows.
 - **Out of scope:** `~/Library/LaunchAgents`, plists, and the systemd unit
   location, which belong to LNX-2.
-- **Open questions:** Q-4, Q-6
+- **Open questions:** None
 
 ### PATH-3. Resolve the Haskell consumers' managed paths per platform
 
