@@ -5,6 +5,7 @@ real ~/Library/LaunchAgents or ~/Library/Application Support/kanban, and no
 test invokes launchctl, git against a real remote, or a network.
 """
 
+import contextlib
 import fcntl
 import json
 import os
@@ -41,6 +42,9 @@ class RedirectedControllerTestCase(unittest.TestCase):
         self.log_root = self.root / "logs"
         for name, value in (
             ("INSTALL_DIR", self.install_dir),
+            ("CONTROLLER_PATH", self.install_dir / "drain_prs_service.py"),
+            ("DRAINER_PATH", self.install_dir / "drain_prs.py"),
+            ("CONFIG_MODULE_PATH", self.install_dir / "kanban_config.py"),
             ("LAUNCH_AGENTS_DIR", self.launch_agents),
             (
                 "LEGACY_PLIST_PATH",
@@ -66,6 +70,18 @@ class RedirectedControllerTestCase(unittest.TestCase):
         self.commands = []
         patched = mock.patch.object(
             drain_prs_service, "run_command", side_effect=self._run_command
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+
+        # The installed-source audit reads real git in a real checkout, which
+        # no test here may depend on. It is stubbed silent by default and kept
+        # reachable for the tests that are actually about it.
+        self.real_audit_installed_sources = drain_prs_service.audit_installed_sources
+        patched = mock.patch.object(
+            drain_prs_service,
+            "audit_installed_sources",
+            return_value=drain_prs_service.SourceAudit(),
         )
         patched.start()
         self.addCleanup(patched.stop)
@@ -2200,6 +2216,337 @@ class MirroredCleanupVocabularyTests(unittest.TestCase):
         )
         for step in described:
             self.assertNotIn("unknown cleanup step", step)
+
+
+SOURCE_NAMES = ("drain_prs.py", "drain_prs_service.py", "kanban_config.py")
+
+
+def _git(repo, *args):
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], text=True, capture_output=True
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed in {repo}: {proc.stderr or proc.stdout}"
+        )
+    return proc.stdout.strip()
+
+
+class InstalledSourceAdvisoryTests(unittest.TestCase):
+    """Issue #246: the installed drainer executes from links into a live
+    development checkout, so a run's own source state is the only record of
+    what it actually behaved as. Real temporary repositories throughout — this
+    is a claim about what git reports, not about a fake.
+
+    Everything asserted here is report-only. Nothing in this class may refuse,
+    delay, or change a drain, which is why the unavailable cases matter as much
+    as the divergent ones.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.remote = self.root / "remote.git"
+        self.repo = self.root / "checkout"
+        self.install = self.root / "install"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
+        self._make_checkout(self.repo)
+        self.install.mkdir()
+        for name in SOURCE_NAMES:
+            (self.install / name).symlink_to(self.repo / "tools" / name)
+        self.point_at(
+            controller=self.install / "drain_prs_service.py",
+            drainer=self.install / "drain_prs.py",
+            config=self.install / "kanban_config.py",
+        )
+
+    def _make_checkout(self, path, push=True):
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+        _git(path, "config", "user.email", "test@example.test")
+        _git(path, "config", "user.name", "Test")
+        (path / "tools").mkdir(parents=True)
+        for name in SOURCE_NAMES:
+            (path / "tools" / name).write_text(f"# {name}\n", encoding="utf-8")
+        _git(path, "add", "tools")
+        _git(path, "commit", "-q", "-m", "initial")
+        _git(path, "branch", "-M", "master")
+        if push:
+            _git(path, "remote", "add", "origin", str(self.remote))
+            _git(path, "push", "-q", "origin", "master")
+            _git(path, "fetch", "-q", "origin")
+        return path
+
+    def point_at(self, *, controller=None, drainer=None, config=None):
+        for name, value in (
+            ("CONTROLLER_PATH", controller),
+            ("DRAINER_PATH", drainer),
+            ("CONFIG_MODULE_PATH", config),
+        ):
+            if value is None:
+                continue
+            patched = mock.patch.object(drain_prs_service, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def commit(self, message, name="drain_prs.py", body=None):
+        (self.repo / "tools" / name).write_text(
+            body or f"# {name}\n# {message}\n", encoding="utf-8"
+        )
+        _git(self.repo, "add", f"tools/{name}")
+        _git(self.repo, "commit", "-q", "-m", message)
+
+    def advance_the_baseline(self, name="drain_prs.py"):
+        """Move `origin/master` ahead of this checkout the way a merged PR
+        does, leaving the checkout itself on the older commit."""
+        original = _git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "tools" / name).write_text("# published\n", encoding="utf-8")
+        _git(self.repo, "add", f"tools/{name}")
+        _git(self.repo, "commit", "-q", "-m", "published elsewhere")
+        _git(self.repo, "push", "-q", "origin", "master")
+        _git(self.repo, "reset", "-q", "--hard", original)
+        _git(self.repo, "fetch", "-q", "origin")
+
+    def audit(self):
+        return drain_prs_service.audit_installed_sources()
+
+    def causes_for(self, path):
+        audit = self.audit()
+        self.assertEqual(audit.unavailable, ())
+        matching = [item for item in audit.diverged if item.path == path]
+        self.assertEqual(len(matching), 1, f"{path} not named once in {audit.diverged}")
+        return matching[0].causes
+
+    def test_sources_matching_the_baseline_report_nothing(self):
+        audit = self.audit()
+        self.assertEqual(audit, drain_prs_service.SourceAudit())
+        self.assertEqual(drain_prs_service.source_advisory_lines(audit), [])
+
+    def test_a_working_tree_edit_is_named_as_one(self):
+        (self.repo / "tools" / "drain_prs.py").write_text(
+            "# mid-edit\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            self.causes_for("tools/drain_prs.py"), ("working-tree edit",)
+        )
+
+    def test_committed_bytes_on_another_branch_name_that_branch(self):
+        _git(self.repo, "checkout", "-q", "-b", "agent/issue-1")
+        self.commit("on a feature branch")
+        causes = self.causes_for("tools/drain_prs.py")
+        self.assertIn("non-master HEAD (agent/issue-1)", causes)
+        self.assertIn("unpushed commits", causes)
+        # The bytes on disk are the committed ones, so this is not an edit.
+        self.assertNotIn("working-tree edit", causes)
+
+    def test_a_detached_head_is_named_as_detached(self):
+        self.commit("committed, then detached")
+        _git(self.repo, "checkout", "-q", "--detach", "HEAD")
+        self.assertIn(
+            "non-master HEAD (detached)", self.causes_for("tools/drain_prs.py")
+        )
+
+    def test_local_master_ahead_of_the_baseline_names_unpushed_commits(self):
+        self.commit("committed but never pushed")
+        self.assertEqual(
+            self.causes_for("tools/drain_prs.py"), ("unpushed commits",)
+        )
+
+    def test_local_master_behind_the_baseline_is_attributed_too(self):
+        # A clean checkout of an unmodified `master` still executes bytes the
+        # baseline no longer has. Without this, such a run explains itself with
+        # none of the working-tree, branch, or unpushed causes.
+        self.advance_the_baseline()
+        self.assertEqual(
+            self.causes_for("tools/drain_prs.py"), ("HEAD behind origin/master",)
+        )
+
+    def test_a_diverged_local_master_reports_both_directions(self):
+        self.advance_the_baseline()
+        self.commit("and a local commit on top")
+        causes = self.causes_for("tools/drain_prs.py")
+        self.assertIn("unpushed commits", causes)
+        self.assertIn("HEAD behind origin/master", causes)
+
+    def test_an_edit_on_a_feature_branch_reports_every_applicable_cause(self):
+        _git(self.repo, "checkout", "-q", "-b", "agent/issue-2")
+        self.commit("committed on the branch")
+        (self.repo / "tools" / "drain_prs.py").write_text(
+            "# and edited since\n", encoding="utf-8"
+        )
+        causes = self.causes_for("tools/drain_prs.py")
+        self.assertIn("working-tree edit", causes)
+        self.assertIn("non-master HEAD (agent/issue-2)", causes)
+        self.assertIn("unpushed commits", causes)
+
+    def test_every_differing_source_shares_one_advisory_line(self):
+        for name in ("drain_prs.py", "kanban_config.py"):
+            (self.repo / "tools" / name).write_text("# mid-edit\n", encoding="utf-8")
+        lines = drain_prs_service.source_advisory_lines(self.audit())
+        self.assertEqual(len(lines), 1)
+        self.assertIn("tools/drain_prs.py", lines[0])
+        self.assertIn("tools/kanban_config.py", lines[0])
+        self.assertNotIn("tools/drain_prs_service.py", lines[0])
+
+    def test_a_broken_link_is_unavailable_without_hiding_a_divergence(self):
+        # The drainer link, not the controller one: a controller that cannot be
+        # resolved is a controller that never ran to report anything.
+        link = self.install / "drain_prs.py"
+        link.unlink()
+        link.symlink_to(self.repo / "tools" / "gone.py")
+        (self.repo / "tools" / "kanban_config.py").write_text(
+            "# mid-edit\n", encoding="utf-8"
+        )
+        audit = self.audit()
+        self.assertEqual(
+            [item.path for item in audit.diverged], ["tools/kanban_config.py"]
+        )
+        self.assertEqual(len(audit.unavailable), 1)
+        self.assertIn("drainer", audit.unavailable[0])
+        lines = drain_prs_service.source_advisory_lines(audit)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("tools/kanban_config.py", lines[0])
+        self.assertIn("unavailable", lines[1])
+
+    def test_a_source_outside_a_git_repository_is_unavailable(self):
+        loose = self.root / "loose.py"
+        loose.write_text("# not tracked anywhere\n", encoding="utf-8")
+        self.point_at(config=loose)
+        audit = self.audit()
+        self.assertEqual(audit.diverged, ())
+        self.assertEqual(len(audit.unavailable), 1)
+        self.assertIn("not inside a git repository", audit.unavailable[0])
+
+    def test_a_checkout_without_the_baseline_ref_is_unavailable(self):
+        remoteless = self._make_checkout(self.root / "remoteless", push=False)
+        self.point_at(config=remoteless / "tools" / "kanban_config.py")
+        audit = self.audit()
+        self.assertEqual(audit.diverged, ())
+        self.assertEqual(len(audit.unavailable), 1)
+        self.assertIn("refs/remotes/origin/master", audit.unavailable[0])
+
+    def test_a_source_absent_from_the_baseline_is_unavailable(self):
+        added = self.repo / "tools" / "added_later.py"
+        added.write_text("# newer than the baseline\n", encoding="utf-8")
+        self.point_at(config=added)
+        audit = self.audit()
+        self.assertEqual(audit.diverged, ())
+        self.assertEqual(len(audit.unavailable), 1)
+        self.assertIn("absent from", audit.unavailable[0])
+
+    def test_git_failing_outright_leaves_one_unavailable_line(self):
+        with mock.patch.object(
+            drain_prs_service.subprocess, "run", side_effect=OSError("no git")
+        ):
+            audit = self.audit()
+        self.assertEqual(audit.diverged, ())
+        self.assertEqual(len(audit.unavailable), 3)
+        self.assertEqual(len(drain_prs_service.source_advisory_lines(audit)), 1)
+
+    def test_an_unexpected_comparison_failure_is_contained(self):
+        with mock.patch.object(
+            drain_prs_service, "_audit_source", side_effect=RuntimeError("boom")
+        ):
+            audit = self.audit()
+        self.assertEqual(audit.diverged, ())
+        self.assertEqual(len(drain_prs_service.source_advisory_lines(audit)), 1)
+
+    def test_the_audit_never_writes_to_the_repository(self):
+        self.commit("committed but never pushed")
+        refs = ["for-each-ref", "--format=%(refname) %(objectname)"]
+        before = (_git(self.repo, *refs), _git(self.repo, "status", "--porcelain"))
+        self.assertNotEqual(self.audit(), drain_prs_service.SourceAudit())
+        after = (_git(self.repo, *refs), _git(self.repo, "status", "--porcelain"))
+        # No ref moved, so nothing fetched or updated, and the baseline the
+        # comparison read is still the one that was already on disk.
+        self.assertEqual(before, after)
+
+
+def _failing_audit():
+    raise RuntimeError("boom")
+
+
+class SourceAdvisoryRunTests(RedirectedControllerTestCase):
+    """The advisory reaches the log stream the plist already writes to, ahead
+    of both of `run_service`'s refusals, and changes neither of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+
+    def _spawn_run(self, audit=None):
+        """One `run_service` whose child exits under the harness, reporting
+        what the run returned and whether it spawned. `audit` replaces the
+        silent stub; None keeps it."""
+        patches = [
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service.subprocess, "Popen"),
+            mock.patch.object(drain_prs_service, "write_incident"),
+        ]
+        if audit is not None:
+            patches.append(
+                mock.patch.object(drain_prs_service, "audit_installed_sources", audit)
+            )
+        with contextlib.ExitStack() as stack:
+            _branch, spawn, _incident = (
+                stack.enter_context(patch) for patch in patches[:3]
+            )
+            for patch in patches[3:]:
+                stack.enter_context(patch)
+            spawn.return_value.pid = os.getpid()
+            spawn.return_value.wait.return_value = 0
+            result = drain_prs_service.run_service(self.job, "acme/widgets")
+        return result, spawn.call_count
+
+    def test_the_audit_runs_once_for_the_invocation(self):
+        self._spawn_run()
+        drain_prs_service.audit_installed_sources.assert_called_once_with()
+
+    def test_the_advisory_never_changes_what_the_run_reports(self):
+        # Requirement 2 as an equality rather than a constant: whatever this
+        # harness makes a run return, an unavailable audit and an outright
+        # broken one have to return the same thing, having spawned the same.
+        silent = self._spawn_run()
+        self.assertEqual(self._spawn_run(self.real_audit_installed_sources), silent)
+        self.assertEqual(self._spawn_run(_failing_audit), silent)
+
+    def test_an_unavailable_advisory_still_lets_the_drainer_spawn(self):
+        # The installed links do not exist under the redirected roots, so the
+        # real audit can compare nothing at all — and the drain runs anyway.
+        _result, spawned = self._spawn_run(self.real_audit_installed_sources)
+        self.assertEqual(spawned, 1)
+        log = self.job.service_log_path.read_text(encoding="utf-8")
+        self.assertIn("source advisory unavailable", log)
+        self.assertIn("Starting PR drainer", log)
+
+    def test_an_unavailable_advisory_still_reaches_the_identity_refusal(self):
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "audit_installed_sources",
+                self.real_audit_installed_sources,
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch") as branch,
+            mock.patch.object(drain_prs_service.subprocess, "Popen") as spawn,
+        ):
+            result = drain_prs_service.run_service(self.job, "acme/gadgets")
+        self.assertEqual(result, 0)
+        spawn.assert_not_called()
+        branch.assert_not_called()
+        # Both lines land where the plist sends this job's output, and nothing
+        # was written under the identity the checkout actually resolves to.
+        installed = drain_prs_service.job_for_identity(self.repo, "acme/gadgets")
+        log = installed.service_log_path.read_text(encoding="utf-8")
+        self.assertIn("source advisory unavailable", log)
+        self.assertIn("PR drainer did not start", log)
+        self.assertFalse(self.job.log_dir.exists())
+
+    def test_a_quiet_audit_leaves_the_lifecycle_messages_alone(self):
+        self._spawn_run()
+        log = self.job.service_log_path.read_text(encoding="utf-8")
+        self.assertNotIn("source advisory", log)
+        self.assertIn("Starting PR drainer", log)
 
 
 class StopBudgetFitsTheTransitionTests(unittest.TestCase):
