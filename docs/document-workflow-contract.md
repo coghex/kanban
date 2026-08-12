@@ -173,6 +173,28 @@ Both are the reason these workflows are user-invoked (§1): each one has a
 mandatory human stop in the middle, so nothing here is safe for Kanban's CLI to
 spawn unattended.
 
+### 5.1 Decision authority in the design workflows
+
+`$design-epic` and `$process-design-doc` carry a third boundary the report
+workflows do not, because a design conversation settles behavior long before
+there is an artifact to approve: the user owns every design decision. Both
+assets state that the session is human-led, that agent-authored directions are
+Proposals and never Decisions, that a `D-N` decision entry changes only on
+explicit user approval of that exact choice, that a serious decision gets its
+own signoff checkpoint covering only clearly enumerated decisions, and that
+silence, continued conversation, an approved document edit, or a request for
+revisions is never that signoff. Ambiguity about intent or about a serious
+design dimension — behavior, scope, ownership, compatibility, migration,
+persistence, determinism, delivery order, issue boundaries, or verification —
+stops for user input rather than being classified as minor to keep moving.
+Questions are batched at most three at a time, which paces the asking without
+licensing a guess.
+
+This is the design-conversation half of the boundary above: §5 governs the
+external mutation, §5.1 governs the choice that mutation encodes. The report
+workflows are unaffected — `$draft-report` and both `process-report` variants
+keep exactly the two boundaries of §5.
+
 ## 6. Project-scoped locations
 
 The declared assets in §2 live inside each plugin's own tracked tree, exactly
@@ -208,7 +230,12 @@ parses §2 and fails if:
   must keep identical is held identical;
 - this document drops the one-artifact-per-invocation or
   stop-for-explicit-approval boundary of §5, or either `process-report` variant
-  stops stating both.
+  stops stating both;
+- this document stops stating the design-workflow decision-authority boundary
+  (§5.1), or `$design-epic` or `$process-design-doc` drops one of the authority
+  clauses that boundary summarizes — the design pair's counterpart to the §5
+  check above, and the reason §5.1's semantics cannot regress in the assets
+  while the document still describes them.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in

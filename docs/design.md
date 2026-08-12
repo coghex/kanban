@@ -1411,6 +1411,23 @@ a countdown.
   A second checkout of the same repository is that repository's own drainer,
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
+- The installer links the controller, the drainer, and the shared configuration
+  module out of one live development checkout, so whatever is on disk there —
+  a mid-edit file, a checked-out feature branch, a checkout the remote has moved
+  past — is what every repository's drain actually runs, and nothing in the run
+  says so. Each launchd run therefore compares those three executing sources
+  against that checkout's local `origin/master` and reports what it finds to the
+  same service log, ahead of both of its refusals: one line naming every
+  differing source and every cause the comparison can attribute to it — a
+  working-tree edit, a non-master `HEAD`, unpushed commits, or a `HEAD` the
+  baseline has moved past — and at most one further line summarizing every
+  comparison it could not make. The advisory is a report and nothing else.
+  Sources matching the baseline are silent, the comparison only reads and never
+  fetches or writes repository state, and no divergence, missing source, absent
+  ref, or failure of the comparison itself refuses, delays, or otherwise changes
+  what the run does. Gating a drain on a dirty checkout is what this
+  deliberately does not do: the drainer has to keep working while a human works
+  the same checkout.
 - The status response also projects the post-merge cleanup a merged pull
   request still owes, which no other surface reports: a merge attempts its own
   cleanup immediately, but what that attempt leaves outstanding is retried only

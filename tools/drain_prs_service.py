@@ -65,6 +65,13 @@ INSTALL_DIR = Path(
 ).expanduser()
 CONTROLLER_PATH = INSTALL_DIR / "drain_prs_service.py"
 DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
+# The third installed link, named by what this process actually imported rather
+# than by INSTALL_DIR: the module already loaded is the one whose bytes ran.
+CONFIG_MODULE_PATH = Path(kanban_config.__file__)
+# What `audit_installed_sources` compares those three against. The published
+# baseline, read out of the checkout's own local remote-tracking ref — never
+# fetched, because the audit may not touch the network or repository state.
+SOURCE_BASELINE_REF = "refs/remotes/origin/master"
 # One document, at that same fixed location, carries both the installer's keys
 # and every repository's discovery record: --install-dir relocates the script
 # links and the runtime state, not the file Kanban and this service both have
@@ -1832,6 +1839,178 @@ def drainer_command(job: DrainerJob) -> list[str]:
     return command
 
 
+@dataclass(frozen=True)
+class SourceDivergence:
+    """One executing source that does not match the baseline, and every reason
+    the comparison could attribute for it."""
+
+    path: str
+    causes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SourceAudit:
+    diverged: tuple[SourceDivergence, ...] = ()
+    unavailable: tuple[str, ...] = ()
+
+
+def installed_source_paths() -> tuple[tuple[str, Path], ...]:
+    """The three files this service actually executes from.
+
+    `tools/install_drainer.py` links all three out of one development checkout,
+    so they are read here at call time rather than captured: whatever they
+    resolve to now is what this run is about to behave as.
+    """
+    return (
+        ("controller", CONTROLLER_PATH),
+        ("drainer", DRAINER_PATH),
+        ("config module", CONFIG_MODULE_PATH),
+    )
+
+
+def _read_git(repo: Path, args: list[str]) -> str | None:
+    """One read-only git query, or None for every way it can fail.
+
+    Every argument list passed here only reads: the audit must not fetch,
+    contact a remote, update a ref, or write repository state.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args], text=True, capture_output=True
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _baseline_causes(repo: Path) -> list[str]:
+    """Why this checkout's committed bytes can differ from the baseline at all.
+
+    Read once per repository: all three sources normally share one. A file
+    whose committed bytes differ from `origin/master` always satisfies at least
+    one of these, because differing blobs mean HEAD is not the baseline commit.
+    """
+    causes: list[str] = []
+    head_ref = _read_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
+    if head_ref != "refs/heads/master":
+        branch = head_ref[len("refs/heads/") :] if head_ref else "detached"
+        causes.append(f"non-master HEAD ({branch})")
+    ahead = _read_git(repo, ["rev-list", "--count", f"{SOURCE_BASELINE_REF}..HEAD"])
+    if ahead and ahead != "0":
+        causes.append("unpushed commits")
+    behind = _read_git(repo, ["rev-list", "--count", f"HEAD..{SOURCE_BASELINE_REF}"])
+    if behind and behind != "0":
+        causes.append("HEAD behind origin/master")
+    return causes
+
+
+def _audit_source(
+    label: str, path: Path, baselines: dict[Path, list[str]]
+) -> tuple[SourceDivergence | None, str | None]:
+    """Compare one executing source against its own checkout's baseline.
+
+    Returns at most one of a divergence and an unavailability note; a source
+    that matches the baseline yields neither, which is what keeps the healthy
+    path silent.
+    """
+    if not os.path.exists(path):
+        return None, f"{label} ({path}): missing, or its link has no target"
+    resolved = Path(os.path.realpath(path))
+    toplevel = _read_git(resolved.parent, ["rev-parse", "--show-toplevel"])
+    if not toplevel:
+        return None, f"{label} ({resolved}): not inside a git repository"
+    repo = Path(os.path.realpath(toplevel))
+    relative = os.path.relpath(resolved, repo)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return None, f"{label} ({resolved}): outside its own repository"
+    baseline = ["rev-parse", "--verify", f"{SOURCE_BASELINE_REF}^{{commit}}"]
+    if _read_git(repo, baseline) is None:
+        return None, f"{label} ({relative}): no local {SOURCE_BASELINE_REF}"
+    baseline_blob = _read_git(
+        repo, ["rev-parse", "--verify", f"{SOURCE_BASELINE_REF}:{relative}"]
+    )
+    if baseline_blob is None:
+        return None, f"{label} ({relative}): absent from {SOURCE_BASELINE_REF}"
+    executing_blob = _read_git(repo, ["hash-object", "--", str(resolved)])
+    if executing_blob is None:
+        return None, f"{label} ({relative}): unreadable"
+    if executing_blob == baseline_blob:
+        return None, None
+
+    causes: list[str] = []
+    head_blob = _read_git(repo, ["rev-parse", "--verify", f"HEAD:{relative}"])
+    if head_blob != executing_blob:
+        causes.append("working-tree edit")
+    if head_blob != baseline_blob:
+        if repo not in baselines:
+            baselines[repo] = _baseline_causes(repo)
+        causes.extend(baselines[repo])
+    if not causes:
+        causes.append("content differs")
+    return SourceDivergence(relative, tuple(causes)), None
+
+
+def audit_installed_sources() -> SourceAudit:
+    """Compare the executing sources against the checkout's local
+    `origin/master`, without ever being able to stop a run.
+
+    The installed drainer executes from links into a live development checkout,
+    so a mid-edit file or a checked-out feature branch is production behavior
+    for every repository it drains. That is the deliberate install shape and
+    manual-workflow compatibility forbids gating on it, so this only reports —
+    and every failure of the comparison itself is swallowed into a note.
+    """
+    diverged: list[SourceDivergence] = []
+    unavailable: list[str] = []
+    baselines: dict[Path, list[str]] = {}
+    for label, path in installed_source_paths():
+        try:
+            divergence, note = _audit_source(label, path, baselines)
+        except Exception:
+            divergence, note = None, f"{label}: the comparison did not complete"
+        if divergence is not None:
+            diverged.append(divergence)
+        if note is not None:
+            unavailable.append(note)
+    return SourceAudit(tuple(diverged), tuple(unavailable))
+
+
+def source_advisory_lines(audit: SourceAudit) -> list[str]:
+    """At most two lines: one naming every comparable differing source, and one
+    summarizing every comparison that could not be made."""
+    lines: list[str] = []
+    if audit.diverged:
+        detail = "; ".join(
+            f"{item.path} ({', '.join(item.causes)})" for item in audit.diverged
+        )
+        lines.append(
+            "PR drainer source advisory: executing sources differ from "
+            f"{SOURCE_BASELINE_REF}: {detail}. Report only; the drain proceeds."
+        )
+    if audit.unavailable:
+        lines.append(
+            "PR drainer source advisory unavailable: "
+            + "; ".join(audit.unavailable)
+            + ". Report only; the drain proceeds."
+        )
+    return lines
+
+
+def log_source_advisory(job: DrainerJob) -> None:
+    """Report the audit into the log stream the plist already writes to.
+
+    Nothing here may raise: this runs ahead of `run_service`'s own refusals, so
+    a failure would turn an observation into the outage it exists to explain.
+    """
+    try:
+        for line in source_advisory_lines(audit_installed_sources()):
+            service_log(job, line)
+    except Exception:
+        pass
+
+
 def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     """Run the drainer for this job, first proving the job is still the one the
     LaunchAgent was installed for.
@@ -1843,15 +2022,16 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     refused until the installer is re-run, which is what mints the job for
     whichever repository the configuration now names.
     """
+    # Into the installed job's own log directory, not this run's: that is where
+    # the plist sends stdout and stderr, and where `logs` looks. Resolved up
+    # front because the advisory below precedes both refusals, and a run that
+    # refuses is exactly one whose source state is worth having on record.
+    installed = requested_job(job.repo_path, requested_identity, job)
+    log_source_advisory(installed)
     try:
         require_requested_identity(job, requested_identity)
     except ServiceError as exc:
-        # Into the installed job's own log directory, not this run's: that is
-        # where the plist sends stdout and stderr, and where `logs` looks.
-        service_log(
-            requested_job(job.repo_path, requested_identity, job),
-            f"PR drainer did not start: {exc}",
-        )
+        service_log(installed, f"PR drainer did not start: {exc}")
         return 0
     try:
         require_default_branch(job.repo_path, job.remote_name)
