@@ -218,16 +218,15 @@ entryIdentity = itemId . entryItem
 -- | Seat @column@'s remembered row on the entry @anchor@ names, in whatever
 -- that column shows now, and select that column.
 --
--- An anchor that is gone falls back to the first selectable row, and an empty
--- view leaves nothing selected — which is what a row index no entry answers to
--- already means. An anchor that is still there but sits inside a group the
--- restored view has collapsed resolves to that group's own row, exactly as
--- 'Kanban.UI.Selection.normalizeCollapsedRow' resolves it everywhere else: it
--- is the nearest thing to the card the user was on that a collapsed column
--- offers, and sending them to the top of the column instead would lose a place
--- the rest of the board keeps. Under a live non-empty query the question does
--- not arise, because every group the query kept a child of is exposed and so
--- every visible row is selectable.
+-- The anchor is kept only while it is still /selectable/ in the resulting
+-- view, which is an exact membership test rather than a nearest-row one: a
+-- child the restored column has collapsed back under its epic is not
+-- selectable, and resolving it to that epic's row would land on neither the
+-- anchored card nor the first result whenever the group is not the column's
+-- first. Anything else — an anchor that is gone, and an anchor the view no
+-- longer offers — takes the first selectable row, and an empty view leaves
+-- nothing selected, which is what a row index no entry answers to already
+-- means.
 seatColumnOn :: BoardColumn -> Maybe ItemId -> AppState -> AppState
 seatColumnOn column anchor state =
   state
@@ -238,16 +237,11 @@ seatColumnOn column anchor state =
   where
     rows = selectableRows state column
     located = anchor >>= \identity -> findIndex ((== identity) . entryIdentity) (entriesFor state column)
-    seated = case located >>= selectableRowFor rows of
-      Just row -> row
-      Nothing -> case rows of
+    seated = case located of
+      Just row | row `elem` rows -> row
+      _ -> case rows of
         row : _ -> row
         [] -> 0
-
--- | The selectable row a row resolves to: itself when the view offers it, and
--- otherwise the collapsed group's own row above it.
-selectableRowFor :: [Int] -> Int -> Maybe Int
-selectableRowFor rows row = safeLast (filter (<= row) rows)
 
 -- | Re-seat the search target column after anything that can change what its
 -- query leaves visible. A no-op with no search live, so every other path keeps

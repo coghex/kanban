@@ -73,6 +73,24 @@ issuesEntries =
 activeEntries :: [ColumnEntry]
 activeEntries = [standaloneCard 799 "Repair stale world cache invalidation"]
 
+-- | A column whose collapsed tracker group sits below a standalone card, so
+-- the first selectable row and the row above a collapsed-away anchor are
+-- different rows.
+laterGroupBoard :: Board
+laterGroupBoard =
+  Board
+    ( Map.fromList
+        ( [(column, []) | column <- [minBound .. maxBound]]
+            <> [ ( Issues,
+                   [ standaloneCard 901 "Add repository snapshot cache",
+                     trackedChild 700 "Persistence contract rollout" 711 "Adopt the versioned save envelope",
+                     trackedChild 700 "Persistence contract rollout" 712 "Migrate the terrain cache reader"
+                   ]
+                 )
+               ]
+        )
+    )
+
 searchBoard :: Board
 searchBoard =
   Board
@@ -319,19 +337,22 @@ transitionSpec = describe "transitions" $ do
     selectedRow closed Issues `shouldBe` 4
     identityOf closed `shouldBe` Just "#812  Modal input leaks through overlay"
 
-  it "seats a result the restored column has collapsed on that group's own row" $ do
-    state <- searchState
-    let collapsed = state {appExpandedTrackers = Set.empty}
-        searching = withQuery "terrain" (openSearch collapsed)
+  it "takes the first visible result when the restored column has collapsed the anchor away" $ do
+    -- The collapsed group is deliberately not this column's first entry: a
+    -- nearest-selectable-row fallback would seat on the epic's own row, which
+    -- is neither the anchored child nor the first result, and only a group
+    -- with something above it tells the two apart.
+    state <- testAppState laterGroupBoard
+    let searching = withQuery "terrain" (openSearch state)
     -- The match is exposed and selected while the query is live ...
     identityOf searching `shouldBe` Just "#712  Migrate the terrain cache reader"
     selectedRow searching Issues `shouldBe` 0
-    -- ... and closing puts the selection on the epic the restored column
-    -- collapsed it back into, rather than at the top of the column.
+    -- ... and closing collapses it away again, so the selection takes the
+    -- first entry the restored column offers.
     let closed = closeSearch searching
-    selectableRows closed Issues `shouldBe` [0, 2, 3, 4]
+    selectableRows closed Issues `shouldBe` [0, 1]
     selectedRow closed Issues `shouldBe` 0
-    identityOf closed `shouldBe` Just "#711  Adopt the versioned save envelope"
+    identityOf closed `shouldBe` Just "#901  Add repository snapshot cache"
 
   it "falls back to the first visible result when the selected item stops matching" $ do
     state <- searchState
