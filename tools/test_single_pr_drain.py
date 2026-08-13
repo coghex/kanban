@@ -39,7 +39,12 @@ TOOLS_DIR = Path(__file__).resolve().parent
 SCRIPT = TOOLS_DIR / "drain_prs.py"
 # Everything drain_prs.py imports, for the fixture that runs a copy of the
 # script from inside the repository under test.
-SCRIPT_MODULES = ("drain_prs.py", "drain_prs_service.py", "kanban_config.py")
+SCRIPT_MODULES = (
+    "drain_prs.py",
+    "drain_prs_service.py",
+    "kanban_config.py",
+    "service_manager.py",
+)
 
 
 def run_git(args, *, cwd):

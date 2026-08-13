@@ -8,7 +8,6 @@ import fcntl
 import hashlib
 import json
 import os
-import plistlib
 import re
 import signal
 import subprocess
@@ -24,22 +23,22 @@ from pathlib import Path
 from typing import Any
 
 import kanban_config
+import service_manager
 
 
-# This module writes the plists, so it also owns the labels they are named and
-# targeted by. Nothing else may restate one: `tools/install_drainer.py` builds
-# them through this module, and `src/Kanban/Drainer.hs` derives none at all —
-# it reads an installed job's label and plist path out of the per-repository
-# record under DISCOVERY_RECORD_PATH below.
+# This module owns the drainer's lifecycle; `tools/service_manager.py` owns
+# every interaction with the service manager that runs it, including the
+# identifier each job is named and targeted by and the definition it is
+# written from. Nothing here constructs, renders, or parses one — the seam is
+# reached through `service_backend` below, and `tools/install_drainer.py`
+# reaches the same one rather than restating any of it. `src/Kanban/Drainer.hs`
+# derives nothing at all: it reads an installed job's label and plist path out
+# of the per-repository record under DISCOVERY_RECORD_PATH below.
 #
-# There is one label, and one of every mutable runtime path, per canonical
+# There is one identifier, and one of every mutable runtime path, per canonical
 # GitHub repository: that partitioning is what lets several repositories be
-# drained independently on one account. LABEL_PREFIX on its own is the
-# machine-wide singleton those replace; it survives only as the legacy job
-# `retire_legacy_job` unloads before a derived job for the same repository is
-# allowed to start.
-LABEL_PREFIX = "com.coghex.drain-prs"
-LEGACY_LABEL = LABEL_PREFIX
+# drained independently on one account.
+#
 # The queue-state document version `cleanup_obligations` below understands,
 # mirrored from `drain_prs.STATE_VERSION` because the controller reads that
 # state directly rather than importing the drainer. A test holds them equal.
@@ -85,8 +84,6 @@ ISO_STRICT_DATE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 HOME = Path.home()
-LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
-LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
 # The record Kanban reads to find those jobs. Its location is fixed rather than
 # INSTALL_DIR-relative on purpose: a dashboard that never inherits
 # KANBAN_DRAINER_INSTALL_DIR still has to discover an install made with
@@ -103,7 +100,11 @@ DRAINER_PATH = INSTALL_DIR / "drain_prs.py"
 # The third installed link, named by what this process actually imported rather
 # than by INSTALL_DIR: the module already loaded is the one whose bytes ran.
 CONFIG_MODULE_PATH = Path(kanban_config.__file__)
-# What `audit_installed_sources` compares those three against. The published
+# The fourth, named the same way and for the same reason: the installed
+# controller imports it out of the install directory, so what it resolved to is
+# what this run's service-manager interactions actually behaved as.
+SERVICE_MANAGER_MODULE_PATH = Path(service_manager.__file__)
+# What `audit_installed_sources` compares those four against. The published
 # baseline, read out of the checkout's own local remote-tracking ref — never
 # fetched, because the audit may not touch the network or repository state.
 SOURCE_BASELINE_REF = "refs/remotes/origin/master"
@@ -122,10 +123,6 @@ RUNTIME_ROOT = INSTALL_DIR / "runtime"
 # The key every repository's record, label, and runtime directory is filed
 # under in the shared document.
 RECORD_REPOSITORIES_KEY = "repositories"
-# Long enough for every GitHub owner/name pair spelled with ordinary
-# characters, short enough that `<label>.plist` stays well inside the 255-byte
-# filename limit even after escaping. See `repository_slug`.
-MAX_LABEL_LENGTH = 180
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -241,7 +238,7 @@ def _escape_identity_segment(segment: str) -> str:
 
 
 def repository_slug(identity: str) -> str:
-    """A launchd- and filename-safe name for one normalized identity.
+    """A service-manager- and filename-safe name for one normalized identity.
 
     Total, nonempty, and injective across distinct normalized identities:
     each segment is escaped into an alphabet that excludes `.`, so the single
@@ -251,13 +248,17 @@ def repository_slug(identity: str) -> str:
     stops two clones of one GitHub repository from naming two drainers.
 
     Escaping can double a segment's length, so an identity spelled almost
-    entirely in separators could outgrow the 255-byte limit on the plist's
-    filename. Those fall back to a hash of the whole identity, which cannot
-    collide with an escaped slug because it contains no `.` at all.
+    entirely in separators could outgrow what the backend's identifier may
+    hold. Whether it does is the backend's answer, not this function's, because
+    the limit is the service manager's; those fall back to a hash of the whole
+    identity, which cannot collide with an escaped slug because it contains no
+    `.` at all. One slug names the identifier and the runtime and log
+    directories together, so the fallback has to be decided here rather than
+    inside the backend, or the three would diverge.
     """
     owner, _, name = identity.partition("/")
     slug = f"{_escape_identity_segment(owner)}.{_escape_identity_segment(name)}"
-    if len(LABEL_PREFIX) + 1 + len(slug) > MAX_LABEL_LENGTH:
+    if not service_backend().identifier_fits(slug):
         return "h" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return slug
 
@@ -390,12 +391,14 @@ def job_for_identity(
     two different repositories to jobs that share nothing.
     """
     slug = repository_slug(identity)
+    backend = service_backend()
+    label = backend.service_identifier(slug)
     return _job(
         repo_path,
         identity=identity,
         slug=slug,
-        label=f"{LABEL_PREFIX}.{slug}",
-        plist_path=LAUNCH_AGENTS_DIR / f"{LABEL_PREFIX}.{slug}.plist",
+        label=label,
+        plist_path=backend.definition_path(label),
         runtime_dir=RUNTIME_ROOT / slug,
         log_dir=LOG_ROOT / slug,
         config_path=config_path,
@@ -434,12 +437,13 @@ def unmanaged_job(repo_path: Path) -> DrainerJob:
     where the singleton always put them, which by construction can never be any
     repository's partition.
     """
+    backend = service_backend()
     return _job(
         repo_path,
         identity="",
         slug="",
-        label=LEGACY_LABEL,
-        plist_path=LEGACY_PLIST_PATH,
+        label=backend.legacy_identifier(),
+        plist_path=backend.legacy_definition_path(),
         runtime_dir=RUNTIME_ROOT,
         log_dir=LOG_ROOT,
         config_path=None,
@@ -644,10 +648,10 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
 
 
 def write_discovery_record(job: DrainerJob) -> Path:
-    """Record where the LaunchAgent this module just wrote actually lives, so
-    Kanban resolves it by reading rather than by deriving the label a second
-    time. Written from the same label and plist path `render_plist` and
-    `launch_target` use, and filed under the identity Kanban selects it by."""
+    """Record where the LaunchAgent just written for this job actually lives,
+    so Kanban resolves it by reading rather than by deriving the label a second
+    time. Written from the same label and plist path the backend rendered and
+    loaded the job under, and filed under the identity Kanban selects it by."""
     return merge_repository_record(
         job.identity,
         {
@@ -681,18 +685,6 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
-def launch_domain() -> str:
-    return f"gui/{os.getuid()}"
-
-
-def launch_target(job: DrainerJob) -> str:
-    return launch_target_for(job.label)
-
-
-def launch_target_for(label: str) -> str:
-    return f"{launch_domain()}/{label}"
-
-
 def run_command(
     args: list[str], *, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -703,15 +695,20 @@ def run_command(
     return proc
 
 
-def launchd_loaded(job: DrainerJob) -> bool:
-    return label_loaded(job.label)
+def service_backend() -> service_manager.ServiceManagerBackend:
+    """The one seam every service-manager interaction in this module goes
+    through.
 
-
-def label_loaded(label: str) -> bool:
-    return (
-        run_command(["launchctl", "print", launch_target_for(label)], check=False).returncode
-        == 0
-    )
+    Resolved per call rather than captured once, for two reasons. It reads
+    `run_command` out of this module at call time, so a backend failure raises
+    the `ServiceError` every caller here already handles — and a test that
+    replaces either this function or that wrapper is honoured by every later
+    call, which is how service-manager delegation is exercised without a real
+    service manager. Nothing about the selection is operator-visible: there is
+    no flag or environment variable to choose a backend, because there is only
+    one to choose.
+    """
+    return service_manager.select_backend(run_command)
 
 
 def lock_pid(repo_path: Path) -> int | None:
@@ -1328,7 +1325,9 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     return {
         "state": state,
         "operation": operation,
-        "launchd_loaded": launchd_loaded(job),
+        # The key name is the contract Kanban reads, so it stays `launchd_`
+        # whatever answers it; the answer itself is the backend's.
+        "launchd_loaded": service_backend().is_loaded(job.label),
         "runner_pid": runner_pid if runner_alive else None,
         "drainer_pid": child_pid if child_alive else (locked_pid if locked_alive else None),
         "started_at": stored.get("started_at") if runner_alive else None,
@@ -1375,7 +1374,14 @@ def another_checkout_running(job: DrainerJob, snapshot: dict[str, Any]) -> str |
     return active_repo
 
 
-def render_plist(job: DrainerJob) -> bytes:
+def service_definition(job: DrainerJob) -> service_manager.ServiceDefinition:
+    """What the service manager must run for this job.
+
+    Every value here is the controller's own — which interpreter runs which
+    installed script against which checkout, where its output goes, and what
+    environment it needs — and none of it is any service manager's spelling of
+    that. Rendering this into a definition on disk is the backend's work.
+    """
     python = str(Path(sys.executable).resolve())
     path_entries = [
         str(HOME / ".local" / "bin"),
@@ -1392,63 +1398,34 @@ def render_plist(job: DrainerJob) -> bytes:
         "PYTHONUNBUFFERED": "1",
         "KANBAN_DRAINER_INSTALL_DIR": str(INSTALL_DIR),
     }
-    data: dict[str, Any] = {
-        "Label": job.label,
-        "ProgramArguments": [
+    return service_manager.ServiceDefinition(
+        identifier=job.label,
+        program_arguments=[
             python,
             str(CONTROLLER_PATH),
             "--path",
             str(job.repo_path),
             # The identity this label, and every path beside it, was derived
-            # from — recorded here because the plist outlives the configuration
-            # it was written from. Without it the runner would re-resolve the
-            # identity at launch, and a shared `remote_name` changed after
-            # installation would silently point this job at another
-            # repository's status file, incidents and logs while the dashboard
-            # could neither discover nor control it.
+            # from — recorded here because the definition outlives the
+            # configuration it was written from. Without it the runner would
+            # re-resolve the identity at launch, and a shared `remote_name`
+            # changed after installation would silently point this job at
+            # another repository's status file, incidents and logs while the
+            # dashboard could neither discover nor control it.
             "--repo",
             job.identity,
             "run",
         ],
-        "WorkingDirectory": str(job.repo_path),
-        "RunAtLoad": False,
-        "KeepAlive": False,
-        "ProcessType": "Background",
-        "ThrottleInterval": 10,
-        "StandardOutPath": str(job.service_out_path),
-        "StandardErrorPath": str(job.service_err_path),
-        "EnvironmentVariables": environment,
-    }
-    return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=False)
-
-
-def legacy_job_repository() -> Path | None:
-    """Which checkout the machine-wide singleton's plist still names, if it is
-    installed at all. Read out of the plist rather than the discovery record,
-    because the plist is what launchd would actually run."""
-    try:
-        with LEGACY_PLIST_PATH.open("rb") as handle:
-            document = plistlib.load(handle)
-    except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    arguments = document.get("ProgramArguments")
-    if isinstance(arguments, list):
-        for index, argument in enumerate(arguments):
-            if argument == "--path" and index + 1 < len(arguments):
-                candidate = arguments[index + 1]
-                if isinstance(candidate, str) and candidate:
-                    return Path(candidate).expanduser()
-    working_directory = document.get("WorkingDirectory")
-    if isinstance(working_directory, str) and working_directory:
-        return Path(working_directory).expanduser()
-    return None
+        working_directory=str(job.repo_path),
+        environment=environment,
+        stdout_path=str(job.service_out_path),
+        stderr_path=str(job.service_err_path),
+    )
 
 
 def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
-    """Unload and set aside the singleton `com.coghex.drain-prs` job before a
-    derived job for the same repository is enabled.
+    """Unload and set aside the machine-wide singleton job before a derived job
+    for the same repository is enabled.
 
     The two would otherwise drain one repository concurrently: the singleton's
     plist is still in `~/Library/LaunchAgents`, so login would bootstrap it
@@ -1460,9 +1437,11 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
     longer a supported GitHub clone, so it can serve no repository, and leaving
     it loadable would leave a job nothing can ever migrate.
     """
-    if not LEGACY_PLIST_PATH.exists() or job.label == LEGACY_LABEL:
+    backend = service_backend()
+    legacy_label = backend.legacy_identifier()
+    if not backend.legacy_definition_exists() or job.label == legacy_label:
         return None
-    legacy_repository = legacy_job_repository()
+    legacy_repository = backend.legacy_service_repository()
     if legacy_repository is not None:
         try:
             # Through the discovery remote, because the answer is compared
@@ -1480,17 +1459,14 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
         if legacy_identity is not None and legacy_identity != job.identity:
             return {
                 "retired": False,
-                "label": LEGACY_LABEL,
+                "label": legacy_label,
                 "repository": legacy_identity,
                 "reason": "the legacy job serves another repository",
             }
-    if label_loaded(LEGACY_LABEL):
-        run_command(["launchctl", "bootout", launch_target_for(LEGACY_LABEL)])
-    retired_path = LEGACY_PLIST_PATH.with_name(LEGACY_PLIST_PATH.name + ".retired")
-    os.replace(LEGACY_PLIST_PATH, retired_path)
+    retired_path = backend.retire_legacy()
     return {
         "retired": True,
-        "label": LEGACY_LABEL,
+        "label": legacy_label,
         "repository": str(legacy_repository) if legacy_repository else None,
         "plist": str(retired_path),
     }
@@ -1513,34 +1489,23 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
     # at the same instant as the job that supersedes it.
     retired = retire_legacy_job(job)
 
-    payload = render_plist(job)
-    fd, tmp_name = tempfile.mkstemp(prefix=job.plist_path.name, dir=job.plist_path.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, job.plist_path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    backend = service_backend()
+    backend.write_definition(service_definition(job))
 
-    # Written from the plist on disk, before launchd is asked to load it: the
-    # record describes where the job is, so it has to be true the moment the
-    # job exists. Every install path reaches here — `install`, and the refresh
-    # `start_service` performs — so no route can leave the record stale.
+    # Written from the definition on disk, before the service manager is asked
+    # to load it: the record describes where the job is, so it has to be true
+    # the moment the job exists. Every install path reaches here — `install`,
+    # and the refresh `start_service` performs — so no route can leave the
+    # record stale.
     record = write_discovery_record(job)
 
-    if launchd_loaded(job):
-        run_command(["launchctl", "bootout", launch_target(job)])
-    run_command(["launchctl", "bootstrap", launch_domain(), str(job.plist_path)])
+    backend.load_definition(job.label)
     return {
         "installed": True,
         "repository": job.identity,
         "label": job.label,
         "plist": str(job.plist_path),
-        "target": launch_target(job),
+        "target": backend.manager_target(job.label),
         "record": str(record),
         "legacy_job": retired,
     }
@@ -1570,7 +1535,7 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
     install_job(job)
 
     previous_incidents = {path.name for path in incident_files(job, open_only=True)}
-    run_command(["launchctl", "kickstart", launch_target(job)])
+    service_backend().kick(job.label)
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     running_since: float | None = None
     while time.monotonic() < deadline:
@@ -1638,7 +1603,7 @@ def stop_service(job: DrainerJob) -> dict[str, Any]:
             raise ServiceError("Could not identify the external drainer PID.")
         os.kill(pid, signal.SIGINT)
     else:
-        run_command(["launchctl", "kill", "SIGTERM", launch_target(job)])
+        service_backend().request_stop(job.label)
 
     deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -2101,9 +2066,9 @@ class SourceAudit:
 
 
 def installed_source_paths() -> tuple[tuple[str, Path], ...]:
-    """The three files this service actually executes from.
+    """The four files this service actually executes from.
 
-    `tools/install_drainer.py` links all three out of one development checkout,
+    `tools/install_drainer.py` links all four out of one development checkout,
     so they are read here at call time rather than captured: whatever they
     resolve to now is what this run is about to behave as.
     """
@@ -2111,6 +2076,7 @@ def installed_source_paths() -> tuple[tuple[str, Path], ...]:
         ("controller", CONTROLLER_PATH),
         ("drainer", DRAINER_PATH),
         ("config module", CONFIG_MODULE_PATH),
+        ("service manager", SERVICE_MANAGER_MODULE_PATH),
     )
 
 

@@ -8,10 +8,11 @@ loads a stopped LaunchAgent definition for the selected repository. An optional
 installed drain_prs.py runs.
 
 One LaunchAgent per canonical GitHub repository. The script links are shared —
-one installed copy of the drainer, the controller, and the configuration parser
-serves every repository — while the job, its runtime state, its logs, and its
-`--config` selection are the repository's own. Installing a second repository
-therefore adds an entry beside the first rather than replacing it.
+one installed copy of the drainer, the controller, the configuration parser,
+and the service-manager backend serves every repository — while the job, its
+runtime state, its logs, and its `--config` selection are the repository's own.
+Installing a second repository therefore adds an entry beside the first rather
+than replacing it.
 
 Installing runs drain_prs_service.py's own install step, which writes the plist
 and records where it put it. Re-running this installer therefore also repairs a
@@ -23,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import secrets
 import subprocess
 import sys
@@ -31,11 +31,14 @@ from pathlib import Path
 from typing import Any
 
 import drain_prs_service
+import service_manager
 
 
-# The controller writes the plist, so it owns the repository identity, the
-# label derived from it, the plist path, and the launchd target; this installer
-# resolves a job through it rather than restating any of them.
+# The controller resolves the repository identity and, through
+# `tools/service_manager.py`, the identifier derived from it, the definition's
+# path, and the manager target; this installer resolves a job through the
+# controller and reaches the service manager through that same backend rather
+# than restating any of them.
 DEFAULT_INSTALL_DIR = drain_prs_service.DEFAULT_INSTALL_DIR
 
 
@@ -65,6 +68,7 @@ def repository_root(requested: Path) -> Path:
         root / "tools" / "drain_prs.py",
         root / "tools" / "drain_prs_service.py",
         root / "tools" / "kanban_config.py",
+        root / "tools" / "service_manager.py",
     ]
     missing = [str(item) for item in required if not item.is_file()]
     if missing:
@@ -89,17 +93,27 @@ def repository_job(repo: Path) -> drain_prs_service.DrainerJob:
         raise InstallError(str(exc)) from exc
 
 
-def launchd_job_running(job: drain_prs_service.DrainerJob) -> bool:
-    proc = run(
-        ["launchctl", "print", drain_prs_service.launch_target(job)], check=False
-    )
-    if proc.returncode != 0:
-        return False
-    output = proc.stdout + proc.stderr
-    return bool(
-        re.search(r"^\s*state = running\s*$", output, re.MULTILINE)
-        or re.search(r"^\s*pid = [1-9][0-9]*\s*$", output, re.MULTILINE)
-    )
+def service_backend() -> service_manager.ServiceManagerBackend:
+    """The same seam the controller reaches its service manager through.
+
+    Constructed with this module's own `run`, so a command that fails here
+    fails as an `InstallError` rather than as the controller's `ServiceError`;
+    resolved per call so a test can replace either this function or that
+    wrapper. The installer spawns the *installed* controller as a subprocess,
+    which selects its own backend in its own process — there is deliberately
+    no flag or environment variable threading a selection between the two.
+    """
+    return service_manager.select_backend(run)
+
+
+def managed_job_running(job: drain_prs_service.DrainerJob) -> bool:
+    """Whether this repository's managed job already has a live process.
+
+    A job the service manager does not hold at all is not running rather than
+    an error: an installer that could not tell those apart would refuse every
+    first install.
+    """
+    return service_backend().is_running(job.label)
 
 
 def pid_alive(pid: int) -> bool:
@@ -261,7 +275,7 @@ def install(
     if sys.platform != "darwin":
         raise InstallError("The PR drainer LaunchAgent installer requires macOS.")
     job = repository_job(repo)
-    if launchd_job_running(job) or repository_drainer_running(repo):
+    if managed_job_running(job) or repository_drainer_running(repo):
         raise InstallError(
             "Refusing to install while the PR drainer is running. Stop it first."
         )
@@ -271,15 +285,21 @@ def install(
         str(Path(config_path).expanduser().resolve()) if config_path else None
     )
 
+    # Every module the installed controller imports has to be linked beside
+    # it: it is executed out of the install directory, so it resolves its
+    # siblings from there and an unlinked one makes every real install fail at
+    # import.
     sources = {
         "drainer": repo / "tools" / "drain_prs.py",
         "controller": repo / "tools" / "drain_prs_service.py",
         "config_module": repo / "tools" / "kanban_config.py",
+        "service_manager": repo / "tools" / "service_manager.py",
     }
     destinations = {
         "drainer": install_dir / "drain_prs.py",
         "controller": install_dir / "drain_prs_service.py",
         "config_module": install_dir / "kanban_config.py",
+        "service_manager": install_dir / "service_manager.py",
     }
     for destination in destinations.values():
         validate_symlink_destination(destination)

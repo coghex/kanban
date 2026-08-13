@@ -1602,11 +1602,12 @@ a countdown.
   A second checkout of the same repository is that repository's own drainer,
   not a foreign one: it is reported as running, and a second install or start
   is refused naming the checkout that already holds it.
-- The installer links the controller, the drainer, and the shared configuration
-  module out of one live development checkout, so whatever is on disk there —
+- The installer links the controller, the drainer, the shared configuration
+  module, and the service-manager backend the controller drives launchd
+  through out of one live development checkout, so whatever is on disk there —
   a mid-edit file, a checked-out feature branch, a checkout the remote has moved
   past — is what every repository's drain actually runs, and nothing in the run
-  says so. Each launchd run therefore compares those three executing sources
+  says so. Each launchd run therefore compares those four executing sources
   against that checkout's local `origin/master` and reports what it finds to the
   same service log, ahead of both of its refusals: one line naming every
   differing source and every cause the comparison can attribute to it — a

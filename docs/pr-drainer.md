@@ -83,6 +83,15 @@ Kanban reports that the drainer is not installed for this repository or that its
 install record is unreadable — an installation predating the record is repaired
 in place, with no uninstall first and no change to the LaunchAgent's identity.
 
+Rerun it once more after pulling a Kanban revision that adds a module the
+controller imports. The installed scripts are links, and the controller is
+executed out of the install directory, so it resolves its imports there rather
+than in the checkout the links point into: a module the current installation
+has no link for makes the controller fail at import until the installer
+supplies it. The service-manager backend `tools/service_manager.py`, added in
+issue #291, is the first such module; an installation made before it needs one
+rerun per repository, which changes nothing else about the job.
+
 ### Migrating from the single machine-wide drainer
 
 Before per-repository jobs there was one drainer for the whole account, labelled
@@ -151,7 +160,7 @@ and does notify.
 #### What the run says about the code it is running
 
 The installed scripts are symlinks into the checkout you develop in, so a run
-executes whatever is on disk there. Each run opens by comparing those three
+executes whatever is on disk there. Each run opens by comparing those four
 sources against that checkout's local `origin/master` and, when they differ,
 writes one line naming each differing file and why:
 
@@ -196,8 +205,9 @@ Two documented paths drain it without opening Kanban:
 
 The obvious way to close that gap — a `StartInterval`, or `KeepAlive` to hold
 one up permanently — is withheld deliberately rather than overlooked. The
-installer links the drainer, the controller, and their shared configuration
-module to the tracked sources in the live Kanban checkout, so what launchd
+installer links the drainer, the controller, their shared configuration
+module, and the service-manager backend the controller drives launchd through
+to the tracked sources in the live Kanban checkout, so what launchd
 executes is whatever those files contain at that moment, including a
 half-finished edit sitting in that checkout's working tree. The exposure is the
 executable code, not the tree being merged: each job's working directory is the

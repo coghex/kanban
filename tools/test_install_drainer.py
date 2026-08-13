@@ -57,7 +57,10 @@ class InstallSymlinkTests(unittest.TestCase):
         self.assertEqual(self.destination.resolve(), self.source_a.resolve())
 
 
-class InstallerPolicyTests(unittest.TestCase):
+class InstallerFixture(unittest.TestCase):
+    """A real checkout with the drainer files, every managed path redirected
+    under a temporary directory, and no service manager anywhere."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -75,13 +78,21 @@ class InstallerPolicyTests(unittest.TestCase):
         for name, value in (
             ("DISCOVERY_RECORD_PATH", self.shared_config),
             ("CONFIG_PATH", self.shared_config),
-            ("LAUNCH_AGENTS_DIR", self.root / "LaunchAgents"),
             ("RUNTIME_ROOT", self.root / "runtime"),
             ("LOG_ROOT", self.root / "logs"),
         ):
             patched = mock.patch.object(controller, name, value)
             patched.start()
             self.addCleanup(patched.stop)
+        # The LaunchAgents directory belongs to the backend, so it is
+        # redirected on the module that derives paths inside it.
+        patched = mock.patch.object(
+            install_drainer.service_manager,
+            "LAUNCH_AGENTS_DIR",
+            self.root / "LaunchAgents",
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
         # Only the remote that decides the *identity* is pinned;
         # configured_remote_name stays real so a repository's own --config
         # still decides what its drainer runs with.
@@ -100,17 +111,20 @@ class InstallerPolicyTests(unittest.TestCase):
         (tools / "drain_prs.py").write_text("drainer\n", encoding="utf-8")
         (tools / "drain_prs_service.py").write_text("controller\n", encoding="utf-8")
         (tools / "kanban_config.py").write_text("config module\n", encoding="utf-8")
+        (tools / "service_manager.py").write_text("backend\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(
             ["git", "-C", str(repo), "remote", "add", "origin", remote_url], check=True
         )
         return repo
 
+
+class InstallerPolicyTests(InstallerFixture):
     def test_dry_run_makes_no_files_and_never_starts(self):
         with (
             mock.patch.object(install_drainer.sys, "platform", "darwin"),
             mock.patch.object(
-                install_drainer, "launchd_job_running", return_value=False
+                install_drainer, "managed_job_running", return_value=False
             ),
             mock.patch.object(
                 install_drainer, "repository_drainer_running", return_value=False
@@ -152,7 +166,7 @@ class InstallerPolicyTests(unittest.TestCase):
         with (
             mock.patch.object(install_drainer.sys, "platform", "darwin"),
             mock.patch.object(
-                install_drainer, "launchd_job_running", return_value=False
+                install_drainer, "managed_job_running", return_value=False
             ),
             mock.patch.object(
                 install_drainer, "repository_drainer_running", return_value=False
@@ -172,7 +186,7 @@ class InstallerPolicyTests(unittest.TestCase):
         with (
             mock.patch.object(install_drainer.sys, "platform", "darwin"),
             mock.patch.object(
-                install_drainer, "launchd_job_running", return_value=True
+                install_drainer, "managed_job_running", return_value=True
             ),
         ):
             with self.assertRaises(install_drainer.InstallError):
@@ -188,7 +202,7 @@ class InstallerPolicyTests(unittest.TestCase):
         with (
             mock.patch.object(install_drainer.sys, "platform", "darwin"),
             mock.patch.object(
-                install_drainer, "launchd_job_running", return_value=False
+                install_drainer, "managed_job_running", return_value=False
             ),
             mock.patch.object(
                 install_drainer, "repository_drainer_running", return_value=False
@@ -384,6 +398,123 @@ class InstallerPolicyTests(unittest.TestCase):
         )
         contents = json.loads(self.shared_config.read_text(encoding="utf-8"))
         self.assertEqual(contents["ntfy_url"], "https://notify.example.test/topic")
+
+
+class InstallerBackendTests(InstallerFixture):
+    """The installer reaches the service manager only through the backend.
+
+    Its own responsibilities — the macOS refusal, symlink safety, the shared
+    document, the identity assertion — stay here; deciding whether a job is
+    already running is the backend's, and is answered without this process
+    spawning anything.
+    """
+
+    def dry_run(self, backend):
+        with (
+            mock.patch.object(install_drainer.sys, "platform", "darwin"),
+            mock.patch.object(
+                install_drainer, "service_backend", return_value=backend
+            ),
+            mock.patch.object(
+                install_drainer, "repository_drainer_running", return_value=False
+            ),
+            mock.patch.object(install_drainer, "run", side_effect=self.no_commands),
+        ):
+            return install_drainer.install(
+                self.repo, self.install_dir, ntfy_url=None, dry_run=True
+            )
+
+    def no_commands(self, args, *, check=True, env=None):
+        raise AssertionError(f"the installer spawned {args!r}")
+
+    def test_the_running_probe_is_the_backends_answer(self):
+        job = install_drainer.repository_job(self.repo)
+        backend = mock.Mock()
+        backend.is_running.return_value = False
+        result = self.dry_run(backend)
+        backend.is_running.assert_called_once_with(job.label)
+        self.assertTrue(result["dry_run"])
+
+    def test_a_backend_reporting_a_running_job_refuses_the_install(self):
+        backend = mock.Mock()
+        backend.is_running.return_value = True
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            self.dry_run(backend)
+        self.assertIn("Refusing to install", str(raised.exception))
+
+    def test_a_non_macos_host_is_still_refused_before_anything_is_probed(self):
+        backend = mock.Mock()
+        with (
+            mock.patch.object(install_drainer.sys, "platform", "linux"),
+            mock.patch.object(
+                install_drainer, "service_backend", return_value=backend
+            ),
+        ):
+            with self.assertRaises(install_drainer.InstallError) as raised:
+                install_drainer.install(
+                    self.repo, self.install_dir, ntfy_url=None, dry_run=True
+                )
+        self.assertIn("macOS", str(raised.exception))
+        backend.is_running.assert_not_called()
+        self.assertFalse(self.install_dir.exists())
+
+    def test_every_module_the_installed_controller_imports_is_linked(self):
+        # The controller is executed out of the install directory, so it
+        # imports its siblings from there: an unlinked module makes every real
+        # install fail at import rather than at install time.
+        backend = mock.Mock()
+        backend.is_running.return_value = False
+        links = self.dry_run(backend)["links"]
+        self.assertEqual(
+            sorted(links),
+            ["config_module", "controller", "drainer", "service_manager"],
+        )
+        for key, link in links.items():
+            with self.subTest(link=key):
+                self.assertTrue(Path(link["source"]).is_file(), link["source"])
+                self.assertEqual(
+                    Path(link["destination"]).parent, self.install_dir
+                )
+                self.assertEqual(
+                    Path(link["source"]).name, Path(link["destination"]).name
+                )
+
+    def test_a_checkout_missing_the_backend_module_is_not_installable(self):
+        (self.repo / "tools" / "service_manager.py").unlink()
+        with self.assertRaises(install_drainer.InstallError) as raised:
+            install_drainer.repository_root(self.repo)
+        self.assertIn("service_manager.py", str(raised.exception))
+
+
+class InstallerFailureVocabularyTests(unittest.TestCase):
+    """A backend failure reaching the installer is an `InstallError`.
+
+    The installer injects its own `run`, so it never has to translate the
+    controller's `ServiceError` — or a third exception type — at the call
+    site that reports `{"error": ...}`.
+    """
+
+    def completed(self, returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def test_an_unknown_job_is_not_running_rather_than_an_error(self):
+        with mock.patch.object(
+            install_drainer.subprocess,
+            "run",
+            return_value=self.completed(1, stderr="Could not find service"),
+        ):
+            self.assertFalse(
+                install_drainer.service_backend().is_running("com.example.job")
+            )
+
+    def test_a_failing_command_is_reported_in_the_installers_vocabulary(self):
+        with mock.patch.object(
+            install_drainer.subprocess,
+            "run",
+            return_value=self.completed(1, stderr="boom"),
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                install_drainer.service_backend().kick("com.example.job")
 
 
 if __name__ == "__main__":
