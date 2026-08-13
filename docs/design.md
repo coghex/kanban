@@ -104,8 +104,10 @@ cache snapshot loaded synchronously before `customMain`
 (`src/Kanban/UI/Refresh.hs:43-51`), so "startup" names two very different
 instants. Neither `~/.local/bin/kanban` nor `~/.cabal/bin/kanban` exists, so
 every manual slice installs first, and the repository documents two different
-installs: `cabal install exe:kanban` from the checkout (`README.md:48-53`) and
-the clean sdist unpack exercise (`docs/development.md:52-58`). `Q-4` through
+installs: `cabal install exe:kanban` from the checkout (`README.md`'s "Install
+from a source checkout") and the clean sdist unpack exercise
+(`docs/development.md:52-58`), which `README.md`'s quickstart now leads with as
+the release install path. `Q-4` through
 `Q-8` raised these; D-9 through D-13 settle them.
 
 Adding a section to this document is parser-safe. `test/Spec/UI/Keys.hs:198-207`
@@ -2575,8 +2577,9 @@ and overlaps `REL-2`.
 Resolved by D-12. The gates measure an install built from the sdist archive.
 
 Affects all four slices. Neither `~/.local/bin/kanban` nor `~/.cabal/bin/kanban`
-exists today. `README.md:48-53` documents `cabal install exe:kanban` from the
-checkout, which measures the code on the branch under test.
+exists today. `README.md`'s "Install from a source checkout" documents
+`cabal install exe:kanban` from the checkout, which measures the code on the
+branch under test.
 `docs/development.md:52-58` and milestone 9 describe a clean sdist unpack, which
 measures what a release consumer actually receives and matches `REL-4`'s
 concern. The two differ, and "the record names the build commit" reads

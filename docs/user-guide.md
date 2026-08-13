@@ -2,21 +2,29 @@
 
 ## Start Kanban
 
+This guide assumes the `kanban` executable is installed; the
+[README quickstart](../README.md#quickstart) covers installing it from a
+release archive or a source checkout.
+
 Run Kanban inside a local GitHub repository:
 
 ```console
-cabal run kanban
+kanban
 ```
 
 To open a different checkout:
 
 ```console
-cabal run kanban -- --path /path/to/project
+kanban --path /path/to/project
 ```
 
 Kanban uses the repository's `origin` remote by default; set `remote_name` in `config.toml` to use another one. Run `gh auth login` first if GitHub CLI is not already signed in.
 
-Use `cabal run kanban -- --help` to see all command-line options.
+Use `kanban --help` to see all command-line options.
+
+Inside a source checkout, `cabal run kanban`, `cabal run kanban -- --path
+/path/to/project`, and `cabal run kanban -- --help` are the development
+equivalents, and run the code on the current branch.
 
 ## Configuration
 
@@ -171,7 +179,10 @@ each action depends on.
 
 If one of these keys reports that the action cannot start, the message names
 the missing component and the command that installs it. To check every
-action at once without starting anything, run `cabal run kanban -- --doctor`.
+action at once without starting anything, run `kanban --doctor` (or
+`cabal run kanban -- --doctor` from a source checkout). It is a read-only
+report on AI-action readiness, so a blocked action there does not stop the
+board.
 
 - Press `r` to review the selected issue or pull request. If changes were requested earlier, the same key starts the appropriate revision or rereview. On an approved pull request in Done that has a problem — a merge conflict, a failed check, or a blocking label — the same key repairs it instead, then sends it back for a fresh review. It never merges.
 - Press `S` to work on an issue and open a pull request.
