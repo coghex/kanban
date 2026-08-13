@@ -40,8 +40,39 @@ everything else.
   `findExecutable`, then spawns it (`createProcess`) with solve-specific
   arguments (model/effort flags and the initial or resume solve prompt built
   by `initialSolvePrompt`/`resumeSolvePrompt`).
-- **Inputs:** issue number, solver brand, optional resumed session id and
-  follow-up user message.
+- **Inputs:** issue number, solver brand, Kanban's resolved repository identity
+  (`Kanban.Repository.resolveRepository`'s `owner/name`, whether it came from an
+  explicit `--repo` or from the configured `remote_name`), the optional
+  `--config` path, and an optional resumed session id with its follow-up user
+  message.
+- **Repository scope:** the resolved identity — not the worked checkout's own
+  remote — scopes every GitHub issue and pull-request operation of the run:
+  issue selection, the read-only canonical gate check and the vendored
+  trusted-comment spec fetch (both by `--repo <owner>/<name>`), the issue claim
+  and its release, the open-pull-request collision search, and pull-request
+  creation (all by `-R <owner>/<name>`). `initialSolvePrompt` states it and
+  `resumeSolvePrompt` restates it, so a session resumed after context
+  truncation cannot silently fall back to checkout derivation for the
+  operations it still owns. It also names the worktree directory,
+  `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/issue-<n>-<slug>` — the
+  convention §2.7 records for repair — while `git worktree list` remains the
+  sole collision and interrupted-work recovery source, so a worktree registered
+  under an earlier path still resolves. As in §2.7 the identity scopes
+  pull-request *metadata* only: the implementation branch still goes to the
+  worked checkout's own push remote, and the worktree still branches from that
+  checkout's `origin/<default-branch>`, which for a fork checkout is the fork's
+  copy of the base branch rather than the resolved repository's. When those are
+  different repositories the pull request is opened cross-repository — `-R
+  <resolved owner/name>` with an owner-qualified `--head <push-owner>:<branch>`
+  — against the resolved repository's branch of that same base name; a pull
+  request GitHub cannot open that way (unrelated repositories, no fork
+  relationship) stops the run with the pushed branch reported, never falling
+  back to the push remote's repository. A run that cannot establish or preserve
+  one identity stops before its first issue mutation — the claim — and reports,
+  rather than re-deriving one from the checkout; that stop is distinct from the
+  canonical-gate refusal, whose single-line `KANBAN_NEEDS_INPUT` spelling is
+  fixed. A directly invoked workflow given no identity resolves one once from
+  its own checkout and is bound by it for the rest of the run.
 - **Comment trust boundary:** both tracked solve workflows
   (`codex-plugin/plugins/kanban/skills/solve/SKILL.md` and
   `claude-plugin/plugins/kanban/commands/solve.md`) fetch the issue's effective
