@@ -10,6 +10,73 @@ report in chat, and create the file only after the user explicitly approves that
 draft. Leave tracker deduplication, issue disposition, issue drafting, and issue
 creation to later `process-report` runs.
 
+## Establish the owning repository
+
+This workflow writes a document and mutates a tracker. Both are irreversible in
+the wrong repository, and moving a Markdown file afterward does not undo an
+issue filed where it does not belong. So resolve the owner explicitly before
+the first durable write and before the first tracker mutation — never from
+whichever checkout the session happens to be sitting in.
+
+Resolve three values together, and treat every one of them as required:
+
+- `$DOC_REPO` — the owning repository as an explicit `owner/repo` slug. It
+  scopes every `gh` command in this workflow.
+- `$DOC_BRANCH` — that repository's default branch, which is the publication
+  target. It is never assumed to be the current checkout's branch.
+- `$DOC_ROOT` — a validated local checkout of `$DOC_REPO`, under which every
+  document read and write resolves. A slug alone names no place to write.
+
+Resolution has two tiers, and the first tier that matches wins:
+
+**(a) Explicit input.** A repository or a document path the user supplied.
+Validate each one, and require them to agree: when the user names both, the
+path's own checkout must resolve to that same repository. Conflicting explicit
+inputs are unresolved, not a preference to rank.
+
+**(b) A §7 row.** For a document path that is Git-tracked in the checkout
+holding it, coverage by exactly one row of `docs/agent-workflow-contract.md` §7
+declares the document Kanban-owned. That table is Kanban's own and classifies
+Kanban paths only, so it can identify Kanban as the owner and can never
+identify a consuming repository. A path covered by no row, covered by more than
+one row, or not tracked at all resolves nothing here — and a new document that
+no row covers is the expected case rather than an error.
+
+Anything else leaves the owner unresolved.
+
+```bash
+# $CANDIDATE is the checkout an explicit path or repository named — never the
+# working directory by default. Nothing below reads the process working
+# directory, which is the point: every command names its own repository.
+DOC_ROOT="$(git -C "$CANDIDATE" rev-parse --show-toplevel)"
+DOC_REMOTE="$(git -C "$DOC_ROOT" remote get-url origin)"
+DOC_REPO="$(gh repo view "$DOC_REMOTE" --json nameWithOwner --jq .nameWithOwner)"
+DOC_BRANCH="$(gh repo view "$DOC_REMOTE" --json defaultBranchRef --jq .defaultBranchRef.name)"
+
+# Tier (b) additionally requires the document to be tracked where it sits.
+git -C "$DOC_ROOT" ls-files --error-unmatch -- "$DOC_RELATIVE_PATH"
+```
+
+**Fail closed.** An unresolved owner, an unresolved or ambiguous default
+branch, or a `$DOC_ROOT` that is not a checkout of `$DOC_REPO` stops the run
+before it creates a file, edits a document, or issues any `gh` mutation. Say
+exactly which of the three could not be determined, and ask the user for the
+owning repository — and for a local path as well when no checkout of it is
+available. Falling back to the active checkout, to the current branch, to a
+hardcoded path, or to a bare `docs/` prefix is never the repair.
+
+Report the resolved `$DOC_REPO` and `$DOC_BRANCH` to the user before the first
+write.
+
+Reading code, tests, or history from another repository as evidence stays
+allowed and is never an ownership signal: where you read something does not
+make that repository the owner.
+
+Repository routing and the publication lane are separate decisions. `$DOC_REPO`
+says where this document and its tracker items belong; whether the document
+then publishes as `coordination` or `pr-atomic` is a later question §7 answers
+about an already-resolved owner, never a substitute for resolving one.
+
 ## Where files go
 
 Never leave uncommitted files in the repository's PRIMARY checkout. The PR
@@ -18,20 +85,21 @@ there; a restore that conflicts leaves unmerged index entries and wedges
 post-merge cleanup until a human clears them. Long-lived uncommitted report
 edits are the exact shape that keeps causing it.
 
-Resolve the docs worktree by BRANCH — never a hard-coded path — and do every
-file write there:
+Resolve the docs worktree by BRANCH — never a hard-coded path — inside the
+already-resolved `$DOC_ROOT`, and do every file write there:
 
 ```bash
-DOCS_WT="$(git worktree list --porcelain \
+DOCS_WT="$(git -C "$DOC_ROOT" worktree list --porcelain \
   | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
-[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
+[ -n "$DOCS_WT" ] || DOCS_WT="$DOC_ROOT"
 ```
 
 Every report or document path in this workflow resolves under `$DOCS_WT`,
 whatever the current directory is. Read code from wherever you already are;
-write only there. If the repository has no `docs-wip` worktree the fallback
-returns the primary checkout, which means that repository does not use this
-convention — proceed normally.
+write only there. If `$DOC_REPO` has no `docs-wip` worktree the fallback
+returns that repository's own primary checkout, which means it does not use
+this convention — proceed normally. What the fallback never returns is the
+checkout you happen to be sitting in.
 
 ## Parse the invocation
 
@@ -47,11 +115,14 @@ $draft-report Audit the save system for duplicated serialization logic and
 capture whatever you verify.
 ```
 
-Treat an explicit token ending in `.md` as the desired report path. Otherwise
-infer a concise subject and use `docs/<subject>_findings.md` when `docs/` exists,
-or `<subject>_findings.md` at the repository root. Tell the user the inferred
-path before substantial investigation so they can redirect it without pausing
-the work. Never overwrite or repurpose an existing report unless the user
+Treat an explicit token ending in `.md` as the desired report path, and feed it
+to the ownership resolution above as the explicit path input. Otherwise infer a
+concise subject and use `$DOCS_WT/docs/<subject>_findings.md` when
+`$DOCS_WT/docs/` exists, or `$DOCS_WT/<subject>_findings.md`; a bare `docs/`
+prefix names nothing until `$DOC_ROOT` is resolved, and a report whose owner
+stays unresolved is asked about rather than created. Tell the user the inferred
+path, `$DOC_REPO`, and `$DOC_BRANCH` before substantial investigation so they
+can redirect any of the three without pausing the work. Never overwrite or repurpose an existing report unless the user
 explicitly asks; use `note-problem` when the intent is to add one observation to
 an existing report.
 
