@@ -1282,6 +1282,66 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
         self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
         self.assertEqual(json.loads(self.raw_stdout.strip()), result)
 
+    def _assert_one_result_document(self, result, code):
+        """Issue #281: whatever the final cleanup pass is interrupted doing,
+        the caller still gets its one document -- not a traceback over an
+        empty stdout, which is what an escape from the pass produced."""
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(self.raw_stdout.strip()), result)
+        self.assertNotIn("cleanup", self.raw_stdout)
+
+    def test_a_repeated_interrupt_reading_the_state_still_reports(self):
+        # Repeated for real, end to end: the first interrupt is the stop that
+        # sends the run to the shutdown boundary, and the second lands inside
+        # the pass that boundary runs -- here in its state read.
+        self._state_owing_one_issue_close()
+
+        with mock.patch.object(
+            drain_prs, "load_drain_state", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self._assert_one_result_document(result, code)
+
+    def test_a_repeated_interrupt_working_the_cleanup_still_reports(self):
+        self._state_owing_one_issue_close()
+
+        with mock.patch.object(
+            drain_prs, "prepare_single_pr", side_effect=KeyboardInterrupt
+        ), mock.patch.object(
+            drain_prs, "complete_pending_cleanup", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self._assert_one_result_document(result, code)
+        # Interrupted before it could discharge anything, so the debt is left
+        # recorded for the next start.
+        self.assertEqual(self.gh_calls("issue", "close", "7"), [])
+        record = json.loads(self.state_path.read_text(encoding="utf-8"))["prs"]["7"]
+        self.assertEqual(
+            record["cleanup"]["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 7}],
+        )
+        self.assertIn("post-merge cleanup", self.raw_stderr)
+
+    def test_a_repeated_interrupt_persisting_the_pass_still_reports(self):
+        self._state_owing_one_issue_close()
+
+        with mock.patch.object(
+            drain_prs, "prepare_single_pr", side_effect=KeyboardInterrupt
+        ), mock.patch.object(
+            drain_prs, "save_drain_state", side_effect=KeyboardInterrupt
+        ):
+            result, code = self.run_main("--pr", "42")
+
+        self._assert_one_result_document(result, code)
+        # The obligation was worked before the write was interrupted; only the
+        # record of it is lost, which the next start re-verifies.
+        self.assertEqual(len(self.gh_calls("issue", "close", "7")), 1)
+
     def test_valid_json_that_is_not_a_valid_queue_state_is_reported(self):
         # These decode cleanly and used to blow up as AttributeError or
         # KeyError wherever the shape was first touched.

@@ -3394,6 +3394,158 @@ class StopCleanupPassTests(PostMergeCleanupFixture):
             [{"kind": "issue", "repo": "acme/widgets", "number": 99}],
         )
 
+    def _owing_one_issue_close(self):
+        """PR #7 owing exactly one issue close, scripted to succeed."""
+        self._state_owing(
+            **{"7": self._entry("b" * 40, cleanup=self._stuck_cleanup_record())}
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+
+    def test_an_interrupt_reading_the_state_writes_nothing_and_returns_zero(self):
+        # Issue #281: the state read is outside the pass's own handler, so an
+        # interrupt landing here escaped the function -- and on a stop, that
+        # is a second Ctrl-C escaping from inside the handler containing the
+        # first. Nothing was attempted, so nothing is written either.
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(
+            drain_prs, "load_drain_state", side_effect=KeyboardInterrupt
+        ):
+            self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.fake.calls("gh"), [])
+
+    def test_an_interrupt_choosing_what_is_owed_writes_nothing_either(self):
+        # The window between the state read and the first obligation: the
+        # selection and the opening log are equally outside the old handler.
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(
+            drain_prs, "recorded_cleanup_prs", side_effect=KeyboardInterrupt
+        ):
+            self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.fake.calls("gh"), [])
+
+    def test_an_interrupt_inside_the_pass_s_own_diagnostic_is_contained(self):
+        # `log` prints and then opens a file, so a second signal can land in
+        # the very line reporting the first. A handler that reports with `log`
+        # is therefore still a handler an interrupt escapes from.
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(drain_prs, "log", side_effect=KeyboardInterrupt):
+            self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.fake.calls("gh"), [])
+
+    def test_an_interrupt_working_an_obligation_keeps_what_it_finished(self):
+        # Contained where it lands: the pass starts nothing further, and what
+        # it already discharged is still persisted and still reported.
+        second = self._full_cleanup_record()
+        second["pending"] = [
+            item for item in second["pending"] if item["kind"] == "issue"
+        ]
+        self._state_owing(
+            **{
+                "7": self._entry("b" * 40, cleanup=self._stuck_cleanup_record()),
+                "42": self._entry(self.head_sha, cleanup=second),
+            }
+        )
+        self.fake.script(
+            "gh", ["issue", "view", "7"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "7"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        real_cleanup = drain_prs.complete_pending_cleanup
+
+        def interrupt_the_second_pull_request(ctx, state, number, *, dry_run):
+            if number == 42:
+                raise KeyboardInterrupt
+            return real_cleanup(ctx, state, number, dry_run=dry_run)
+
+        with mock.patch.object(
+            drain_prs,
+            "complete_pending_cleanup",
+            side_effect=interrupt_the_second_pull_request,
+        ):
+            self.assertEqual(self._stop(), 1)
+
+        state = self._read_state()
+        self.assertEqual(len(self._issue_close_calls(7)), 1)
+        self.assertNotIn("7", state["prs"])
+        # PR #42's obligation was never started, so it stays owed for the
+        # next start rather than being lost with the interrupt.
+        self.assertEqual(self._issue_close_calls(99), [])
+        self.assertEqual(
+            state["prs"]["42"]["cleanup"]["pending"],
+            [{"kind": "issue", "repo": "acme/widgets", "number": 99}],
+        )
+
+    def test_an_interrupt_persisting_leaves_the_prior_state_intact(self):
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(
+            drain_prs, "save_drain_state", side_effect=KeyboardInterrupt
+        ):
+            # Still what the pass discharged before the write was interrupted.
+            self.assertEqual(self._stop(), 1)
+
+        self.assertEqual(len(self._issue_close_calls(7)), 1)
+        # Byte-for-byte, with no temporary beside it: the next start
+        # re-verifies exactly the debt this pass could not record discharging.
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            [
+                path
+                for path in self.state_path.parent.glob("drain_prs_state.*")
+                if path != self.state_path
+            ],
+            [],
+        )
+
+    def test_a_non_interrupt_failure_persisting_is_contained_too(self):
+        # The promise is "never raises", not "never raises KeyboardInterrupt":
+        # a TypeError out of the state write loses a `--pr` caller's one
+        # result document in exactly the same way.
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(
+            drain_prs,
+            "save_drain_state",
+            side_effect=TypeError("Object of type set is not JSON serializable"),
+        ):
+            self.assertEqual(self._stop(), 1)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_non_interrupt_failure_reading_the_state_is_contained_too(self):
+        # `load_drain_state` answers a DrainError itself; anything else its
+        # migration raises used to end the stop.
+        self._owing_one_issue_close()
+        before = self.state_path.read_bytes()
+
+        with mock.patch.object(
+            drain_prs, "load_drain_state", side_effect=ValueError("unmigratable")
+        ):
+            self.assertEqual(self._stop(), 0)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.fake.calls("gh"), [])
+
 
 class QueueOrderTests(ProcessPrFixture):
     """Issue #204: one polling pass walks the approved queue lowest number
