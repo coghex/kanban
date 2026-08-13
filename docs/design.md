@@ -1526,11 +1526,13 @@ a countdown.
   publishing rather than of fetching for exactly that reason: cancellation is
   only known at the publish step, so a cache written from inside the fetch would
   be the one result a cancelled refresh still left behind — and the one a later
-  launch would load as its own. Releasing a finished job, choosing its outcome,
-  and claiming the right to publish it are one step, so a quit lands on one side
-  or the other: before it, and nothing is published; after it, and the quit
-  waits for the publication already claimed rather than halting while a board
-  update and a cache write are still to land.
+  launch would load as its own. Whatever makes work stop being observable also
+  claims the right to answer it, in the same step: releasing a finished job, and
+  taking an expiring request out of the queue, each claim their publication as
+  they happen. A quit therefore lands on one side or the other — before the
+  claim, and nothing is published; after it, and the quit waits for the answer
+  already claimed rather than halting while a board update and a cache write are
+  still to land.
 - Every foreground request is answered exactly once. A job that produced no
   outcome of its own — its deadline expired, or it gave up — is still answered,
   from what its verified cleanup concluded: an unverified `gh` outranks the

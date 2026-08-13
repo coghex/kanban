@@ -583,8 +583,16 @@ schedulerLoop coordinator = do
     -- Claimed under the state lock, so the owner and the slot that names its
     -- thread are taken together and a shutdown can never observe one without
     -- the other.
+    --
+    -- An expiring request claims its publication here for the same reason.
+    -- The plan has just taken it out of the queue, so from this instant it is
+    -- no longer observable as pending work; reserving anywhere later would
+    -- leave a gap in which nothing looks outstanding and a timeout result is
+    -- still to be published. Stopping never reaches this arm -- it plans as
+    -- 'PlanStop' -- so the claim needs no condition.
     case decision of
       PlanRun _ _ -> void (takeMVar coordinator.coordinatorLive)
+      PlanExpire OpenJob -> takeMVar coordinator.coordinatorPublishLock
       _ -> pure ()
     pure planned
   case plan of
@@ -598,9 +606,7 @@ schedulerLoop coordinator = do
       -- simply outlived its deadline while waiting for the owner or for a
       -- rate limit to lift, and gets the same timeout outcome a slow fetch
       -- would have earned it.
-      outcome <- coordinator.coordinatorRunner.openRefreshExpired Nothing
-      reserved <- reservePublication coordinator
-      when reserved (publishReserved coordinator outcome)
+      publishReserved coordinator (coordinator.coordinatorRunner.openRefreshExpired Nothing)
       schedulerLoop coordinator
     PlanExpire HistoryJob -> schedulerLoop coordinator
     PlanRun OpenJob deadline -> runOpenJob coordinator deadline >> schedulerLoop coordinator
@@ -657,28 +663,21 @@ runOpenJob coordinator deadline = do
         takeMVar coordinator.coordinatorPublishLock
         pure (settled, Just outcome)
       _ -> pure (settled, Nothing)
-  mapM_ (publishReserved coordinator) publishing
+  mapM_ (publishReserved coordinator . pure) publishing
 
--- | Hands one outcome to the board and releases the reservation taken for it.
+-- | Produces an outcome and hands it to the board, releasing the reservation
+-- already taken for it.
 --
--- The lock is acquired by the caller, inside the section that decided to
--- publish, and only released here, so a shutdown either sees it held and waits
--- or arrives before the decision and prevents it.
-publishReserved :: RefreshCoordinator outcome -> outcome -> IO ()
-publishReserved coordinator outcome =
-  coordinator.coordinatorPublish outcome `finally` putMVar coordinator.coordinatorPublishLock ()
-
--- | Takes the publication reservation for an outcome nothing has settled for,
--- under the state lock so a shutdown cannot slip between the check and the
--- claim.
-reservePublication :: RefreshCoordinator outcome -> IO Bool
-reservePublication coordinator =
-  modifyMVar coordinator.coordinatorState $ \state ->
-    if state.coordinatorStopping
-      then pure (state, False)
-      else do
-        takeMVar coordinator.coordinatorPublishLock
-        pure (state, True)
+-- The lock is acquired by the caller, inside the section that made the work
+-- unobservable, and released only here, so a shutdown either sees it held and
+-- waits or arrives before the claim and prevents the publication entirely.
+-- Producing the outcome is inside the reservation rather than before it: a
+-- caller that computed one first would reopen the very gap the claim closes,
+-- and an outcome that fails to compute would strand the lock.
+publishReserved :: RefreshCoordinator outcome -> IO outcome -> IO ()
+publishReserved coordinator produce =
+  (produce >>= coordinator.coordinatorPublish)
+    `finally` putMVar coordinator.coordinatorPublishLock ()
 
 runHistoryJob :: RefreshCoordinator outcome -> IO ()
 runHistoryJob coordinator = do

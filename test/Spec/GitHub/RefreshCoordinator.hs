@@ -665,6 +665,39 @@ spec = do
       awaitCount probe.probePublished 1
       readIORef probe.probePublished `shouldReturn` ["expired"]
 
+    -- A request that expires before it can run leaves the queue the instant
+    -- the plan drops it, so its answer has to be claimed in that same step.
+    -- Claimed any later, nothing would look outstanding while a timeout result
+    -- was still to be published.
+    it "still has something to settle while an expiring request is being answered" $ do
+      recordLock <- newGhRecordLock
+      answering <- newEmptyMVar
+      release <- newEmptyMVar
+      published <- newIORef []
+      coordinator <-
+        newRefreshCoordinator
+          recordLock
+          RefreshRunner
+            { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult ("open" :: Text) False),
+              openRefreshExpired = \_ -> putMVar answering () >> takeMVar release >> pure "expired",
+              runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
+            }
+          (\outcome -> atomicModifyIORef' published (\seen -> (seen <> [outcome], ())))
+          (const (pure ()))
+      -- A deadline already behind us, so the request expires rather than runs.
+      alreadyPast <- addUTCTime (-1) <$> getCurrentTime
+      requestRefreshJob coordinator OpenJob (Just alreadyPast)
+      takeMVar answering
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` False
+      coordinatorMustSettle coordinator `shouldReturn` True
+      settled <- newEmptyMVar
+      void (forkIO (shutdownRefreshCoordinator coordinator >>= putMVar settled))
+      threadDelay 200000
+      tryTakeMVar settled `shouldReturn` Nothing
+      putMVar release ()
+      void (takeMVar settled)
+      readIORef published `shouldReturn` ["expired"]
+
     it "publishes nothing from a job shutdown cancelled, and starts nothing after" $ do
       probe <- newProbe
       running <- newEmptyMVar
