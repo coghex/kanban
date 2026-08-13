@@ -445,6 +445,12 @@ class PinnedServiceDefinitionTests(unittest.TestCase):
 
     HOME = Path("/Users/pinned")
     INSTALL_DIR = HOME / "Library" / "Application Support" / "kanban" / "pr-drainer"
+    # Names a directory that exists on no host, deliberately. The definition
+    # records `Path(sys.executable).resolve()`, so any real interpreter path
+    # would resolve differently wherever a component of it is a symlink — on
+    # Ubuntu `/usr/bin/python3` resolves to `/usr/bin/python3.12`, which is a
+    # per-host golden rather than a pin.
+    INTERPRETER = "/kanban-pinned-interpreter/python3"
     GOLDEN = "\n".join(
         [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -456,7 +462,7 @@ class PinnedServiceDefinitionTests(unittest.TestCase):
             "\t<string>com.coghex.drain-prs.acme.widgets</string>",
             "\t<key>ProgramArguments</key>",
             "\t<array>",
-            "\t\t<string>/usr/bin/python3</string>",
+            "\t\t<string>/kanban-pinned-interpreter/python3</string>",
             "\t\t<string>/Users/pinned/Library/Application Support/kanban/"
             "pr-drainer/drain_prs_service.py</string>",
             "\t\t<string>--path</string>",
@@ -522,11 +528,21 @@ class PinnedServiceDefinitionTests(unittest.TestCase):
             ),
             # The interpreter the definition names is this process's own, which
             # differs between a system python3, a virtualenv, and CI.
-            (drain_prs_service.sys, "executable", "/usr/bin/python3"),
+            (drain_prs_service.sys, "executable", self.INTERPRETER),
         ):
             patched = mock.patch.object(module, name, value)
             patched.start()
             self.addCleanup(patched.stop)
+
+    def test_the_pinned_interpreter_path_resolves_to_itself(self):
+        # The redirection above is only a fixed value if it survives
+        # `resolve()`; a host where it did not would fail the pin below with a
+        # byte diff that says nothing about why.
+        self.assertEqual(
+            str(Path(self.INTERPRETER).resolve()),
+            self.INTERPRETER,
+            "the pinned interpreter path must contain no symlinked component",
+        )
 
     def test_the_generated_definition_is_byte_identical_to_the_pin(self):
         job = drain_prs_service.job_for_identity(
