@@ -269,7 +269,24 @@ parses §2 and fails if:
   the check that keeps the ten tracker operations in `/process-report`,
   `$process-report`, `/process-design-doc`, and `$process-design-doc` from
   reverting to the unscoped form that binds them to the shell's current
-  directory.
+  directory;
+- a processing asset loses its §9 publication contract, or a drafting asset
+  stops stating that a novel document remains local until it is separately
+  classified and published;
+- this document drops §9's `pr-atomic` fail-closed rule for an unmatched path;
+- a processing asset or this document drops one of the safety rules §9.3-§9.6
+  introduce — the single-approved-mutation isolation rule, the never-force-push
+  and never-overwrite-a-concurrent-advance rule, or the rule that a commit is
+  verified present on the remote publication branch before anything is called
+  published;
+- publication weakens the one-artifact boundary of §5, or stops following the
+  explicit approval that §5 already requires.
+
+The `coordination`/`pr-atomic` classification itself is not this module's
+subject: `tools/test_document_classification.py` owns §7's rows, and the
+`coghex/kanban` `workflow.coordination_paths` example that mirrors them is
+reconciled there, beside the §7 parser that already exists rather than behind a
+second one.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -352,3 +369,115 @@ resolving the owner.
 That §7 table is Kanban's own: it describes this repository and nothing else,
 so it can identify Kanban as an owner and can never identify a consuming
 repository's. A consuming repository resolves its documents through tier (a).
+
+## 9. Publishing an approved coordination mutation
+
+§8 answers *where* a document belongs. This section answers what happens to an
+approved mutation once it has been applied there. The document workflows present
+their Markdown files as durable cursors a fresh session can resume, but a cursor
+that only ever exists in one checkout is resumable only from that checkout. So a
+document whose resolved path takes the `coordination` lane is published in the
+same run that mutates it, rather than left for a later manual commit.
+
+### 9.1 Which assets publish, and which do not
+
+- The four **processing** assets — `/process-report`, `$process-report`,
+  `/process-design-doc`, and `$process-design-doc` — publish the approved
+  document mutation during the same invocation that applies it, whenever the
+  resolved path is eligible under §9.2. These are the assets that publish an
+  eligible mutation, and no other asset does.
+- The three **drafting** assets — `/design-epic`, `$design-epic`, and
+  `$draft-report` — publish nothing at all. A document one of them newly
+  creates is local and unpublished. Its first publication requires a separate
+  pull request that adds both the document and its `coordination`
+  classification; only after that pull request lands may a later processing run
+  publish direct-to-`master` mutations to it. Automating that enrollment pull
+  request is outside this contract.
+
+The split follows from §7 rather than from convenience: the classifier's subject
+inventory is `git ls-files '*.md'`, so a document a drafting asset just created
+is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
+moment at which a novel document is directly publishable.
+
+### 9.2 Eligibility, and the fail-closed default
+
+[agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+is the authoritative classification for Kanban paths, and eligibility means
+exactly one thing: the resolved document's repository-relative path is
+classified `coordination` there. **A `pr-atomic` path, and a path no row
+matches, is never published directly** — `pr-atomic` is the fail-closed default
+for an unmatched path, so an unrecognized document is left unpublished rather
+than guessed into the direct lane. When a mutation is not direct-publication
+eligible, the run leaves the edit in place and recoverable and says why.
+
+A resolved owner is a prerequisite, not a parallel check. §8's `$DOC_REPO`,
+`$DOC_BRANCH`, and `$DOC_ROOT` must already be established before eligibility is
+even consulted: a document whose owning repository or publication branch could
+not be verified fails closed and stays unpublished, exactly as §8.3 requires.
+§7's rows classify Kanban paths only, so they answer eligibility for a
+Kanban-owned document and for no other repository's.
+
+### 9.3 What a publication may contain
+
+A publication carries the single approved mutation to the one eligible document
+and nothing else. It must not carry unrelated dirty paths, earlier `docs-wip`
+commits, unrelated changes already present in the same document, or a second
+disposition or document mutation. If the approved mutation cannot be isolated
+from other changes, publication fails closed without discarding any work.
+
+### 9.4 How a publication is made
+
+Publication is a normal fast-forward update of the remote publication branch and
+nothing more. It never force-pushes, never resets, never overwrites a concurrent
+advance of `$DOC_BRANCH`, and never resolves a conflict by guessing. A
+non-fast-forward rejection, a conflict, or a detected branch movement leaves the
+mutation recoverable and is reported as an unpublished failure.
+
+Recoverable does not mean parked anywhere convenient. A failed publication must
+not leave the checkout's local default branch diverged from its remote: the PR
+drainer fast-forwards that branch with `git merge --ff-only` after every merge,
+and an unpushed local commit on it wedges every later pass until a human
+intervenes. Retaining the mutation as an uncommitted edit in the docs worktree,
+or under a ref that is not the default branch, both satisfy this; committing it
+onto the local default branch does not. The §9.5 failure report names where the
+mutation was retained.
+
+### 9.5 What "published" means, and the three-state failure report
+
+A run may describe a document as published only after verifying that the
+intended publication commit is present on the remote publication branch. A push
+that appeared to succeed is not that verification.
+
+A failure report distinguishes all three states rather than collapsing them:
+
+- whether the document edit exists locally, and in which worktree and at which
+  path;
+- whether a local publication commit exists and, if so, its commit ID; and
+- whether the remote publication branch contains that commit.
+
+After a verified publication the local state must agree with it: a later run
+resolving the document under `$DOCS_WT` sees the published content rather than a
+divergent local-only copy, and the published mutation is not left queued for
+republication. Advancing the docs worktree's branch and reconciling the file
+against the published commit both satisfy this; what may not survive is a local
+copy a later run cannot tell apart from a still-pending mutation.
+
+### 9.6 Resuming an unfinished publication
+
+A later run recognizes an already-applied tracker or document mutation and
+resumes the unfinished publication step without repeating the tracker mutation.
+The evidence is only what the document and the tracker already carry — a ledger
+entry already bearing its `[#N]`, `[no-issue]`, or `[deferred]` marker, or an
+existing local publication commit — and the response is only to re-attempt the
+publication step itself. A durable journal, cross-system reconciliation, or
+identity verification of a similarly titled artifact is deliberately not part of
+this contract.
+
+### 9.7 What publishing does not change
+
+Publication happens after each individually approved disposition and is never
+batched or deferred merely to reduce commit or push frequency. The §5
+boundaries are untouched: one artifact per invocation still bounds the run, and
+explicit approval still precedes every mutation — including the publication of
+one, which inherits the approval of the mutation it carries and grants no
+license to sweep in a second.

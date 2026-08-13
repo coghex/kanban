@@ -185,7 +185,222 @@ CONTRACT_STATEMENTS = {
     "section-7-classifies-kanban-only": (
         "it describes this repository and nothing else"
     ),
+    # Issue #237: §9's publication contract. Every entry below is a rule a
+    # text-only change could quietly drop while the assets still looked like
+    # they published something.
+    "publication-assets-are-the-processing-ones": (
+        "The four processing assets — /process-report, $process-report, "
+        "/process-design-doc, and $process-design-doc — publish the approved "
+        "document mutation during the same invocation that applies it"
+    ),
+    "publication-drafting-assets-stay-local": (
+        "The three drafting assets — /design-epic, $design-epic, and "
+        "$draft-report — publish nothing at all"
+    ),
+    "publication-section-7-is-authoritative": (
+        "is the authoritative classification for Kanban paths"
+    ),
+    "publication-unmatched-fails-closed": (
+        "pr-atomic is the fail-closed default for an unmatched path"
+    ),
+    "publication-needs-a-resolved-owner": (
+        "must already be established before eligibility is even consulted"
+    ),
+    "publication-carries-one-mutation": (
+        "A publication carries the single approved mutation to the one eligible "
+        "document and nothing else"
+    ),
+    "publication-isolation-fails-closed": (
+        "If the approved mutation cannot be isolated from other changes, "
+        "publication fails closed without discarding any work"
+    ),
+    "publication-is-fast-forward-only": (
+        "Publication is a normal fast-forward update of the remote publication "
+        "branch and nothing more"
+    ),
+    "publication-never-force-pushes": (
+        "It never force-pushes, never resets, never overwrites a concurrent "
+        "advance of $DOC_BRANCH"
+    ),
+    "publication-leaves-the-default-branch-undiverged": (
+        "A failed publication must not leave the checkout's local default branch "
+        "diverged from its remote"
+    ),
+    "publication-is-verified-on-the-remote": (
+        "may describe a document as published only after verifying that the "
+        "intended publication commit is present on the remote publication branch"
+    ),
+    "publication-failure-has-three-states": (
+        "A failure report distinguishes all three states rather than collapsing "
+        "them"
+    ),
+    "publication-post-success-local-state": (
+        "sees the published content rather than a divergent local-only copy"
+    ),
+    "publication-resumption-is-bounded": (
+        "The evidence is only what the document and the tracker already carry"
+    ),
+    "publication-is-never-batched": (
+        "Publication happens after each individually approved disposition and is "
+        "never batched or deferred merely to reduce commit or push frequency"
+    ),
 }
+
+# Issue #237: the publication step every processing asset states, as the
+# load-bearing prose fragments. Compared against canonical() output for the same
+# reason OWNERSHIP_CLAUSES is: each asset is its own brand's text. §9 of the
+# contract summarizes the same rules; pinning them there alone would let the
+# assets regress while the document kept describing them.
+PUBLICATION_CLAUSES = {
+    "publishes-in-the-same-run": (
+        "publish the approved mutation in this same run"
+    ),
+    "is-never-batched": (
+        "never batched or deferred merely to reduce commit or push frequency"
+    ),
+    "eligibility-is-section-7": (
+        "publish only when the resolved document's repository-relative path is "
+        "classified coordination by docs/agent-workflow-contract.md §7"
+    ),
+    "pr-atomic-is-never-published": (
+        "a pr-atomic path, and a path no §7 row matches, is never published "
+        "directly"
+    ),
+    "unmatched-fails-closed": (
+        "pr-atomic is the fail-closed default for an unmatched path"
+    ),
+    "ineligible-stays-recoverable": (
+        "leave the edit in place and recoverable, say plainly that it was not "
+        "published and why"
+    ),
+    "needs-a-resolved-owner": (
+        "an owner or publication branch that could not be verified fails closed "
+        "and the document stays unpublished"
+    ),
+    "carries-one-mutation": (
+        "a publication carries the single approved mutation to the one eligible "
+        "document and nothing else"
+    ),
+    "sweeps-in-nothing-else": (
+        "no unrelated dirty paths, no earlier docs-wip commits, no unrelated "
+        "changes already present in the same document, and no second disposition"
+    ),
+    "isolation-fails-closed": (
+        "if the approved mutation cannot be isolated from other changes, "
+        "publication fails closed: publish nothing, discard nothing"
+    ),
+    "never-force-pushes": (
+        "never force-push, never reset, and never overwrite a concurrent advance "
+        "of $doc_branch or resolve a conflict by guessing"
+    ),
+    "rejection-is-an-unpublished-failure": (
+        "a non-fast-forward rejection, a conflict, or a branch that moved under "
+        "the run leaves the mutation recoverable and is reported as an "
+        "unpublished failure"
+    ),
+    "leaves-the-default-branch-undiverged": (
+        "recoverable never means a commit left on the local default branch of a "
+        "checkout the pr drainer fast-forwards"
+    ),
+    "verified-on-the-remote": (
+        "say the document is published only after verifying that the intended "
+        "publication commit is present on the remote publication branch"
+    ),
+    "post-success-local-state": (
+        "a later run resolving the document under $docs_wt sees the published "
+        "content rather than a divergent local-only copy, and the published "
+        "mutation is not left queued for republication"
+    ),
+    "convergence-is-scoped-to-the-fallback": (
+        "the fast-forward applies only when $docs_wt fell back to the checkout "
+        "that sits on $doc_branch"
+    ),
+    "failure-has-three-states": (
+        "whether the document edit exists locally and in which worktree and at "
+        "which path; whether a local publication commit exists and, if so, its "
+        "commit id; and whether the remote publication branch contains that "
+        "commit"
+    ),
+    "resumes-only-the-publication-step": (
+        "re-attempt only the unfinished publication step below, and never repeat "
+        "the tracker mutation"
+    ),
+    "resumption-evidence-is-bounded": (
+        "that marker and an existing local publication commit are the only "
+        "evidence used here"
+    ),
+}
+
+# The executable half. The commit is built from the fetched remote tip with one
+# blob replaced and pushed without --force, which is what makes requirements 4
+# and 5 structural rather than aspirational: `commit-tree` moves no local
+# branch, so a rejected push cannot strand a commit on the default branch the
+# drainer fast-forwards, and a tree built from `origin/$DOC_BRANCH` cannot carry
+# a second path. Compared against normalized() because case is load-bearing in a
+# shell command.
+PUBLICATION_SHELL_BINDINGS = (
+    'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"',
+    'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
+    # Braced deliberately: zsh reads the unbraced `"$PUB_COMMIT:refs/..."` as a
+    # `:r` modifier and pushes a mangled refspec, and these assets run in
+    # whatever shell the session started in.
+    'git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
+    'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH"',
+    # Guarded by the branch test rather than run unconditionally: a docs-wip
+    # worktree is on its own branch, and fast-forwarding it to the publication
+    # branch would be a different operation entirely. The path-scoped checkout
+    # is part of the same guarded chain because git refuses to fast-forward
+    # over a locally modified file even when the file's content is exactly what
+    # the fast-forward would install.
+    '[ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \\ '
+    '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
+    '&& git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"',
+)
+
+# The blanket prohibition §9 replaced in the processing assets. It stated the
+# opposite of the publication step, so an asset that reintroduces it has
+# un-published its mutation no matter what its new section still says. The
+# drafting assets never carried it: they publish nothing and say so.
+PUBLICATION_FORBIDDEN_PROSE = (
+    "do not commit, push, or open a pr unless separately requested",
+    "do not commit, push, open a pr, or modify implementation code unless "
+    "separately requested",
+)
+
+# Issue #237 requirement 3: what a drafting asset must say about a document it
+# just created. The classifier derives its inventory from `git ls-files`, so a
+# novel document matches no row and is pr-atomic — there is no moment at which
+# it is directly publishable.
+BOOTSTRAP_CLAUSES = {
+    "novel-document-is-local": (
+        "a document this workflow newly creates is local and unpublished, and "
+        "this workflow never publishes one"
+    ),
+    "unmatched-is-pr-atomic": (
+        "an unmatched path is pr-atomic by the fail-closed default"
+    ),
+    "never-directly-publishable": (
+        "there is no moment at which a novel document is directly publishable"
+    ),
+    "first-publication-needs-a-pull-request": (
+        "its first publication requires a separate pull request that adds both "
+        "the document and its coordination classification"
+    ),
+    "only-then-may-processing-publish": (
+        "only after that pull request lands may a later processing run publish "
+        "direct-to-master mutations to it"
+    ),
+    "enrollment-is-out-of-scope": (
+        "creating that enrollment pull request is not this workflow's job either"
+    ),
+}
+
+# §9.1's two halves, as this module's own lists. The publication clauses are
+# asserted against the first and the bootstrap clauses against the second, and
+# the partition assertion below keeps a later asset from escaping both.
+PROCESSING_ASSETS = DISPOSITION_APPLYING_ASSETS
+DRAFTING_ASSETS = CAPTURE_ASSETS
 
 # Issue #278: the ownership-resolution step every declared asset states, as the
 # load-bearing prose fragments. Compared against canonical() output for the
@@ -458,6 +673,36 @@ def reintroduced_unscoped_roots(text):
     """The pre-§8 active-checkout resolutions `text` has brought back."""
     asset = normalized(text)
     return [form for form in OWNERSHIP_FORBIDDEN_SHELL if form in asset]
+
+
+def missing_publication_clauses(text):
+    """The §9 publication clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in PUBLICATION_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_publication_bindings(text):
+    """The §9 publication commands `text` no longer runs."""
+    asset = normalized(text)
+    return [
+        binding for binding in PUBLICATION_SHELL_BINDINGS if binding not in asset
+    ]
+
+
+def reintroduced_publication_prohibitions(text):
+    """The blanket never-commit prohibition §9 replaced, if it is back."""
+    asset = canonical(text)
+    return [form for form in PUBLICATION_FORBIDDEN_PROSE if form in asset]
+
+
+def missing_bootstrap_clauses(text):
+    """The §9.1 novel-document clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in BOOTSTRAP_CLAUSES.items() if clause not in asset
+    )
 
 
 def unbound_gh_invocations(text):
@@ -874,6 +1119,148 @@ class OwningRepositoryTests(unittest.TestCase):
             "ownership-branch-fails-closed",
             "routing-is-not-the-lane",
             "section-7-classifies-kanban-only",
+        ):
+            with self.subTest(statement=key):
+                self.assertIn(CONTRACT_STATEMENTS[key], document)
+                self.assertEqual(
+                    missing_contract_statements(
+                        document.replace(CONTRACT_STATEMENTS[key], "")
+                    ),
+                    [key],
+                )
+
+
+class PublicationTests(unittest.TestCase):
+    """Issue #237: a coordination document's persistence boundary was the local
+    checkout, so an approved mutation survived only where the session ran. §9
+    makes the processing assets publish the mutation in the same run, and keeps
+    the drafting assets from publishing a document no §7 row classifies yet.
+
+    Every rule is asserted in the packaged assets as well as in the contract
+    prose describing them, because the assets are what an agent actually reads.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_the_two_asset_groups_partition_the_declared_set(self):
+        # §9.1 splits the seven declared assets into the four that publish and
+        # the three that never do. Without this, an asset added to neither
+        # would be held to neither rule.
+        self.assertEqual(
+            set(PROCESSING_ASSETS) | set(DRAFTING_ASSETS), EXPECTED_DECLARED_PATHS
+        )
+        self.assertEqual(set(PROCESSING_ASSETS) & set(DRAFTING_ASSETS), set())
+
+    def test_every_processing_asset_states_the_publication_step(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_publication_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states the publication clauses "
+                    f"docs/document-workflow-contract.md §9 pins: {missing}",
+                )
+
+    def test_removing_a_publication_clause_from_an_asset_is_reported(self):
+        # The negative case issue #237's acceptance names: delete one clause at
+        # a time from each processing asset and confirm exactly that key is
+        # reported. canonical() is idempotent, so mutating its output is the
+        # same planted-violation shape the other checks in this module use.
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in PUBLICATION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_publication_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_every_processing_asset_performs_the_publication(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_publication_bindings(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} states the publication step but no longer performs "
+                    f"it: {missing}",
+                )
+
+    def test_removing_a_publication_command_from_an_asset_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = normalized(self.asset_text(path))
+            for binding in PUBLICATION_SHELL_BINDINGS:
+                with self.subTest(path=path, binding=binding):
+                    self.assertEqual(
+                        missing_publication_bindings(asset.replace(binding, "")),
+                        [binding],
+                    )
+
+    def test_no_processing_asset_still_forbids_publishing_outright(self):
+        # The prose and the commands above can both be present while the
+        # blanket "do not commit, push, or open a PR" bullet the publication
+        # step replaced sits in the same file, which would tell an agent the
+        # opposite of §9 in the boundaries section it reads last.
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                reintroduced = reintroduced_publication_prohibitions(
+                    self.asset_text(path)
+                )
+                self.assertEqual(
+                    reintroduced,
+                    [],
+                    f"{path} forbids the publication step §9 requires: "
+                    f"{reintroduced}",
+                )
+
+    def test_reintroducing_the_blanket_prohibition_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for form in PUBLICATION_FORBIDDEN_PROSE:
+                with self.subTest(path=path, form=form):
+                    self.assertEqual(
+                        reintroduced_publication_prohibitions(f"{asset} {form}"),
+                        [form],
+                    )
+
+    def test_every_drafting_asset_states_the_novel_document_rule(self):
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_bootstrap_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states that its novel output remains "
+                    "local until separately classified and published: "
+                    f"{missing}",
+                )
+
+    def test_removing_the_bootstrap_rule_from_an_asset_is_reported(self):
+        for path in DRAFTING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in BOOTSTRAP_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_bootstrap_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_no_drafting_asset_performs_a_publication(self):
+        # The other half of §9.1: the drafting assets say they never publish,
+        # so none of them may carry the push that would.
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "push origin", normalized(self.asset_text(path)), path
+                )
+
+    def test_the_contract_states_the_publication_rules_the_assets_implement(self):
+        # The document half, asserted the way §8's is: the contract cannot keep
+        # the eligibility rule while losing the safety rules that make direct
+        # publication survivable.
+        document = normalized(contract_text())
+        for key in sorted(
+            key for key in CONTRACT_STATEMENTS if key.startswith("publication-")
         ):
             with self.subTest(statement=key):
                 self.assertIn(CONTRACT_STATEMENTS[key], document)

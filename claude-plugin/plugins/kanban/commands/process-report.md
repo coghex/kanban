@@ -178,6 +178,15 @@ Rules:
 
 ## 1. Locate the next finding
 
+Check first whether an earlier run left a publication unfinished. When the
+entry you would select already carries its `[#N]`, `[no-issue]`, or `[deferred]`
+marker but the document still differs from the remote publication branch, that
+earlier run's tracker mutation already succeeded: re-attempt only the unfinished
+publication step below, and never repeat the tracker mutation. That marker and
+an existing local publication commit are the only evidence used here; a durable
+journal or cross-system reconciliation is deliberately not part of this
+workflow.
+
 1. Resolve `$ARGUMENTS` under `$DOCS_WT`, never relative to the working
    directory. Stop with a concise error if it does not exist or is not a
    Markdown file.
@@ -362,7 +371,8 @@ Then edit only the selected report finding:
   produced two contradictory answers to the same question.
 - Preserve the finding body and all unrelated changes.
 - Never mark the finding when issue creation or lookup failed.
-- Do not commit, push, or open a PR unless separately requested.
+- Do not commit, push, or open a PR beyond the publication step in
+  section 6 below unless separately requested.
 
 Verify heading and checklist agree, and that the run changed exactly one finding:
 
@@ -373,9 +383,97 @@ git diff --stat -- "$ARGUMENTS"
 
 For a created or linked issue, also verify its title, state, labels, and URL.
 
+## 6. Publish the approved mutation
+
+Publish the approved mutation in this same run. The document is a durable
+cursor, and a cursor that only ever exists in one checkout is resumable only
+from that checkout. Publication is one more step of the disposition that was
+already approved; it carries no second one, and it is never batched or deferred
+merely to reduce commit or push frequency.
+
+**Eligibility.** Publish only when the resolved document's repository-relative
+path is classified `coordination` by `docs/agent-workflow-contract.md` §7.
+A `pr-atomic` path, and a path no §7 row matches, is never published directly:
+`pr-atomic` is the fail-closed default for an unmatched path. When the document
+is not direct-publication eligible, leave the edit in place and recoverable, say
+plainly that it was not published and why, and stop there. Publishing at all
+requires the `$DOC_REPO`, `$DOC_BRANCH`, and `$DOC_ROOT` the ownership step
+resolved; an owner or publication branch that could not be verified fails closed
+and the document stays unpublished.
+
+**Isolate the mutation first.** A publication carries the single approved
+mutation to the one eligible document and nothing else — no unrelated dirty
+paths, no earlier `docs-wip` commits, no unrelated changes already present in
+the same document, and no second disposition. Read the whole difference first:
+
+```bash
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+```
+
+If the approved mutation cannot be isolated from other changes, publication
+fails closed: publish nothing, discard nothing, and report what else the
+document carries.
+
+**Publish with a fast-forward and nothing else.** Build the publication commit
+from the fetched remote tip with exactly that one blob replaced, so no local
+branch moves and no other path can be swept in, then push it plainly:
+
+```bash
+PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path kanban-publish-index)"
+PUB_BLOB="$(git -C "$DOCS_WT" hash-object -w -- "$DOCS_WT/$DOC_RELATIVE_PATH")"
+GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"
+GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
+  --cacheinfo "100644,$PUB_BLOB,$DOC_RELATIVE_PATH"
+PUB_TREE="$(GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" write-tree)"
+PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
+  -p "origin/$DOC_BRANCH" -m "docs: <the approved mutation, one line>")"
+git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
+```
+
+Never force-push, never reset, and never overwrite a concurrent advance of
+`$DOC_BRANCH` or resolve a conflict by guessing. A non-fast-forward rejection, a
+conflict, or a branch that moved under the run leaves the mutation recoverable
+and is reported as an unpublished failure. Recoverable never means a commit left
+on the local default branch of a checkout the PR drainer fast-forwards; the
+commands above cannot produce one, because `commit-tree` moves no branch and a
+rejected push leaves the mutation exactly where it already was.
+
+**Verify before calling it published.** Say the document is published only after
+verifying that the intended publication commit is present on the remote
+publication branch:
+
+```bash
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH"
+git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+[ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
+  && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
+  && git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"
+```
+
+Those commands pin the post-success local state: a later run resolving the
+document under `$DOCS_WT` sees the published content rather than a divergent
+local-only copy, and the published mutation is not left queued for
+republication. The fast-forward applies only when `$DOCS_WT` fell back to the
+checkout that sits on `$DOC_BRANCH`, where the published edit would otherwise
+keep reading as a pending local modification that also blocks the fast-forward
+itself; a `docs-wip` worktree is on its own branch, already matches the
+published content, and is left alone. The `checkout` there discards nothing —
+the preceding `diff --quiet` has already proved that content identical to it is
+on the remote branch — and it touches only `$DOC_RELATIVE_PATH`, so unrelated
+work in that checkout survives. Never force either one, and never `reset`.
+
+**Report all three states on any failure**, rather than collapsing them: whether
+the document edit exists locally and in which worktree and at which path;
+whether a local publication commit exists and, if so, its commit ID; and whether
+the remote publication branch contains that commit. Name where the mutation was
+retained.
+
 Report, in this order: the disposition and its tracker link if any; the report
-line as it now reads; and the number of findings still unchecked, so the next run
-starts from a known position.
+line as it now reads; whether the mutation was published, with the commit ID
+when it was and the three states above when it was not; and the number of
+findings still unchecked, so the next run starts from a known position.
 
 Stop after this one finding. Advance only when the user explicitly asks or runs
 `/process-report` again. Never batch a second finding into the same run, even
