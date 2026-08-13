@@ -16,17 +16,19 @@ plugin's assets to exist.
 Issue #118 added four more packaged commands — the drafting and canonical
 issue-review workflows /issue, /draft-issues, /autoissue, and /issue-review —
 so discovery and Haskell name parity are now two separate concepts here, and
-issue #229 added /process-report, the one design/report document workflow with
-a Claude counterpart, and issue #240 added /issue-rereview, the drafting
-contract's repair loop for a changes-requested issue.
+issue #229 added /process-report, then the one design/report document workflow
+with a Claude counterpart, and issue #240 added /issue-rereview, the drafting
+contract's repair loop for a changes-requested issue. Issue #241 added the
+design pair /design-epic and /process-design-doc, transposed from the
+post-#239 tracked Codex skills.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all eleven); HASKELL_PARITY_COMMAND_NAMES is the strictly
+commands directory (all thirteen); HASKELL_PARITY_COMMAND_NAMES is the strictly
 smaller set Kanban's own Haskell code spawns by name (the five above). The
 drafting and document workflows are user- or daemon-invoked and are
 deliberately excluded from that parity pinning; see
 docs/drafting-workflow-contract.md and docs/document-workflow-contract.md,
-whose §3.5 records why /design-epic, /process-design-doc, and /draft-report
-have no Claude counterpart here. They are still subject to every structural
+whose §3.5 records why /draft-report is now the one document workflow with no
+Claude counterpart here. They are still subject to every structural
 policy this module enforces: frontmatter description, forbidden configuration
 keys, and no personal paths.
 
@@ -111,12 +113,13 @@ DRAFTING_COMMAND_NAMES = {
     "issue-rereview",
 }
 
-# The design and report document workflows vendored by issue #229. Also user-
-# invoked and excluded from Haskell name parity. Only /process-report has a
-# Claude counterpart: docs/document-workflow-contract.md §3.5 declares the
-# other three Codex-only, so the Claude plugin must not grow one.
-DOCUMENT_COMMAND_NAMES = {"process-report"}
-CODEX_ONLY_DOCUMENT_WORKFLOWS = ("design-epic", "process-design-doc", "draft-report")
+# The design and report document workflows vendored by issue #229, plus the
+# design pair issue #241 transposed from the post-#239 tracked Codex skills.
+# Also user-invoked and excluded from Haskell name parity.
+# docs/document-workflow-contract.md §3.5 now declares only $draft-report
+# Codex-only, so the Claude plugin must not grow that one.
+DOCUMENT_COMMAND_NAMES = {"design-epic", "process-design-doc", "process-report"}
+CODEX_ONLY_DOCUMENT_WORKFLOWS = ("draft-report",)
 
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
@@ -263,7 +266,7 @@ class CommandDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
 
-    def test_the_codex_only_document_workflows_are_not_packaged_here(self):
+    def test_the_remaining_codex_only_document_workflow_is_not_packaged_here(self):
         for name in CODEX_ONLY_DOCUMENT_WORKFLOWS:
             self.assertNotIn(name, EXPECTED_COMMAND_NAMES)
             self.assertFalse(

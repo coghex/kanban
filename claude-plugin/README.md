@@ -88,10 +88,10 @@ Verify discovery:
 claude plugin list
 ```
 
-`kanban@kanban` should be listed, and all eleven workflow names should be
+`kanban@kanban` should be listed, and all thirteen workflow names should be
 available as `/solve`, `/pr-review`, `/pr-rereview`, `/pr-revise`, `/issue`,
 `/draft-issues`, `/autoissue`, `/issue-review`, `/issue-rereview`, `/repair`,
-and `/process-report`.
+`/design-epic`, `/process-design-doc`, and `/process-report`.
 
 Verified against Claude Code `2.1.216` (`claude --version`), the version
 that provides the `claude plugin` / `claude plugin marketplace` subcommand
@@ -134,19 +134,23 @@ under either brand must be resumable under the other.
 
 No `epic` command is packaged: arc decomposition — planning a user-supplied
 feature arc rather than independently hunting for discretionary work — belongs
-to the `design-epic`/`process-design-doc` pipeline (see the
+to the `/design-epic`/`/process-design-doc` pipeline (see the
 [document-workflow contract](../docs/document-workflow-contract.md)) and is
 not part of this drafting contract. The personal `/epic` command that once
 created epic trees directly was retired 2026-08-11 in that pipeline's favor.
 
-Three document workflows are deliberately not packaged here either.
-`design-epic`, `process-design-doc`, and `draft-report` are **Codex-only** — a
-declared gap rather than an oversight, because authoring Claude counterparts
+One document workflow is deliberately not packaged here either.
+`draft-report` is **Codex-only** — a
+declared gap rather than an oversight, because authoring a Claude counterpart
 would be new behavior no pinned source defines, which the SHA-pinned vendoring
 model of issue #118 refused to do. The asymmetry runs opposite to the
 Claude-only `/draft-issues` boundary above, and is recorded the same way rather
 than closed; see
-[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry).
+[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-partially-closed).
+`design-epic` and `process-design-doc` were Codex-only under the same rule
+until issue #239 landed their decision-authority guardrails in the tracked
+Codex skills; `/design-epic` and `/process-design-doc` are transposed from
+that pinned source, which is what cleared them to ship here.
 
 `pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
 to the bundled coordinator at `scripts/review_pr.py`. Claude Code exposes
@@ -230,13 +234,13 @@ runs) checks that:
 
 - the marketplace and plugin manifests are valid and point at this
   directory;
-- the commands directory contains exactly the eleven packaged workflows, and
+- the commands directory contains exactly the thirteen packaged workflows, and
   the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  five drafting commands or `/process-report`;
-- the three Codex-only document workflows have no counterpart here, keeping
-  the declared asymmetry;
+  five drafting commands or the three document commands;
+- the one remaining Codex-only document workflow has no counterpart here,
+  keeping the declared asymmetry;
 - no packaged manifest sets model/effort/permission-mode/working-directory
   configuration, and every packaged command — drafting commands included —
   declares a `description:` and no forbidden frontmatter key;
@@ -259,7 +263,7 @@ difference permitted. Nothing is excluded — not a function, not a comment bloc
 issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
-surface (all eleven commands under `claude-plugin/plugins/kanban/commands/`) and
+surface (all thirteen commands under `claude-plugin/plugins/kanban/commands/`) and
 both bundled Python assets — the review coordinator and `/solve`'s
 trusted-comment helper — against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
@@ -295,15 +299,18 @@ exemption rules as the document, each gate instruction must follow the guard
 that makes it apply only when the consuming repo declares a gate, and
 `/issue-review` must stay free of gate language.
 
-`tools/test_document_workflow_contract.py` does the same for `/process-report`
+`tools/test_document_workflow_contract.py` does the same for `/design-epic`,
+`/process-design-doc`, and `/process-report`
 against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
-appear here, the document must keep stating the Codex-only asymmetry and the
-design-pipeline epic-planner boundary, and the exact `[#N]`, `[no-issue]`,
+appear here, the document must keep stating the remaining Codex-only asymmetry,
+the design-pair closure record, and the
+design-pipeline epic-planner boundary, the decision-authority clauses of §5.1
+must survive in both Claude design commands, and the exact `[#N]`, `[no-issue]`,
 `[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
-both `process-report` variants — the surface that makes a report portable
-between the brands.
+every cross-brand pair — the surface that makes a report or design document
+portable between the brands.
 
 ## Project-scoped locations
 

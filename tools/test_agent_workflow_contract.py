@@ -15,8 +15,10 @@ markdown counterpart of the Haskell home-relative-path check so the user-scoped
 paths those assets name are reconciled against the same `personal-path`
 manifest rows.
 
-Issue #229 added the five design and report document workflows
-(docs/document-workflow-contract.md §2) on the same terms. The plugin surfaces
+Issue #229 added the design and report document workflows
+(docs/document-workflow-contract.md §2) on the same terms, and issue #241 grew
+that declared set to seven by transposing /design-epic and /process-design-doc
+into the Claude bundle. The plugin surfaces
 here are enumerated lists rather than globs, so an asset reaches the scan only
 by being listed; the document assets are therefore reconciled against their own
 contract's declared set, and what the extractor recovers from each of them is
@@ -95,6 +97,8 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/issue-review.md",
     "claude-plugin/plugins/kanban/commands/issue-rereview.md",
     "claude-plugin/plugins/kanban/commands/repair.md",
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
@@ -149,14 +153,18 @@ REREVIEW_SURFACE_EXPECTED_COMMANDS = {
     },
 }
 
-# The five design and report document-workflow assets vendored by issue #229
-# (docs/document-workflow-contract.md §2), covered exactly the way the drafting
-# assets above are: all five are members of the two plugin surface lists, so
-# their bash fences are already scanned for external commands, and all five are
+# The seven design and report document-workflow assets declared in
+# docs/document-workflow-contract.md §2 — the five vendored by issue #229 plus
+# the Claude design pair issue #241 transposed from the tracked Codex skills —
+# covered exactly the way the drafting
+# assets above are: all seven are members of the two plugin surface lists, so
+# their bash fences are already scanned for external commands, and all seven are
 # scanned here for user-scoped paths. They name none today — which is why the
 # assertion below pins what the extractor actually recovers from them, rather
 # than only asserting that nothing undeclared was found.
 DOCUMENT_SURFACE_FILES = [
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
@@ -165,15 +173,19 @@ DOCUMENT_SURFACE_FILES = [
 ]
 
 # What each document-workflow asset's bash fences actually invoke. Since issue
-# #278 every one of the five resolves its owning repository with `git` and `gh`
+# #278 every one of the seven resolves its owning repository with `git` and `gh`
 # before any write, and resolves the docs worktree beneath it with
 # `git -C "$DOC_ROOT" worktree list | awk ...`; the processing workflows
 # additionally list and search issues with `gh`, and the Claude process-report
 # lists finding headings with `rg` inside a fence rather than in prose. `gh`
-# is therefore on all five, where before the ownership step it was on the three
-# processing assets alone. Pinned so a rewrite that stops invoking anything
-# cannot leave the completeness check with nothing to discover.
+# is therefore on all seven, where before the ownership step it was on the
+# processing assets alone. The Claude design pair inherits exactly the Codex
+# sources' fences, so it inherits their command sets too. Pinned so a rewrite
+# that stops invoking anything cannot leave the completeness check with nothing
+# to discover.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/design-epic.md": {"git", "awk", "gh"},
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md": {"git", "awk", "gh"},
     "claude-plugin/plugins/kanban/commands/process-report.md": {"git", "awk", "gh", "rg"},
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {"git", "awk", "gh"},
