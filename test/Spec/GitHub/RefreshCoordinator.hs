@@ -9,6 +9,7 @@
 module Spec.GitHub.RefreshCoordinator (spec) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay, tryTakeMVar)
+import Control.Exception (finally, throwIO)
 import Control.Monad (unless, void)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -571,7 +572,7 @@ spec = do
           recordLock
           RefreshRunner
             { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult ("open" :: Text) False),
-              openRefreshExpired = pure "expired",
+              openRefreshExpired = const (pure "expired"),
               runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
             }
           ( \_ -> do
@@ -625,6 +626,44 @@ spec = do
       awaitCount probe.probeStarted 1
       coordinatorOpenCycleInFlight coordinator `shouldReturn` False
       putMVar release ()
+
+    -- The reservation is what a quit collides with. Taken in the same section
+    -- that releases the owner, it leaves no instant in which the work looks
+    -- finished and the publication has claimed nothing.
+    it "still has something to settle while a publication is reserved" $ do
+      recordLock <- newGhRecordLock
+      publishing <- newEmptyMVar
+      release <- newEmptyMVar
+      coordinator <-
+        newRefreshCoordinator
+          recordLock
+          RefreshRunner
+            { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult ("open" :: Text) False),
+              openRefreshExpired = const (pure "expired"),
+              runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
+            }
+          (\_ -> putMVar publishing () >> takeMVar release)
+          (const (pure ()))
+      requestRefreshJob coordinator OpenJob Nothing
+      takeMVar publishing
+      -- Nothing is running and nothing is queued, yet a quit still has to go
+      -- through the coordinator rather than halting past this publication.
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` False
+      coordinatorMustSettle coordinator `shouldReturn` True
+      putMVar release ()
+
+    -- A request whose job produced nothing still has to be answered, or the
+    -- board waits on a cycle that will never report.
+    it "answers a foreground request whose job produced no outcome of its own" $ do
+      probe <- newProbe
+      coordinator <-
+        startProbeCoordinator
+          probe
+          (\_ _ -> throwIO (userError "the fetch gave up"))
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator OpenJob Nothing
+      awaitCount probe.probePublished 1
+      readIORef probe.probePublished `shouldReturn` ["expired"]
 
     it "publishes nothing from a job shutdown cancelled, and starts nothing after" $ do
       probe <- newProbe
@@ -839,6 +878,32 @@ spec = do
         readIORef published `shouldReturn` 0
         (repositoryCachePath repository >>= doesFileExist) `shouldReturn` False
 
+    -- Requirement 8's timeout outcome, reached through the coordinator rather
+    -- than through a lone refresh thread.
+    it "publishes the configured timeout for a fetch that outran its deadline" $
+      withIsolatedCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+        outcomes <- newIORef []
+        settled <- newEmptyMVar
+        recordLock <- newGhRecordLock
+        coordinator <-
+          newRefreshCoordinator
+            recordLock
+            (boardRefreshRunner (uncachedConfig 1) repository)
+            (\outcome -> atomicModifyIORef' outcomes (\seen -> (outcome : seen, ())) >> putMVar settled ())
+            (const (pure ()))
+        withFakeGh
+          temporaryRoot
+          ["sleep 30", "printf '%s' '" <> emptyGraphqlPage <> "'"]
+          $ do
+            requestRefreshJob coordinator OpenJob . Just =<< deadlineIn 1
+            takeMVar settled
+        published <- readIORef outcomes
+        case published of
+          [BoardRefreshCompleted (Left providerError)] ->
+            providerError.providerErrorKind `shouldBe` RequestTimedOut
+          other -> expectationFailure ("expected one timed-out refresh, got " <> show other)
+
     it "confirms the gh it owned is gone before a quit is allowed to halt" $
       withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
@@ -924,7 +989,7 @@ startProbeCoordinator probe openBody historyBody = do
     recordLock
     RefreshRunner
       { runOpenRefresh = \guard observe _ -> instrumentedJob probe OpenJob (openBody guard observe),
-        openRefreshExpired = pure "expired",
+        openRefreshExpired = const (pure "expired"),
         runHistoryPage = \_ observe -> instrumentedJob probe HistoryJob (historyBody observe)
       }
     (\value -> atomicModifyIORef' probe.probePublished (\seen -> (seen <> [value], ())))
@@ -936,9 +1001,7 @@ instrumentedJob probe job body = do
   inFlight <- atomicModifyIORef' probe.probeInFlight (\count -> (count + 1, count + 1))
   atomicModifyIORef' probe.probePeakInFlight (\peak -> (max peak inFlight, ()))
   atomicModifyIORef' probe.probeStarted (\seen -> (job : seen, ()))
-  value <- body
-  atomicModifyIORef' probe.probeInFlight (\count -> (count - 1, ()))
-  pure value
+  body `finally` atomicModifyIORef' probe.probeInFlight (\count -> (count - 1, ()))
 
 -- | Waits for a recorded list to reach a length, rather than for a duration.
 awaitCount :: IORef [value] -> Int -> IO ()

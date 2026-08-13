@@ -96,7 +96,7 @@ inertRefreshCoordinator = do
     recordLock
     RefreshRunner
       { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult inertOutcome False),
-        openRefreshExpired = pure inertOutcome,
+        openRefreshExpired = const (pure inertOutcome),
         runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
       }
     (const (pure ()))

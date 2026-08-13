@@ -211,9 +211,20 @@ boardRefreshRunner :: ResolvedConfig -> Repository -> RefreshRunner BoardRefresh
 boardRefreshRunner config repository =
   RefreshRunner
     { runOpenRefresh = runBoardOpenRefresh config repository,
-      openRefreshExpired = pure (boardRefreshTimedOut config),
+      openRefreshExpired = boardRefreshUnanswered config,
       runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
     }
+
+-- | What a request earns when its own job produced no outcome.
+--
+-- An unverified cleanup outranks the timeout. A job that ran out of time over
+-- a @gh@ nobody could confirm stopped is not an ordinary timeout, and the
+-- board has to hold off refreshing rather than age into a failure that lets
+-- the next fetch through beside a process that may still be running.
+boardRefreshUnanswered :: ResolvedConfig -> Maybe GhFetchGuard -> IO BoardRefreshOutcome
+boardRefreshUnanswered config guard = do
+  cleanupFailure <- maybe (pure Nothing) ghFetchCleanupFailure guard
+  pure (maybe (boardRefreshTimedOut config) BoardRefreshUnverified cleanupFailure)
 
 -- | One foreground refresh, bounded by whatever is left of its deadline.
 --

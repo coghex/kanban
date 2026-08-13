@@ -52,9 +52,10 @@ where
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.MVar
   ( MVar,
+    withMVar,
     modifyMVar,
     modifyMVar_,
-    withMVar,
+    isEmptyMVar,
     newEmptyMVar,
     newMVar,
     putMVar,
@@ -63,7 +64,7 @@ import Control.Concurrent.MVar
     tryPutMVar,
   )
 import Control.Exception (SomeException, finally, try)
-import Control.Monad (unless, void, when)
+import Control.Monad (void, when)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -389,9 +390,14 @@ data RefreshRunner outcome = RefreshRunner
   { -- | Runs a foreground refresh under the given guard, reporting each page's
     -- budget, and bounded by the microseconds left of its deadline.
     runOpenRefresh :: GhFetchGuard -> RateObserver -> Maybe Int -> IO (OpenRefreshResult outcome),
-    -- | The outcome a foreground request earns when its deadline ran out
-    -- before it could ever start.
-    openRefreshExpired :: IO outcome,
+    -- | The outcome a foreground request earns when it produced none of its
+    -- own: its deadline ran out, or its body gave up.
+    --
+    -- The guard is present exactly when a job ran under one, so an
+    -- implementation can account for whatever that job's verified cleanup
+    -- concluded rather than reporting a bare timeout over a @gh@ whose fate
+    -- is unresolved. 'Nothing' is the request that never started at all.
+    openRefreshExpired :: Maybe GhFetchGuard -> IO outcome,
     -- | Fetches one page of background history, then returns the owner.
     runHistoryPage :: GhFetchGuard -> RateObserver -> IO HistoryPageResult
   }
@@ -513,7 +519,12 @@ coordinatorOpenCycleInFlight coordinator = do
 coordinatorMustSettle :: RefreshCoordinator outcome -> IO Bool
 coordinatorMustSettle coordinator = do
   state <- readMVar coordinator.coordinatorState
-  if isJust state.coordinatorRunning || not (Map.null state.coordinatorPending)
+  -- Read after the state, and deliberately so: a reservation is taken while
+  -- the state lock is held, so a read that got past that lock either saw the
+  -- job still running or sees the reservation here. There is no order in
+  -- which both look idle.
+  reserved <- isEmptyMVar coordinator.coordinatorPublishLock
+  if reserved || isJust state.coordinatorRunning || not (Map.null state.coordinatorPending)
     then pure True
     else do
       live <- readMVar coordinator.coordinatorLive
@@ -587,9 +598,9 @@ schedulerLoop coordinator = do
       -- simply outlived its deadline while waiting for the owner or for a
       -- rate limit to lift, and gets the same timeout outcome a slow fetch
       -- would have earned it.
-      outcome <- coordinator.coordinatorRunner.openRefreshExpired
-      stopping <- modifyMVar coordinator.coordinatorState (\state -> pure (state, state.coordinatorStopping))
-      unless stopping (publishOutcome coordinator outcome)
+      outcome <- coordinator.coordinatorRunner.openRefreshExpired Nothing
+      reserved <- reservePublication coordinator
+      when reserved (publishReserved coordinator outcome)
       schedulerLoop coordinator
     PlanExpire HistoryJob -> schedulerLoop coordinator
     PlanRun OpenJob deadline -> runOpenJob coordinator deadline >> schedulerLoop coordinator
@@ -625,24 +636,49 @@ runOpenJob coordinator deadline = do
   let remaining = fmap (remainingMicros now) deadline
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runOpenRefresh guard (rateObserverFor coordinator) remaining)
   finished <- getCurrentTime
-  -- Deciding whether to publish and releasing the owner are one step. Split
-  -- apart, a quit landing between them would find nothing left to settle,
-  -- halt without ever telling the coordinator, and leave a publisher free to
-  -- run afterwards -- committing a board update, and a cache, on behalf of a
-  -- dashboard that had already stopped.
-  publishing <- modifyMVar coordinator.coordinatorState $ \state ->
-    pure
-      ( settleOpenJob finished deadline (maybe False (.openRefreshRateLimited) result) state,
-        if state.coordinatorStopping then Nothing else result
-      )
-  mapM_ (publishOutcome coordinator . (.openRefreshOutcome)) publishing
+  -- A job that produced nothing was either cancelled or gave up: its deadline
+  -- expired, or its body failed outright. Cancellation is the coordinator's
+  -- own doing and publishes nothing; anything else still owes the request an
+  -- answer, or the board waits on a cycle that will never report. The guard
+  -- goes with it, because by here its cleanup has run to completion and its
+  -- verdict is what the answer has to account for.
+  expired <- maybe (Just <$> coordinator.coordinatorRunner.openRefreshExpired (Just guard)) (const (pure Nothing)) result
+  -- Releasing the owner, choosing an outcome, and /reserving/ the publication
+  -- are one step. Deciding here but reserving afterwards leaves an instant in
+  -- which the work looks finished and the publication has claimed nothing: a
+  -- quit landing there finds nothing to settle, halts, and the publisher then
+  -- commits a board update and a cache on behalf of a dashboard that has
+  -- already stopped.
+  publishing <- modifyMVar coordinator.coordinatorState $ \state -> do
+    let settled = settleOpenJob finished deadline (maybe False (.openRefreshRateLimited) result) state
+        answer = maybe expired (Just . (.openRefreshOutcome)) result
+    case answer of
+      Just outcome | not state.coordinatorStopping -> do
+        takeMVar coordinator.coordinatorPublishLock
+        pure (settled, Just outcome)
+      _ -> pure (settled, Nothing)
+  mapM_ (publishReserved coordinator) publishing
 
--- | Hands one outcome to the board, holding the publication lock for exactly
--- as long as that takes, so a concurrent shutdown waits rather than returning
--- while it is still in flight.
-publishOutcome :: RefreshCoordinator outcome -> outcome -> IO ()
-publishOutcome coordinator outcome =
-  withMVar coordinator.coordinatorPublishLock (const (coordinator.coordinatorPublish outcome))
+-- | Hands one outcome to the board and releases the reservation taken for it.
+--
+-- The lock is acquired by the caller, inside the section that decided to
+-- publish, and only released here, so a shutdown either sees it held and waits
+-- or arrives before the decision and prevents it.
+publishReserved :: RefreshCoordinator outcome -> outcome -> IO ()
+publishReserved coordinator outcome =
+  coordinator.coordinatorPublish outcome `finally` putMVar coordinator.coordinatorPublishLock ()
+
+-- | Takes the publication reservation for an outcome nothing has settled for,
+-- under the state lock so a shutdown cannot slip between the check and the
+-- claim.
+reservePublication :: RefreshCoordinator outcome -> IO Bool
+reservePublication coordinator =
+  modifyMVar coordinator.coordinatorState $ \state ->
+    if state.coordinatorStopping
+      then pure (state, False)
+      else do
+        takeMVar coordinator.coordinatorPublishLock
+        pure (state, True)
 
 runHistoryJob :: RefreshCoordinator outcome -> IO ()
 runHistoryJob coordinator = do

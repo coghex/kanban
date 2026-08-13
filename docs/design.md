@@ -1526,11 +1526,18 @@ a countdown.
   publishing rather than of fetching for exactly that reason: cancellation is
   only known at the publish step, so a cache written from inside the fetch would
   be the one result a cancelled refresh still left behind — and the one a later
-  launch would load as its own. Releasing a finished job and deciding to publish
-  it are one step, so a quit lands on one side or the other: before it, and
-  nothing is published; after it, and the quit waits for the publication already
-  committed to rather than halting while a board update and a cache write are
-  still to land. The dashboard halts once the cleanup reaches a verdict
+  launch would load as its own. Releasing a finished job, choosing its outcome,
+  and claiming the right to publish it are one step, so a quit lands on one side
+  or the other: before it, and nothing is published; after it, and the quit
+  waits for the publication already claimed rather than halting while a board
+  update and a cache write are still to land.
+- Every foreground request is answered exactly once. A job that produced no
+  outcome of its own — its deadline expired, or it gave up — is still answered,
+  from what its verified cleanup concluded: an unverified `gh` outranks the
+  timeout, since a refresh that ran out of time over a process nobody could
+  confirm stopped is not an ordinary timeout and the board must hold off rather
+  than age into a failure that lets the next fetch through. Only a job the quit
+  cancelled is left unanswered, because nothing is waiting for it. The dashboard halts once the cleanup reaches a verdict
   that leaves nothing ambiguous — the group confirmed gone, or durably recorded
   for a later run to re-check before it spawns anything. A group that is
   neither, possibly live with only this process's in-memory refusal covering it,
