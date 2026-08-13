@@ -2537,6 +2537,57 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
         self.assertIsNone(stash_failed["drainer_stashes"])
         self.assertIsNotNone(stash_failed["kept_autostash_anchors"])
 
+    def test_output_the_fixed_format_cannot_have_produced_reports_unknown(self):
+        """Malformed is unknown, never verified data.
+
+        Both reads answer whether some copy of someone's work is about to be
+        missed, so a row skipped or a field taken on trust would turn output
+        nobody could parse into `[]` or into a partial list that reads as a
+        complete one -- the one answer this must never give.
+        """
+        ref, sha = self.anchored_snapshot("line3-orphaned")
+        date = self.commit_date(sha)
+        good = f"{ref} {sha} {date}"
+        for why, read, payload in (
+            ("an anchor row with no object ID", "for-each-ref", "broken\n"),
+            ("one readable anchor row and one not", "for-each-ref", f"{good}\nbroken\n"),
+            ("an object ID that is not one", "for-each-ref", f"{ref} nothex {date}\n"),
+            (
+                "a ref outside the namespace",
+                "for-each-ref",
+                f"refs/heads/master {sha} {date}\n",
+            ),
+            ("a date that is not one", "for-each-ref", f"{ref} {sha} yesterday\n"),
+            ("a truncated stash record", "stash", "stash@{0}\x00"),
+            (
+                "a stash selector that is not one",
+                "stash",
+                f"stash@0\x1f{sha}\x1f{date}\x1fmessage\x00",
+            ),
+            (
+                "a stash object ID that is not one",
+                "stash",
+                f"stash@{{0}}\x1fnothex\x1f{date}\x1fmessage\x00",
+            ),
+            (
+                "a stash date that is not one",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1flast Tuesday\x1fmessage\x00",
+            ),
+        ):
+            with self.subTest(why=why):
+                self.malformed.clear()
+                self.malformed[read] = payload
+                inventory = self.inventory()
+                spoiled, intact = (
+                    ("kept_autostash_anchors", "drainer_stashes")
+                    if read == "for-each-ref"
+                    else ("drainer_stashes", "kept_autostash_anchors")
+                )
+                self.assertIsNone(inventory[spoiled], why)
+                # And only its own collection: the other read succeeded.
+                self.assertIsNotNone(inventory[intact], why)
+
     def test_every_way_a_read_can_fail_reports_unknown(self):
         self.anchored_snapshot("line3-orphaned")
         for why, arrange in (

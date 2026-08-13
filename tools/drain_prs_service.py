@@ -73,6 +73,17 @@ DRAINER_STASH_MESSAGES = (
 # this is stripped before the payload above is compared. A branch name can hold
 # no colon, which is what makes the prefix unambiguous.
 STASH_BRANCH_WRAPPER = re.compile(r"On [^:]+: ")
+# The fixed fields of both inventory reads below. They are checked rather than
+# assumed because those reads answer whether any copy of someone's work is
+# about to be missed: output the format cannot have produced makes the whole
+# collection unknown, and a field taken on trust would make it look verified.
+# An object ID is 40 hex digits in a sha1 repository and 64 in a sha256 one.
+OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+STASH_SELECTOR = re.compile(r"stash@\{[0-9]+\}")
+# Exactly what git's own `iso-strict` renders, and nothing else.
+ISO_STRICT_DATE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})"
+)
 HOME = Path.home()
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
@@ -1106,6 +1117,13 @@ def _snapshot_anchor_rows(repo_path: Path) -> list[tuple[str, str, str]] | None:
     commit, so an anchor reads here exactly as the drainer's own kept-anchor
     log line reads it. A ref name can hold no whitespace, so the first two
     fields split unambiguously and the date is whatever remains.
+
+    Where that sweep steps over a line it cannot use, this refuses the whole
+    collection: the sweep is deciding what to delete and a line it cannot read
+    is simply not a deletion, while this is answering whether any anchor holds
+    a sole copy of someone's work, and a skipped line there would read as
+    "none does". Every field of the fixed format is therefore checked, and
+    anything the format cannot have produced reports unknown.
     """
     out = _read_checkout_git(
         repo_path,
@@ -1119,10 +1137,20 @@ def _snapshot_anchor_rows(repo_path: Path) -> list[tuple[str, str, str]] | None:
         return None
     rows: list[tuple[str, str, str]] = []
     for line in out.splitlines():
+        if not line.strip():
+            continue
         ref, _, rest = line.strip().partition(" ")
         sha, _, date = rest.partition(" ")
-        if ref and sha:
-            rows.append((ref, sha, date.strip() or "date unknown"))
+        date = date.strip()
+        if (
+            not ref.startswith(f"{SNAPSHOT_ANCHOR_NAMESPACE}/")
+            or not OBJECT_ID.fullmatch(sha)
+            # Empty is the format's own answer for a ref pointing at something
+            # that is not a commit, and the only non-date it can produce.
+            or not (date == "" or ISO_STRICT_DATE.fullmatch(date))
+        ):
+            return None
+        rows.append((ref, sha, date or "date unknown"))
     return rows
 
 
@@ -1138,6 +1166,12 @@ def _stash_rows(repo_path: Path) -> list[tuple[str, str, str, str]] | None:
     date comes from `%cI`, which is already strict ISO 8601. Records are
     NUL-separated and fields unit-separated, and the message is taken as
     whatever remains, so no entry's own text can be read as a boundary.
+
+    Every field the format fixes is checked, not merely counted: a record with
+    four fields but no readable selector, object ID, or date is output this
+    format cannot have produced, and reporting part of a stash would read as
+    reporting all of it. Only the message is free text, because only the
+    message is the entry's own.
     """
     out = _read_checkout_git(
         repo_path, ["stash", "list", "-z", "--format=%gd%x1f%H%x1f%cI%x1f%gs"]
@@ -1154,6 +1188,12 @@ def _stash_rows(repo_path: Path) -> list[tuple[str, str, str, str]] | None:
             # is read to find possibly-sole copies of work.
             return None
         selector, sha, date, message = fields
+        if (
+            not STASH_SELECTOR.fullmatch(selector)
+            or not OBJECT_ID.fullmatch(sha)
+            or not ISO_STRICT_DATE.fullmatch(date)
+        ):
+            return None
         rows.append((selector, sha, date, message))
     return rows
 
