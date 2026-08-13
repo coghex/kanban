@@ -224,7 +224,7 @@ solveArguments issueNumber workflow CodexSolver configPath repository config exi
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
         Text.unpack sessionId,
-        Text.unpack (resumeSolvePrompt config workflow CodexSolver provenance userMessage)
+        Text.unpack (resumeSolvePrompt config workflow CodexSolver repository provenance userMessage)
       ]
 solveArguments issueNumber workflow ClaudeSolver configPath repository config existingSession provenance userMessage =
   [ "--print",
@@ -239,7 +239,7 @@ solveArguments issueNumber workflow ClaudeSolver configPath repository config ex
     "--verbose"
   ]
     <> maybe [] (\sessionId -> ["--resume", Text.unpack sessionId]) existingSession
-    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath repository else resumeSolvePrompt config workflow ClaudeSolver provenance userMessage)]
+    <> [Text.unpack (if existingSession == Nothing then initialSolvePrompt issueNumber workflow ClaudeSolver configPath repository else resumeSolvePrompt config workflow ClaudeSolver repository provenance userMessage)]
 
 initialSolvePrompt :: Int -> SolveWorkflow -> SolverBrand -> Maybe FilePath -> Repository -> Text
 initialSolvePrompt issueNumber workflow brand configPath repository =
@@ -250,25 +250,36 @@ initialSolvePrompt issueNumber workflow brand configPath repository =
         interruptedWorktreeRecovery,
         "Do not run issue-review, issue-rereview, or --review/--rereview against approve-issues.py, its legacy ~/work/approve-issues.py symlink, or the installed tools/approve_issues.py backend, from this solve session. Kanban's r workflow owns that gate. Run only the required read-only v2 gate check; if it is not approved, stop with KANBAN_NEEDS_INPUT: This issue needs canonical review; press r on the issue, then retry."
       ]
+        <> repositoryLines
         <> configLines
         <> [ "Interaction contract: if a product choice, ambiguity, credentials problem, or other user decision blocks safe progress, do not guess and do not continue. End your response with exactly one line in the form KANBAN_NEEDS_INPUT: <one concrete question>. Kanban will resume this same session with the answer.",
              completionContract
            ]
     )
   where
-    -- Explicit --repo always accompanies the gate check, not only when a
-    -- custom --config is set: Kanban's own resolved repository (which may
-    -- come from an explicit --repo override, e.g. reviewing upstream from a
-    -- fork checkout) must never be silently re-derived by the gate check
-    -- from the checkout's configured remote instead.
-    configLines =
-      [ "Pass --repo " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> " to the read-only v2 gate check so it resolves the same repository as this dashboard."
+    -- Kanban's own resolved repository scopes the WHOLE run, not only the
+    -- readiness gate, and accompanies it always rather than only when a
+    -- custom --config or an explicit --repo override is set: the identity may
+    -- equally come from a configured remote_name naming upstream from a fork
+    -- checkout, and either way an operation that re-derived it from the
+    -- checkout would read the specification of, or mutate, issue #N of a
+    -- different repository than the one this dashboard gated and displays.
+    repositoryLines =
+      [ "Target GitHub repository: " <> repositorySlug <> ". Kanban resolved that identity and it scopes every GitHub issue and pull-request operation of this run; never re-derive it from the checkout.",
+        "Pass --repo " <> repositorySlug <> " to the read-only v2 gate check so it resolves the same repository as this dashboard.",
+        "Pass --repo " <> repositorySlug <> " to the vendored trusted-comment helper so the effective specification comes from that same repository.",
+        "Pass -R " <> repositorySlug <> " to every gh issue and pull-request command of this run: issue selection, the issue claim and its release, the open-pull-request collision search, and pull-request creation.",
+        "Name the worktree directory with that identity, $WORKTREES_ROOT/" <> repositorySlug <> "/issue-" <> Text.pack (show issueNumber) <> "-<slug>; `git worktree list` remains the sole collision and recovery source, so a worktree already registered under an earlier path still resolves.",
+        "The implementation branch still pushes to the worked checkout's own remote, and the worktree still branches from that checkout's origin/<default-branch>. When that remote is a different repository, open the pull request in " <> repositorySlug <> " with an explicit cross-repository head (--head <push-owner>:<branch>); if GitHub cannot open that pull request, stop and report the pushed branch rather than opening one in the push remote's repository.",
+        "If that identity cannot be established or preserved, stop and report before the first issue mutation (the claim, gh issue edit ... --add-assignee @me); falling back to the checkout's own repository is never the repair."
       ]
-        <> case configPath of
-          Nothing -> []
-          Just path ->
-            [ "Pass --config " <> Text.pack path <> " to the read-only v2 gate check so it resolves the same configured workflow labels and remote as this dashboard."
-            ]
+    repositorySlug = repository.repositoryOwner <> "/" <> repository.repositoryName
+    configLines =
+      case configPath of
+        Nothing -> []
+        Just path ->
+          [ "Pass --config " <> Text.pack path <> " to the read-only v2 gate check so it resolves the same configured workflow labels and remote as this dashboard."
+          ]
     workflowContract = case workflow of
       SolveOnly -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop after opening the PR; do not review or merge it."
       AutoSolve -> "Preserve the existing solve contract: readiness gate, interrupted-worktree recovery, effective specification from issue comments, targeted validation, commit/push, and PR creation. Stop immediately after opening the PR; do not start a reviewer, revise the PR, or merge it. Kanban owns the bounded review/fix loop."
@@ -288,12 +299,19 @@ workflowLogName :: SolveWorkflow -> Text
 workflowLogName SolveOnly = "solve"
 workflowLogName AutoSolve = "autosolve"
 
-resumeSolvePrompt :: WorkflowConfig -> SolveWorkflow -> SolverBrand -> ResumeProvenance -> Text -> Text
-resumeSolvePrompt config workflow brand provenance answer =
+-- | The resumed prompt restates the resolved repository rather than relying on
+-- the initial prompt still being in the session's context: a session resumed
+-- after truncation owns the rest of the run — the remaining claim release and
+-- every pull-request operation — and would otherwise silently fall back to
+-- deriving an identity from the checkout, which is exactly the divergence the
+-- initial prompt exists to prevent.
+resumeSolvePrompt :: WorkflowConfig -> SolveWorkflow -> SolverBrand -> Repository -> ResumeProvenance -> Text -> Text
+resumeSolvePrompt config workflow brand repository provenance answer =
   Text.unlines
     [ resumeProvenanceHeader config provenance,
       Text.strip answer,
-      "Continue the same " <> workflowName workflow brand <> " workflow from its current state. Apply the same interaction contract: stop with KANBAN_NEEDS_INPUT: <question> rather than guessing if another user decision is required."
+      "Continue the same " <> workflowName workflow brand <> " workflow from its current state. Apply the same interaction contract: stop with KANBAN_NEEDS_INPUT: <question> rather than guessing if another user decision is required.",
+      "Target GitHub repository: " <> repository.repositoryOwner <> "/" <> repository.repositoryName <> ". It still scopes every remaining GitHub issue and pull-request operation of this run — pass --repo to the gate check and the trusted-comment helper and -R to every gh command — and is never re-derived from the checkout."
     ]
 
 -- | The opening line for a resumed prompt, distinguishing a real user answer

@@ -89,10 +89,45 @@ spec = do
       promptWithConfig `shouldContain` "Pass --config /tmp/kanban/custom.toml to the read-only v2 gate check"
       promptWithoutConfig `shouldNotContain` "Pass --config"
 
-    it "always passes Kanban's own resolved --repo to the read-only gate-check instruction, even without a fork override" $ do
-      let forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
-          forkPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing forkRepository defaultWorkflowConfig Nothing ResumeAnswer "")
-      forkPrompt `shouldContain` "Pass --repo upstream-owner/upstream-repo to the read-only v2 gate check"
+    it "scopes every instructed GitHub operation to Kanban's own resolved repository, not the checkout's" $ do
+      -- One assertion per instructed GitHub surface, because scoping only the
+      -- gate check is exactly the gap this covers: a solve pointed at
+      -- upstream-owner/upstream-repo from a fork checkout would otherwise
+      -- claim, read the effective spec of, and open a pull request against a
+      -- different repository's issue #844.
+      let scopedInstructions slug =
+            [ "Target GitHub repository: " <> slug,
+              "Pass --repo " <> slug <> " to the read-only v2 gate check",
+              "Pass --repo " <> slug <> " to the vendored trusted-comment helper",
+              "Pass -R " <> slug <> " to every gh issue and pull-request command",
+              "$WORKTREES_ROOT/" <> slug <> "/issue-844-<slug>",
+              "open the pull request in " <> slug
+            ]
+          promptFor brand repository = last (solveArguments 844 SolveOnly brand Nothing repository defaultWorkflowConfig Nothing ResumeAnswer "")
+          forkRepository = Repository "/tmp/fork" "upstream-owner" "upstream-repo"
+          ordinaryRepository = Repository "/tmp/repo" "coghex" "kanban"
+      mapM_ (shouldContain (promptFor CodexSolver forkRepository)) (scopedInstructions "upstream-owner/upstream-repo")
+      mapM_ (shouldContain (promptFor ClaudeSolver forkRepository)) (scopedInstructions "upstream-owner/upstream-repo")
+      -- Non-vacuity: the same instructions carry whichever identity Kanban
+      -- resolved, so neither a hardcoded slug nor a checkout-derived one can
+      -- satisfy both halves.
+      mapM_ (shouldContain (promptFor CodexSolver ordinaryRepository)) (scopedInstructions "coghex/kanban")
+      promptFor CodexSolver forkRepository `shouldNotContain` "coghex/kanban"
+      promptFor CodexSolver ordinaryRepository `shouldNotContain` "upstream-owner/upstream-repo"
+
+    it "stops a solve that cannot preserve one identity before the claim rather than falling back to the checkout" $ do
+      let forkPrompt = last (solveArguments 844 SolveOnly CodexSolver Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig Nothing ResumeAnswer "")
+      forkPrompt `shouldContain` "never re-derive it from the checkout"
+      forkPrompt `shouldContain` "stop and report before the first issue mutation"
+      forkPrompt `shouldContain` "falling back to the checkout's own repository is never the repair"
+
+    it "restates the resolved repository on a resumed solve, whose truncated session still owns the remaining GitHub operations" $ do
+      let resumedPrompt brand = last (solveArguments 844 AutoSolve brand Nothing (Repository "/tmp/fork" "upstream-owner" "upstream-repo") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+          ordinaryResumedPrompt = last (solveArguments 844 AutoSolve CodexSolver Nothing (Repository "/tmp/repo" "coghex" "kanban") defaultWorkflowConfig (Just "session-1") ResumeAnswer "pick option B")
+      resumedPrompt CodexSolver `shouldContain` "Target GitHub repository: upstream-owner/upstream-repo"
+      resumedPrompt ClaudeSolver `shouldContain` "Target GitHub repository: upstream-owner/upstream-repo"
+      resumedPrompt CodexSolver `shouldContain` "never re-derived from the checkout"
+      ordinaryResumedPrompt `shouldContain` "Target GitHub repository: coghex/kanban"
 
     it "recovers an interrupted same-issue worktree instead of treating it as a collision" $ do
       -- Short distinguishing substrings rather than whole sentences, so this
