@@ -414,8 +414,17 @@ A resolved owner is a prerequisite, not a parallel check. §8's `$DOC_REPO`,
 `$DOC_BRANCH`, and `$DOC_ROOT` must already be established before eligibility is
 even consulted: a document whose owning repository or publication branch could
 not be verified fails closed and stays unpublished, exactly as §8.3 requires.
-§7's rows classify Kanban paths only, so they answer eligibility for a
-Kanban-owned document and for no other repository's.
+
+That prerequisite is also what binds the table to a repository, and the binding
+is load-bearing rather than incidental. A repository-relative path is not by
+itself an eligibility signal, because the same path exists in other
+repositories: `docs/ui-bugs.md` names a `coordination` document here and names
+whatever a consuming repository decides it names. So the §7 table a run consults
+is the one tracked inside the already-validated `$DOC_ROOT`, never the copy in
+whichever checkout the session was reading code from. **A `$DOC_ROOT` that does
+not track that contract has no `coordination` lane at all** — every document in
+it is `pr-atomic` and nothing is published there — which is how §7 stays
+Kanban's own statement about Kanban while the assets themselves remain portable.
 
 ### 9.3 What a publication may contain
 
@@ -424,6 +433,14 @@ and nothing else. It must not carry unrelated dirty paths, earlier `docs-wip`
 commits, unrelated changes already present in the same document, or a second
 disposition or document mutation. If the approved mutation cannot be isolated
 from other changes, publication fails closed without discarding any work.
+
+That isolation is verified on the publication commit itself before it is
+pushed, rather than inferred from how the commit was constructed. Construction
+can be raced — two runs in one docs worktree share that worktree's Git
+directory, so any fixed scratch path they both write is a collision waiting to
+happen — and a check on the finished artifact holds regardless. The commit must
+change exactly the one eligible document against the remote publication branch;
+any second path fails closed before the push.
 
 ### 9.4 How a publication is made
 

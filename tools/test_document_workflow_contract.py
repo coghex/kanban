@@ -206,6 +206,18 @@ CONTRACT_STATEMENTS = {
     "publication-needs-a-resolved-owner": (
         "must already be established before eligibility is even consulted"
     ),
+    "publication-consults-the-owners-own-table": (
+        "the §7 table a run consults is the one tracked inside the "
+        "already-validated $DOC_ROOT"
+    ),
+    "publication-untracked-contract-has-no-lane": (
+        "A $DOC_ROOT that does not track that contract has no coordination lane "
+        "at all"
+    ),
+    "publication-isolation-is-verified-on-the-commit": (
+        "That isolation is verified on the publication commit itself before it "
+        "is pushed, rather than inferred from how the commit was constructed"
+    ),
     "publication-carries-one-mutation": (
         "A publication carries the single approved mutation to the one eligible "
         "document and nothing else"
@@ -260,7 +272,27 @@ PUBLICATION_CLAUSES = {
     ),
     "eligibility-is-section-7": (
         "publish only when the resolved document's repository-relative path is "
-        "classified coordination by docs/agent-workflow-contract.md §7"
+        "classified coordination by that file's §7"
+    ),
+    "a-path-alone-is-not-eligibility": (
+        "a repository-relative path is not by itself an eligibility signal, "
+        "because the same path exists in other repositories"
+    ),
+    "consults-the-owners-own-table": (
+        "consult only the copy tracked inside the already-validated $doc_root, "
+        "never the §7 table of whatever checkout you happen to be reading code in"
+    ),
+    "untracked-contract-has-no-lane": (
+        "a $doc_root that does not track that contract is a repository with no "
+        "coordination lane at all"
+    ),
+    "isolation-is-verified-on-the-artifact": (
+        "verify the isolation on the artifact rather than trusting the "
+        "construction that produced it"
+    ),
+    "scratch-index-is-per-blob": (
+        "the scratch index is named for the blob rather than fixed, so two runs "
+        "publishing different documents in one docs worktree cannot interleave"
     ),
     "pr-atomic-is-never-published": (
         "a pr-atomic path, and a path no §7 row matches, is never published "
@@ -339,7 +371,17 @@ PUBLICATION_CLAUSES = {
 # a second path. Compared against normalized() because case is load-bearing in a
 # shell command.
 PUBLICATION_SHELL_BINDINGS = (
+    # Eligibility is read out of the resolved owner's own checkout. Without
+    # this, a document in any repository whose path happens to match a
+    # Kanban coordination row would reach the push.
+    'git -C "$DOC_ROOT" ls-files --error-unmatch -- docs/agent-workflow-contract.md',
     'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    # Named for the blob, so two runs in one docs worktree cannot share the
+    # scratch index and interleave into a two-path tree.
+    'PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_BLOB")"',
+    # The isolation guarantee, checked on the finished commit rather than
+    # assumed from how it was built.
+    'git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT"',
     'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"',
     'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
     # Braced deliberately: zsh reads the unbraced `"$PUB_COMMIT:refs/..."` as a

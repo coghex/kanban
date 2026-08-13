@@ -391,15 +391,27 @@ from that checkout. Publication is one more step of the disposition that was
 already approved; it carries no second one, and it is never batched or deferred
 merely to reduce commit or push frequency.
 
-**Eligibility.** Publish only when the resolved document's repository-relative
-path is classified `coordination` by `docs/agent-workflow-contract.md` §7.
-A `pr-atomic` path, and a path no §7 row matches, is never published directly:
-`pr-atomic` is the fail-closed default for an unmatched path. When the document
-is not direct-publication eligible, leave the edit in place and recoverable, say
-plainly that it was not published and why, and stop there. Publishing at all
-requires the `$DOC_REPO`, `$DOC_BRANCH`, and `$DOC_ROOT` the ownership step
-resolved; an owner or publication branch that could not be verified fails closed
-and the document stays unpublished.
+**Eligibility.** Publishing at all requires the `$DOC_REPO`, `$DOC_BRANCH`, and
+`$DOC_ROOT` the ownership step resolved; an owner or publication branch that
+could not be verified fails closed and the document stays unpublished. A
+repository-relative path is not by itself an eligibility signal, because the
+same path exists in other repositories: §7 classifies the paths of the
+repository that tracks it and of no other, so consult only the copy tracked
+inside the already-validated `$DOC_ROOT`, never the §7 table of whatever
+checkout you happen to be reading code in.
+
+```bash
+git -C "$DOC_ROOT" ls-files --error-unmatch -- docs/agent-workflow-contract.md
+```
+
+A `$DOC_ROOT` that does not track that contract is a repository with no
+coordination lane at all: every document in it is `pr-atomic`, and this
+workflow publishes nothing there. Otherwise publish only when the resolved
+document's repository-relative path is classified `coordination` by that file's
+§7. A `pr-atomic` path, and a path no §7 row matches, is never published
+directly: `pr-atomic` is the fail-closed default for an unmatched path. When the
+document is not direct-publication eligible, leave the edit in place and
+recoverable, say plainly that it was not published and why, and stop there.
 
 **Isolate the mutation first.** A publication carries the single approved
 mutation to the one eligible document and nothing else — no unrelated dirty
@@ -420,16 +432,26 @@ from the fetched remote tip with exactly that one blob replaced, so no local
 branch moves and no other path can be swept in, then push it plainly:
 
 ```bash
-PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path kanban-publish-index)"
 PUB_BLOB="$(git -C "$DOCS_WT" hash-object -w -- "$DOCS_WT/$DOC_RELATIVE_PATH")"
+PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_BLOB")"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
   --cacheinfo "100644,$PUB_BLOB,$DOC_RELATIVE_PATH"
 PUB_TREE="$(GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" write-tree)"
 PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
   -p "origin/$DOC_BRANCH" -m "docs: <the approved mutation, one line>")"
+git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT"
 git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
 ```
+
+The scratch index is named for the blob rather than fixed, so two runs
+publishing different documents in one docs worktree cannot interleave
+`read-tree`, `update-index`, and `write-tree` through one shared file. The
+`diff --name-only` is what actually guarantees the result: it must print exactly
+`$DOC_RELATIVE_PATH` and nothing else, and any other output — a second path from
+a concurrent run, a stale index, anything unexpected — fails closed there,
+before the push. Verify the isolation on the artifact rather than trusting the
+construction that produced it.
 
 Never force-push, never reset, and never overwrite a concurrent advance of
 `$DOC_BRANCH` or resolve a conflict by guessing. A non-fast-forward rejection, a
