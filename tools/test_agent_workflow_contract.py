@@ -164,17 +164,20 @@ DOCUMENT_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
 ]
 
-# What each document-workflow asset's bash fences actually invoke. Every one
-# resolves the docs worktree with `git worktree list | awk ...`; the processing
-# workflows additionally list and search issues with `gh`, and the Claude
-# process-report lists finding headings with `rg` inside a fence rather than in
-# prose. Pinned so a rewrite that stops invoking anything cannot leave the
-# completeness check with nothing to discover.
+# What each document-workflow asset's bash fences actually invoke. Since issue
+# #278 every one of the five resolves its owning repository with `git` and `gh`
+# before any write, and resolves the docs worktree beneath it with
+# `git -C "$DOC_ROOT" worktree list | awk ...`; the processing workflows
+# additionally list and search issues with `gh`, and the Claude process-report
+# lists finding headings with `rg` inside a fence rather than in prose. `gh`
+# is therefore on all five, where before the ownership step it was on the three
+# processing assets alone. Pinned so a rewrite that stops invoking anything
+# cannot leave the completeness check with nothing to discover.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/process-report.md": {"git", "awk", "gh", "rg"},
-    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk"},
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {"git", "awk", "gh"},
-    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk"},
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {"git", "awk", "gh"},
 }
 

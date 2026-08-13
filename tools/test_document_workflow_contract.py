@@ -120,7 +120,128 @@ CONTRACT_STATEMENTS = {
     "design-authority-ambiguity-stops": (
         "stops for user input rather than being classified as minor"
     ),
+    # Issue #278: §8's ownership contract. The resolution order, the
+    # fail-closed rule, and the routing/lane separation are the parts a later
+    # rewrite could drop while every asset still looked like it resolved
+    # something.
+    "ownership-resolution-order": "Two tiers, and the first tier that matches wins",
+    "ownership-explicit-inputs-agree": (
+        "both must validate and resolve to the same repository"
+    ),
+    "ownership-section-7-tier": "coverage by exactly one row of",
+    "ownership-fails-closed": (
+        "creates no file, edits no document, and issues no gh mutation"
+    ),
+    "ownership-branch-fails-closed": (
+        "A failed or ambiguous default-branch resolution fails closed identically"
+    ),
+    "routing-is-not-the-lane": "Routing is not the publication lane",
+    "section-7-classifies-kanban-only": (
+        "it describes this repository and nothing else"
+    ),
 }
+
+# Issue #278: the ownership-resolution step every declared asset states, as the
+# load-bearing prose fragments. Compared against canonical() output for the
+# same reason DESIGN_AUTHORITY_CLAUSES is: the five assets are each brand's own
+# text, so reflowing a paragraph or bolding a term must not fail CI. §8 of the
+# contract summarizes the same rules; pinning them there alone would let the
+# assets regress while the document kept describing them.
+OWNERSHIP_CLAUSES = {
+    "resolves-owner-slug": (
+        "$doc_repo — the owning repository as an explicit owner/repo slug"
+    ),
+    "resolves-publication-branch": (
+        "$doc_branch — that repository's default branch, which is the "
+        "publication target. it is never assumed to be the current checkout's "
+        "branch"
+    ),
+    "resolves-local-write-root": (
+        "$doc_root — a validated local checkout of $doc_repo"
+    ),
+    "resolves-before-any-write": (
+        "before the first durable write and before the first tracker mutation"
+    ),
+    "two-tiers-first-match-wins": (
+        "resolution has two tiers, and the first tier that matches wins"
+    ),
+    "explicit-inputs-must-agree": (
+        "conflicting explicit inputs are unresolved, not a preference to rank"
+    ),
+    "section-7-tier": (
+        "coverage by exactly one row of docs/agent-workflow-contract.md §7 "
+        "declares the document kanban-owned"
+    ),
+    "section-7-is-kanban-only": "classifies kanban paths only",
+    "new-document-is-expected": (
+        "a new document that no row covers is the expected case rather than an "
+        "error"
+    ),
+    "unresolved-fails-closed": (
+        "stops the run before it creates a file, edits a document, or issues "
+        "any gh mutation"
+    ),
+    "branch-failure-fails-closed": (
+        "an unresolved owner, an unresolved or ambiguous default branch"
+    ),
+    "no-fallback-is-the-repair": (
+        "falling back to the active checkout, to the current branch, to a "
+        "hardcoded path, or to a bare docs/ prefix is never the repair"
+    ),
+    "reports-owner-and-branch": (
+        "report the resolved $doc_repo and $doc_branch to the user before the "
+        "first write"
+    ),
+    "evidence-is-not-ownership": (
+        "reading code, tests, or history from another repository as evidence "
+        "stays allowed and is never an ownership signal"
+    ),
+    "routing-is-not-the-lane": (
+        "repository routing and the publication lane are separate decisions"
+    ),
+}
+
+# The executable half of the same step. Compared against normalized() rather
+# than canonical() output because case is load-bearing here: `git -C` and
+# `git -c` are different flags, and $DOC_ROOT is a variable name rather than
+# prose.
+OWNERSHIP_SHELL_BINDINGS = (
+    'DOC_ROOT="$(git -C "$CANDIDATE" rev-parse --show-toplevel)"',
+    'DOC_REMOTE="$(git -C "$DOC_ROOT" remote get-url origin)"',
+    'DOC_REPO="$(gh repo view "$DOC_REMOTE" --json nameWithOwner',
+    'DOC_BRANCH="$(gh repo view "$DOC_REMOTE" --json defaultBranchRef',
+    'git -C "$DOC_ROOT" ls-files --error-unmatch',
+    'DOCS_WT="$(git -C "$DOC_ROOT" worktree list --porcelain',
+    '[ -n "$DOCS_WT" ] || DOCS_WT="$DOC_ROOT"',
+)
+
+# The unscoped forms §8 replaced. These are what the five assets used to run,
+# and the exact shape of the verified wrong-repository failure: both resolve
+# the write root from whichever checkout the session started in, so an asset
+# that reintroduces either has un-bound its writes from $DOC_ROOT no matter
+# what its prose still claims.
+OWNERSHIP_FORBIDDEN_SHELL = (
+    'DOCS_WT="$(git worktree list --porcelain',
+    '[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"',
+)
+
+# Requirement 4 of issue #278. An invocation is owner-bound by naming
+# $DOC_REPO, or — for the two calls that resolve the slug in the first place —
+# by naming the remote of the already-resolved $DOC_ROOT positionally. Nothing
+# is bound by the process working directory, which is the failure this closes.
+# Any other spelling, including an unquoted -R $DOC_REPO or a scope naming some
+# other variable, is reported: this check fails closed, so a
+# bound-but-unrecognized form is a rewrite of this list rather than a silent
+# pass.
+OWNER_BOUND_FORMS = (
+    '-R "$DOC_REPO"',
+    '--repo "$DOC_REPO"',
+    'repo view "$DOC_REMOTE"',
+)
+
+# \b before `gh` keeps "through the next heading" out of the scan while still
+# matching a real invocation at a line start or after a `$(`.
+GH_INVOCATION_RE = re.compile(r"\bgh\s+(?P<command>[a-z][^\n`]*)")
 
 # Issue #239: the design pair's decision-authority section, as the load-bearing
 # fragments both assets must state. §5's approval stop governs the external
@@ -262,6 +383,38 @@ def missing_design_authority_clauses(text):
         for key, clause in DESIGN_AUTHORITY_CLAUSES.items()
         if clause not in asset
     )
+
+
+def missing_ownership_clauses(text):
+    """The §8 ownership-resolution clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in OWNERSHIP_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_ownership_bindings(text):
+    """The §8 shell bindings `text` no longer performs."""
+    asset = normalized(text)
+    return [binding for binding in OWNERSHIP_SHELL_BINDINGS if binding not in asset]
+
+
+def reintroduced_unscoped_roots(text):
+    """The pre-§8 active-checkout resolutions `text` has brought back."""
+    asset = normalized(text)
+    return [form for form in OWNERSHIP_FORBIDDEN_SHELL if form in asset]
+
+
+def unbound_gh_invocations(text):
+    """Every `gh` invocation in `text` that binds to neither $DOC_REPO nor the
+    resolved $DOC_ROOT, and therefore to the shell's current directory."""
+    unbound = []
+    for match in GH_INVOCATION_RE.finditer(text):
+        invocation = match.group(0).strip()
+        if any(form in invocation for form in OWNER_BOUND_FORMS):
+            continue
+        unbound.append(invocation)
+    return unbound
 
 
 def missing_marker_literals(text):
@@ -476,6 +629,186 @@ class DesignDecisionAuthorityTests(unittest.TestCase):
                 "document in place of asking; it contradicts the "
                 f"ambiguity-is-never-minor clause (§5.1): {phrase!r}",
             )
+
+
+class OwningRepositoryTests(unittest.TestCase):
+    """Issue #278: these workflows write documents and file issues, and neither
+    is reversible in the wrong repository — `docs/document_workflow_findings.md`
+    was created under a different repository solely because that was the active
+    checkout. Every declared asset must therefore resolve an explicit
+    `owner/repo` slug, a publication branch, and a local write root before its
+    first durable write and before its first tracker mutation.
+
+    Driven off the §2 declared-asset table rather than a second hardcoded list,
+    so an asset added to the contract later is covered here the moment its row
+    lands instead of only when someone remembers to extend this module.
+    """
+
+    def setUp(self):
+        self.declared = parse_declared_assets()
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_every_declared_asset_states_the_ownership_step(self):
+        for path in sorted(self.declared):
+            with self.subTest(path=path):
+                missing = missing_ownership_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states the ownership-resolution clauses "
+                    f"docs/document-workflow-contract.md §8 pins: {missing}",
+                )
+
+    def test_removing_an_ownership_clause_from_an_asset_is_reported(self):
+        # The check above is load-bearing rather than decorative: delete one
+        # clause at a time from each asset and confirm exactly that key is
+        # reported. canonical() is idempotent, so mutating its output is the
+        # same planted-violation shape the boundary tests above use.
+        for path in sorted(self.declared):
+            asset = canonical(self.asset_text(path))
+            for key, clause in OWNERSHIP_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_ownership_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_every_declared_asset_binds_its_write_root_to_the_resolved_owner(self):
+        for path in sorted(self.declared):
+            with self.subTest(path=path):
+                missing = missing_ownership_bindings(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} states the ownership step but no longer performs it: "
+                    f"{missing}",
+                )
+
+    def test_removing_an_ownership_binding_from_an_asset_is_reported(self):
+        for path in sorted(self.declared):
+            asset = normalized(self.asset_text(path))
+            for binding in OWNERSHIP_SHELL_BINDINGS:
+                with self.subTest(path=path, binding=binding):
+                    self.assertEqual(
+                        missing_ownership_bindings(asset.replace(binding, "")),
+                        [binding],
+                    )
+
+    def test_no_declared_asset_falls_back_to_the_active_checkout(self):
+        # The prose and the bindings above can both be present while the old
+        # `DOCS_WT="$(git rev-parse --show-toplevel)"` fallback sits underneath
+        # them, which is exactly the wrong-repository failure this issue
+        # closes: an unrelated active checkout would still win at run time.
+        for path in sorted(self.declared):
+            with self.subTest(path=path):
+                reintroduced = reintroduced_unscoped_roots(self.asset_text(path))
+                self.assertEqual(
+                    reintroduced,
+                    [],
+                    f"{path} resolves a write root from the active checkout "
+                    f"rather than from $DOC_ROOT: {reintroduced}",
+                )
+
+    def test_reintroducing_the_active_checkout_fallback_is_reported(self):
+        for path in sorted(self.declared):
+            asset = normalized(self.asset_text(path))
+            for form in OWNERSHIP_FORBIDDEN_SHELL:
+                with self.subTest(path=path, form=form):
+                    self.assertEqual(
+                        reintroduced_unscoped_roots(f"{asset} {form}"), [form]
+                    )
+
+    def test_every_gh_invocation_binds_to_the_resolved_owner(self):
+        # Requirement 4: the three processing assets carry the eight tracker
+        # operations this issue scopes; the two capture assets carry only the
+        # ownership block's own `gh repo view` calls, bound by $DOC_ROOT's own
+        # remote. Both shapes are checked the same way, so a tracker mutation
+        # added to a capture asset later cannot arrive unscoped.
+        for path in sorted(self.declared):
+            with self.subTest(path=path):
+                unbound = unbound_gh_invocations(self.asset_text(path))
+                self.assertEqual(
+                    unbound,
+                    [],
+                    f"{path} runs a gh command bound to the shell's current "
+                    f"directory rather than to $DOC_REPO: {unbound}",
+                )
+
+    def test_the_eight_scoped_tracker_operations_are_all_present(self):
+        # Pins what the scan above actually recovers. Without this, deleting
+        # every `gh issue` command would leave the check with nothing to find
+        # and still pass.
+        recovered = {}
+        for path in sorted(self.declared):
+            recovered[path] = len(
+                re.findall(r"gh issue [a-z]", self.asset_text(path))
+            )
+        self.assertEqual(
+            recovered,
+            {
+                "claude-plugin/plugins/kanban/commands/process-report.md": 3,
+                "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
+                "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
+                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 2,
+                "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 3,
+            },
+        )
+
+    def test_reverting_a_tracker_command_to_an_unscoped_form_is_reported(self):
+        # The negative case issue #278's acceptance names: drop the -R from one
+        # tracker operation and the scan names that operation.
+        for path in (
+            "claude-plugin/plugins/kanban/commands/process-report.md",
+            "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+            "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                reverted = self.asset_text(path).replace(
+                    'gh issue create -R "$DOC_REPO" --body-file',
+                    "gh issue create --body-file",
+                    1,
+                )
+                self.assertEqual(
+                    unbound_gh_invocations(reverted),
+                    ["gh issue create --body-file"],
+                )
+
+    def test_an_unrelated_repo_scope_does_not_count_as_owner_bound(self):
+        # $DOC_REPO specifically, not any -R: routing every mutation to a slug
+        # resolved some other way is the failure this issue closes, not a
+        # different spelling of the fix.
+        self.assertEqual(
+            unbound_gh_invocations('gh issue create -R "$REPO" --body-file x'),
+            ['gh issue create -R "$REPO" --body-file x'],
+        )
+        self.assertEqual(
+            unbound_gh_invocations('gh issue create -R "$DOC_REPO" --body-file x'),
+            [],
+        )
+
+    def test_the_contract_states_the_order_the_assets_implement(self):
+        # §8's own statements are pinned in CONTRACT_STATEMENTS above, which
+        # the DocumentedBoundaryTests mutation test already drives one at a
+        # time. This asserts the other direction the acceptance names: the
+        # document cannot keep the resolution order while losing the
+        # fail-closed rule that makes it safe.
+        document = normalized(contract_text())
+        for key in (
+            "ownership-resolution-order",
+            "ownership-fails-closed",
+            "ownership-branch-fails-closed",
+            "routing-is-not-the-lane",
+            "section-7-classifies-kanban-only",
+        ):
+            with self.subTest(statement=key):
+                self.assertIn(CONTRACT_STATEMENTS[key], document)
+                self.assertEqual(
+                    missing_contract_statements(
+                        document.replace(CONTRACT_STATEMENTS[key], "")
+                    ),
+                    [key],
+                )
 
 
 class SharedStatusVocabularyTests(unittest.TestCase):
