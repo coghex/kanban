@@ -49,6 +49,30 @@ DRAIN_STATE_VERSION = 4
 # about post-merge debt, so a version 3 file the upgraded drainer has not
 # rewritten yet still reports its obligations rather than reporting unknown.
 DRAIN_STATE_CLEANUP_VERSIONS = frozenset({3, DRAIN_STATE_VERSION})
+# The private namespace the drainer anchors an autostash snapshot under, and the
+# two stash messages its own writes produce -- mirrored from `drain_prs` for the
+# same reason the state version above is, and pinned against the messages the
+# drainer really writes by a test. The namespace prefix is used whole rather
+# than as `.../*`, exactly as the drainer's own enumeration does, so no anchor
+# below it can be missed.
+SNAPSHOT_ANCHOR_NAMESPACE = "refs/drain-prs/autostash"
+# Matched in full, never as a prefix: `drain-prs-autostash-notes` is a user's
+# entry that merely looks like one of these. Git records no creator identity, so
+# a hand-forged exact payload is indistinguishable and counts as drainer-named.
+# Both object-format widths are accepted because a sha256 repository names the
+# same snapshot in 64 hex digits.
+DRAINER_STASH_MESSAGES = (
+    # From a pass whose snapshot could not be prepared: the message it passed
+    # to `git stash create` is the one it stores the orphaned commit under.
+    re.compile(r"drain-prs-autostash-[0-9]+-[0-9]+"),
+    # From a pass whose `git stash apply --index` restore conflicted.
+    re.compile(r"drain-prs-autostash-recovery (?:[0-9a-f]{40}|[0-9a-f]{64})"),
+)
+# Git's display wrapper on an entry pushed with `git stash push -m`. The drainer
+# only ever uses `git stash store -m`, which records the payload verbatim, so
+# this is stripped before the payload above is compared. A branch name can hold
+# no colon, which is what makes the prefix unambiguous.
+STASH_BRANCH_WRAPPER = re.compile(r"On [^:]+: ")
 HOME = Path.home()
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
@@ -1052,6 +1076,152 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     return sorted(owed, key=lambda item: item["pull_request"])
 
 
+def _read_checkout_git(repo_path: Path, args: list[str]) -> str | None:
+    """One read-only git query in a checkout, or None for every way it fails.
+
+    Separate from `_read_git`, which serves the installed-source audit against
+    whatever checkout an executing script came from: this one goes through
+    `run_command`, the seam every other repository read in this module uses.
+
+    None is the whole failure vocabulary — a path that is no repository, a
+    nonzero exit, git missing, and output no locale can decode all answer the
+    same way, because every caller here turns any of them into an unknown
+    collection rather than into a status failure.
+    """
+    try:
+        proc = run_command(["git", "-C", str(repo_path), *args], check=False)
+    except (OSError, UnicodeDecodeError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout or ""
+
+
+def _snapshot_anchor_rows(repo_path: Path) -> list[tuple[str, str, str]] | None:
+    """Every autostash anchor as (ref, commit, commit date), or None when the
+    namespace could not be enumerated.
+
+    Mirrors `drain_prs._list_snapshot_anchors` field for field, including its
+    `date unknown` fallback for a ref pointing at something that is not a
+    commit, so an anchor reads here exactly as the drainer's own kept-anchor
+    log line reads it. A ref name can hold no whitespace, so the first two
+    fields split unambiguously and the date is whatever remains.
+    """
+    out = _read_checkout_git(
+        repo_path,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname) %(committerdate:iso-strict)",
+            SNAPSHOT_ANCHOR_NAMESPACE,
+        ],
+    )
+    if out is None:
+        return None
+    rows: list[tuple[str, str, str]] = []
+    for line in out.splitlines():
+        ref, _, rest = line.strip().partition(" ")
+        sha, _, date = rest.partition(" ")
+        if ref and sha:
+            rows.append((ref, sha, date.strip() or "date unknown"))
+    return rows
+
+
+def _stash_rows(repo_path: Path) -> list[tuple[str, str, str, str]] | None:
+    """Every `git stash list` entry as (selector, commit, date, message), or
+    None when the stash could not be read or parsed.
+
+    One read serves both collections below, so the anchors they classify and
+    the entries they report describe the same moment rather than two.
+
+    `%gd` renders the `stash@{n}` selector a human can act on only while no
+    `--date` is in force — passing one turns it into `stash@{<date>}` — so the
+    date comes from `%cI`, which is already strict ISO 8601. Records are
+    NUL-separated and fields unit-separated, and the message is taken as
+    whatever remains, so no entry's own text can be read as a boundary.
+    """
+    out = _read_checkout_git(
+        repo_path, ["stash", "list", "-z", "--format=%gd%x1f%H%x1f%cI%x1f%gs"]
+    )
+    if out is None:
+        return None
+    rows: list[tuple[str, str, str, str]] = []
+    for record in out.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\x1f", 3)
+        if len(fields) != 4:
+            # A partial list would read as a complete one, and this collection
+            # is read to find possibly-sole copies of work.
+            return None
+        selector, sha, date, message = fields
+        rows.append((selector, sha, date, message))
+    return rows
+
+
+def drainer_stash_message(message: str) -> str | None:
+    """The reserved payload a stash entry carries if the drainer wrote it, or
+    None for a user's own entry.
+
+    The stash is the user's; only the entries the drainer itself stored are
+    reported, and nothing here is ever a reason to touch one.
+    """
+    payload = STASH_BRANCH_WRAPPER.sub("", message, count=1)
+    if any(pattern.fullmatch(payload) for pattern in DRAINER_STASH_MESSAGES):
+        return payload
+    return None
+
+
+def autostash_inventory(repo_path: Path) -> dict[str, list[dict[str, Any]] | None]:
+    """The local copies of work this checkout's autostash lifecycle left
+    behind: anchors the drainer kept, and the stash entries it created itself.
+
+    Both are otherwise visible only in one log line per startup sweep, which
+    repeats identically every pass — so work that exists nowhere else waits for
+    a human to read a service log. They are two independent collections
+    because they fail independently, and each follows the rule
+    `cleanup_obligations` follows: entries, `[]` for verified-empty, and None
+    for a collection that could not be enumerated or parsed. None is never
+    "nothing there".
+
+    Strictly read-only, and non-fatal by construction — this is polled every
+    ten seconds and again through a start or stop, and no reading of it may
+    change the controller's exit status, a ref, the stash's order or contents,
+    the queue state, or the drainer's own sweep and its logging.
+
+    Scoped to this checkout, including the git directory it shares when it is a
+    linked worktree: both refs and the stash live in the common directory, so
+    `git -C` answers for the whole shared repository without resolving it.
+    """
+    anchors = _snapshot_anchor_rows(repo_path)
+    stashes = _stash_rows(repo_path)
+    kept: list[dict[str, Any]] | None = None
+    if anchors is not None:
+        # An anchor is kept when its commit is absent from a stash list that
+        # was read successfully. Without that list nothing is provably
+        # redundant, so every anchor is conservatively kept — the same rule
+        # `drain_prs.sweep_snapshot_anchors` follows before it deletes
+        # anything, restated here without invoking the sweep.
+        recoverable = {sha for _, sha, _, _ in stashes} if stashes is not None else set()
+        kept = [
+            {
+                "ref": ref,
+                "commit": sha,
+                "date": date,
+                "restore": f"git stash apply --index {sha}",
+            }
+            for ref, sha, date in anchors
+            if sha not in recoverable
+        ]
+    reported: list[dict[str, Any]] | None = None
+    if stashes is not None:
+        reported = [
+            {"stash": selector, "message": payload, "date": date}
+            for selector, _, date, message in stashes
+            if (payload := drainer_stash_message(message)) is not None
+        ]
+    return {"kept_autostash_anchors": kept, "drainer_stashes": reported}
+
+
 def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     """This repository's drainer state, read from this repository's own status
     file.
@@ -1101,6 +1271,7 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     latest_incident = open_incidents[0] if open_incidents else None
     log_path = latest_log_path(job)
     log_tail = tail_lines(log_path, 1)
+    inventory = autostash_inventory(job.repo_path)
     return {
         "state": state,
         "operation": operation,
@@ -1124,6 +1295,13 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         # debt under CLEANUP_PASSES_BEFORE_INCIDENT has raised no incident to
         # be seen through. Null is unknown, `[]` is verified-empty.
         "cleanup_obligations": cleanup_obligations(job.repo_path),
+        # Local copies of work the autostash lifecycle left behind, which
+        # otherwise appear only in one repeating line per startup sweep. Both
+        # follow the same null-is-unknown rule, and both are independent of
+        # the projection above: a queue state nobody can read says nothing
+        # about a ref, and vice versa.
+        "kept_autostash_anchors": inventory["kept_autostash_anchors"],
+        "drainer_stashes": inventory["drainer_stashes"],
     }
 
 

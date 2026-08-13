@@ -340,11 +340,24 @@ makes it the only copy. Its whole life:
   ref, its commit, that commit's date, and the command that restores it. An
   anchor that outlives one startup and is still reported holds work that is in
   no stash entry.
+- **Reported** by `status` for exactly as long as it is kept, carrying those
+  same four facts in a `kept_autostash_anchors` field — so an anchor holding
+  the only copy of some work does not wait for someone to read a service log.
+  Beside it, `drainer_stashes` names every `git stash list` entry the drainer
+  itself stored: `drain-prs-autostash-<epoch>-<pid>` from a pass whose snapshot
+  could not be prepared, and `drain-prs-autostash-recovery <sha>` from one
+  whose restore conflicted, each with its `stash@{n}` selector and its date.
+  Entries you pushed yourself are never listed — the stash is yours. Both
+  fields are `[]` when they were read and held nothing and `null` when that
+  collection could not be read at all, which is not the same answer. Reading
+  them takes no lock, runs no sweep, and creates, deletes, or reorders no ref
+  and no stash entry.
 
 Enumerate them yourself with:
 
 ```console
 git for-each-ref refs/drain-prs/autostash
+git stash list
 ```
 
 Every failure of the sweep — enumerating, reading the stash, or deleting a ref
@@ -816,6 +829,10 @@ any of them, and drops the record only once every one of them is done.
   state. The field is `null` when the queue state could not be read at all,
   which is not the same answer as the empty list a drainer owing nothing
   reports. Reading it takes no lock and changes nothing.
+- `status` also names the local copies of work the autostash lifecycle left
+  behind in the checkout — `kept_autostash_anchors` and `drainer_stashes` — on
+  the same three-answer rule. See
+  [the lifecycle of an autostash anchor](#the-lifecycle-of-an-autostash-anchor).
 - If the drainer is restarted or the pull request merges without its cleanup
   being recorded, the next poll reads the merged pull request and finishes the
   outstanding work. A pull request closed *without* merging owes nothing: it is
