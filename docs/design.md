@@ -1513,6 +1513,27 @@ a countdown.
   malformed, or of an unsupported version. Reading it is strictly read-only —
   no lock, no migration, no repair — and can never fail a status call, which is
   the diagnostic used when the repository is already in a bad state.
+- The status response also names the local copies of work the drainer's
+  autostash lifecycle left behind in the checkout, which are otherwise visible
+  only in one log line per startup sweep — a line that repeats identically
+  every pass, so a possibly-sole copy of someone's work waits for a human to
+  read a service log. Two collections, separate because they fail separately:
+  every autostash anchor whose snapshot is in no `git stash list` entry, named
+  by the same ref, commit, commit date, and restore command the kept-anchor log
+  line names; and every stash entry the drainer itself stored, named by its
+  selector, its reserved message, and its date. Classification restates the
+  startup sweep's own rule rather than running it — an anchor is kept when its
+  commit is absent from a stash list that was read successfully, and every
+  anchor is kept when that list could not be read — and an entry counts as the
+  drainer's only on a full match against the exact messages the drainer writes,
+  so the entries a user pushed are never named and the stash stays theirs. Each
+  collection distinguishes the same three answers the projection above
+  distinguishes: entries, verified-empty, and unknown for one that could not be
+  enumerated or parsed, with one collection's failure leaving the other and
+  every other status field intact. Reading both is strictly read-only and
+  cannot fail a status call: no ref, stash entry, stash ordering, queue state,
+  or sweep behavior changes, and neither does what any caller of status —
+  including the polling a start or stop does — goes on to report.
 - The sidebar folds that projection into its single drainer detail line as a
   clause counting the pull requests that owe, on every state that can carry
   debt. Unknown renders nothing, so a controller predating the projection looks

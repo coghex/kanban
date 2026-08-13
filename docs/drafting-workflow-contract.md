@@ -44,9 +44,13 @@ codex | $issue-review | codex-plugin/plugins/kanban/skills/issue-review/SKILL.md
 codex | $issue-rereview | codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md
 ```
 
-The list above is exhaustive. A drafting, issue-review, or issue-rereview
-asset that exists in either plugin without a row here fails the completeness
-check in §8, and so does a row whose path is missing from the tracked tree.
+The list above is exhaustive for this contract's scope — the drafting and
+issue-review assets. A drafting, issue-review, or issue-rereview asset that
+exists in either plugin without a row here fails the completeness check in §8,
+and so does a row whose path is missing from the tracked tree. Both plugins
+also package document workflows, which are declared in
+[document-workflow-contract.md](document-workflow-contract.md) rather than
+here; their absence from the list above is that split, not a gap.
 
 ## 3. Responsibility matrix
 
@@ -348,10 +352,11 @@ The declared assets in §2 live inside each plugin's own tracked tree:
 Both are picked up by file placement alone — adding a workflow needs no
 manifest schema change. Because these locations are project-scoped rather
 than user-scoped, a consuming project reaches them through the plugin install
-or link flow described in each plugin's README, which is the surface the
-planned opt-in cross-project setup work (issue #78) installs or links for
-other repositories. This document is the inventory that flow consumes; it is
-not itself an installer.
+or link flow described in each plugin's README. `tools/setup_workflows.py`
+performs that install for other repositories, and
+[workflow-setup.md](workflow-setup.md) documents it along with the read-only
+`--doctor` report that diagnoses it. This document is the inventory that flow
+consumes; it is not itself an installer.
 
 ## 8. Completeness check
 

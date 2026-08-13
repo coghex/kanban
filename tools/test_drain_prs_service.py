@@ -2256,6 +2256,523 @@ class CleanupObligationTests(RedirectedControllerTestCase):
         )
 
 
+class AutostashInventoryTests(RedirectedControllerTestCase):
+    """The local copies of work `status` projects out of the repository itself:
+    autostash anchors the drainer kept, and the stash entries it wrote.
+
+    Against a real temporary Git repository, because what is being projected is
+    live Git state -- refs and a reflog -- rather than a document. Every other
+    command stays scripted; only the two read-only inventory queries reach the
+    real repository.
+
+    Both are otherwise named in one log line per startup sweep, which repeats
+    identically every pass, so a possibly-sole copy of someone's work waits for
+    a human to read a service log.
+    """
+
+    INVENTORY_READS = frozenset({"for-each-ref", "stash"})
+
+    def setUp(self):
+        # Captured before the base class patches the seam: the inventory reads
+        # have to reach the real repository underneath the scripted fake.
+        self.real_run_command = drain_prs_service.run_command
+        super().setUp()
+        self.failing = set()
+        self.malformed = {}
+        self.raising = set()
+
+        self.repo = self.root / "widgets"
+        self.repo.mkdir()
+        self.remotes[(str(self.repo), "origin")] = "git@github.com:acme/widgets.git"
+        self.git("init", "-q", "-b", "master", ".")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "Test")
+        (self.repo / "shared.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+        self.git("add", "shared.txt")
+        self.git("commit", "-q", "-m", "initial")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        self.state_path = self.repo / ".git" / "drain_prs_state.json"
+
+    def _run_command(self, args, *, check=True):
+        # The inventory's own reads run for real; a test can still make either
+        # of them fail or answer nonsense, which is how the unknown states
+        # below are reached without corrupting a repository to produce them.
+        if args[:1] == ["git"] and args[3:4] and args[3] in self.INVENTORY_READS:
+            self.commands.append(list(args))
+            if args[3] in self.raising:
+                raise OSError("git could not be executed")
+            if args[3] in self.failing:
+                return _completed(128, stderr="fatal: injected failure")
+            if args[3] in self.malformed:
+                return _completed(0, stdout=self.malformed[args[3]])
+            return self.real_run_command(args, check=False)
+        return super()._run_command(args, check=check)
+
+    def git(self, *args):
+        proc = subprocess.run(
+            ["git", "-C", str(self.repo), *args], text=True, capture_output=True
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"git {' '.join(args)} failed:\n{proc.stderr}")
+        return proc
+
+    def anchored_snapshot(self, line3):
+        """A real `git stash create` commit under a real anchor ref.
+
+        Exactly the pair the drainer leaves behind when a pass is killed or its
+        restore conflicts: the floating snapshot commit, and the private ref
+        created before the reset so nothing else has to hold it.
+        """
+        (self.repo / "shared.txt").write_text(f"line1\nline2\n{line3}\n", encoding="utf-8")
+        sha = self.git("stash", "create", f"snapshot-{line3}").stdout.strip()
+        self.git("checkout", "--", "shared.txt")
+        self.assertTrue(sha)
+        self.git("update-ref", f"refs/drain-prs/autostash/{sha}", sha)
+        return f"refs/drain-prs/autostash/{sha}", sha
+
+    def store(self, message, sha):
+        """A stash entry written the one way the drainer writes one."""
+        self.git("stash", "store", "-m", message, sha)
+
+    def push_user_stash(self, message):
+        """A stash entry pushed the way a human pushes one, wrapper and all."""
+        (self.repo / "shared.txt").write_text(f"{message}\n", encoding="utf-8")
+        self.git("stash", "push", "-q", "-m", message)
+
+    def commit_date(self, sha):
+        return self.git("log", "-1", "--format=%cI", sha).stdout.strip()
+
+    def repository_state(self):
+        """Everything this projection may never disturb: every ref, the stash
+        in order with its messages, and the stash reflog itself."""
+        return (
+            self.git("for-each-ref").stdout,
+            self.git("stash", "list", "--format=%H %gs").stdout,
+            self.git("reflog", "show", "--format=%H %gs", "stash").stdout,
+        )
+
+    def inventory(self):
+        return drain_prs_service.autostash_inventory(self.repo)
+
+    def test_a_kept_anchor_reports_every_fact_a_recovery_needs(self):
+        ref, sha = self.anchored_snapshot("line3-orphaned")
+
+        anchors = self.inventory()["kept_autostash_anchors"]
+
+        # Recovery has to be a supported operation rather than archaeology, so
+        # the projection names the same four facts the kept-anchor log line
+        # names -- not a ref the reader then has to research.
+        self.assertEqual(
+            anchors,
+            [
+                {
+                    "ref": ref,
+                    "commit": sha,
+                    "date": self.commit_date(sha),
+                    "restore": f"git stash apply --index {sha}",
+                }
+            ],
+        )
+
+    def test_an_anchor_the_stash_also_holds_is_not_kept(self):
+        ref, sha = self.anchored_snapshot("line3-recovered")
+        self.store(f"drain-prs-autostash-recovery {sha}", sha)
+
+        inventory = self.inventory()
+
+        # Verified-empty, not unknown: the anchor was enumerated and its
+        # snapshot was found, so nothing here holds a sole copy of anything.
+        self.assertEqual(inventory["kept_autostash_anchors"], [])
+        self.assertEqual(
+            inventory["drainer_stashes"],
+            [
+                {
+                    "stash": "stash@{0}",
+                    "message": f"drain-prs-autostash-recovery {sha}",
+                    "date": self.commit_date(sha),
+                }
+            ],
+        )
+        # The anchor is reported on, never acted on. Reaping stays the
+        # startup sweep's, and this ref is still exactly where it was.
+        self.assertEqual(self.git("rev-parse", ref).stdout.strip(), sha)
+
+    def test_an_entry_below_the_tip_still_matches_its_anchor(self):
+        # The proving entry is stash@{1}, which only reading the whole list
+        # finds -- ancestry from the refs/stash tip would not.
+        _, sha = self.anchored_snapshot("line3-recovered")
+        self.store(f"drain-prs-autostash-recovery {sha}", sha)
+        self.push_user_stash("user-manual-stash")
+        self.assertEqual(
+            self.git("stash", "list", "--format=%H").stdout.split()[1], sha
+        )
+
+        self.assertEqual(self.inventory()["kept_autostash_anchors"], [])
+
+    def test_both_drainer_message_forms_are_reported(self):
+        _, prepared = self.anchored_snapshot("line3-unprepared")
+        _, recovered = self.anchored_snapshot("line3-conflicted")
+        self.store("drain-prs-autostash-1700000000-4242", prepared)
+        self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
+
+        reported = self.inventory()["drainer_stashes"]
+
+        self.assertEqual(
+            reported,
+            [
+                {
+                    "stash": "stash@{0}",
+                    "message": f"drain-prs-autostash-recovery {recovered}",
+                    "date": self.commit_date(recovered),
+                },
+                {
+                    "stash": "stash@{1}",
+                    "message": "drain-prs-autostash-1700000000-4242",
+                    "date": self.commit_date(prepared),
+                },
+            ],
+        )
+
+    def test_a_user_entry_is_never_reported(self):
+        _, sha = self.anchored_snapshot("line3-conflicted")
+        self.store(f"drain-prs-autostash-recovery {sha}", sha)
+        self.push_user_stash("user-manual-stash")
+        self.push_user_stash("WIP on the drain-prs-autostash-recovery branch")
+
+        reported = self.inventory()["drainer_stashes"]
+
+        # The stash is the user's. Only what the drainer itself stored is
+        # named, and the rest is not this report's business.
+        self.assertEqual(
+            [entry["message"] for entry in reported],
+            [f"drain-prs-autostash-recovery {sha}"],
+        )
+
+    def test_a_merely_similar_message_is_not_a_drainer_entry(self):
+        # Classification is the whole exclusion, so it is a full match rather
+        # than a prefix: each of these shares the reserved stem and is still
+        # somebody's own entry.
+        for message in (
+            "drain-prs-autostash-notes",
+            "drain-prs-autostash-",
+            "drain-prs-autostash-1700000000",
+            "drain-prs-autostash-1700000000-4242-extra",
+            "before drain-prs-autostash-1700000000-4242",
+            "drain-prs-autostash-1700000000-4242 after",
+            "drain-prs-autostash-recovery",
+            "drain-prs-autostash-recovery " + "z" * 40,
+            "drain-prs-autostash-recovery " + "a" * 39,
+            "drain-prs-autostash-recovery " + "a" * 41,
+        ):
+            with self.subTest(message=message):
+                self.assertIsNone(drain_prs_service.drainer_stash_message(message))
+
+    def test_a_wrapped_payload_is_unwrapped_before_it_is_matched(self):
+        # `git stash push -m` records `On <branch>: <message>`; the drainer's
+        # own `git stash store -m` records the payload verbatim. The wrapper is
+        # a display detail of the entry, not part of what it says.
+        _, sha = self.anchored_snapshot("line3-conflicted")
+        self.push_user_stash(f"drain-prs-autostash-recovery {sha}")
+        self.assertIn(
+            "On master: drain-prs-autostash-recovery",
+            self.git("stash", "list").stdout,
+        )
+
+        reported = self.inventory()["drainer_stashes"]
+
+        # Git records no creator identity, so an exactly forged payload is
+        # indistinguishable from the drainer's own and is reported as one.
+        self.assertEqual(
+            [entry["message"] for entry in reported],
+            [f"drain-prs-autostash-recovery {sha}"],
+        )
+
+    def test_a_sha256_recovery_payload_is_a_drainer_entry(self):
+        # The payload names whatever `git stash create` returned, which is 64
+        # hex digits in a sha256 repository.
+        self.assertEqual(
+            drain_prs_service.drainer_stash_message(
+                "drain-prs-autostash-recovery " + "b" * 64
+            ),
+            "drain-prs-autostash-recovery " + "b" * 64,
+        )
+
+    def test_a_checkout_with_nothing_left_behind_reports_verified_empty(self):
+        self.push_user_stash("user-manual-stash")
+
+        self.assertEqual(
+            self.inventory(),
+            {"kept_autostash_anchors": [], "drainer_stashes": []},
+        )
+
+    def test_an_unreadable_stash_keeps_every_anchor(self):
+        ref, sha = self.anchored_snapshot("line3-recovered")
+        self.store(f"drain-prs-autostash-recovery {sha}", sha)
+        self.failing.add("stash")
+
+        inventory = self.inventory()
+
+        # Redundant in fact, and still kept: without the list nothing is
+        # provably redundant, which is the rule the sweep itself follows.
+        self.assertEqual(
+            [entry["ref"] for entry in inventory["kept_autostash_anchors"]], [ref]
+        )
+        self.assertIsNone(inventory["drainer_stashes"])
+
+    def test_each_collection_fails_alone(self):
+        _, sha = self.anchored_snapshot("line3-conflicted")
+        self.store(f"drain-prs-autostash-recovery {sha}", sha)
+
+        self.failing.add("for-each-ref")
+        anchors_failed = self.inventory()
+        self.failing.clear()
+        self.failing.add("stash")
+        stash_failed = self.inventory()
+
+        self.assertIsNone(anchors_failed["kept_autostash_anchors"])
+        self.assertEqual(
+            [entry["message"] for entry in anchors_failed["drainer_stashes"]],
+            [f"drain-prs-autostash-recovery {sha}"],
+        )
+        self.assertIsNone(stash_failed["drainer_stashes"])
+        self.assertIsNotNone(stash_failed["kept_autostash_anchors"])
+
+    def test_output_the_fixed_format_cannot_have_produced_reports_unknown(self):
+        """Malformed is unknown, never verified data.
+
+        Both reads answer whether some copy of someone's work is about to be
+        missed, so a row skipped or a field taken on trust would turn output
+        nobody could parse into `[]` or into a partial list that reads as a
+        complete one -- the one answer this must never give.
+        """
+        ref, sha = self.anchored_snapshot("line3-orphaned")
+        date = self.commit_date(sha)
+        good = f"{ref} {sha} {date}"
+        for why, read, payload in (
+            ("an anchor row with no object ID", "for-each-ref", "broken\n"),
+            ("one readable anchor row and one not", "for-each-ref", f"{good}\nbroken\n"),
+            ("an object ID that is not one", "for-each-ref", f"{ref} nothex {date}\n"),
+            (
+                "a ref outside the namespace",
+                "for-each-ref",
+                f"refs/heads/master {sha} {date}\n",
+            ),
+            ("a date that is not one", "for-each-ref", f"{ref} {sha} yesterday\n"),
+            ("a field the format does not have", "for-each-ref", f"{good} extra\n"),
+            # The format prints one row per ref and never a blank, so a blank
+            # is output it cannot have produced -- and skipping one is exactly
+            # how nothing-was-parsed would come back as nothing-is-there.
+            ("nothing but a blank row", "for-each-ref", "\n"),
+            ("a readable row beside a blank one", "for-each-ref", f"{good}\n\n"),
+            ("a row of only whitespace", "for-each-ref", "   \n"),
+            ("a truncated stash record", "stash", "stash@{0}\x00"),
+            # `-z` terminates every record, so one trailing empty is the whole
+            # expected supply of them.
+            ("nothing but a record separator", "stash", "\x00"),
+            (
+                "a readable record beside an empty one",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1f{date}\x1fmessage\x00\x00",
+            ),
+            (
+                "output that stops mid-record",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1f{date}\x1fmessage",
+            ),
+            (
+                "a stash selector that is not one",
+                "stash",
+                f"stash@0\x1f{sha}\x1f{date}\x1fmessage\x00",
+            ),
+            (
+                "a stash object ID that is not one",
+                "stash",
+                f"stash@{{0}}\x1fnothex\x1f{date}\x1fmessage\x00",
+            ),
+            (
+                "a stash date that is not one",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1flast Tuesday\x1fmessage\x00",
+            ),
+        ):
+            with self.subTest(why=why):
+                self.malformed.clear()
+                self.malformed[read] = payload
+                inventory = self.inventory()
+                spoiled, intact = (
+                    ("kept_autostash_anchors", "drainer_stashes")
+                    if read == "for-each-ref"
+                    else ("drainer_stashes", "kept_autostash_anchors")
+                )
+                self.assertIsNone(inventory[spoiled], why)
+                # And only its own collection: the other read succeeded.
+                self.assertIsNotNone(inventory[intact], why)
+
+    def test_every_way_a_read_can_fail_reports_unknown(self):
+        self.anchored_snapshot("line3-orphaned")
+        for why, arrange in (
+            ("a nonzero exit", lambda: self.failing.update(self.INVENTORY_READS)),
+            ("git could not be run", lambda: self.raising.update(self.INVENTORY_READS)),
+            (
+                # A record the fixed format cannot have produced: a partial
+                # list would read as a complete one.
+                "output no format explains",
+                lambda: self.malformed.update({"stash": "stash@{0}\x00"}),
+            ),
+        ):
+            with self.subTest(why=why):
+                self.failing.clear()
+                self.raising.clear()
+                self.malformed.clear()
+                arrange()
+                inventory = self.inventory()
+                self.assertIsNone(inventory["drainer_stashes"], why)
+
+        # A path that is no repository at all answers the same way.
+        self.failing.clear()
+        self.assertEqual(
+            drain_prs_service.autostash_inventory(self.root / "absent"),
+            {"kept_autostash_anchors": None, "drainer_stashes": None},
+        )
+
+    def test_a_ref_pointing_at_no_commit_still_names_its_anchor(self):
+        # `date unknown` rather than a dropped row, exactly as the drainer's
+        # own enumeration answers: a ref that cannot be dated is still a ref
+        # somebody has to be told about.
+        proc = subprocess.run(
+            ["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+            input="contents\n",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        sha = proc.stdout.strip()
+        self.git("update-ref", f"refs/drain-prs/autostash/{sha}", sha)
+
+        anchors = self.inventory()["kept_autostash_anchors"]
+
+        self.assertEqual(
+            anchors,
+            [
+                {
+                    "ref": f"refs/drain-prs/autostash/{sha}",
+                    "commit": sha,
+                    "date": "date unknown",
+                    "restore": f"git stash apply --index {sha}",
+                }
+            ],
+        )
+
+    def test_reading_the_inventory_changes_no_ref_and_no_stash_entry(self):
+        _, kept = self.anchored_snapshot("line3-orphaned")
+        _, recovered = self.anchored_snapshot("line3-conflicted")
+        self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
+        self.push_user_stash("user-manual-stash")
+        before = self.repository_state()
+
+        for _ in range(3):
+            self.inventory()
+
+        # Not one ref deleted or created, and the stash keeps its order, its
+        # entries, and its reflog. Reporting is all this may ever do.
+        self.assertEqual(self.repository_state(), before)
+        self.assertIn(kept, before[0])
+
+    def test_a_status_call_reports_both_collections(self):
+        self.write_status(self.job, self.repo)
+        _, kept = self.anchored_snapshot("line3-orphaned")
+        _, recovered = self.anchored_snapshot("line3-conflicted")
+        self.store(f"drain-prs-autostash-recovery {recovered}", recovered)
+
+        snapshot = drain_prs_service.status_snapshot(self.job)
+
+        self.assertEqual(
+            [entry["commit"] for entry in snapshot["kept_autostash_anchors"]], [kept]
+        )
+        self.assertEqual(
+            [entry["message"] for entry in snapshot["drainer_stashes"]],
+            [f"drain-prs-autostash-recovery {recovered}"],
+        )
+
+    def test_the_cleanup_projection_survives_an_inventory_that_fails(self):
+        # The queue state is a document and the inventory is live Git state:
+        # neither says anything about the other, and version 3 and version 4
+        # cleanup records keep reporting through an inventory that is unknown.
+        self.write_status(self.job, self.repo)
+        self.anchored_snapshot("line3-orphaned")
+        for version in sorted(drain_prs_service.DRAIN_STATE_CLEANUP_VERSIONS):
+            with self.subTest(version=version):
+                self.state_path.write_text(
+                    json.dumps(
+                        {
+                            "version": version,
+                            "attempt_counter": 4,
+                            "prs": {
+                                "12": {
+                                    "approved_head": "a" * 40,
+                                    "cleanup": {
+                                        "pr": {
+                                            "number": 12,
+                                            "headRefName": "issue-7",
+                                            "headRefOid": "b" * 40,
+                                        },
+                                        "pending": [{"kind": "worktree"}],
+                                        "failed_passes": 0,
+                                        "last_error": None,
+                                        "incident": None,
+                                    },
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.failing.clear()
+                healthy = drain_prs_service.status_snapshot(self.job)
+                self.failing.update(self.INVENTORY_READS)
+                degraded = drain_prs_service.status_snapshot(self.job)
+
+                self.assertEqual(
+                    [item["pull_request"] for item in healthy["cleanup_obligations"]],
+                    [12],
+                )
+                self.assertIsNotNone(healthy["kept_autostash_anchors"])
+                self.assertIsNone(degraded["kept_autostash_anchors"])
+                self.assertIsNone(degraded["drainer_stashes"])
+                self.assertEqual(
+                    degraded["cleanup_obligations"], healthy["cleanup_obligations"]
+                )
+
+    def test_an_unknown_inventory_leaves_every_other_status_field_alone(self):
+        self.write_status(self.job, self.repo)
+        self.anchored_snapshot("line3-orphaned")
+        healthy = drain_prs_service.status_snapshot(self.job)
+        self.failing.update(self.INVENTORY_READS)
+
+        degraded = drain_prs_service.status_snapshot(self.job)
+
+        inventory_keys = {"kept_autostash_anchors", "drainer_stashes"}
+        self.assertEqual(
+            {k: v for k, v in degraded.items() if k not in inventory_keys},
+            {k: v for k, v in healthy.items() if k not in inventory_keys},
+        )
+
+    def test_a_linked_worktree_reports_the_shared_repositorys_inventory(self):
+        # Refs and the stash both live in the shared git directory, so a
+        # linked worktree is answering for the same repository rather than for
+        # one of its own -- which is what "per repository" has to mean here.
+        _, sha = self.anchored_snapshot("line3-orphaned")
+        linked = self.root / "linked"
+        self.git("worktree", "add", "-q", "-b", "issue-7", str(linked))
+
+        from_linked = drain_prs_service.autostash_inventory(linked)
+
+        self.assertEqual(from_linked, self.inventory())
+        self.assertEqual(
+            [entry["commit"] for entry in from_linked["kept_autostash_anchors"]], [sha]
+        )
+
+
 class MirroredCleanupVocabularyTests(unittest.TestCase):
     """The controller restates the drainer's state version and step wording
     rather than importing them, exactly as `in_progress_operation` restates
