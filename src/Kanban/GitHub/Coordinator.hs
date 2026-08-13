@@ -32,6 +32,8 @@ module Kanban.GitHub.Coordinator
     queueCoordinatorJob,
     rateLimitFallbackHold,
     rateLimitHoldUntil,
+    settleHistoryJob,
+    settleOpenJob,
 
     -- * The running coordinator
     CoordinatorNotice (..),
@@ -39,7 +41,7 @@ module Kanban.GitHub.Coordinator
     OpenRefreshResult (..),
     RefreshCoordinator,
     RefreshRunner (..),
-    coordinatorHasWork,
+    coordinatorMustSettle,
     newRefreshCoordinator,
     requestRefreshJob,
     shutdownRefreshCoordinator,
@@ -66,7 +68,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.GitHub.Fetch (RateObserver)
-import Kanban.GitHub.Guard (GhCleanupFailure, GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), historyRateVerdict, foregroundRateReserve)
 import System.Timeout (timeout)
 
@@ -289,6 +291,51 @@ rateLimitHoldUntil now state = case state.coordinatorRate of
   Just sample | sample.rateSampleResetAt > now -> sample.rateSampleResetAt
   _ -> addUTCTime rateLimitFallbackHold now
 
+-- | Where a finished foreground job leaves the coordinator.
+--
+-- A refusal GitHub attributed to its primary rate limit is /reissued/, not
+-- merely held: the job goes back in the queue under a hold until the reported
+-- reset, so it is tried again rather than being dropped the moment the hold
+-- lapses. It keeps its original deadline, which is what bounds the whole of
+-- this — the retry runs only if the reset arrives first, and otherwise the
+-- deadline expires and publishes the configured timeout, leaving no stale
+-- retry to complete afterwards.
+--
+-- The refusal itself is still published when it happens. Section 13 shows a
+-- rate limit to the user while retaining the last good snapshot, and a
+-- reissue that is silent until it succeeds would leave the board saying
+-- nothing at all for as long as the budget takes to return.
+settleOpenJob :: UTCTime -> Maybe UTCTime -> Bool -> CoordinatorState -> CoordinatorState
+settleOpenJob now deadline rateLimited state
+  | not rateLimited || released.coordinatorStopping = released
+  | otherwise =
+      holdCoordinatorJob
+        OpenJob
+        (JobHold HeldForRateLimit (rateLimitHoldUntil now released))
+        (queueCoordinatorJob OpenJob deadline released)
+  where
+    released = finishCoordinatorJob OpenJob False state
+
+-- | Where a finished history page leaves the coordinator.
+--
+-- More pages requeue the traversal, which is its page-boundary yield. A
+-- refusal against the primary rate limit requeues it too, under a hold until
+-- the reported reset, so a background traversal waits the limit out instead of
+-- hot-looping it. Any other failure ends the traversal: a page that failed for
+-- a reason nothing here can wait out is not one to reissue.
+settleHistoryJob :: UTCTime -> Maybe HistoryPageResult -> CoordinatorState -> CoordinatorState
+settleHistoryJob now result state = case result of
+  -- Interrupted: the owner goes back, and nothing requeues itself.
+  Nothing -> finishCoordinatorJob HistoryJob False state
+  Just (HistoryPageFetched more) -> finishCoordinatorJob HistoryJob more state
+  Just (HistoryPageFailed rateLimited)
+    | not rateLimited -> finishCoordinatorJob HistoryJob False state
+    | otherwise ->
+        let released = finishCoordinatorJob HistoryJob True state
+         in if released.coordinatorStopping
+              then finishCoordinatorJob HistoryJob False state
+              else holdCoordinatorJob HistoryJob (JobHold HeldForRateLimit (rateLimitHoldUntil now released)) released
+
 -- | What a foreground refresh produced.
 data OpenRefreshResult outcome = OpenRefreshResult
   { openRefreshOutcome :: outcome,
@@ -389,12 +436,30 @@ requestRefreshJob coordinator job deadline = do
 coordinatorStateSnapshot :: RefreshCoordinator outcome -> IO CoordinatorState
 coordinatorStateSnapshot coordinator = readMVar coordinator.coordinatorState
 
--- | Whether anything is queued or running, so a quit knows whether it has
--- something to stop before it can halt.
-coordinatorHasWork :: RefreshCoordinator outcome -> IO Bool
-coordinatorHasWork coordinator = do
-  state <- coordinatorStateSnapshot coordinator
-  pure (isJust state.coordinatorRunning || not (Map.null state.coordinatorPending))
+-- | Whether a quit has to go through the coordinator before the dashboard may
+-- halt.
+--
+-- Queued or running work is the obvious reason. The other is a job that has
+-- already finished and left a verdict that would refuse the quit: a
+-- possibly-live @gh@ that nothing durable records, held back by nothing but
+-- this process's own refusal to start another. Halting straight past that
+-- would drop exactly the guard that makes it safe, so it counts as something
+-- to settle even though nothing is running — which is the difference between
+-- asking "is work in flight?" and asking "may this dashboard stop?".
+coordinatorMustSettle :: RefreshCoordinator outcome -> IO Bool
+coordinatorMustSettle coordinator = do
+  state <- readMVar coordinator.coordinatorState
+  if isJust state.coordinatorRunning || not (Map.null state.coordinatorPending)
+    then pure True
+    else do
+      live <- readMVar coordinator.coordinatorLive
+      maybe (pure False) (fmap unsettledVerdict . ghFetchCleanupFailure . liveJobGuard) live
+
+-- | Whether a cleanup verdict leaves a group only this process is holding
+-- back. A group confirmed gone has nothing left to hold back, and a recorded
+-- one is re-checked by any later run before it spawns anything.
+unsettledVerdict :: Maybe GhCleanupFailure -> Bool
+unsettledVerdict = maybe False ((== GuardInMemoryOnly) . (.ghCleanupGuard))
 
 wakeCoordinator :: RefreshCoordinator outcome -> IO ()
 wakeCoordinator coordinator = void (tryPutMVar coordinator.coordinatorWake ())
@@ -490,17 +555,13 @@ runOpenJob coordinator deadline = do
   let remaining = fmap (remainingMicros now) deadline
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runOpenRefresh guard (rateObserverFor coordinator) remaining)
   finished <- getCurrentTime
-  modifyMVar_ coordinator.coordinatorState $ \state -> do
-    let released = finishCoordinatorJob OpenJob False state
-    pure $ case result of
-      Just openResult
-        | openResult.openRefreshRateLimited ->
-            holdCoordinatorJob OpenJob (JobHold HeldForRateLimit (rateLimitHoldUntil finished released)) released
-      _ -> released
+  modifyMVar_
+    coordinator.coordinatorState
+    (pure . settleOpenJob finished deadline (maybe False (.openRefreshRateLimited) result))
   -- Read after the state settled, and checked before anything reaches the
   -- board: a job the shutdown cancelled must publish nothing, or a dashboard
   -- on its way out would take a board update from work it just abandoned.
-  stopping <- (.coordinatorStopping) <$> coordinatorStateSnapshot coordinator
+  stopping <- (.coordinatorStopping) <$> readMVar coordinator.coordinatorState
   case result of
     Just openResult | not stopping -> coordinator.coordinatorPublish openResult.openRefreshOutcome
     _ -> pure ()
@@ -510,15 +571,7 @@ runHistoryJob coordinator = do
   guard <- newGhFetchGuard coordinator.coordinatorRecordLock
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runHistoryPage guard (rateObserverFor coordinator))
   finished <- getCurrentTime
-  modifyMVar_ coordinator.coordinatorState $ \state -> pure $ case result of
-    -- Interrupted: the owner goes back, and nothing requeues itself.
-    Nothing -> finishCoordinatorJob HistoryJob False state
-    Just (HistoryPageFetched more) -> finishCoordinatorJob HistoryJob more state
-    Just (HistoryPageFailed rateLimited) ->
-      let released = finishCoordinatorJob HistoryJob rateLimited state
-       in if rateLimited
-            then holdCoordinatorJob HistoryJob (JobHold HeldForRateLimit (rateLimitHoldUntil finished released)) released
-            else released
+  modifyMVar_ coordinator.coordinatorState (pure . settleHistoryJob finished result)
 
 remainingMicros :: UTCTime -> UTCTime -> Int
 remainingMicros now deadline =

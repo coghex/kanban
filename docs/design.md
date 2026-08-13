@@ -1478,24 +1478,39 @@ a countdown.
   reset has passed, or once a later foreground page reports sufficient budget —
   a paused history job cannot produce that page itself, which is why the
   foreground's counts. An unknown budget pauses nothing.
+- A job GitHub refuses against its primary rate limit is reissued, not merely
+  delayed: it goes back in the queue under a hold until the reported reset, so
+  it is tried again once the budget returns rather than dropped when the hold
+  lapses. A foreground refusal is still published when it happens, since §13
+  shows a rate limit while retaining the last good snapshot, and a silent
+  reissue would leave the board saying nothing for as long as the budget takes.
+  A background traversal is reissued the same way, which is what keeps it from
+  hot-looping the limit; a history page that failed for any other reason ends
+  the traversal rather than being retried.
 - The configured GitHub timeout covers the whole request, coordinator waiting
   and rate-limit delay included, because from the board's side those are
   indistinguishable from a slow response. Expiry cancels that job and any retry
   scheduled for it, performs the verified cleanup, and publishes the existing
   timeout outcome, rather than letting a stale retry or completion publish
-  afterwards.
-- Quitting while any board-refresh job is queued or running cancels the queued
-  work and interrupts the running one exactly as a refresh timeout does, so it
-  unwinds through the same verified `gh` cleanup, bounded by that cleanup's own
-  budget. The board says it is stopping GitHub work while this happens; a
-  cancelled job publishes no board or cache result and requeues nothing; and
-  nothing requested afterwards is accepted. The dashboard halts once the cleanup
-  reaches a verdict that leaves nothing ambiguous — the group confirmed gone, or
-  durably recorded for a later run to re-check before it spawns anything. A
-  group that is neither, possibly live with only this process's in-memory
-  refusal covering it, refuses the quit and reports that instead: halting there
-  would drop the one thing holding the next `gh` back. A live interactive review
-  still refuses the quit exactly as it did, and is asked first.
+  afterwards. That is what bounds the reissue above: the retry runs only if the
+  reset arrives inside the deadline.
+- Quitting goes through the coordinator whenever it has anything to settle, and
+  halts immediately otherwise. Queued or running work is one reason to settle;
+  so is a job that has already finished and left a group only this process is
+  holding back, since the question a quit asks is whether the dashboard may
+  stop, not whether work is in flight. Settling cancels the queued work and
+  interrupts the running job exactly as a refresh timeout does, so it unwinds
+  through the same verified `gh` cleanup, bounded by that cleanup's own budget.
+  The board says it is stopping GitHub work while this happens; a cancelled job
+  publishes no board or cache result and requeues nothing; and nothing requested
+  afterwards is accepted. The dashboard halts once the cleanup reaches a verdict
+  that leaves nothing ambiguous — the group confirmed gone, or durably recorded
+  for a later run to re-check before it spawns anything. A group that is
+  neither, possibly live with only this process's in-memory refusal covering it,
+  refuses the quit and reports that instead: halting there would drop the one
+  thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
+  and then end it from outside. A live interactive review still refuses the quit
+  exactly as it did, and is asked first.
 - Every canonical GitHub repository has its own PR drainer: its own LaunchAgent
   label and plist, its own runtime status, its own service and dated logs, and
   its own `--config` selection. Starting, stopping, querying, logs, status, and

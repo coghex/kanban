@@ -56,7 +56,7 @@ module Kanban.GitHub
     RefreshJob (..),
     RefreshRunner (..),
     beginCoordinatorShutdown,
-    coordinatorHasWork,
+    coordinatorMustSettle,
     finishCoordinatorJob,
     foregroundRateReserve,
     historyRateVerdict,
@@ -70,6 +70,8 @@ module Kanban.GitHub
     rateLimitHoldUntil,
     rateSampleFromResponse,
     requestRefreshJob,
+    settleHistoryJob,
+    settleOpenJob,
     shutdownRefreshCoordinator,
     usableRateSample,
   )
@@ -88,7 +90,7 @@ import Kanban.GitHub.Coordinator
     RefreshJob (..),
     RefreshRunner (..),
     beginCoordinatorShutdown,
-    coordinatorHasWork,
+    coordinatorMustSettle,
     finishCoordinatorJob,
     holdCoordinatorJob,
     initialCoordinatorState,
@@ -99,6 +101,8 @@ import Kanban.GitHub.Coordinator
     rateLimitFallbackHold,
     rateLimitHoldUntil,
     requestRefreshJob,
+    settleHistoryJob,
+    settleOpenJob,
     shutdownRefreshCoordinator,
   )
 import Kanban.GitHub.Fetch (FetchState (..), GitHubResult (..), RateObserver, advanceState, decodeGitHubItems, fetchGitHubSnapshot, graphqlArguments, paginationDecision)

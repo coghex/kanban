@@ -33,7 +33,7 @@ import Kanban.Domain
 import Kanban.GitHub
   ( GhCleanupFailure (..),
     GhCleanupGuard (..),
-    coordinatorHasWork,
+    coordinatorMustSettle,
     shutdownRefreshCoordinator
     )
 import Kanban.Process (killManagedProcess )
@@ -329,8 +329,8 @@ requestDashboardQuit = do
       if state.appQuitPending
         then setNotice stoppingGitHubWorkNotice
         else do
-          hasWork <- liftIO (coordinatorHasWork state.appRefreshCoordinator)
-          if not hasWork
+          mustSettle <- liftIO (coordinatorMustSettle state.appRefreshCoordinator)
+          if not mustSettle
             then halt
             else do
               modify (\current -> current {appOverlay = Nothing, appQuitPending = True, appNotice = Just stoppingGitHubWorkNotice})
@@ -366,7 +366,8 @@ quitDecision (Just failure) = case failure.ghCleanupGuard of
     QuitHeldBack
       ( "Not quitting: a gh process this dashboard started could not be confirmed stopped ("
           <> failure.ghCleanupMessage
-          <> ") and nothing durable records it, so nothing would hold back the next one -- check for a stray gh process first"
+          <> ") and nothing durable records it, so this process's refusal is all that holds the next one back"
+          <> " -- stop the stray gh, then end this dashboard from outside"
       )
 
 completeDashboardQuit :: Maybe GhCleanupFailure -> EventM Name AppState ()

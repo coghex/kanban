@@ -30,12 +30,14 @@ import Kanban.GitHub
     HoldReason (..),
     JobHold (..),
     OpenRefreshResult (..),
+    PendingJob (..),
     RateSample (..),
     RefreshCoordinator,
     RefreshJob (..),
     RefreshRunner (..),
     beginCoordinatorShutdown,
     classifyFailure,
+    coordinatorMustSettle,
     finishCoordinatorJob,
     foregroundRateReserve,
     historyRateVerdict,
@@ -52,6 +54,8 @@ import Kanban.GitHub
     rateSampleFromResponse,
     requestRefreshJob,
     setCleanupFailure,
+    settleHistoryJob,
+    settleOpenJob,
     shutdownRefreshCoordinator,
     usableRateSample
   )
@@ -213,6 +217,61 @@ spec = do
         `shouldBe` Just (JobHold HeldForRateLimit (secondsAfterEpoch 3600))
       snd (planCoordinator epoch observed) `shouldBe` PlanWait (Just (secondsAfterEpoch 3600))
 
+  describe "a job that GitHub refused" $ do
+    -- A hold on its own only delays; without the requeue the job is simply
+    -- gone once the hold lapses, and the refresh nobody answered never
+    -- happens.
+    it "puts the refused open job back in the queue under a hold, keeping its deadline" $ do
+      -- A deadline past the reported reset, so the reissue is the thing under
+      -- test rather than the expiry the next case covers.
+      let running = fst (planCoordinator epoch (queueCoordinatorJob OpenJob (Just (secondsAfterEpoch 7200)) initialCoordinatorState))
+          observed = observeRateSample (Just (sampleWith 0)) running
+          settled = settleOpenJob epoch (Just (secondsAfterEpoch 7200)) True observed
+      settled.coordinatorRunning `shouldBe` Nothing
+      Map.lookup OpenJob settled.coordinatorPending `shouldBe` Just (PendingJob (Just (secondsAfterEpoch 7200)))
+      Map.lookup OpenJob settled.coordinatorHolds
+        `shouldBe` Just (JobHold HeldForRateLimit (secondsAfterEpoch 3600))
+      -- Held until the reset, then reissued rather than dropped.
+      snd (planCoordinator (secondsAfterEpoch 60) settled)
+        `shouldBe` PlanWait (Just (secondsAfterEpoch 3600))
+      snd (planCoordinator (secondsAfterEpoch 3601) settled)
+        `shouldBe` PlanRun OpenJob (Just (secondsAfterEpoch 7200))
+
+    -- The deadline is what stops the reissue turning into an unbounded wait,
+    -- and what makes sure no retry completes after the request gave up.
+    it "expires the reissued job instead of retrying when its deadline runs out first" $ do
+      let settled = settleOpenJob epoch (Just (secondsAfterEpoch 30)) True (observeRateSample (Just (sampleWith 0)) initialCoordinatorState)
+          (expired, plan) = planCoordinator (secondsAfterEpoch 31) settled
+      plan `shouldBe` PlanExpire OpenJob
+      expired.coordinatorPending `shouldBe` Map.empty
+      expired.coordinatorHolds `shouldBe` Map.empty
+
+    it "requeues nothing for an open job that failed for any other reason" $ do
+      let settled = settleOpenJob epoch (Just (secondsAfterEpoch 300)) False initialCoordinatorState
+      settled.coordinatorPending `shouldBe` Map.empty
+      settled.coordinatorHolds `shouldBe` Map.empty
+
+    it "reissues nothing once shutdown has begun" $ do
+      let settled = settleOpenJob epoch (Just (secondsAfterEpoch 300)) True (beginCoordinatorShutdown initialCoordinatorState)
+      settled.coordinatorPending `shouldBe` Map.empty
+      settled.coordinatorHolds `shouldBe` Map.empty
+
+    it "resumes a rate-limited history traversal after the reset rather than hot-looping it" $ do
+      let observed = observeRateSample (Just (sampleWith 0)) initialCoordinatorState
+          settled = settleHistoryJob epoch (Just (HistoryPageFailed True)) observed
+      Map.keys settled.coordinatorPending `shouldBe` [HistoryJob]
+      Map.lookup HistoryJob settled.coordinatorHolds
+        `shouldBe` Just (JobHold HeldForRateLimit (secondsAfterEpoch 3600))
+      snd (planCoordinator (secondsAfterEpoch 3601) settled) `shouldBe` PlanRun HistoryJob Nothing
+
+    it "ends a history traversal that failed for a reason nothing can wait out" $ do
+      let settled = settleHistoryJob epoch (Just (HistoryPageFailed False)) initialCoordinatorState
+      settled.coordinatorPending `shouldBe` Map.empty
+
+    it "carries a history traversal on to its next page" $ do
+      let settled = settleHistoryJob epoch (Just (HistoryPageFetched True)) initialCoordinatorState
+      Map.keys settled.coordinatorPending `shouldBe` [HistoryJob]
+
   describe "coordinator shutdown" $ do
     it "discards queued work and refuses anything requested afterwards" $ do
       let stopping =
@@ -370,6 +429,62 @@ spec = do
       shutdownRefreshCoordinator coordinator
         `shouldReturn` Just (GhCleanupFailure "ps exited 1" GuardRecorded)
 
+    -- The whole point of the reissue: the refusal is answered now, and the
+    -- job is tried again once GitHub says the budget is back -- not before.
+    it "reissues a rate-limited open job no earlier than the reported reset" $ do
+      probe <- newProbe
+      resetAt <- addUTCTime 0.4 <$> getCurrentTime
+      attempts <- newIORef (0 :: Int)
+      deadline <- deadlineIn 30
+      coordinator <-
+        startProbeCoordinator
+          probe
+          ( \_ observe -> do
+              attempt <- atomicModifyIORef' attempts (\seen -> (seen + 1, seen + 1))
+              observe (Just (RateSample 1 5000 resetAt))
+              pure (OpenRefreshResult (if attempt == 1 then "limited" else "open") (attempt == 1))
+          )
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator OpenJob (Just deadline)
+      awaitCount probe.probePublished 2
+      reissuedAt <- getCurrentTime
+      reissuedAt `shouldSatisfy` (>= resetAt)
+      readIORef probe.probePublished `shouldReturn` ["limited", "open"]
+      readIORef probe.probeStarted `shouldReturn` [OpenJob, OpenJob]
+
+    -- Requirement 7's guarantee is about what is left behind, not about what
+    -- is still running: a settled job whose group only this process holds back
+    -- has to reach the quit path just as a running one does.
+    it "makes a quit settle over a finished job that left a possibly-live gh" $ do
+      probe <- newProbe
+      coordinator <-
+        startProbeCoordinator
+          probe
+          ( \guard _ -> do
+              setCleanupFailure guard (GhCleanupFailure "ps exited 1" GuardInMemoryOnly)
+              pure (OpenRefreshResult "open" False)
+          )
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator OpenJob Nothing
+      awaitCount probe.probePublished 1
+      coordinatorMustSettle coordinator `shouldReturn` True
+      verdict <- shutdownRefreshCoordinator coordinator
+      verdict `shouldBe` Just (GhCleanupFailure "ps exited 1" GuardInMemoryOnly)
+      case quitDecision verdict of
+        QuitHalts -> expectationFailure "expected the quit to be held back"
+        QuitHeldBack notice -> notice `shouldMention` "stray gh"
+
+    it "lets a quit past a finished job that left nothing behind" $ do
+      probe <- newProbe
+      coordinator <-
+        startProbeCoordinator
+          probe
+          (\_ _ -> pure (OpenRefreshResult "open" False))
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator OpenJob Nothing
+      awaitCount probe.probePublished 1
+      coordinatorMustSettle coordinator `shouldReturn` False
+
     it "publishes nothing from a job shutdown cancelled, and starts nothing after" $ do
       probe <- newProbe
       running <- newEmptyMVar
@@ -420,7 +535,7 @@ spec = do
         QuitHalts -> expectationFailure "expected the quit to be held back"
         QuitHeldBack notice -> do
           notice `shouldMention` "ps exited 1"
-          notice `shouldMention` "stray gh process"
+          notice `shouldMention` "stop the stray gh"
 
     it "says it is stopping GitHub work while the cancellation runs" $
       stoppingGitHubWorkNotice `shouldMention` "Stopping GitHub work"
