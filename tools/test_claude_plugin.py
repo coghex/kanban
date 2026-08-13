@@ -1403,5 +1403,68 @@ class ManifestListingParityTests(unittest.TestCase):
         )
 
 
+class SelfReviewPreconditionDocumentTests(unittest.TestCase):
+    """Issue #303: `--self-review` hands the review to the calling session, so
+    it is correct only where that session is the opposite brand Kanban spawned.
+    These documents used to assert that premise unconditionally, which made a
+    solver session running the review workflow on its own pull request read as
+    the intended case. They must now declare this bundle's own brand and route
+    a refusal back to the nested spawn."""
+
+    def _doc(self, name: str) -> str:
+        return (COMMANDS_ROOT / f"{name}.md").read_text(encoding="utf-8")
+
+    def test_every_self_review_invocation_declares_this_bundles_brand(self):
+        for name in ("pr-review", "pr-rereview"):
+            text = self._doc(name)
+            for block in re.findall(r"```bash\n(.*?)```", text, re.DOTALL):
+                if "--self-review" not in block:
+                    continue
+                self.assertIn(
+                    "--self-review-as claude",
+                    block,
+                    f"{name}: a --self-review invocation must declare this session's brand",
+                )
+
+    def test_both_documents_route_a_refusal_back_to_the_nested_spawn(self):
+        for name in ("pr-review", "pr-rereview"):
+            text = self._doc(name)
+            self.assertIn("self_review_refused", text, f"{name} must handle the refusal status")
+            self.assertIn(
+                "own origin brand",
+                text,
+                f"{name} must say a refusal means this session is the PR's own brand",
+            )
+
+    def test_neither_document_asserts_the_opposite_brand_premise_unconditionally(self):
+        stale = "Kanban already spawned this session as the canonical opposite-brand reviewer"
+        for name in ("pr-review", "pr-rereview"):
+            self.assertNotIn(
+                stale,
+                self._doc(name),
+                f"{name} must state the opposite-brand premise as a checked precondition",
+            )
+
+
+class SolveStopConditionScopeTests(unittest.TestCase):
+    """Issue #303: solve's stop condition ended the *run* rather than the
+    workflow, so a caller that delegated to it (an auto-solve loop owing a
+    review) stopped at PR creation. The prohibition it carries is the reason
+    that caller still has work to do, so scoping the handoff must not weaken
+    it."""
+
+    def test_the_review_prohibition_stays_absolute(self):
+        text = (COMMANDS_ROOT / "solve.md").read_text(encoding="utf-8")
+        self.assertIn("Do not review, label, merge, or finalize the PR.", text)
+        self.assertIn("absolute", text)
+
+    def test_the_terminal_line_is_scoped_to_the_workflow(self):
+        text = (COMMANDS_ROOT / "solve.md").read_text(encoding="utf-8")
+        self.assertIn("ends *this workflow*", text)
+        self.assertIn("delegated", text)
+        # The unscoped spelling is what a delegating caller misread.
+        self.assertNotIn("End with exactly:", text)
+
+
 if __name__ == "__main__":
     unittest.main()

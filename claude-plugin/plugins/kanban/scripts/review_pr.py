@@ -1256,6 +1256,7 @@ def workflow(
     dry_run: bool,
     allow_no_issue: bool,
     self_review: bool = False,
+    self_review_as: str | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -1273,6 +1274,43 @@ def workflow(
         "review_mode": "standalone" if allow_no_issue else "issue-gated",
         "issue_gate": gate,
     }
+    if self_review and len(reviewers) == 1:
+        # The self-review path below hands the review to the calling session
+        # to perform itself, which is correct only when that session IS the
+        # brand this route names. This coordinator cannot observe who invoked
+        # it, so the caller declares its own brand and the declaration is
+        # checked HERE: ahead of the blocked-gate comment, the dry-run
+        # response, collect_context, and every reviewer spawn, so a refusal
+        # publishes nothing, collects nothing, and switches no label.
+        #
+        # An absent declaration is refused exactly like a mismatched one. The
+        # session this guard exists to stop -- a solver running /pr-review on
+        # the pull request it just opened -- is precisely the one that would
+        # otherwise inherit the old unchecked default and self-review its own
+        # work under the opposite brand's name (issue #303).
+        #
+        # An unknown or external origin routes to both brands, where
+        # --self-review stays non-operative as it always has: one session
+        # cannot review as both, so it falls through to the nested dual spawn
+        # rather than being refused here.
+        reviewer = reviewers[0]
+        if self_review_as != reviewer.key:
+            problem = (
+                "--self-review requires --self-review-as <brand> declaring the calling "
+                "session's own brand"
+                if self_review_as is None
+                else f"--self-review-as {self_review_as} is not the {reviewer.key} reviewer "
+                "this pull request routes to"
+            )
+            return 1, {
+                **base,
+                "status": "self_review_refused",
+                "error": (
+                    f"{problem}. A pr-origin:{origin} pull request is reviewed by "
+                    f"{reviewer.key}; omit --self-review so this coordinator spawns the "
+                    f"{reviewer.key} reviewer instead of publishing a same-brand review."
+                ),
+            }
     if not gate["approved"]:
         if dry_run:
             return 2, {**base, "status": "blocked", "comment_status": "dry-run"}
@@ -1465,7 +1503,18 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For a single known-brand reviewer, return review context for the calling agent to "
             "review with directly instead of spawning a nested, unpinned reviewer. Use only when "
-            "this session is itself the canonical reviewer Kanban already spawned as."
+            "this session is itself the canonical reviewer Kanban already spawned as, and declare "
+            "that with --self-review-as; without a matching declaration the request is refused."
+        ),
+    )
+    parser.add_argument(
+        "--self-review-as",
+        choices=("codex", "claude"),
+        metavar="BRAND",
+        help=(
+            "The calling session's own brand, required by --self-review. This coordinator cannot "
+            "observe who invoked it, so a single-reviewer route accepts --self-review only when "
+            "this brand is the one that route names; anything else is refused unpublished."
         ),
     )
     parser.add_argument(
@@ -1539,6 +1588,7 @@ def main() -> None:
                 dry_run=args.dry_run,
                 allow_no_issue=args.allow_no_issue,
                 self_review=args.self_review,
+                self_review_as=args.self_review_as,
                 config_path=args.config,
                 explicit_repo=args.repo,
             )

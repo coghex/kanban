@@ -150,6 +150,21 @@ arithmetic, which §2.3 owns.
   on, and brand routing, model selection, and preflight all read it. Which of
   the four the `r` key selects is §7 of `docs/design.md`; `repair`'s own
   behavior is §2.7 below.
+- **Who may self-review:** the bundled coordinator's `--self-review` skips the
+  nested reviewer spawn and lets the calling session review directly, which is
+  sound only when Kanban spawned that session as the opposite-brand reviewer —
+  the `pr-review`/`pr-rereview` side of the split above. The coordinator cannot
+  observe who invoked it, so the caller declares its own brand through
+  `--self-review-as` and the coordinator refuses any single-reviewer route
+  whose declaration is absent or is not the routed reviewer's brand, returning
+  `self_review_refused` having published nothing and changed no label. This is
+  the same rule §2.7 states for `repair` and `pr-revise`, which run on the
+  pull request's own origin brand and therefore never pass the flag; stating it
+  here as a checked precondition is what keeps a session that reached
+  `pr-review` on its own pull request — an auto-solve loop reviewing the PR it
+  just opened — from reviewing its own work under the opposite brand's name.
+  An unknown or external origin routes to both brands, where `--self-review`
+  stays non-operative as it always has rather than being refused.
 - **Inputs:** PR number, PR origin marker, action
   (`PullRequestReview` | `PullRequestRereview` | `PullRequestRevision` |
   `PullRequestRepair`),

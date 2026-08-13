@@ -5,7 +5,7 @@ description: Run the canonical issue-gated review for one GitHub pull request, r
 
 # Review Pull Request
 
-Require one positive PR number. Kanban already spawned this session as the canonical opposite-brand reviewer — its own CLI invocation pinned this session's model before this workflow ever ran — so for the normal known-origin case you perform the review yourself; the bundled coordinator only handles safe publication. Do not independently comment, label, or compensate for the coordinator's result.
+Require one positive PR number. When Kanban's own `r` key spawned this session, it spawned it as the canonical opposite-brand reviewer — that invocation pinned this session's model before this workflow ever ran — so for the normal known-origin case you perform the review yourself and the bundled coordinator only handles safe publication. Treat that as a precondition to check, not a given: a session running on the pull request's *own* origin brand — the solver that opened it, or anything continuing that work — is not its reviewer and must let the coordinator spawn the opposite brand. Declare this session's brand with `--self-review-as codex`; the coordinator refuses a same-brand self-review outright, publishing nothing and changing no label. Do not independently comment, label, or compensate for the coordinator's result.
 
 Kanban spawns this workflow with the *reviewed* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
@@ -15,6 +15,7 @@ python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --review <pr> \
   --self-review \
+  --self-review-as codex \
   --json
 ```
 
@@ -29,6 +30,7 @@ For a blocked gate (`"status": "blocked"`), the coordinator has already posted t
 Read the returned `"status"`:
 
 - `"blocked"`: stop, per the gate section above.
+- `"self_review_refused"`: this session's declared brand is not the reviewer this pull request routes to, so it is running on the PR's own origin brand and may not review it. Nothing was published and no label changed. Rerun the same command with both `--self-review` and `--self-review-as` dropped, so the coordinator spawns the opposite-brand reviewer itself; never review it yourself instead.
 - `"awaiting_self_review"`: this is the normal known-origin case (exactly one reviewer route). Read `"instructions"` completely — it contains the full review payload (linked issue specs, PR metadata and diff, prior comments/reviews, CI) and the exact result schema to use — and perform the review yourself, using your own reasoning and tools. Do not edit files, comment, or label; write your result as a JSON file matching the given schema (`verdict`, `summary`, `blocking_concerns`), then publish it:
 
   ```bash

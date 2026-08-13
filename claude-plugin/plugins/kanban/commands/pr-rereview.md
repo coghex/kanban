@@ -5,13 +5,14 @@ argument-hint: "[PR number]"
 
 # Rereview Pull Request
 
-Require one positive PR number in `$ARGUMENTS`. Read and follow the complete `/pr-review` policy — including its self-review protocol, since Kanban already spawned this session as the canonical opposite-brand reviewer for the normal known-origin case — then use its bundled coordinator in rereview mode:
+Require one positive PR number in `$ARGUMENTS`. Read and follow the complete `/pr-review` policy — including its self-review protocol and the `--self-review-as claude` declaration gating it, which holds only where Kanban spawned this session as the canonical opposite-brand reviewer rather than on the pull request's own origin brand — then use its bundled coordinator in rereview mode:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py" \
   --path "$(git rev-parse --show-toplevel)" \
   --rereview <pr> \
   --self-review \
+  --self-review-as claude \
   --allow-no-issue \
   --json
 ```
@@ -25,6 +26,7 @@ Require a prior authenticated-user `pr-review:v1` or `pr-review:v2` comment befo
 Read the returned `"status"`, exactly as in `/pr-review`:
 
 - `"blocked"`: stop, per the gate above.
+- `"self_review_refused"`: this session's declared brand is not the reviewer this pull request routes to, so it is running on the PR's own origin brand and may not review it. Nothing was published and no label changed. Rerun the same command with both `--self-review` and `--self-review-as` dropped, so the coordinator spawns the opposite-brand reviewer itself; never review it yourself instead.
 - `"awaiting_self_review"` (the normal known-origin case): read `"instructions"` completely. It gives you the prior comments and requires you to verify every previous blocker against the current head as well as inspect the complete current change for regressions and new blockers. Perform the rereview yourself, write your result as a JSON file matching the given schema, then publish it:
 
   ```bash
