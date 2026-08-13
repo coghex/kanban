@@ -206,11 +206,12 @@ actually spawns:
   with the opposite brand, so it needs both brands.
 - **PR review and rereview** run on the opposite brand from the PR's origin
   marker and are themselves the canonical reviewer, so they need that
-  brand's CLI and bundle. **PR revise** runs on the PR's *own* brand and
-  then hands off to exactly one canonical rereview by spawning the opposite
-  brand from inside that session, so it also needs that brand's CLI and
+  brand's CLI and bundle. **PR revise** and **repair** run on the PR's *own*
+  brand — each needs that brand's CLI, sign-in, and bundle — and then hand
+  off to exactly one canonical rereview by spawning the opposite brand from
+  inside that session, so each also needs that brand's CLI and
   sign-in — but not its bundle, since the nested call is a direct
-  `codex exec` / `claude -p`. All three additionally need the
+  `codex exec` / `claude -p`. All four additionally need the
   `issue-review` backend: the bundled coordinator runs its read-only
   `--check` gate against the PR's linked issue before publishing any
   verdict.
