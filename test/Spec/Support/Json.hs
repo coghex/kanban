@@ -30,6 +30,8 @@ module Spec.Support.Json
     versionTwoCacheFile,
     versionThreeCacheFile,
     versionFourCacheFile,
+    graphqlPageWithRateLimit,
+    rateLimitedGraphqlResponse,
     checkRunJson,
     codexRateLimitResponse,
     codexWeeklyOnlyResponse,
@@ -59,6 +61,25 @@ emptyGraphqlPage =
         <> fixtureRepositoryIdentity
         <> "\",\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
     )
+
+-- | The same smallest accepted page with GitHub's rate report beside it. The
+-- argument is the @rateLimit@ field's own body verbatim, so one fixture
+-- covers a complete report, a partial one, an implausible one, and @null@.
+graphqlPageWithRateLimit :: String -> ByteString.ByteString
+graphqlPageWithRateLimit rateLimit =
+  ByteString.pack
+    ( "{\"data\":{\"rateLimit\":"
+        <> rateLimit
+        <> ",\"repository\":{\"nameWithOwner\":\""
+        <> fixtureRepositoryIdentity
+        <> "\",\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}"
+    )
+
+-- | How GitHub answers a request against an exhausted primary budget: an
+-- otherwise ordinary response carrying no data and a @RATE_LIMITED@ error.
+rateLimitedGraphqlResponse :: ByteString.ByteString
+rateLimitedGraphqlResponse =
+  "{\"data\":null,\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for user ID 4242.\"}]}"
 
 githubResponse :: String
 githubResponse =

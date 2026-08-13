@@ -11,6 +11,7 @@ module Kanban.GitHub.Message
     decodeGhOutput,
     normalizeSpacing,
     partialResponseWarning,
+    primaryRateLimited,
     withGraphQLErrors,
   )
 where
@@ -23,8 +24,8 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Provider (ProviderErrorKind (..))
 
 -- | Sorts a failed @gh@ invocation onto the vocabulary section 17 renders,
--- which for this path is the choice between @AUTH REQUIRED@ and
--- @REQUEST ERROR@.
+-- which for this path is the choice between @AUTH REQUIRED@, @RATE LIMITED@
+-- and @REQUEST ERROR@.
 --
 -- The match is by phrase, and deliberately not by keyword. \"token\" alone
 -- occurs in messages that say nothing about credentials -- a rate limiter's
@@ -36,6 +37,7 @@ import Kanban.Provider (ProviderErrorKind (..))
 classifyFailure :: Text -> ProviderErrorKind
 classifyFailure message
   | any (`Text.isInfixOf` Text.toCaseFold message) authenticationPhrases = AuthenticationRequired
+  | primaryRateLimited message = RateLimited
   | otherwise = RequestFailed
 
 -- | The phrases @gh@ and the GitHub API actually use when the credentials are
@@ -53,6 +55,40 @@ authenticationPhrases =
     -- A token that is present but rejected.
     "bad credentials"
   ]
+
+-- | Whether GitHub attributed this failure to its own /primary/ rate limit.
+--
+-- The distinction earns a kind of its own because it is the only failure that
+-- comes with a remedy the scheduler can act on: the budget returns at a time
+-- GitHub reports, so the job waits rather than being reissued. That makes a
+-- false positive expensive -- a refresh held back over an unrelated error --
+-- so the match is against the phrases GitHub actually uses for the primary
+-- limit, never a bare word such as \"token\" or \"limit\".
+--
+-- The secondary limit is deliberately excluded. It is a short abuse-detection
+-- block with no reported reset, so it carries nothing to schedule against and
+-- stays an ordinary request error; excluding it first also keeps a message
+-- naming both from being read as the primary one.
+primaryRateLimited :: Text -> Bool
+primaryRateLimited message
+  | any (`Text.isInfixOf` folded) secondaryRateLimitPhrases = False
+  | otherwise = any (`Text.isInfixOf` folded) primaryRateLimitPhrases
+  where
+    folded = Text.toCaseFold message
+
+-- | The phrases GitHub and @gh@ use when the primary rate limit is what
+-- refused the request, already case-folded.
+primaryRateLimitPhrases :: [Text]
+primaryRateLimitPhrases =
+  [ -- The REST and GraphQL bodies returned with an exhausted hourly budget.
+    "api rate limit exceeded",
+    -- GraphQL answers an exhausted budget with this error type, which travels
+    -- in the message text once a rejected page's errors are folded together.
+    "rate_limited"
+  ]
+
+secondaryRateLimitPhrases :: [Text]
+secondaryRateLimitPhrases = ["secondary rate limit"]
 
 -- | The one decoding every byte @gh@ writes goes through. GitHub's API output
 -- is UTF-8 by contract, and 'lenientDecode' means a truncated or corrupted

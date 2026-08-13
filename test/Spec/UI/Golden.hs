@@ -38,6 +38,7 @@ import Kanban.Card (displayWidth)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
+import Kanban.GitHub (RefreshCoordinator)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
@@ -53,11 +54,13 @@ import Kanban.UI.Theme
 import Kanban.UI.Types
   ( AppEvent,
     AppState (..),
+    BoardRefreshOutcome,
     IncidentSelection (..),
     Overlay (..),
     ProcessSelection (..),
     ReviewBackend (..),
   )
+import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (itemNumber, testOptions, testResolvedConfig)
 import Spec.Support.Golden (attributeGrid, expectGolden, goldenPath)
 import Spec.Support.Render (FrameCell (..), frameRowText, renderFrameCells)
@@ -431,7 +434,8 @@ renderCase frameCase = do
   -- Nothing here writes to or reads from the channel; the application state
   -- carries one and drawing never touches it.
   channel <- newBChan 1
-  let state = frameCase.frameCaseState (restingState channel)
+  refreshCoordinator <- inertRefreshCoordinator
+  let state = frameCase.frameCaseState (restingState channel refreshCoordinator)
   pure (renderFrameCells (themeFor state.appOptions) (frameCase.frameCaseWidth, frameCase.frameCaseHeight) (drawApplication state))
 
 withOptions :: (Options -> Options) -> AppState -> AppState
@@ -439,8 +443,8 @@ withOptions change state = state {appOptions = change state.appOptions}
 
 -- | The state every case starts from: the fixture board, the fixture usage
 -- snapshots, and a resting value for everything else that can reach a frame.
-restingState :: BChan AppEvent -> AppState
-restingState channel =
+restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> AppState
+restingState channel refreshCoordinator =
   AppState
     { appRepository = Repository "/fixture/kanban" "coghex" "kanban",
       appBoard = fixtureBoard,
@@ -471,6 +475,8 @@ restingState channel =
       appDirectMergePending = Nothing,
       appDirectMergeResult = Nothing,
       appBoardRefreshQueued = False,
+      appRefreshCoordinator = refreshCoordinator,
+      appQuitPending = False,
       appReviewBackend = ReviewBackendStopped,
       appReviewSessions = Map.empty,
       appSolveSessions = Map.empty,

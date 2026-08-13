@@ -50,7 +50,7 @@ import Kanban.Drainer
     DrainerObservation (..),
     DrainerStatus (..)
     )
-import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..) )
+import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), RefreshCoordinator )
 import Kanban.Process (ManagedProcess )
 import Kanban.Provider (ProviderError (..) )
 import Kanban.PullRequestFlow
@@ -397,6 +397,19 @@ data BoardRefreshOutcome
 
 data AppEvent
   = BoardRefreshFinished BoardRefreshOutcome
+  | -- | The coordinator has taken the owner for a foreground cycle, whoever
+    -- asked for it. The board records that a refresh is running so a press
+    -- arriving during one it did not start still coalesces rather than
+    -- starting a second.
+    BoardRefreshStarted
+  | -- | Background history yielded the budget reserved for foreground work,
+    -- and resumes no earlier than the moment GitHub reported.
+    BoardHistoryPaused UTCTime
+  | -- | The coordinator finished cancelling everything a quit asked it to,
+    -- carrying the cleanup verdict for whatever @gh@ it had running. Whether
+    -- the dashboard may actually stop is decided from that verdict, not from
+    -- the fact that the cancellation ran.
+    BoardRefreshShutdownFinished (Maybe GhCleanupFailure)
   | CodexRefreshFinished (Either ProviderError UsageSnapshot)
   | ClaudeRefreshFinished (Either ProviderError UsageSnapshot)
   | DrainerStatusRefreshed (Either Text DrainerObservation)
@@ -462,11 +475,22 @@ data AppState = AppState
     -- gets, and the refresh it triggers would otherwise overwrite it before
     -- it could be read.
     appDirectMergeResult :: Maybe DirectMergeReport,
-    -- | A board refresh that has to observe something already committed, and
-    -- could not start because a fetch was already in flight. That fetch may
-    -- have read GitHub before the change landed, so it does not satisfy the
-    -- request; the request waits and starts once it publishes.
+    -- | A board refresh that could not start because a cycle was already in
+    -- flight. An in-flight fetch may have read GitHub before a change this
+    -- dashboard made landed, so it does not satisfy a request that has to
+    -- observe one; and a plain @u@ during a cycle wants the newest state, not
+    -- the one already being fetched. Either way the request waits here — one
+    -- flag, so any number of presses leave exactly one follow-up — and starts
+    -- once the running cycle publishes.
     appBoardRefreshQueued :: Bool,
+    -- | The one coordinator that owns every @gh@ a board refresh starts for
+    -- this repository, its durable group record, and the order its jobs run
+    -- in (§15).
+    appRefreshCoordinator :: RefreshCoordinator BoardRefreshOutcome,
+    -- | Whether a quit is waiting for the coordinator to finish cancelling
+    -- its work. A further quit while this is set reports the wait rather than
+    -- commanding a second cancellation.
+    appQuitPending :: Bool,
     appReviewBackend :: ReviewBackend,
     appReviewSessions :: Map Int ReviewSession,
     appSolveSessions :: Map Int SolveSession,

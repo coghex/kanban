@@ -130,11 +130,13 @@ library
     Kanban.Worker
     Kanban.Workflow
   other-modules:
+    Kanban.GitHub.Coordinator
     Kanban.GitHub.Decode
     Kanban.GitHub.Fetch
     Kanban.GitHub.Group
     Kanban.GitHub.Guard
     Kanban.GitHub.Message
+    Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
     Kanban.Preflight.Environment
@@ -213,6 +215,7 @@ test-suite kanban-test
     Spec.GitHub.BoardRefresh
     Spec.GitHub.Decoding
     Spec.GitHub.PullRequestStatus
+    Spec.GitHub.RefreshCoordinator
     Spec.Repository.Identity
     Spec.Repository.State
     Spec.Support.App
