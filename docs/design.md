@@ -75,11 +75,13 @@ fixtures remain for subsequent slices.
 The automated release foundation is already present: `.github/workflows/ci.yml`
 builds and runs both test suites on Linux, `docs/development.md` defines the
 source-distribution check, and the clean-install exercise recorded in milestone
-9 has passed. As of 2026-08-12, `kanban.cabal` still declares version `0.1.0.0`,
-the repository has no tags and the remote no GitHub Releases, and `ci.yml` and
-`review-gate.yml` remain the only tracked workflows, so no release workflow
-exists yet. Open epic #268 now owns this release-readiness arc; closed issue
-#203 covers the source distribution rather than these manual gates. The
+9 has passed. As of 2026-08-13, `kanban.cabal` and `src/Kanban/CLI.hs` both
+declare version `1.0.0.0` — established by #283 under packaging epic #282,
+along with the root `CHANGELOG.md` whose top section is the first release's
+notes — while the repository has no tags and the remote no GitHub Releases, and
+`ci.yml` and `review-gate.yml` remain the only tracked workflows, so no release
+workflow exists yet. Open epic #268 now owns this release-readiness arc; closed
+issue #203 covers the source distribution rather than these manual gates. The
 document classification that gated publication is in place: PR #227 (commit
 518a3de) added `docs/document_workflow_findings.md` to
 `EXCLUDED_TRACKED_PATHS` in `tools/test_source_distribution.py`, and PR #232
@@ -2385,10 +2387,13 @@ drainer loaded, and "usable first frame" means the GitHub-populated board.
 
 ### D-5. The first release is version 1.0.0.0 and GitHub-only
 
-The release commit updates Kanban's package version to `1.0.0.0`. Publication
-creates a GitHub Release for tag `v1.0.0.0`. The `v` prefix distinguishes the
-Git tag from the bare package-version value; a bare `1.0.0.0` tag was considered
-but rejected in favor of that conventional distinction. Hackage or another
+Kanban's first release is package version `1.0.0.0`. Since 2026-08-13 that
+version is established ahead of publication — #283, under packaging epic #282,
+set it in `kanban.cabal` and `src/Kanban/CLI.hs` — so the release commit carries
+it rather than updating it. Publication creates a GitHub Release for tag
+`v1.0.0.0`. The `v` prefix distinguishes the Git tag from the bare
+package-version value; a bare `1.0.0.0` tag was considered but rejected in
+favor of that conventional distinction. Hackage or another
 package registry, binary installers, and distribution through any channel other
 than GitHub are outside the first-release arc.
 
@@ -2697,23 +2702,25 @@ for release and verify the published tag and GitHub Release resolve to it.
 > any of them changes this slice's scope before it can start.
 >
 > Two things to settle when this slice is reprocessed. First, it does not fit one
-> pull request: a PR can bump `kanban.cabal` and `src/Kanban/CLI.hs:111`, but the
-> `v1.0.0.0` tag and the GitHub Release are post-merge operations against master,
-> which `tools/drain_prs.py` merges. Second, the user ruled on 2026-08-12 that a
-> solver agent may create the tag and Release itself, with the issue as its
-> authorization, once every gate has passed and required CI (`build-test` and
-> `review-approved`) is green on the release commit. That ruling still needs a
-> `/design-epic` pass to become a numbered decision, since D-3 and D-5 say what
-> publication is but not who performs it.
+> pull request at all: #283 established the package version and the changelog
+> under packaging epic #282, so no code change remains for a PR to carry, and
+> the `v1.0.0.0` tag and the GitHub Release are post-merge operations against
+> master, which `tools/drain_prs.py` merges. Second, the user ruled on
+> 2026-08-12 that a solver agent may create the tag and Release itself, with
+> the issue as its authorization, once every gate has passed and required CI
+> (`build-test` and `review-approved`) is green on the release commit. That
+> ruling still needs a `/design-epic` pass to become a numbered decision, since
+> D-3 and D-5 say what publication is but not who performs it.
 
 - **Outcome:** Kanban version `1.0.0.0` has a GitHub Release whose tag points to
   the exact required-CI-passing commit containing accepted evidence for every
   manual gate.
-- **Scope:** Update the package version to `1.0.0.0` in both places that carry
-  it — `kanban.cabal` and `src/Kanban/CLI.hs:111`'s hard-coded
-  `"kanban 0.1.0.0"` — apply the chosen tag convention, make any required
-  release-metadata or operator-documentation update, verify the release commit,
-  and publish its GitHub Release.
+- **Scope:** Verify that the already-established package version is `1.0.0.0` in
+  both places that carry it — `kanban.cabal` and `src/Kanban/CLI.hs`'s
+  hard-coded `"kanban 1.0.0.0"`, which #283 set under packaging epic #282 and
+  which `tools/test_version_consistency.py` holds to agreeing — apply the chosen
+  tag convention, make any required release-metadata or operator-documentation
+  update, verify the release commit, and publish its GitHub Release.
 - **Phase:** 2 — publication.
 - **Depends on:** `REL-1`, `REL-2`, `REL-3`.
 - **Ordering:** `critical path`.
@@ -2723,6 +2730,7 @@ for release and verify the published tag and GitHub Release resolve to it.
   published identifier resolves to that commit, and the installed executable
   reports `1.0.0.0` from both `--version` and `kanban.cabal`.
 - **Out of scope:** Package-registry publication, binary installers, and
-  non-GitHub distribution. Deduplicating the two version literals into one
-  source; this slice only has to make them agree.
+  non-GitHub distribution. Establishing the package version or the changelog,
+  both of which #283 delivered ahead of this slice; deduplicating the two
+  version literals into one source, which that issue also left undone.
 - **Open questions:** `None`.

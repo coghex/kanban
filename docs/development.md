@@ -45,6 +45,20 @@ the explicit switch and read the resulting diff before committing it:
 KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 ```
 
+## Changing the version
+
+The package version is written twice: `kanban.cabal`'s `version:` field and the
+hard-coded `infoOption "kanban <version>"` literal in `src/Kanban/CLI.hs`.
+`tools/test_version_consistency.py` fails when they disagree, so a bump has to
+change both in the same commit. It pins the literal's shape as well as its
+digits — rewording or splitting the string fails the check rather than passing
+it unchecked — and it fails closed when either literal cannot be read at all.
+Deduplicating the two into one source is deliberately not done yet.
+
+Record the release under a `##` heading in `CHANGELOG.md` whose text is exactly
+the new version. That heading is the section boundary the release notes are
+extracted by, so nothing else delimits a release.
+
 ## Source release
 
 The source distribution is meant to be a complete Kanban checkout, so that
