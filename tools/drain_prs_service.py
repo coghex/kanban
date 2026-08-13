@@ -971,8 +971,11 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     read as a complete one. Versions 1 and 2 are unknown rather than empty
     because they predate durable cleanup records, so an entry either left
     behind can be a merged pull request whose obligations have not been
-    reconstructed yet. Version 3 is read like version 4 because the two carry
-    the same records; see DRAIN_STATE_CLEANUP_VERSIONS.
+    reconstructed yet. Version 3 is read like the current version because the
+    two carry the same records; see DRAIN_STATE_CLEANUP_VERSIONS. Their
+    active-candidate lanes differ, and only the current version's is checked:
+    migration overwrites a version 3 lane with null before validating it, so
+    whatever one carries, the drainer can still use the file.
 
     A document the drainer's own `migrate_drain_state` would refuse is
     unknown too, checked here in the same order and never by calling it: that
@@ -992,6 +995,18 @@ def cleanup_obligations(repo_path: Path) -> list[dict[str, Any]] | None:
     # all -- whatever its `prs` table appears to say about debt.
     if not is_plain_integer(state.get("attempt_counter", 0)):
         return None
+    # The queue's active-candidate lane, defaulted to null and otherwise
+    # required to be a positive pull-request number. A document failing that
+    # is one `migrate_drain_state` refuses outright, so its `prs` table says
+    # nothing this can report as verified-empty debt. No membership check
+    # against that table goes with it: the lane names a candidate drawn from
+    # the eligible pull requests, not an entry, and the drainer does not
+    # require one -- being stricter here would divide the two sides again in
+    # the other direction.
+    if state.get("version") == DRAIN_STATE_VERSION:
+        active = state.get("active_pr")
+        if active is not None and (not is_plain_integer(active) or active <= 0):
+            return None
     owed: list[dict[str, Any]] = []
     for key, entry in entries.items():
         number = pull_request_key(key)
