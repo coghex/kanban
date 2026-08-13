@@ -66,9 +66,7 @@ fixtureSnapshot =
           -- is red, and nothing else here is pending.
           pullRequest 861 "Adopt the envelope in the snapshot loader" "Reads the cache through the versioned envelope and reports a truncated payload." [label "reviewed:approve" "2f9e44", label "feature" "a2eeef"] False [901] ReviewApproved MergeBehind (ChecksPending 9 12 [CheckDetail "integration-suite" CheckPending])
         ],
-      snapshotFetchedAt = at 12 0,
-      snapshotIssuesTruncated = False,
-      snapshotPullRequestsTruncated = False
+      snapshotFetchedAt = at 12 0
     }
 
 -- | A tracker issue: the @epic@ label 'defaultWorkflowConfig' recognizes, and

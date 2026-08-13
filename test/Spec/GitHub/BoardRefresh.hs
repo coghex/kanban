@@ -6,11 +6,9 @@ import Control.Monad (void)
 import Data.Aeson (eitherDecode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Data.List (intercalate)
 import Data.Maybe (isJust)
 import qualified Data.Text
 import Kanban.Cache (ghGroupRecordPath, writeGhGroupRecord)
-import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub
   ( FetchState (..),
@@ -46,6 +44,8 @@ import Spec.Support.Json
     emptyClosingIssuesJson,
     emptyGraphqlPage,
     emptyLabelsJson,
+    emptySubIssuesJson,
+    githubIndependentPage,
     githubPageWithErrors,
     issueNodeJson,
     pullRequestNodeJson
@@ -261,11 +261,11 @@ spec = do
                 Nothing
                 [issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]]
                 [pullRequestNodeJson 10 [emptyLabelsJson, emptyClosingIssuesJson]]
-            initialState = FetchState [] [] Nothing Nothing True True False False True []
+            initialState = FetchState [] [] Nothing Nothing True True True []
         decodedFirstPage <- case eitherDecode (LazyByteString.pack firstPage) of
           Left message -> fail ("undecodable fixture page: " <> message)
           Right page -> pure page
-        secondPageState <- case advanceState defaultLimitsConfig initialState decodedFirstPage of
+        secondPageState <- case advanceState initialState decodedFirstPage of
           Left providerError -> fail ("fixture page unexpectedly failed to advance: " <> show providerError)
           Right state -> pure state
         outcome <-
@@ -294,32 +294,85 @@ spec = do
                 (filter (not . ByteString.null) (ByteString.split '\RS' recordedBytes))
         case invocations of
           [firstArgv, secondArgv] -> do
-            firstArgv `shouldBe` graphqlArguments defaultLimitsConfig repository initialState
-            secondArgv `shouldBe` graphqlArguments defaultLimitsConfig repository secondPageState
+            firstArgv `shouldBe` graphqlArguments repository initialState
+            secondArgv `shouldBe` graphqlArguments repository secondPageState
           other -> expectationFailure ("expected exactly two recorded gh invocations, got " <> show (length other))
 
-    -- The pull-request cap is 100, equal to the page size, so a single full
-    -- page reaching it truncates immediately without needing a second
-    -- fetch -- the exact shape a capped connection takes in production.
-    it "reports the pull-request truncation fields and warning once a connection reaches its configured cap" $
+    -- The retired caps were 250 open issues and 100 open pull requests, so
+    -- both connections here are deliberately longer than that: 251 issues
+    -- over three pages and 101 pull requests over two. The pull requests
+    -- finish first, which is the ordinary shape of an uncapped traversal --
+    -- the last page asks for issues alone, and publication waits for it.
+    it "follows both open connections past the retired caps to their final pages" $
       withTemporaryCacheRoot $ \temporaryRoot -> do
-        let cappedPullRequestNodes = intercalate "," [pullRequestNodeJson number [emptyLabelsJson, emptyClosingIssuesJson] | number <- [1 .. 100]]
-            cappedPage =
-              "{\"data\":{\"repository\":{"
-                <> "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},"
-                <> "\"pullRequests\":{\"nodes\":["
-                <> cappedPullRequestNodes
-                <> "],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"more\"}}"
-                <> "}}}"
-        withFakeGh temporaryRoot ["printf '%s' '" <> ByteString.pack cappedPage <> "'"] $ do
-          (outcome, _) <- captureBoardRefresh temporaryRoot 30
-          case outcome of
-            BoardRefreshCompleted (Right githubResult) -> do
-              githubResult.githubSnapshot.snapshotPullRequestsTruncated `shouldBe` True
-              githubResult.githubSnapshot.snapshotIssuesTruncated `shouldBe` False
-              length githubResult.githubSnapshot.snapshotPullRequests `shouldBe` 100
-              githubResult.githubWarnings `shouldBe` ["100+ open pull requests; board is truncated"]
-            other -> expectationFailure ("expected a truncated snapshot, got " <> show other)
+        let pageCounter = temporaryRoot </> "page.count"
+            -- Complete nodes, sub-issue answer included, so the only thing the
+            -- banner could possibly report is the traversal itself.
+            issueNodes numbers = [issueNodeJson number [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson] | number <- numbers]
+            pullRequestNodes numbers = [pullRequestNodeJson number [emptyLabelsJson, emptyClosingIssuesJson] | number <- numbers]
+            pages =
+              [ githubIndependentPage (Just (issueNodes [1 .. 100], Just "i1")) (Just (pullRequestNodes [1 .. 100], Just "p1")),
+                githubIndependentPage (Just (issueNodes [101 .. 200], Just "i2")) (Just (pullRequestNodes [101 .. 101], Nothing)),
+                -- Pull requests are done, so the query stops asking for them
+                -- and the page comes back without that connection at all.
+                githubIndependentPage (Just (issueNodes [201 .. 251], Nothing)) Nothing
+              ]
+        mapM_
+          (\(index, page) -> writeFile (temporaryRoot </> ("page." <> show index <> ".json")) page)
+          (zip [1 :: Int ..] pages)
+        withFakeGh
+          temporaryRoot
+          [ ByteString.pack ("page=$(cat " <> pageCounter <> " 2>/dev/null || echo 0)"),
+            "page=$((page + 1))",
+            ByteString.pack ("printf '%s' \"$page\" > " <> pageCounter),
+            ByteString.pack ("cat " <> temporaryRoot <> "/page.$page.json")
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 30
+            case outcome of
+              BoardRefreshCompleted (Right githubResult) -> do
+                map (.issueNumber) githubResult.githubSnapshot.snapshotIssues `shouldBe` [1 .. 251]
+                map (.pullRequestNumber) githubResult.githubSnapshot.snapshotPullRequests `shouldBe` [1 .. 101]
+                -- Nothing about a complete traversal is worth warning over.
+                githubResult.githubWarnings `shouldBe` []
+              other -> expectationFailure ("expected every open item, got " <> show other)
+            readMarkerPid pageCounter `shouldReturn` 3
+
+    -- A page finishing inside the budget is what the deadline is about, not a
+    -- traversal finishing inside it: every page here answers well within the
+    -- configured timeout while the whole fetch takes comfortably longer than
+    -- one such interval, and it must still publish.
+    it "bounds each page by the configured timeout rather than the whole multi-page traversal" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let pageCounter = temporaryRoot </> "page.count"
+            pages =
+              [ githubIndependentPage
+                  (Just ([issueNodeJson 41 [emptyLabelsJson, emptyAssigneesJson]], Just "i1"))
+                  (Just ([], Nothing)),
+                githubIndependentPage
+                  (Just ([issueNodeJson 42 [emptyLabelsJson, emptyAssigneesJson]], Nothing))
+                  Nothing
+              ]
+        mapM_
+          (\(index, page) -> writeFile (temporaryRoot </> ("page." <> show index <> ".json")) page)
+          (zip [1 :: Int ..] pages)
+        withFakeGh
+          temporaryRoot
+          [ ByteString.pack ("page=$(cat " <> pageCounter <> " 2>/dev/null || echo 0)"),
+            "page=$((page + 1))",
+            ByteString.pack ("printf '%s' \"$page\" > " <> pageCounter),
+            -- Two seconds each, under a three-second budget; four seconds
+            -- together, over it. A whole-traversal deadline fails this.
+            "sleep 2",
+            ByteString.pack ("cat " <> temporaryRoot <> "/page.$page.json")
+          ]
+          $ do
+            (outcome, _) <- captureBoardRefresh temporaryRoot 3
+            case outcome of
+              BoardRefreshCompleted (Right githubResult) ->
+                map (.issueNumber) githubResult.githubSnapshot.snapshotIssues `shouldBe` [41, 42]
+              other -> expectationFailure ("expected the slow-but-answering traversal to publish, got " <> show other)
+            readMarkerPid pageCounter `shouldReturn` 2
 
     -- The output is read as bytes and decoded once, leniently, as UTF-8, so a
     -- response GitHub truncated mid-character is a page with a replacement

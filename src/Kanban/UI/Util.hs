@@ -230,9 +230,11 @@ unknownAssigneesText, unknownLinksText :: Text
 unknownAssigneesText = "assignees unknown"
 unknownLinksText = "LINKS UNKNOWN"
 
-countedSource :: Text -> Int -> Bool -> Text
-countedSource noun count truncated =
-  showText count <> (if truncated then "+" else "") <> " " <> noun <> if count == 1 then "" else "s"
+-- | How many of something a refresh brought back. The count is exact: both
+-- open connections are followed to their final page, so there is no cap for a
+-- @+@ to stand for (§13).
+countedSource :: Text -> Int -> Text
+countedSource noun count = showText count <> " " <> noun <> if count == 1 then "" else "s"
 
 -- | The row a column has remembered. It indexes whatever that column is
 -- showing, which under a live search is the filtered view

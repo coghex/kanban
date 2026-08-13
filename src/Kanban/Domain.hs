@@ -329,12 +329,15 @@ newtype Board = Board {boardColumns :: Map BoardColumn [ColumnEntry]}
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | One complete open generation: every open issue and every open pull
+-- request the repository had, with no top-level connection left unfollowed.
+-- There is nothing to say about truncation because there is no cap to reach
+-- (§13); the nested @+N@ overflow markers are item-local and live on the
+-- items themselves.
 data RepoSnapshot = RepoSnapshot
   { snapshotIssues :: [Issue],
     snapshotPullRequests :: [PullRequest],
-    snapshotFetchedAt :: UTCTime,
-    snapshotIssuesTruncated :: Bool,
-    snapshotPullRequestsTruncated :: Bool
+    snapshotFetchedAt :: UTCTime
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

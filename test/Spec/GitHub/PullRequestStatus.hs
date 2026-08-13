@@ -51,7 +51,7 @@ spec = do
     it "reorders standalone board entries when amber blocking severity drops a blocked PR out of the problem bucket" $ do
       let blocked = (basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]) {pullRequestCreatedAt = addUTCTime 3600 epoch}
           neutral = basePullRequest 11 [] False []
-          snapshot = RepoSnapshot [] [blocked, neutral] epoch False False
+          snapshot = RepoSnapshot [] [blocked, neutral] epoch
           Board redColumns = deriveBoard defaultWorkflowConfig snapshot
           amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
           Board amberColumns = deriveBoard amberConfig snapshot
@@ -73,7 +73,7 @@ spec = do
               }
           blockedPr = basePullRequest 10 [1] False [Label "reviewed:changes" "ff0000"]
           neutralPr = basePullRequest 11 [2] False []
-          snapshot = RepoSnapshot [blockedTracker, neutralTracker, baseIssue 1 [], baseIssue 2 []] [blockedPr, neutralPr] epoch False False
+          snapshot = RepoSnapshot [blockedTracker, neutralTracker, baseIssue 1 [], baseIssue 2 []] [blockedPr, neutralPr] epoch
           Board redColumns = deriveBoard defaultWorkflowConfig snapshot
           amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
           Board amberColumns = deriveBoard amberConfig snapshot
@@ -113,7 +113,7 @@ spec = do
     it "lets a configured approval label change Done-column membership" $ do
       let config = defaultWorkflowConfig {approvalLabel = "lgtm"}
           pullRequest = basePullRequest 10 [] False [Label "lgtm" "00ff00"]
-          snapshot = RepoSnapshot [] [pullRequest] epoch False False
+          snapshot = RepoSnapshot [] [pullRequest] epoch
           Board customColumns = deriveBoard config snapshot
           Board defaultColumns = deriveBoard defaultWorkflowConfig snapshot
       map itemNumber (map entryItem (Map.findWithDefault [] Done customColumns)) `shouldBe` [10]

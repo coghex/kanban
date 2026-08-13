@@ -5,7 +5,6 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text
-import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub (snapshotWarnings)
 import Kanban.Tracker
@@ -45,20 +44,20 @@ spec = do
   -- the header itself has to carry every interaction §12 and §17 promise.
   describe "zero-child tracker headers" $ do
     it "is a keyboard focus target with no epic expanded" $ do
-      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch False False)
+      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch)
       visibleSelectionRows Set.empty board Issues `shouldBe` [0, 1]
       normalizeCollapsedRow Set.empty board Issues 0 `shouldBe` 0
 
     it "draws amber while a tracker that parsed cleanly keeps the ordinary accent" $ do
-      let Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch False False)
+      let Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch)
       case Map.findWithDefault [] Issues columns of
         [TrackerHeader rendered] -> trackerHeaderAttribute rendered `shouldBe` pendingAttr
         entries -> expectationFailure ("unexpected issue entries: " <> show entries)
       trackerHeaderAttribute (fixtureTracker 100) `shouldBe` trackerAttr
 
     it "keeps its details overlay open across a refresh while the tracker issue stays open" $ do
-      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch False False)
-          closed = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] epoch False False)
+      let board = deriveBoard defaultWorkflowConfig (RepoSnapshot [zeroChildTracker] [] epoch)
+          closed = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [] epoch)
           overlay = Just (DetailsOverlay (IssueItem zeroChildTracker))
       refreshOverlay board overlay `shouldBe` (overlay, Nothing)
       refreshOverlay closed overlay `shouldBe` (Nothing, Just "Details closed because that item is no longer open")
@@ -70,7 +69,7 @@ spec = do
     it "lists the diagnostics the derived tracker retained rather than a re-parse" $ do
       let config = defaultWorkflowConfig {trackerLabels = Set.singleton "tracker"}
           tracker = zeroChildTracker {issueLabels = [Label "tracker" "5319e7"]}
-          board = deriveBoard config (RepoSnapshot [tracker] [] epoch False False)
+          board = deriveBoard config (RepoSnapshot [tracker] [] epoch)
       detailsRows (renderDetails board (IssueItem tracker)) "Tracker warnings"
         `shouldBe` map (("• " <>) . renderTrackerDiagnostic) zeroChildDiagnostics
 
@@ -79,7 +78,7 @@ spec = do
   -- assertions below are about those two boundaries and the diagnostics that
   -- must stop being drawn once the second source answers.
   describe "native sub-issue membership" $ do
-    let board issues pullRequests = deriveBoard defaultWorkflowConfig (RepoSnapshot issues pullRequests epoch False False)
+    let board issues pullRequests = deriveBoard defaultWorkflowConfig (RepoSnapshot issues pullRequests epoch)
         issueColumn (Board columns) = Map.findWithDefault [] Issues columns
         trackerOf (Tracked tracking _) = Just tracking.trackingPrimary.membershipTracker
         trackerOf (TrackerHeader tracker) = Just tracker
@@ -166,7 +165,7 @@ spec = do
           rendered.trackerDiagnostics `shouldBe` []
         rendered -> expectationFailure ("unexpected trackers: " <> show rendered)
       -- The card still says the answer was incomplete.
-      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch False False)
+      snapshotWarnings defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch)
         `shouldSatisfy` any (Data.Text.isInfixOf "Issue #700: incomplete data")
 
     -- An answer that never arrived is an unverified absence. Reporting it as
@@ -179,7 +178,7 @@ spec = do
                 issueDataGaps = [SubIssuesUnavailable]
               }
       trackerDiagnosticsForIssue defaultWorkflowConfig tracker `shouldBe` []
-      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+      snapshotWarnings defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
         `shouldSatisfy` any (Data.Text.isInfixOf "Issue #700: incomplete data")
 
     -- Suppression is narrow: it removes the two diagnostics that say there is
@@ -199,7 +198,7 @@ spec = do
     it "stops warning at every diagnostic surface once native membership answers" $ do
       let native = nativeTrackerIssue 700 [localSubIssue 10 False] 0 1
           checklistless = (baseIssue 700 []) {issueLabels = [Label "epic" "5319e7"], issueBody = "Background only, with no child list."}
-          bannerFor tracker = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch False False)
+          bannerFor tracker = snapshotWarnings defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 10 []] [] epoch)
           cardRowsFor tracker = cardInterior (renderCard testOptions False (Standalone (IssueItem tracker)) 46)
           overlayRowsFor tracker = detailsRows (renderDetails (board [tracker, baseIssue 10 []] []) (IssueItem tracker)) "Tracker warnings"
           missingChecklists = Data.Text.isInfixOf "malformed or missing child checklists"
@@ -285,7 +284,7 @@ spec = do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #2 — A1: Valid\n- [?] #3 — A2: Malformed"
               }
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 2 [], baseIssue 3 []] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker, baseIssue 2 [], baseIssue 3 []] [] epoch)
           entries = Map.findWithDefault [] Issues columns
       entries `shouldSatisfy` any (isStandaloneIssue 3)
 
@@ -293,7 +292,7 @@ spec = do
       let body = "## Context\n- [ ] #2 — A1: Not authoritative"
           tracker = (baseIssue 100 []) {issueLabels = [Label "epic" "5319e7"], issueBody = body}
       snd (parseTrackerBody [] body) `shouldBe` [TrackerSectionMissing]
-      snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+      snapshotWarnings defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
         `shouldSatisfy` any (Data.Text.isInfixOf "1 tracker")
 
     it "recognizes a configured additional tracker-section heading" $ do

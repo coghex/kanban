@@ -3,19 +3,25 @@ module Kanban.UI.Reconcile
     applyBoardRefresh,
     applyClaudeRefresh,
     applyCodexRefresh,
+    currentOpenGeneration,
+    failureFreshness,
+    reconcilePullRequestSessions,
     reconcileReviewSessions,
+    refreshSuccessNotice,
     unverifiedRefreshNotice,
   )
 where
 
 
 import Brick
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time (UTCTime)
 import Kanban.Cache
   ( writeUsageCache
   )
@@ -46,8 +52,34 @@ import Kanban.UI.Solve
 import Kanban.UI.PullRequest
 import Kanban.UI.Worker
 
-applyBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
-applyBoardRefresh outcome = do
+-- | Applies one open generation's outcome, or drops it.
+--
+-- An outcome older than the newest generation this board has seen start is
+-- discarded whole: not applied partially, not merged, not allowed to move the
+-- freshness. The board it would have replaced belongs to the generation that
+-- superseded it, and a superseded answer arriving late is one nobody is
+-- waiting for (§15). Everything below therefore runs only for the current
+-- generation, which is what makes a publication atomic as well as ordered —
+-- selection, overlay, sessions, and notice all move together or not at all.
+applyBoardRefresh :: OpenGeneration -> BoardRefreshOutcome -> EventM Name AppState ()
+applyBoardRefresh generation outcome = do
+  current <- get
+  when (currentOpenGeneration current.appOpenGeneration generation) (applyCurrentBoardRefresh outcome)
+
+-- | Whether an outcome arriving under @arriving@ is still the answer the
+-- board is waiting for, given that @newest@ is the newest generation it has
+-- seen start.
+--
+-- The whole of requirement 9's ordering rule, as one total decision the arm
+-- above only projects. It is @>=@ rather than @==@ deliberately: a request
+-- that expired without ever starting is answered under an identity no
+-- 'BoardRefreshStarted' announced, and that answer is owed to the caller just
+-- as much as a fetched one.
+currentOpenGeneration :: OpenGeneration -> OpenGeneration -> Bool
+currentOpenGeneration newest arriving = arriving >= newest
+
+applyCurrentBoardRefresh :: BoardRefreshOutcome -> EventM Name AppState ()
+applyCurrentBoardRefresh outcome = do
   before <- get
   -- Which result was selected before the refresh, so a live query can be
   -- re-run against the new board and still keep that card selected. Read
@@ -64,13 +96,13 @@ applyBoardRefresh outcome = do
     BoardRefreshUnverified failure
       | GuardRecorded <- failure.ghCleanupGuard ->
           state
-            { appBoardFreshness = failureFreshness state (unverifiedProviderError failure),
+            { appBoardFreshness = failureFreshness state.appLastSuccessfulFetch (unverifiedProviderError failure),
               appNotice = Just (unverifiedRefreshNotice failure)
             }
       | otherwise -> state {appNotice = Just (unverifiedRefreshNotice failure)}
     BoardRefreshCompleted (Left providerError) ->
       state
-        { appBoardFreshness = failureFreshness state providerError,
+        { appBoardFreshness = failureFreshness state.appLastSuccessfulFetch providerError,
           appNotice = Just (renderProviderError providerError)
         }
     BoardRefreshCompleted (Right githubResult) ->
@@ -90,8 +122,6 @@ applyBoardRefresh outcome = do
               appPullRequestReviewSessions = refreshedPullRequestSessions,
               appBoardFreshness = Fresh snapshot.snapshotFetchedAt,
               appLastSuccessfulFetch = Just snapshot.snapshotFetchedAt,
-              appIssuesTruncated = snapshot.snapshotIssuesTruncated,
-              appPullRequestsTruncated = snapshot.snapshotPullRequestsTruncated,
               appNotice = Just (maybe successNotice (<> (" · " <> successNotice)) overlayNotice)
             }
   -- The query is re-run against the new board by 'entriesFor' itself; what
@@ -211,10 +241,18 @@ usageFailureFreshness provider state providerError = case Map.lookup provider st
     UnsupportedVersion -> Unsupported providerError.providerErrorMessage
     _ -> Unavailable providerError.providerErrorMessage
 
-failureFreshness :: AppState -> ProviderError -> Freshness
-failureFreshness state providerError = case state.appLastSuccessfulFetch of
-  Just fetchedAt -> Stale fetchedAt providerError.providerErrorMessage
-  Nothing -> Unavailable providerError.providerErrorMessage
+-- | Where a failed board refresh leaves the freshness: 'Stale' over the last
+-- complete generation, or 'Unavailable' when none has ever published.
+--
+-- The classified rendering is what is stored rather than the bare message,
+-- because 'Unavailable' is now read back and shown: §7's centered
+-- @OPEN DATA UNAVAILABLE@ panel is the whole of what a failed first load
+-- displays, so the reason it carries has to name the kind — @AUTH REQUIRED@,
+-- @TIMED OUT@, @RATE LIMITED@ — exactly as the notice line does.
+failureFreshness :: Maybe UTCTime -> ProviderError -> Freshness
+failureFreshness lastSuccessfulFetch providerError = case lastSuccessfulFetch of
+  Just fetchedAt -> Stale fetchedAt (renderProviderErrorMessage providerError)
+  Nothing -> Unavailable (renderProviderErrorMessage providerError)
 
 renderProviderError :: ProviderError -> Text
 renderProviderError providerError =
@@ -236,9 +274,9 @@ renderProviderErrorMessage providerError =
 refreshSuccessNotice :: RepoSnapshot -> [Text] -> Text
 refreshSuccessNotice snapshot warnings =
   "GitHub refreshed · "
-    <> countedSource "issue" (length snapshot.snapshotIssues) snapshot.snapshotIssuesTruncated
+    <> countedSource "issue" (length snapshot.snapshotIssues)
     <> " · "
-    <> countedSource "PR" (length snapshot.snapshotPullRequests) snapshot.snapshotPullRequestsTruncated
+    <> countedSource "PR" (length snapshot.snapshotPullRequests)
     <> case warnings of
       [] -> ""
       values -> " · " <> Text.intercalate " · " values

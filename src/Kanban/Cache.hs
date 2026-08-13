@@ -14,7 +14,6 @@ module Kanban.Cache
     repositoryCacheSchemaVersion,
     usageCachePath,
     writeGhGroupRecord,
-    writeRepositoryCache,
     writeUsageCache,
   )
 where
@@ -126,10 +125,16 @@ instance ToJSON UsageCacheEnvelope where
 -- restoring one as though GitHub had reported no sub-issues would silently
 -- claim native membership was checked and absent -- turning a natively
 -- tracked epic back into a warned, childless header. Any older file is
--- treated as absent -- the §16 contract for an unknown schema version -- and
--- the next refresh rebuilds it.
+-- treated as absent -- the §16 contract for an unknown schema version.
+--
+-- Version 6 is the version nothing writes. Open cards are live-only (§13):
+-- the dashboard neither loads a repository snapshot at startup nor persists
+-- one afterwards. Advancing the constant is what makes a version 5 file an
+-- earlier release left behind read as absent by the gate below, rather than
+-- being decoded, rewritten, or deleted -- the file is simply never consulted
+-- again and stays exactly as it was found.
 repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
-repositoryCacheSchemaVersion = 5
+repositoryCacheSchemaVersion = 6
 usageCacheSchemaVersion = 1
 ghGroupRecordSchemaVersion = 1
 
@@ -179,6 +184,14 @@ removeGhGroupRecord repository = do
     Left exception -> Left ("gh group record could not be cleared: " <> Text.pack (show exception))
     Right () -> Right ()
 
+-- | Reads whatever repository snapshot is on disk.
+--
+-- Nothing in the dashboard calls this any more: open cards are live-only, so
+-- startup renders nothing from disk and a successful refresh persists nothing
+-- (§13). What it remains is the compatibility gate for a file an earlier
+-- release wrote — under the current 'repositoryCacheSchemaVersion' that file
+-- reads as absent, and reading it neither decodes its payload nor writes to
+-- it.
 loadRepositoryCache :: Repository -> IO CacheLoad
 loadRepositoryCache repository = do
   path <- repositoryCachePath repository
@@ -238,12 +251,6 @@ loadDecodedUsageCache value = case parse (withObject "usage cache" (.: "schemaVe
     | otherwise -> case fromJSON value :: Result UsageCacheEnvelope of
         Error message -> UsageCacheInvalid ("usage cache ignored: " <> Text.pack message)
         Success envelope -> UsageCacheLoaded envelope.usageSnapshots
-
-writeRepositoryCache :: Repository -> RepoSnapshot -> IO (Either Text ())
-writeRepositoryCache repository repoSnapshot = do
-  path <- repositoryCachePath repository
-  let envelope = CacheEnvelope repositoryCacheSchemaVersion (repositoryIdentity repository) repoSnapshot
-  writeCacheFile path envelope
 
 writeUsageCache :: Map UsageProvider UsageSnapshot -> IO (Either Text ())
 writeUsageCache snapshots = do

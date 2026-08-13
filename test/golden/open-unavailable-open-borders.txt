@@ -1,0 +1,48 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ coghex/kanban ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━ USAGE ━━━━━━━━━━
+ Codex
+ 5 hour  [██████░░░░] 63%
+         Thu 16:05
+ week    [████░░░░░░] 41%
+         Tue 09:00
+ Claude
+ 5 hour  [████████░░] 78%
+         Thu 17:30
+ week    [██░░░░░░░░] 22%
+         Sat 09:10
+
+
+
+
+
+
+
+
+                                                                       ┌────────────── OPEN DATA UNAVAILABLE ─────────────┐
+                                                                       │ AUTH REQUIRED: gh: Bad credentials (HTTP 401)    │
+                                                                       │ press u to retry                                 │
+                                                                       └──────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ┏━━━━━━━━━━━━━━┓
+ ┃ drain_prs.py ┃
+ ┗━━━━━━━━━━━━━━┛
+ off
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  e epic  enter details  esc close  r review/revise  S solve  A autosol
+ board: unavailable
+ GitHub refresh failed: AUTH REQUIRED: gh: Bad credentials (HTTP 401)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

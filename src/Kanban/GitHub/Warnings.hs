@@ -1,10 +1,15 @@
--- | The refresh banner's account of what a snapshot is missing: truncated
--- board limits, nested connections GitHub omitted, malformed tracker
--- checklists, and cards that arrived with incomplete data.
+-- | The refresh banner's account of what a snapshot is missing: nested
+-- connections GitHub omitted, malformed tracker checklists, and cards that
+-- arrived with incomplete data.
+--
+-- There is nothing here about the board being truncated. Both open
+-- connections are followed to their final page, so the only omissions left to
+-- report are item-local: a label list, an assignee list, a closing-issue
+-- reference list, or a sub-issue connection that came back capped inside an
+-- item GitHub did deliver (§13).
 --
 -- This reads a finished 'RepoSnapshot' and nothing else, which is why it is
--- not part of the fetch: the board asks the same question of a snapshot
--- restored from the last-good cache, which was never fetched in this run.
+-- not part of the fetch.
 module Kanban.GitHub.Warnings
   ( snapshotWarnings,
   )
@@ -12,18 +17,15 @@ where
 
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
 import Kanban.Tracker (trackerDiagnosticsForIssue)
 
-snapshotWarnings :: LimitsConfig -> WorkflowConfig -> RepoSnapshot -> [Text]
-snapshotWarnings limits workflowConfig snapshot =
-  [showText limits.limitsMaxOpenIssues <> "+ open issues; board is truncated" | snapshot.snapshotIssuesTruncated]
-    <> [showText limits.limitsMaxOpenPullRequests <> "+ open pull requests; board is truncated" | snapshot.snapshotPullRequestsTruncated]
-    <> [ nestedCountText nestedOverflowItems
-           <> " contain truncated labels, assignees, or linked issues; +N markers show omitted values"
-       | nestedOverflowItems > 0
-       ]
+snapshotWarnings :: WorkflowConfig -> RepoSnapshot -> [Text]
+snapshotWarnings workflowConfig snapshot =
+  [ nestedCountText nestedOverflowItems
+      <> " contain truncated labels, assignees, or linked issues; +N markers show omitted values"
+    | nestedOverflowItems > 0
+  ]
     <> [ trackerCountText malformedTrackers
            <> " have malformed or missing child checklists; amber diagnostics show the cause"
        | malformedTrackers > 0

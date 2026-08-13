@@ -7,7 +7,6 @@ import Kanban.UI.Board (cardExcerptLimit)
 import Kanban.UI.Refresh
   ( claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
-    githubRefreshTimeoutMicros,
   )
 import Kanban.UI.Util (cacheEnabled)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
@@ -24,12 +23,10 @@ spec = do
       cacheEnabled (testOptions {optionNoCache = False}) (testResolvedConfig {resolvedCache = True}) `shouldBe` True
 
   describe "configured provider timeouts and excerpt height reaching their runtime consumers" $ do
-    it "converts the configured GitHub timeout from seconds to the microseconds System.Timeout.timeout takes" $
-      githubRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 5000000
     it "converts the configured Codex timeout from seconds to microseconds" $
       codexRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 7000000
     it "converts the configured Claude timeout from seconds to microseconds" $
       claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9}) `shouldBe` 9000000
     it "passes the configured excerpt line count through to the card-rendering limit" $ do
-      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 3}) `shouldBe` 3
-      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 250 100 9}) `shouldBe` 9
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 3}) `shouldBe` 3
+      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 9}) `shouldBe` 9

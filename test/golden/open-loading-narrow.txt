@@ -1,0 +1,40 @@
+╔══════════ coghex/kanban ═════════╗
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║┌─────── LOADING OPEN DATA ──────┐║
+║│ Fetching every open issue and  │║
+║│ pull request.                  │║
+║│ The board appears once the     │║
+║│ first complete refresh         │║
+║│ publishes.                     │║
+║└────────────────────────────────┘║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║                                  ║
+║ j/↓ next  k/↑ previous  x kill   ║
+║ board: refreshing…               ║
+║ Refreshing GitHub…               ║
+╚══════════════════════════════════╝

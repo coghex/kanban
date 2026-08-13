@@ -6,6 +6,8 @@ module Kanban.UI.Board
     drawCardFrame,
     drawLiveActivity,
     footerHintLine,
+    openDataLoadingHeading,
+    openDataUnavailableHeading,
     searchFooterHintLine,
     pullRequestPhaseGlyph,
     pullRequestPhaseGlyphFor,
@@ -19,6 +21,7 @@ where
 
 import Brick
 import Brick.Widgets.Border (borderWithLabel, hBorder, hBorderWithLabel, vBorder)
+import Brick.Widgets.Center (center)
 import Brick.Widgets.Border.Style
   ( bsCornerBL,
     bsCornerBR,
@@ -175,8 +178,55 @@ usageBar state percentage =
       | state.appOptions.optionAscii = ("[", "]", "#", ".")
       | otherwise = ("[", "]", "█", "░")
 
+-- | The board body: four columns of cards, or the panel that stands in for
+-- them until a complete open generation has published.
+--
+-- The panel replaces the columns rather than being drawn over them, and that
+-- is the whole of §7's "renders no cards from any source": there is no
+-- heading to carry a count, no viewport holding a stale board underneath, and
+-- no partial page set anything could have put there. The sidebar, the footer,
+-- and every key stay exactly as they are, so @u@, @q@, @Ctrl-C@, help, and
+-- options remain operable while it is up.
 drawBoard :: AppState -> Widget Name
-drawBoard state =
+drawBoard state = case openDataView state.appLastSuccessfulFetch state.appBoardFreshness of
+  OpenDataLoading -> drawOpenDataPanel state openDataLoadingHeading loadingBody
+  OpenDataUnavailable reason -> drawOpenDataPanel state openDataUnavailableHeading (unavailableBody reason)
+  OpenDataBoard -> drawPopulatedBoard state
+  where
+    loadingBody =
+      [ txtWrap "Fetching every open issue and pull request.",
+        withAttr dimAttr (txtWrap "The board appears once the first complete refresh publishes.")
+      ]
+    unavailableBody reason =
+      [ withAttr problemAttr (txtWrap reason),
+        withAttr dimAttr (txtWrap ("press " <> actionKeyText RefreshAll <> " to retry"))
+      ]
+
+-- | The headings the two panels are recognised by. Fixed strings rather than
+-- composed ones: §7 names @OPEN DATA UNAVAILABLE@ exactly, and the golden
+-- frames are what hold both to it.
+openDataLoadingHeading, openDataUnavailableHeading :: Text
+openDataLoadingHeading = "LOADING OPEN DATA"
+openDataUnavailableHeading = "OPEN DATA UNAVAILABLE"
+
+-- | Cells the widest panel is allowed. Narrower regions simply clip it, since
+-- 'hLimit' is an upper bound; the §6 minimum column is wide enough for the
+-- longer of the two headings and its border.
+openDataPanelWidth :: Int
+openDataPanelWidth = 52
+
+drawOpenDataPanel :: AppState -> Text -> [Widget Name] -> Widget Name
+drawOpenDataPanel state heading body =
+  center
+    . hLimit openDataPanelWidth
+    . withBorderStyle (cardBorderStyle state.appOptions)
+    . borderWithLabel (withAttr headingAttr (txt (" " <> heading <> " ")))
+    . padLeftRight 1
+    . vBox
+    $ body
+
+drawPopulatedBoard :: AppState -> Widget Name
+drawPopulatedBoard state =
   BrickTypes.Widget BrickTypes.Greedy BrickTypes.Greedy $ do
     context <- BrickTypes.getContext
     let availableWidth = BrickTypes.availWidth context

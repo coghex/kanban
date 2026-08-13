@@ -26,7 +26,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (getCurrentTime)
-import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
 import Kanban.GitHub.Decode (Connection (..), GitHubPage (..), PageInfo (..))
 import Kanban.GitHub.Guard (GhFetchGuard, reclaimRecordedGhGroups, uninterruptiblyBounded)
@@ -36,6 +35,7 @@ import Kanban.GitHub.Run (GhFetchAborted (..), GhProcessFailed (..), ghFailureKi
 import Kanban.GitHub.Warnings (snapshotWarnings)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import System.Exit (ExitCode (..))
+import System.Timeout (timeout)
 
 data GitHubResult = GitHubResult
   { githubSnapshot :: RepoSnapshot,
@@ -50,8 +50,6 @@ data FetchState = FetchState
     pullRequestCursor :: Maybe Text,
     fetchMoreIssues :: Bool,
     fetchMorePullRequests :: Bool,
-    issuesTruncated :: Bool,
-    pullRequestsTruncated :: Bool,
     -- | Whether this refresh is still asking for native sub-issue
     -- relationships. A deployment whose GraphQL schema has no such fields
     -- rejects the whole query at validation time, which would fail every
@@ -65,6 +63,9 @@ data FetchState = FetchState
     fetchWarnings :: [Text]
   }
 
+-- | GitHub's own maximum for a connection page, and therefore the size every
+-- page asks for: with no configured cap to stop short of, the traversal wants
+-- the fewest requests it can make.
 pageLimit :: Int
 pageLimit = 100
 
@@ -78,8 +79,19 @@ pageLimit = 100
 -- fetch itself never changes course over a budget.
 type RateObserver = Maybe RateSample -> IO ()
 
-fetchGitHubSnapshot :: GhFetchGuard -> RateObserver -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
-fetchGitHubSnapshot guard observeRate limits workflowConfig repository = do
+-- | Fetches one complete open generation: both connections followed to their
+-- final page, published only once neither has more to give (§13).
+--
+-- @pageSeconds@ bounds one page request rather than the traversal. A
+-- repository large enough to need twenty pages is not a repository whose
+-- refresh should fail on page nineteen because the first eighteen were
+-- healthy but slow; what the deadline is there to catch is a single @gh@ that
+-- has stopped answering. Interrupting the page unwinds it through
+-- 'Kanban.GitHub.Run.runGh'\'s own verified cleanup, exactly as the whole
+-- refresh's deadline used to, so the abandoned group is dealt with before the
+-- failure is reported.
+fetchGitHubSnapshot :: GhFetchGuard -> RateObserver -> Int -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
+fetchGitHubSnapshot guard observeRate pageSeconds workflowConfig repository = do
   -- Reclaim signals process groups and then confirms what it did, so it is
   -- held to the same rule as cleanup: the refresh timer may not land between
   -- those halves. Without that, a timeout arriving mid-freeze would leave the
@@ -97,7 +109,7 @@ fetchGitHubSnapshot guard observeRate limits workflowConfig repository = do
   where
     reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
 
-    initialState = FetchState [] [] Nothing Nothing True True False False True []
+    initialState = FetchState [] [] Nothing Nothing True True True []
 
     fetchPages state
       | not state.fetchMoreIssues && not state.fetchMorePullRequests = do
@@ -107,13 +119,12 @@ fetchGitHubSnapshot guard observeRate limits workflowConfig repository = do
                   state.fetchedIssues
                   state.fetchedPullRequests
                   fetchedAt
-                  state.issuesTruncated
-                  state.pullRequestsTruncated
-          pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot <> state.fetchWarnings)))
+          pure (Right (GitHubResult repoSnapshot (snapshotWarnings workflowConfig repoSnapshot <> state.fetchWarnings)))
       | otherwise = do
-          pageResult <- fetchPage guard observeRate limits repository state
-          case pageResult of
-            Left providerError
+          timedPage <- timeout (pageSeconds * 1000000) (fetchPage guard observeRate repository state)
+          case timedPage of
+            Nothing -> pure (Left (pageTimedOut pageSeconds))
+            Just (Left providerError)
               | state.fetchSubIssues && subIssueSchemaUnsupported providerError.providerErrorMessage ->
                   fetchPages
                     state
@@ -121,9 +132,19 @@ fetchGitHubSnapshot guard observeRate limits workflowConfig repository = do
                         fetchWarnings = state.fetchWarnings <> [subIssuesUnsupportedWarning]
                       }
               | otherwise -> pure (Left providerError)
-            Right page -> case advanceState limits state page of
+            Just (Right page) -> case advanceState state page of
               Left providerError -> pure (Left providerError)
               Right nextState -> fetchPages nextState
+
+-- | What a page that outran the configured GitHub timeout reports. The
+-- wording is the one §17 already renders for a refresh that timed out, since
+-- from the board's side a page that never answered /is/ the refresh timing
+-- out.
+pageTimedOut :: Int -> ProviderError
+pageTimedOut pageSeconds =
+  ProviderError
+    RequestTimedOut
+    ("GitHub refresh timed out after " <> Text.pack (show pageSeconds) <> " seconds")
 
 -- | Whether a failed page is GitHub rejecting the sub-issue selection itself
 -- rather than failing the request for some other reason.
@@ -154,14 +175,14 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: GhFetchGuard -> RateObserver -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage guard observeRate limits repository state = do
+fetchPage :: GhFetchGuard -> RateObserver -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
+fetchPage guard observeRate repository state = do
   -- The unwritable-guard failure is deliberately not folded in with the
   -- IOExceptions below: those mean gh could not be run, while this means gh
   -- ran and was then stopped again because nothing durable could account for
   -- it. Reporting it as a missing executable would send the user looking in
   -- entirely the wrong place.
-  guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (graphqlArguments limits repository state)))
+  guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (graphqlArguments repository state)))
   -- Reported off the response body rather than off a decoded page, and for a
   -- failed request as readily as a successful one: gh prints what GitHub
   -- answered whatever the status was, and a rejected page's own report is the
@@ -231,34 +252,26 @@ fetchPage guard observeRate limits repository state = do
 -- what GitHub could not resolve. A page that fails them has a hole the
 -- decoder cannot reason about, and the same messages become the explanation
 -- for the failure instead of a warning beside data nobody should trust.
-advanceState :: LimitsConfig -> FetchState -> GitHubPage -> Either ProviderError FetchState
-advanceState limits previous page = first explainStructuralFailure $ do
+advanceState :: FetchState -> GitHubPage -> Either ProviderError FetchState
+advanceState previous page = first explainStructuralFailure $ do
   issueConnection <- requireConnection "issues" previous.fetchMoreIssues page.pageIssues
   pullRequestConnection <- requireConnection "pull requests" previous.fetchMorePullRequests page.pagePullRequests
   let newIssues = map (forgetSubIssueRequest previous.fetchSubIssues) (maybe [] (.connectionNodes) issueConnection)
       newPullRequests = maybe [] (.connectionNodes) pullRequestConnection
-      allIssues = take issueLimit (previous.fetchedIssues <> newIssues)
-      allPullRequests = take pullRequestLimit (previous.fetchedPullRequests <> newPullRequests)
-  (moreIssues, nextIssueCursor, truncatedIssues) <-
-    advanceConnection issueLimit (length allIssues) previous.fetchMoreIssues issueConnection
-  (morePullRequests, nextPullRequestCursor, truncatedPullRequests) <-
-    advanceConnection pullRequestLimit (length allPullRequests) previous.fetchMorePullRequests pullRequestConnection
+  (moreIssues, nextIssueCursor) <- advanceConnection previous.fetchMoreIssues issueConnection
+  (morePullRequests, nextPullRequestCursor) <- advanceConnection previous.fetchMorePullRequests pullRequestConnection
   pure
     FetchState
-      { fetchedIssues = allIssues,
-        fetchedPullRequests = allPullRequests,
+      { fetchedIssues = previous.fetchedIssues <> newIssues,
+        fetchedPullRequests = previous.fetchedPullRequests <> newPullRequests,
         issueCursor = nextIssueCursor,
         pullRequestCursor = nextPullRequestCursor,
         fetchMoreIssues = moreIssues,
         fetchMorePullRequests = morePullRequests,
-        issuesTruncated = previous.issuesTruncated || truncatedIssues,
-        pullRequestsTruncated = previous.pullRequestsTruncated || truncatedPullRequests,
         fetchSubIssues = previous.fetchSubIssues,
         fetchWarnings = previous.fetchWarnings <> pageWarnings
       }
   where
-    issueLimit = limits.limitsMaxOpenIssues
-    pullRequestLimit = limits.limitsMaxOpenPullRequests
     pageWarnings = [partialResponseWarning page.pageGraphQLErrors | not (null page.pageGraphQLErrors)]
     explainStructuralFailure providerError =
       providerError
@@ -290,26 +303,28 @@ requireConnection connectionName True Nothing =
       }
 requireConnection _ True connection = Right connection
 
-advanceConnection :: Int -> Int -> Bool -> Maybe (Connection item) -> Either ProviderError (Bool, Maybe Text, Bool)
-advanceConnection _ _ False _ = Right (False, Nothing, False)
-advanceConnection limit currentCount True (Just connection) =
-  paginationDecision limit currentCount pageInfo.pageHasNext pageInfo.pageEndCursor
+advanceConnection :: Bool -> Maybe (Connection item) -> Either ProviderError (Bool, Maybe Text)
+advanceConnection False _ = Right (False, Nothing)
+advanceConnection True (Just connection) =
+  paginationDecision pageInfo.pageHasNext pageInfo.pageEndCursor
   where
     pageInfo = connection.connectionPageInfo
-advanceConnection _ _ True Nothing =
+advanceConnection True Nothing =
   Left (ProviderError InvalidResponse "GitHub response omitted a requested connection")
 
-paginationDecision :: Int -> Int -> Bool -> Maybe Text -> Either ProviderError (Bool, Maybe Text, Bool)
-paginationDecision _ _ False _ = Right (False, Nothing, False)
-paginationDecision limit currentCount True _
-  | currentCount >= limit = Right (False, Nothing, True)
-paginationDecision _ _ True Nothing =
+-- | Whether this connection has another page, and the cursor to ask for it
+-- with. @hasNextPage@ is the only thing that ends a traversal: there is no
+-- cap left for a connection to reach, so a repository with a thousand open
+-- issues is followed to its thousandth (§13).
+paginationDecision :: Bool -> Maybe Text -> Either ProviderError (Bool, Maybe Text)
+paginationDecision False _ = Right (False, Nothing)
+paginationDecision True Nothing =
   Left
     ProviderError
       { providerErrorKind = InvalidResponse,
         providerErrorMessage = "GitHub pagination indicated another page without a cursor"
       }
-paginationDecision _ _ True (Just cursor) = Right (True, Just cursor, False)
+paginationDecision True (Just cursor) = Right (True, Just cursor)
 
 -- | Builds the @gh api graphql@ argument vector.  GraphQL @String!@
 -- variables go through @-f@, gh's always-raw flag, because @-F@ coerces
@@ -317,8 +332,8 @@ paginationDecision _ _ True (Just cursor) = Right (True, Just cursor, False)
 -- repository named @12345@ would otherwise be sent as an Int and rejected
 -- for every page of every refresh.  Only the genuinely typed variables --
 -- the @Int!@ page sizes and @Boolean!@ fetch controls -- keep @-F@.
-graphqlArguments :: LimitsConfig -> Repository -> FetchState -> [String]
-graphqlArguments limits repository state =
+graphqlArguments :: Repository -> FetchState -> [String]
+graphqlArguments repository state =
   [ "api",
     "graphql",
     "-f",
@@ -326,9 +341,9 @@ graphqlArguments limits repository state =
     "-f",
     "name=" <> Text.unpack repository.repositoryName,
     "-F",
-    "issuePageSize=" <> show issuePageSize,
+    "issuePageSize=" <> show pageLimit,
     "-F",
-    "pullRequestPageSize=" <> show pullRequestPageSize,
+    "pullRequestPageSize=" <> show pageLimit,
     "-F",
     "fetchIssues=" <> boolText state.fetchMoreIssues,
     "-F",
@@ -337,9 +352,6 @@ graphqlArguments limits repository state =
     <> cursorArgument "issueCursor" state.issueCursor
     <> cursorArgument "pullRequestCursor" state.pullRequestCursor
     <> ["-f", "query=" <> Text.unpack (graphqlQuery state.fetchSubIssues)]
-  where
-    issuePageSize = max 1 (min pageLimit (limits.limitsMaxOpenIssues - length state.fetchedIssues))
-    pullRequestPageSize = max 1 (min pageLimit (limits.limitsMaxOpenPullRequests - length state.fetchedPullRequests))
 
 -- | Cursors are declared @String@ and are opaque to us, so they are passed
 -- raw as well; an all-digit cursor would otherwise corrupt pagination the

@@ -61,8 +61,9 @@ predates D-10's process-group rule. Neither changes the arc's shape.
 
 The warning-clean GHC2024/Cabal foundation,
 local repository resolution, event-driven Brick/Vty dashboard, standalone-card
-workflow, explicit GitHub refresh, and last-good repository cache are
-implemented. Checklist-based tracker hierarchy, inherited PR membership,
+workflow, and explicit GitHub refresh are implemented. Open issues and open
+pull requests are fetched live and uncapped on every refresh, with no display
+limit and no repository snapshot on disk. Checklist-based tracker hierarchy, inherited PR membership,
 tracker progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
@@ -249,12 +250,14 @@ Startup sequence:
 4. Resolve `owner/name` from the remote, unless `--repo` supplied it directly.
    The flag is the escape hatch for unusual setups: SSH host aliases, multiple
    remotes, and bare mirrors.
-5. Load configuration and the last cached snapshot, if enabled.
+5. Load configuration, and the cached usage snapshots if enabled. No
+   repository snapshot is loaded: open cards are live-only (section 13).
 6. Enter the TUI immediately and asynchronously update GitHub plus both usage
    providers once. The providers remain independent and failure-isolated.
 
-If there is no cached data, the board and usage panes start empty while the
-initial update runs.
+The board body starts as section 17's centered loading panel and draws its
+first card only when the first complete open generation publishes. The usage
+pane starts from its cache when there is one, and empty otherwise.
 
 `--doctor` short-circuits that sequence after step 1, before configuration
 and repository resolution, so a fresh clone with no configured remote can
@@ -417,8 +420,9 @@ expanded view exactly.
 An empty query shows the column complete beneath the empty box. A non-empty
 query with no matches shows a `No matches` row, distinct from the `No items` row
 an empty column shows. While a non-empty query is live the column heading shows
-the visible result count over the column's full total, with GitHub's `+`
-truncation marker still attached to that total.
+the visible result count over the column's full total. Both counts are exact: a
+board is only ever drawn from a generation that followed both open connections
+to their end, so no heading total stands for more than it says.
 
 Every edit, close, and successful refresh re-seats the searched column by the
 identity of the row that was selected. A row drawing an ordinary card is kept by
@@ -1025,10 +1029,10 @@ Activating a row closes the panel and:
   pull-request work present on the current board;
 - additionally opens that work's session overlay when Kanban holds a session
   for it;
-- when the numbered work is absent or truncated from the board, leaves the
-  current column, row, and tracker expansion unchanged, reports that the work
-  is not on the board, and still opens the referenced session overlay if there
-  is one.
+- when the numbered work is absent from the board — closed since, or never on
+  it — leaves the current column, row, and tracker expansion unchanged, reports
+  that the work is not on the board, and still opens the referenced session
+  overlay if there is one.
 
 Number-based selection recognizes every shape the board holds work in:
 ordinary issue and pull-request entries; a childless tracker, whose header
@@ -1263,12 +1267,30 @@ only the fields required by the board. Expected data includes:
   decoding, so these are requested for every issue on the page and only the
   tracker ones are consumed.
 
-One explicit refresh should perform one GraphQL operation when practical,
-including pagination. The initial display limits are 250 open issues and 100
-open pull requests, both configurable. If the repository exceeds a limit, show
-the configured cap followed by `+` — by default `250+` for issues and `100+`
-for pull requests — and a visible truncation warning rather than silently
-presenting an incomplete board.
+One explicit refresh follows both open connections to their end. Open issues
+and open pull requests paginate independently, each until GitHub reports no
+next page, and the refresh publishes only once both have reached their final
+page. There are no display caps and nothing to configure: a repository with
+several hundred open issues yields every one of them, and no column heading,
+banner, or count ever stands for more items than it names.
+
+`timeouts.github_seconds` bounds one page request and its cleanup rather than
+the whole traversal. An uncapped refresh of a large repository legitimately
+takes many pages, and bounding all of them together by a single page's budget
+would fail exactly the repositories pagination exists for; what the deadline is
+there to catch is one `gh` that has stopped answering. A page that exceeds it
+fails that generation with the timeout vocabulary of section 17, and unwinds
+through the same verified `gh` cleanup an interrupted fetch has always used.
+Waiting for the coordinator's owner and waiting out a rate limit are not the
+fetch being slow and consume none of that budget (section 15).
+
+Open cards live only in the running process. The board reads no repository
+snapshot at startup and writes none after a successful refresh, so every card
+on screen was fetched by the process showing it. The per-repository snapshot
+file an earlier release left behind is inert: the schema version has advanced
+past it, so the compatibility gate in section 16 reads it as absent without
+decoding, rewriting, or removing it. `--no-cache` and `cache = false` keep
+their documented meaning for every cache that remains.
 
 Nested connections that return nodes — labels, assignees, closing-issue
 references, and sub-issues — carry explicit `first:` limits and request
@@ -1510,13 +1532,12 @@ a countdown.
   A background traversal is reissued the same way, which is what keeps it from
   hot-looping the limit; a history page that failed for any other reason ends
   the traversal rather than being retried.
-- The configured GitHub timeout covers the whole request, coordinator waiting
-  and rate-limit delay included, because from the board's side those are
-  indistinguishable from a slow response. Expiry cancels that job and any retry
-  scheduled for it, performs the verified cleanup, and publishes the existing
-  timeout outcome, rather than letting a stale retry or completion publish
-  afterwards. That is what bounds the reissue above: the retry runs only if the
-  reset arrives inside the deadline.
+- The board's open job carries no whole-request deadline. The configured GitHub
+  timeout bounds one page of the traversal (section 13), and an uncapped
+  refresh of a large repository legitimately takes many pages; waiting for the
+  owner and waiting out a rate limit are not that fetch being slow and spend
+  none of a page's budget. A refusal is published when it happens, so the board
+  is never silent while a reissue waits out the reported reset.
 - Quitting goes through the coordinator whenever it has anything to settle, and
   halts immediately otherwise. Queued or running work is one reason to settle;
   so is a job that has already finished and left a group only this process is
@@ -1525,18 +1546,36 @@ a countdown.
   interrupts the running job exactly as a refresh timeout does, so it unwinds
   through the same verified `gh` cleanup, bounded by that cleanup's own budget.
   The board says it is stopping GitHub work while this happens; a cancelled job
-  publishes no board or cache result and requeues nothing; and nothing requested
-  afterwards is accepted. Writing the snapshot to the last-good cache is part of
-  publishing rather than of fetching for exactly that reason: cancellation is
-  only known at the publish step, so a cache written from inside the fetch would
-  be the one result a cancelled refresh still left behind — and the one a later
-  launch would load as its own. Whatever makes work stop being observable also
-  claims the right to answer it, in the same step: releasing a finished job, and
-  taking an expiring request out of the queue, each claim their publication as
-  they happen. A quit therefore lands on one side or the other — before the
-  claim, and nothing is published; after it, and the quit waits for the answer
-  already claimed rather than halting while a board update and a cache write are
-  still to land.
+  publishes nothing and requeues nothing; and nothing requested afterwards is
+  accepted. A cancelled generation leaves no trace at all — no board update, and
+  no file, since open cards are never written to disk (section 13). Whatever
+  makes work stop being observable also claims the right to answer it, in the
+  same step: releasing a finished job, and taking an expiring request out of the
+  queue, each claim their publication as they happen. A quit therefore lands on
+  one side or the other — before the claim, and nothing is published; after it,
+  and the quit waits for the answer already claimed rather than halting while a
+  board update is still to land.
+- Every open cycle has an identity, and only the newest one may publish. The
+  coordinator claims an identity in the same decision that makes a cycle
+  answerable — starting it, or spending a request that expired before it could
+  start — and every publication carries the identity it was claimed under. The
+  board records the newest identity it has been told started, and discards an
+  outcome carrying an older one outright: not applied partially, not merged,
+  not allowed to move the freshness. "Newest" means the newest cycle the
+  coordinator actually started, so a `u` that only managed to queue a follow-up
+  does not retroactively suppress the cycle already running; that cycle
+  publishes under its own identity, and is superseded only once the successor
+  has started. A partial page set, a cancelled generation, and a page that
+  timed out publish nothing at all.
+- A published generation replaces the board whole. Selection is preserved by
+  the item's identity, the details overlay keeps its target, and live worker
+  and review session association is reconciled, exactly as every refresh has
+  always done — all of it in one step, so nothing on screen is ever half of one
+  generation and half of another.
+- Until the first complete generation publishes there is no board to draw, and
+  section 17's two centered panels stand in for one. They replace the columns
+  rather than covering them, so no card, heading, or count from any source
+  reaches the screen; the sidebar, footer, and every key stay as they are.
 - Every foreground request is answered exactly once. A job that produced no
   outcome of its own — its deadline expired, or it gave up — is still answered,
   from what its verified cleanup concluded: an unverified `gh` outranks the
@@ -1797,7 +1836,6 @@ Suggested paths:
 ```text
 ~/.config/kanban/config.toml
 ~/.config/kanban/settings.json
-~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
@@ -1806,7 +1844,10 @@ Suggested paths:
 
 Defaults:
 
-- Cache only the latest good snapshot.
+- Cache only the latest good snapshot. Open issues and open pull requests are
+  not cached at all: nothing writes a per-repository snapshot, and the
+  snapshot's schema version has advanced past the last one that did, so a file
+  an earlier release wrote is read as absent and left exactly as it was found.
 - Persist lightweight UI preferences separately from future repository
   semantics. Chat verbosity defaults to Standard and offers Compact, Standard,
   and Full display modes.
@@ -1821,9 +1862,9 @@ Defaults:
   `0600` whatever the umask, and is tightened to `0600` before each append, so
   one an earlier release left loose self-corrects instead of waiting for a
   rewrite that never comes.
-- Cache issue and PR bodies regardless of repository visibility so startup can
-  render rich cards without network access; user-only permissions protect
-  private content.
+- Never cache issue or PR bodies. Startup renders no card until the first live
+  generation publishes, so nothing about a private repository's open work is
+  written to disk; user-only permissions protect the caches that remain.
 - Bound the per-repository worker cache during startup discovery, so neither
   retired leases nor finished workers accumulate for the life of the cache. A
   retired `.stale-*` lease directory is collected once every identity it
@@ -1879,10 +1920,10 @@ Configurable repository semantics include:
 - Additional tracker-section headings.
 - GitHub remote name, default `origin`.
 - Approval predicate mode: label, review decision, or either; default label.
-- Maximum open issues, default 250.
-- Maximum open pull requests, default 100.
 - Card excerpt line count, default 3.
-- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s.
+- Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s. The GitHub
+  timeout bounds one page of the open traversal rather than the whole refresh
+  (section 13).
 - External usage provider commands (section 14).
 
 ## 17. Error presentation
@@ -1903,9 +1944,15 @@ repository at all.
   error because it is the one failure whose remedy is waiting a known length of
   time, which §15's scheduler acts on; GitHub's secondary limit reports no such
   time and stays a request error.
-- GitHub truncation: affected count shows its configured cap followed by `+`
-  and an amber banner.
-- Cached data after refresh failure: dashed/dim treatment plus snapshot time.
+- No open generation yet: the board body is a centered indeterminate loading
+  panel that renders no cards from any source and reports no item counts or
+  page totals.
+- First open generation failed: that panel becomes a centered
+  `OPEN DATA UNAVAILABLE` state carrying the classified reason and a `u` retry
+  hint. It renders no cards and restores no persisted board, while `u`, `q`,
+  `Ctrl-C`, help, and options stay operable. Once one generation has completed,
+  a later failure keeps that board instead, with the stale marker below.
+- Data after refresh failure: dashed/dim treatment plus snapshot time.
 - Malformed tracker checklist: tracker remains visible; unparsed children fall
   back to Standalone and the tracker gets an amber parse warning.
 - Partial GraphQL response: a response GitHub answers with both data and
@@ -1961,7 +2008,11 @@ frame can vary over — the fixture snapshot's timestamps, the redraw instant an
 time zone, freshness, the notice line, drainer status, and the session, process
 and worker maps — is pinned. Beyond the three sizes, the matrix covers the box
 and open border renderers, ASCII mode, a selected card, the details overlay,
-and the help overlay. Characters are the baseline; one frame additionally
+and the help overlay. Section 17's two blocking board states — the initial
+loading panel and `OPEN DATA UNAVAILABLE` — are captured at every one of those
+five settings, over the fixture board rather than an empty one, so what the
+frames record is that a board no complete generation has published draws none
+of it. Characters are the baseline; one frame additionally
 records a per-cell attribute grid, because §10's split selected border is a
 color contract on glyphs that are identical either way.
 
@@ -1978,7 +2029,9 @@ KANBAN_UPDATE_GOLDENS=1 cabal test kanban-test
 - Codex app-server schemas and rate-limit responses.
 - Claude `/usage` output for each supported CLI family.
 - ANSI stripping and Unicode-width behavior.
-- Cache compatibility and corrupt-cache recovery.
+- Cache compatibility and corrupt-cache recovery, including the repository
+  snapshot an earlier release left behind, which the version gate reads as
+  absent without decoding, rewriting, or removing it.
 
 ### Integration tests
 
@@ -2049,16 +2102,17 @@ golden-frame suite at wide, minimum four-column, and narrow sizes.
 
 ### Milestone 2 — GitHub snapshot and workflow board
 
-Implemented, including cached top-level truncation state, `+` column/count
-markers, nested `totalCount` decoding, amber incomplete-card outlines, and
-`+N` label/assignee/linked-issue indicators.
+Implemented, including uncapped open-connection traversal, nested `totalCount`
+decoding, amber incomplete-card outlines, and `+N` label/assignee/linked-issue
+indicators.
 
 - Implement local remote resolution and authenticated `gh` GraphQL execution.
-- Fetch and paginate open issues and PRs.
+- Fetch and paginate open issues and PRs to their final page.
 - Decode labels, bodies, assignees, links, mergeability, and checks.
 - Implement column classification, readiness colors, global sorting, UNLINKED,
   rich cards, details, and the configured issue/PR item guards.
-- Add last-good repository caching.
+- Draw the centered loading and `OPEN DATA UNAVAILABLE` states until the first
+  complete open generation publishes.
 
 Exit criteria: startup and `u` produce a correct standalone-card board for an
 arbitrary GitHub repository; idle makes no network requests.

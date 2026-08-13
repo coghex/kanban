@@ -74,20 +74,17 @@ import Toml.Schema
   )
 import Toml.Syntax (startPos)
 
--- | GitHub fetch caps and rendered-card excerpt height.
-data LimitsConfig = LimitsConfig
-  { limitsMaxOpenIssues :: Int,
-    limitsMaxOpenPullRequests :: Int,
-    limitsExcerptLines :: Int
+-- | Rendered-card excerpt height. There are no open-connection caps to
+-- configure: a refresh follows both open connections to their end (§13).
+newtype LimitsConfig = LimitsConfig
+  { limitsExcerptLines :: Int
   }
   deriving stock (Eq, Show)
 
 defaultLimitsConfig :: LimitsConfig
 defaultLimitsConfig =
   LimitsConfig
-    { limitsMaxOpenIssues = 250,
-      limitsMaxOpenPullRequests = 100,
-      limitsExcerptLines = 3
+    { limitsExcerptLines = 3
     }
 
 -- | Provider timeouts, in whole seconds.
@@ -153,19 +150,15 @@ emptyWorkflowOverride =
       overrideCoordinationPaths = Nothing
     }
 
-data LimitsOverride = LimitsOverride
-  { overrideMaxOpenIssues :: Maybe Int,
-    overrideMaxOpenPullRequests :: Maybe Int,
-    overrideExcerptLines :: Maybe Int
+newtype LimitsOverride = LimitsOverride
+  { overrideExcerptLines :: Maybe Int
   }
   deriving stock (Eq, Show)
 
 emptyLimitsOverride :: LimitsOverride
 emptyLimitsOverride =
   LimitsOverride
-    { overrideMaxOpenIssues = Nothing,
-      overrideMaxOpenPullRequests = Nothing,
-      overrideExcerptLines = Nothing
+    { overrideExcerptLines = Nothing
     }
 
 data TimeoutsOverride = TimeoutsOverride
@@ -292,9 +285,7 @@ applyWorkflowOverride base override =
 applyLimitsOverride :: LimitsConfig -> LimitsOverride -> LimitsConfig
 applyLimitsOverride base override =
   base
-    { limitsMaxOpenIssues = fromMaybe base.limitsMaxOpenIssues override.overrideMaxOpenIssues,
-      limitsMaxOpenPullRequests = fromMaybe base.limitsMaxOpenPullRequests override.overrideMaxOpenPullRequests,
-      limitsExcerptLines = fromMaybe base.limitsExcerptLines override.overrideExcerptLines
+    { limitsExcerptLines = fromMaybe base.limitsExcerptLines override.overrideExcerptLines
     }
 
 applyTimeoutsOverride :: TimeoutsConfig -> TimeoutsOverride -> TimeoutsConfig
@@ -439,14 +430,10 @@ workflowOverrideParser = do
 
 limitsOverrideParser :: ParseTable Position LimitsOverride
 limitsOverrideParser = do
-  maxOpenIssuesValue <- optKeyOf "max_open_issues" parsePositiveBoundedInt
-  maxOpenPullRequestsValue <- optKeyOf "max_open_pull_requests" parsePositiveBoundedInt
   excerptLinesValue <- optKeyOf "excerpt_lines" parsePositiveBoundedInt
   pure
     LimitsOverride
-      { overrideMaxOpenIssues = maxOpenIssuesValue,
-        overrideMaxOpenPullRequests = maxOpenPullRequestsValue,
-        overrideExcerptLines = excerptLinesValue
+      { overrideExcerptLines = excerptLinesValue
       }
 
 timeoutsOverrideParser :: ParseTable Position TimeoutsOverride

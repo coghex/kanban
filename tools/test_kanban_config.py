@@ -36,8 +36,6 @@ class MissingFileTests(unittest.TestCase):
         self.assertEqual(raw.workflow.problem_style_labels, frozenset())
         self.assertEqual(raw.workflow.ui_style_labels, frozenset())
         self.assertEqual(raw.workflow.coordination_paths, frozenset())
-        self.assertEqual(raw.limits.max_open_issues, 250)
-        self.assertEqual(raw.limits.max_open_pull_requests, 100)
         self.assertEqual(raw.limits.excerpt_lines, 3)
         self.assertEqual(raw.timeouts.github_seconds, 30)
         self.assertEqual(raw.timeouts.codex_seconds, 10)
@@ -77,8 +75,6 @@ ui_style_labels = ["interface", "input"]
 coordination_paths = ["docs/status.md", "ROADMAP.md"]
 
 [limits]
-max_open_issues = 10
-max_open_pull_requests = 5
 excerpt_lines = 7
 
 [timeouts]
@@ -99,7 +95,7 @@ ui_style_labels = ["widget-ui"]
 coordination_paths = ["docs/widgets.md"]
 
 [repositories."acme/widgets".limits]
-max_open_issues = 999
+excerpt_lines = 9
 
 [repositories."acme/widgets".timeouts]
 claude_seconds = 999
@@ -135,8 +131,6 @@ class FullFixtureTests(unittest.TestCase):
             raw.workflow.coordination_paths,
             frozenset({"docs/status.md", "ROADMAP.md"}),
         )
-        self.assertEqual(raw.limits.max_open_issues, 10)
-        self.assertEqual(raw.limits.max_open_pull_requests, 5)
         self.assertEqual(raw.limits.excerpt_lines, 7)
         self.assertEqual(raw.timeouts.github_seconds, 11)
         self.assertEqual(raw.timeouts.codex_seconds, 22)
@@ -168,9 +162,7 @@ class MergeAndSelectionTests(unittest.TestCase):
         self.assertEqual(resolved.workflow.approval_label, "acme:go")
         # changes_requested_label was not overridden for this repository.
         self.assertEqual(resolved.workflow.changes_requested_label, "verdict:no")
-        self.assertEqual(resolved.limits.max_open_issues, 999)
-        # max_open_pull_requests was not overridden; inherits the global value.
-        self.assertEqual(resolved.limits.max_open_pull_requests, 5)
+        self.assertEqual(resolved.limits.excerpt_lines, 9)
         self.assertEqual(resolved.timeouts.claude_seconds, 999)
         self.assertEqual(resolved.timeouts.github_seconds, 11)
         # The overridden styling array replaces the global one; the omitted
@@ -202,8 +194,7 @@ class MergeAndSelectionTests(unittest.TestCase):
                 self.assertEqual(resolved.workflow.approval_label, "acme:go")
                 # Merge and precedence survive the normalized lookup.
                 self.assertEqual(resolved.workflow.changes_requested_label, "verdict:no")
-                self.assertEqual(resolved.limits.max_open_issues, 999)
-                self.assertEqual(resolved.limits.max_open_pull_requests, 5)
+                self.assertEqual(resolved.limits.excerpt_lines, 9)
                 self.assertEqual(resolved.timeouts.claude_seconds, 999)
                 self.assertEqual(resolved.timeouts.github_seconds, 11)
 
@@ -246,7 +237,7 @@ class MergeAndSelectionTests(unittest.TestCase):
         resolved = kc.resolve_config("someone/else", raw)
         self.assertEqual(resolved.workflow.approval_label, "verdict:go")
         self.assertEqual(resolved.workflow.blocked_labels, frozenset({"blocked", "on-hold"}))
-        self.assertEqual(resolved.limits.max_open_issues, 10)
+        self.assertEqual(resolved.limits.excerpt_lines, 7)
         self.assertEqual(resolved.timeouts.claude_seconds, 33)
 
     def test_resolved_config_carries_global_only_fields_unchanged(self):
@@ -304,11 +295,6 @@ class SemanticValidationErrorTests(unittest.TestCase):
             '[workflow]\nblocking_severity = "blue"\n', "workflow.blocking_severity"
         )
 
-    def test_non_positive_max_open_issues_raises(self):
-        self._expect_error(
-            "[limits]\nmax_open_issues = 0\n", "limits.max_open_issues"
-        )
-
     def test_non_positive_excerpt_lines_raises(self):
         self._expect_error("[limits]\nexcerpt_lines = -1\n", "limits.excerpt_lines")
 
@@ -341,13 +327,13 @@ class SemanticValidationErrorTests(unittest.TestCase):
     def test_limit_exceeding_the_bounded_int_raises_but_the_boundary_is_accepted(self):
         overflowing = kc._MAX_INT64 + 1
         self._expect_error(
-            f"[limits]\nmax_open_issues = {overflowing}\n", "limits.max_open_issues"
+            f"[limits]\nexcerpt_lines = {overflowing}\n", "limits.excerpt_lines"
         )
         with tempfile.TemporaryDirectory() as tmp:
-            path = write(Path(tmp), f"[limits]\nmax_open_issues = {kc._MAX_INT64}\n")
+            path = write(Path(tmp), f"[limits]\nexcerpt_lines = {kc._MAX_INT64}\n")
             raw, warnings = kc.load_raw_config(str(path))
         self.assertEqual(warnings, [])
-        self.assertEqual(raw.limits.max_open_issues, kc._MAX_INT64)
+        self.assertEqual(raw.limits.excerpt_lines, kc._MAX_INT64)
 
     def test_global_approval_and_changes_requested_labels_colliding_raises(self):
         self._expect_error(
@@ -473,6 +459,33 @@ class UnknownKeyWarningTests(unittest.TestCase):
         self.assertIn("acme/widgets", raw.repositories)
         self.assertEqual(len(warnings), 1)
         self.assertIn('repositories."acme/widgets".workflow.not_real', warnings[0])
+
+    def test_retired_open_connection_caps_warn_like_any_other_unknown_key(self):
+        # A refresh follows both open connections to their final page, so
+        # max_open_issues and max_open_pull_requests are gone from the schema
+        # rather than merely ignored. A file that still sets them is a file
+        # with unknown keys in it -- one warning apiece, at either scope, and
+        # nothing about the resolved configuration changes.
+        text = (
+            "[limits]\n"
+            "max_open_issues = 500\n"
+            "max_open_pull_requests = 200\n"
+            '[repositories."acme/widgets".limits]\n'
+            "max_open_issues = 999\n"
+            "max_open_pull_requests = 400\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), text)
+            raw, warnings = kc.load_raw_config(str(path))
+        self.assertEqual(len(warnings), 4)
+        reported = "\n".join(warnings)
+        for key in ("limits.max_open_issues", "limits.max_open_pull_requests"):
+            self.assertIn(key, reported)
+            self.assertIn(f'repositories."acme/widgets".{key}', reported)
+        self.assertEqual(raw.limits, kc.LimitsConfig())
+        self.assertEqual(
+            kc.resolve_config("acme/widgets", raw).limits, kc.LimitsConfig()
+        )
 
 
 class RepositoryNameParsingTests(unittest.TestCase):

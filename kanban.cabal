@@ -237,6 +237,7 @@ test-suite kanban-test
     Spec.UI.Incidents
     Spec.UI.Keys
     Spec.UI.Layout
+    Spec.UI.OpenData
     Spec.UI.ReviewSession
     Spec.UI.Search
     Spec.UI.SessionCore

@@ -30,6 +30,9 @@ module Spec.Support.Json
     versionTwoCacheFile,
     versionThreeCacheFile,
     versionFourCacheFile,
+    versionFiveCacheFile,
+    undecodableCacheFile,
+    githubIndependentPage,
     graphqlPageWithRateLimit,
     rateLimitedGraphqlResponse,
     checkRunJson,
@@ -191,6 +194,29 @@ githubChecksResponse totalCount nodes =
 -- | A page holding the given raw issue and pull-request nodes, so a test can
 -- stand one anomalous item beside an intact one and check that only the
 -- anomalous item is degraded.
+-- | A page whose two open connections are paginated independently: each is
+-- either absent — which is what @\@include(if: false)@ produces once that
+-- connection has reached its final page — or present with its own nodes and
+-- its own next cursor.
+--
+-- The other page builders here move both connections together, which cannot
+-- express the ordinary shape of an uncapped traversal: issues and pull
+-- requests run out at different pages, and every page after the shorter one
+-- finishes asks for the longer one alone.
+githubIndependentPage :: Maybe ([String], Maybe String) -> Maybe ([String], Maybe String) -> String
+githubIndependentPage issues pullRequests =
+  "{\"data\":{\"repository\":{\"nameWithOwner\":\""
+    <> fixtureRepositoryIdentity
+    <> "\""
+    <> maybe "" (connectionJson "issues") issues
+    <> maybe "" (connectionJson "pullRequests") pullRequests
+    <> "}}}"
+  where
+    connectionJson name (nodes, nextCursor) =
+      ",\"" <> name <> "\":{\"nodes\":[" <> intercalate "," nodes <> "]," <> pageInfoJson nextCursor <> "}"
+    pageInfoJson Nothing = "\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}"
+    pageInfoJson (Just cursor) = "\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"" <> cursor <> "\"}"
+
 githubPageWith :: [String] -> [String] -> String
 githubPageWith issueNodes pullRequestNodes =
   unlines
@@ -457,6 +483,39 @@ versionFourCacheFile version =
         <> "\"issueLabelOverflow\":0,\"issueLabels\":[],\"issueNumber\":36,"
         <> "\"issueTitle\":\"T\",\"issueUpdatedAt\":\"2026-01-01T00:00:00Z\","
         <> "\"issueUrl\":\"u\"}]}}"
+    )
+
+-- | A cache file exactly as version 5 wrote one: the last shape anything ever
+-- persisted, complete with the top-level truncation flags version 6 dropped.
+-- This is what an earlier release leaves in the cache root, and what the
+-- current version gate has to turn away without reading.
+versionFiveCacheFile :: Int -> ByteString.ByteString
+versionFiveCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{"
+        <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\",\"snapshotPullRequests\":[],"
+        <> "\"snapshotIssuesTruncated\":true,\"snapshotPullRequestsTruncated\":true,"
+        <> "\"snapshotIssues\":[{"
+        <> "\"issueAssigneeOverflow\":0,\"issueAssignees\":[],\"issueBody\":\"B\","
+        <> "\"issueCreatedAt\":\"2026-01-01T00:00:00Z\",\"issueDataGaps\":[],"
+        <> "\"issueLabelOverflow\":0,\"issueLabels\":[],\"issueNumber\":36,"
+        <> "\"issueSubIssues\":{\"tag\":\"SubIssuesNotRequested\"},"
+        <> "\"issueTitle\":\"T\",\"issueUpdatedAt\":\"2026-01-01T00:00:00Z\","
+        <> "\"issueUrl\":\"u\"}]}}"
+    )
+
+-- | A cache file carrying a recognised envelope around a payload that cannot
+-- be a snapshot at all. Loading it under the current version is what shows
+-- the gate answered before the decoder did: turned away by the version, it is
+-- absent; relabelled as current, the same bytes are corruption.
+undecodableCacheFile :: Int -> ByteString.ByteString
+undecodableCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":\"not a snapshot at all\"}"
     )
 
 checkRunJson :: String -> String -> String -> String
