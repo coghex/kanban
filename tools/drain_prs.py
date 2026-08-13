@@ -306,6 +306,23 @@ def fail(message: str) -> "NoReturn":
     raise SystemExit(1)
 
 
+def shutdown_log(message: str) -> None:
+    """Report from inside the final cleanup pass, where the report itself must
+    not be able to end the process.
+
+    `log` prints and then opens a file, so a stop being interrupted a second
+    time can take that signal in either -- which means a handler reporting the
+    first interrupt with `log` still lets one escape, from inside the handler
+    that was containing it. `fail` protects its own report for the same
+    reason. Only the shutdown boundary may use this: swallowing a signal
+    anywhere else would make an interrupt fail to interrupt.
+    """
+    try:
+        log(message)
+    except BaseException:
+        pass
+
+
 @contextlib.contextmanager
 def command_deadline(deadline: float) -> Iterator[None]:
     """Bound every command run inside the block by one `time.monotonic()` mark.
@@ -3293,73 +3310,108 @@ def discharge_recorded_cleanup(
     the pass is bounded by the same deadline, so an obligation that wedges
     stops the pass instead of the stop.
 
-    Never raises, and never widens its own remit: it starts no per-pull-request
-    work of any kind, reads no pull request, and leaves everything it could not
+    Never raises, from any phase and for any reason -- the whole body is
+    inside that promise, not only the obligations it works. A stop is where a
+    second Ctrl-C is likeliest to land, and one landing in the state read, the
+    persistence or a diagnostic used to escape from inside the handler for the
+    first, failing the stop it was trying to finish. On the single-pull-request
+    path it took the caller's one result document with it, because that
+    document is written only after this returns.
+
+    Never widens its own remit either: it starts no per-pull-request work of
+    any kind, reads no pull request, and leaves everything it could not
     discharge exactly as it found it -- still recorded, still projected by
     `status`, and still under whatever incident it had raised. Outstanding debt
-    is a debt to retry, not a reason to fail a stop.
+    is a debt to retry, not a reason to fail a stop. Containment obeys that
+    same bound: nothing is retried because it was interrupted, so the work
+    left after a contained failure is one local state write and one log line.
     """
-    try:
-        state = load_drain_state(ctx)
-    except DrainError as exc:
-        log(f"Could not read the queue state for a final cleanup pass: {exc}")
-        return 0
-    owing = recorded_cleanup_prs(state)
-    if not owing:
-        # Nothing recorded is the common case, and it must cost a stop
-        # nothing: no command, no state write, and no state file where the
-        # repository had none.
-        return 0
-
-    deadline = time.monotonic() + budget_seconds
-    log(
-        f"Stopping: {len(owing)} pull request(s) still owe post-merge cleanup; "
-        f"attempting them for up to {budget_seconds:g}s"
-    )
     discharged = 0
     try:
-        with command_deadline(deadline):
-            for number in owing:
-                if time.monotonic() >= deadline:
-                    log(
-                        "Final cleanup pass ran out of time; "
-                        f"PR #{number} and any after it were not attempted"
-                    )
-                    break
-                before = outstanding_obligations(state, number)
-                try:
-                    if complete_pending_cleanup(ctx, state, number, dry_run=dry_run):
-                        forget_pr(state, number)
-                        discharged += before
-                        continue
-                except (DrainError, OSError) as exc:
-                    # advance_pending_cleanup() absorbs a failing obligation
-                    # itself; this covers the bookkeeping around it -- writing
-                    # an incident, say -- so one unwritable path cannot cost
-                    # the pull requests after this one their attempt.
-                    log(f"PR #{number}: final cleanup pass failed: {exc}")
-                discharged += before - outstanding_obligations(state, number)
-    # A shutdown pass that raised would take the stop with it, and on the
-    # single-pull-request path it would take the caller's result document too.
-    except Exception as exc:
-        log(f"Final cleanup pass failed unexpectedly: {exc!r}")
+        try:
+            state = load_drain_state(ctx)
+        except DrainError as exc:
+            shutdown_log(
+                f"Could not read the queue state for a final cleanup pass: {exc}"
+            )
+            return 0
+        owing = recorded_cleanup_prs(state)
+        if not owing:
+            # Nothing recorded is the common case, and it must cost a stop
+            # nothing: no command, no state write, and no state file where the
+            # repository had none.
+            return 0
+
+        deadline = time.monotonic() + budget_seconds
+        log(
+            f"Stopping: {len(owing)} pull request(s) still owe post-merge cleanup; "
+            f"attempting them for up to {budget_seconds:g}s"
+        )
+        try:
+            with command_deadline(deadline):
+                for number in owing:
+                    if time.monotonic() >= deadline:
+                        log(
+                            "Final cleanup pass ran out of time; "
+                            f"PR #{number} and any after it were not attempted"
+                        )
+                        break
+                    before = outstanding_obligations(state, number)
+                    try:
+                        if complete_pending_cleanup(
+                            ctx, state, number, dry_run=dry_run
+                        ):
+                            forget_pr(state, number)
+                            discharged += before
+                            continue
+                    except (DrainError, OSError) as exc:
+                        # advance_pending_cleanup() absorbs a failing obligation
+                        # itself; this covers the bookkeeping around it --
+                        # writing an incident, say -- so one unwritable path
+                        # cannot cost the pull requests after this one their
+                        # attempt.
+                        log(f"PR #{number}: final cleanup pass failed: {exc}")
+                    discharged += before - outstanding_obligations(state, number)
+        # An interrupt stops the pass where it stands rather than starting one
+        # more obligation, and whatever it already discharged is still
+        # persisted below.
+        except KeyboardInterrupt:
+            shutdown_log("Final cleanup pass interrupted; leaving the rest outstanding")
+        except BaseException as exc:
+            shutdown_log(f"Final cleanup pass failed unexpectedly: {exc!r}")
+    # Reached only from the phases before the first obligation was started:
+    # the state read, the selection of what is owed, and the opening log.
+    # Nothing was attempted, so there is nothing to persist -- and no state
+    # file to create where the repository had none.
     except KeyboardInterrupt:
-        log("Final cleanup pass interrupted; leaving the rest outstanding")
+        shutdown_log("Final cleanup pass interrupted before it started; nothing done")
+        return 0
+    except BaseException as exc:
+        shutdown_log(f"Final cleanup pass could not start: {exc!r}")
+        return 0
 
     try:
-        # Written once, after the pass: what it discharged must be durable
-        # before this process releases the run lock, and what it did not is
-        # what the next start has to retry.
-        save_drain_state(ctx, state, dry_run=dry_run)
-    except OSError as exc:
-        # The pass still happened; only the record of it is lost, which leaves
-        # discharged obligations to be re-verified as already done.
-        log(f"Could not persist the final cleanup pass: {exc}")
-    still_owed = sum(outstanding_obligations(state, number) for number in owing)
-    log(
-        f"Final cleanup pass discharged {discharged} obligation(s); "
-        f"{still_owed} still outstanding"
-    )
+        try:
+            # Written once, after the pass: what it discharged must be durable
+            # before this process releases the run lock, and what it did not is
+            # what the next start has to retry.
+            save_drain_state(ctx, state, dry_run=dry_run)
+        except OSError as exc:
+            # The pass still happened; only the record of it is lost, which
+            # leaves discharged obligations to be re-verified as already done.
+            log(f"Could not persist the final cleanup pass: {exc}")
+        still_owed = sum(outstanding_obligations(state, number) for number in owing)
+        log(
+            f"Final cleanup pass discharged {discharged} obligation(s); "
+            f"{still_owed} still outstanding"
+        )
+    # An interrupted write leaves the prior file byte-for-byte intact with no
+    # temporary beside it -- `save_drain_state` unlinks its own on the way out
+    # -- so the next start re-verifies exactly the debt an unwritten pass
+    # leaves. Retrying the write here would be new work at the one moment the
+    # caller has the least budget for it.
+    except BaseException as exc:
+        shutdown_log(f"Could not finish the final cleanup pass: {exc!r}")
     return discharged
 
 
