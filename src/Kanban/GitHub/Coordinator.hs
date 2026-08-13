@@ -395,10 +395,20 @@ data RefreshRunner outcome = RefreshRunner
   }
 
 -- | Something the coordinator has to say to the board.
-newtype CoordinatorNotice
+data CoordinatorNotice
   = -- | Background history yielded the reserve, and will resume no earlier
     -- than the moment GitHub named.
     HistoryPausedUntilReset UTCTime
+  | -- | A foreground cycle has taken the owner.
+    --
+    -- Announced for every one, including a cycle the coordinator reissued of
+    -- its own accord after a rate limit. The board coalesces further update
+    -- requests against its own \"a refresh is running\" state, and that state
+    -- is only the truth while every cycle is one the board asked for. Without
+    -- this, a reissued cycle would run unannounced: the next press would read
+    -- an idle board, report no refresh in progress, and leave a follow-up
+    -- beside the one already in flight.
+    OpenRefreshStarted
   deriving stock (Eq, Show)
 
 data RefreshCoordinator outcome = RefreshCoordinator
@@ -575,6 +585,7 @@ rateObserverFor coordinator sample = do
 
 runOpenJob :: RefreshCoordinator outcome -> Maybe UTCTime -> IO ()
 runOpenJob coordinator deadline = do
+  coordinator.coordinatorReport OpenRefreshStarted
   guard <- newGhFetchGuard coordinator.coordinatorRecordLock
   now <- getCurrentTime
   let remaining = fmap (remainingMicros now) deadline

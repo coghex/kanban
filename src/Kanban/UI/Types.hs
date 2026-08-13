@@ -397,6 +397,11 @@ data BoardRefreshOutcome
 
 data AppEvent
   = BoardRefreshFinished BoardRefreshOutcome
+  | -- | The coordinator has taken the owner for a foreground cycle, whoever
+    -- asked for it. The board records that a refresh is running so a press
+    -- arriving during one it did not start still coalesces rather than
+    -- starting a second.
+    BoardRefreshStarted
   | -- | Background history yielded the budget reserved for foreground work,
     -- and resumes no earlier than the moment GitHub reported.
     BoardHistoryPaused UTCTime

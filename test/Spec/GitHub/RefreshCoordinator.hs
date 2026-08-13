@@ -15,7 +15,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Time (UTCTime, addUTCTime, getCurrentTime, utc)
-import Kanban.Cache (ghGroupRecordPath)
+import Kanban.Cache (ghGroupRecordPath, repositoryCachePath)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub
@@ -67,11 +67,12 @@ import Kanban.UI.Refresh
     boardRefreshDispatch,
     boardRefreshRunner,
     historyPausedNotice,
+    persistBoardRefresh,
     releaseQueuedBoardRefresh
   )
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Board (readMarkerPid, withFakeGh)
-import Spec.Support.Env (withTemporaryCacheRoot)
+import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention)
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 import Spec.Support.Json (emptyGraphqlPage, graphqlPageWithRateLimit, rateLimitedGraphqlResponse)
@@ -516,6 +517,39 @@ spec = do
       awaitCount probe.probePublished 1
       coordinatorMustSettle coordinator `shouldReturn` False
 
+    -- The board coalesces against its own "a refresh is running" state, so a
+    -- cycle nobody pressed for has to reach that state too, or the next press
+    -- reads an idle board and starts a second one beside it.
+    it "announces every foreground cycle it starts, including one it reissued itself" $ do
+      probe <- newProbe
+      resetAt <- addUTCTime 0.3 <$> getCurrentTime
+      attempts <- newIORef (0 :: Int)
+      deadline <- deadlineIn 30
+      coordinator <-
+        startProbeCoordinator
+          probe
+          ( \_ observe -> do
+              attempt <- atomicModifyIORef' attempts (\seen -> (seen + 1, seen + 1))
+              observe (Just (RateSample 1 5000 resetAt))
+              pure (OpenRefreshResult "open" (attempt == 1))
+          )
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator OpenJob (Just deadline)
+      awaitCount probe.probePublished 2
+      readIORef probe.probeNotices `shouldReturn` [OpenRefreshStarted, OpenRefreshStarted]
+
+    it "announces no foreground cycle for a background history page" $ do
+      probe <- newProbe
+      coordinator <-
+        startProbeCoordinator
+          probe
+          (\_ _ -> pure (OpenRefreshResult "open" False))
+          (\_ -> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator HistoryJob Nothing
+      awaitCount probe.probeStarted 1
+      threadDelay 200000
+      readIORef probe.probeNotices `shouldReturn` []
+
     it "publishes nothing from a job shutdown cancelled, and starts nothing after" $ do
       probe <- newProbe
       running <- newEmptyMVar
@@ -573,7 +607,7 @@ spec = do
 
   describe "coordinated board refreshes against gh" $ do
     it "runs two requested refreshes one at a time and leaves the durable gh record empty" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
+      withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
             busyMarker = temporaryRoot </.> "gh.busy"
             overlapMarker = temporaryRoot </.> "gh.overlap"
@@ -611,7 +645,7 @@ spec = do
         (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
     it "reports each page's cost, remaining and reset exactly as GitHub gave them" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
+      withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
         samples <- newIORef []
         recordLock <- newGhRecordLock
@@ -623,7 +657,7 @@ spec = do
                 <> graphqlPageWithRateLimit "{\"cost\":3,\"remaining\":4997,\"resetAt\":\"2026-01-01T01:00:00Z\"}"
                 <> "'"
             ]
-            ( (boardRefreshRunner testOptions (uncachedConfig 30) repository).runOpenRefresh
+            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
                 guard
                 (\sample -> atomicModifyIORef' samples (\seen -> (sample : seen, ())))
                 (Just (30 * 1000000))
@@ -632,7 +666,7 @@ spec = do
         readIORef samples `shouldReturn` [Just (RateSample 3 4997 (secondsAfterEpoch 3600))]
 
     it "reports an unknown budget, and no failure, for a page that never mentioned one" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
+      withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
         samples <- newIORef []
         recordLock <- newGhRecordLock
@@ -641,7 +675,7 @@ spec = do
           withFakeGh
             temporaryRoot
             ["printf '%s' '" <> emptyGraphqlPage <> "'"]
-            ( (boardRefreshRunner testOptions (uncachedConfig 30) repository).runOpenRefresh
+            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
                 guard
                 (\sample -> atomicModifyIORef' samples (\seen -> (sample : seen, ())))
                 (Just (30 * 1000000))
@@ -654,7 +688,7 @@ spec = do
     -- Requirement 6 end to end: GitHub's own refusal is classified as its own
     -- kind, and the refusal is what the next job is made to wait out.
     it "sorts GitHub's primary refusal onto its own kind and makes the next job wait for the reset" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
+      withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
         recordLock <- newGhRecordLock
         guard <- newGhFetchGuard recordLock
@@ -662,7 +696,7 @@ spec = do
           withFakeGh
             temporaryRoot
             ["printf '%s' '" <> rateLimitedGraphqlResponse <> "'"]
-            ( (boardRefreshRunner testOptions (uncachedConfig 30) repository).runOpenRefresh
+            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
                 guard
                 (const (pure ()))
                 (Just (30 * 1000000))
@@ -674,8 +708,60 @@ spec = do
             providerError.providerErrorMessage `shouldSatisfy` (not . null . show)
           other -> expectationFailure ("expected a rate-limited refresh failure, got " <> show other)
 
+    -- Cancellation is only known at the publish step, so anything the fetch
+    -- itself commits escapes it. A cache written from inside the job would be
+    -- the one result a cancelled refresh still left behind -- and the one a
+    -- later launch would load as its own.
+    it "commits no cache from the fetch itself, only from publishing it" $
+      withIsolatedCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+        recordLock <- newGhRecordLock
+        guard <- newGhFetchGuard recordLock
+        result <-
+          withFakeGh
+            temporaryRoot
+            ["printf '%s' '" <> emptyGraphqlPage <> "'"]
+            ( (boardRefreshRunner (cachedConfig 30) repository).runOpenRefresh
+                guard
+                (const (pure ()))
+                (Just (30 * 1000000))
+            )
+        case result.openRefreshOutcome of
+          BoardRefreshCompleted (Right _) -> pure ()
+          other -> expectationFailure ("expected a completed refresh, got " <> show other)
+        (repositoryCachePath repository >>= doesFileExist) `shouldReturn` False
+        void (persistBoardRefresh testOptions (cachedConfig 30) repository result.openRefreshOutcome)
+        (repositoryCachePath repository >>= doesFileExist) `shouldReturn` True
+
+    it "leaves no cache behind when a quit cancels the fetch" $
+      withIsolatedCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+            leaderMarker = temporaryRoot </.> "gh.pid"
+        published <- newIORef (0 :: Int)
+        recordLock <- newGhRecordLock
+        coordinator <-
+          newRefreshCoordinator
+            recordLock
+            (boardRefreshRunner (cachedConfig 30) repository)
+            (\outcome -> persistBoardRefresh testOptions (cachedConfig 30) repository outcome >> atomicModifyIORef' published (\seen -> (seen + 1, ())))
+            (const (pure ()))
+        verdict <-
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s\\n' \"$$\" > " <> ByteString.pack leaderMarker,
+              "sleep 30",
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ do
+              requestRefreshJob coordinator OpenJob . Just =<< deadlineIn 30
+              awaitFile leaderMarker
+              shutdownRefreshCoordinator coordinator
+        verdict `shouldBe` Nothing
+        readIORef published `shouldReturn` 0
+        (repositoryCachePath repository >>= doesFileExist) `shouldReturn` False
+
     it "confirms the gh it owned is gone before a quit is allowed to halt" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
+      withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
             leaderMarker = temporaryRoot </.> "gh.pid"
         published <- newIORef (0 :: Int)
@@ -709,7 +795,12 @@ spec = do
 startBoardCoordinator :: Repository -> (BoardRefreshOutcome -> IO ()) -> IO (RefreshCoordinator BoardRefreshOutcome)
 startBoardCoordinator repository publish = do
   recordLock <- newGhRecordLock
-  newRefreshCoordinator recordLock (boardRefreshRunner testOptions (uncachedConfig 30) repository) publish (const (pure ()))
+  newRefreshCoordinator recordLock (boardRefreshRunner (uncachedConfig 30) repository) publish (const (pure ()))
+
+-- | The same, with the last-good cache in play, for the cases that are about
+-- what does and does not reach it.
+cachedConfig :: Int -> ResolvedConfig
+cachedConfig githubSeconds = (uncachedConfig githubSeconds) {resolvedCache = True}
 
 uncachedConfig :: Int -> ResolvedConfig
 uncachedConfig githubSeconds =
@@ -780,6 +871,18 @@ awaitCount reference wanted = go (400 :: Int)
     go attempts = do
       seen <- readIORef reference
       unless (length seen >= wanted) (threadDelay 25000 >> go (attempts - 1))
+
+-- | A temporary directory that is also the XDG cache root for the test that
+-- runs inside it.
+--
+-- Everything below spawns a real @gh@ through the real guard, so without this
+-- a test would reclaim, record, and clear entries in the durable @gh@ record
+-- of whatever machine it ran on -- and would read that machine's board cache
+-- when asking whether one had been written. Both answers have to be the test's
+-- own.
+withIsolatedCacheRoot :: (FilePath -> IO result) -> IO result
+withIsolatedCacheRoot body =
+  withTemporaryCacheRoot (\temporaryRoot -> withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot (body temporaryRoot))
 
 -- | A deadline measured from the real clock, since the running coordinator
 -- plans against that rather than against the suite's fixed epoch.

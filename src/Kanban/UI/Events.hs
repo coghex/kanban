@@ -79,6 +79,7 @@ handleEvent event = do
   state <- get
   case (state.appOverlay, event) of
     (_, AppEvent (BoardRefreshFinished result)) -> applyBoardRefresh result
+    (_, AppEvent BoardRefreshStarted) -> markBoardRefreshRunning
     (_, AppEvent (BoardHistoryPaused resetAt)) -> setNotice (historyPausedNotice state.appTimeZone resetAt)
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result

@@ -1466,6 +1466,13 @@ a countdown.
   by something this dashboard already committed is never dropped is unchanged.
   This is about GitHub board jobs only: Codex and Claude usage refreshes stay
   independent, with their own workers, timeouts, and freshness (§14).
+- That coalescing is decided from the board's own "a refresh is running" state,
+  so the coordinator reports every foreground cycle it takes the owner for —
+  including one it reissued itself after a rate limit, which no press asked for.
+  A cycle that ran unannounced would leave the next press reading an idle board
+  and starting a second one beside it. The report moves the freshness only: the
+  notice already on screen, above all the rate limit that caused the reissue, is
+  what explains the wait.
 - Background history yields to a reserve held for foreground work. Before
   starting or resuming a history job the coordinator compares the remaining
   budget against a fixed internal reserve of 200 GraphQL points — a named
@@ -1512,7 +1519,11 @@ a countdown.
   through the same verified `gh` cleanup, bounded by that cleanup's own budget.
   The board says it is stopping GitHub work while this happens; a cancelled job
   publishes no board or cache result and requeues nothing; and nothing requested
-  afterwards is accepted. The dashboard halts once the cleanup reaches a verdict
+  afterwards is accepted. Writing the snapshot to the last-good cache is part of
+  publishing rather than of fetching for exactly that reason: cancellation is
+  only known at the publish step, so a cache written from inside the fetch would
+  be the one result a cancelled refresh still left behind — and the one a later
+  launch would load as its own. The dashboard halts once the cleanup reaches a verdict
   that leaves nothing ambiguous — the group confirmed gone, or durably recorded
   for a later run to re-check before it spawns anything. A group that is
   neither, possibly live with only this process's in-memory refusal covering it,
