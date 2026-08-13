@@ -2079,6 +2079,97 @@ class CleanupObligationTests(RedirectedControllerTestCase):
             with self.subTest(why=why):
                 self.assert_unknown(json.dumps({"version": 3, "prs": prs}), why)
 
+    def test_an_active_candidate_the_drainer_refuses_reports_unknown(self):
+        # Exactly the values pinned for `migrate_drain_state` at
+        # test_pure_logic.test_an_unreadable_active_candidate_raises, plus the
+        # composites, so the two sides are refused over one shared list rather
+        # than over two independently chosen ones.
+        healthy = self.state_with_debt()
+        for active in ("42", 0, -1, True, 4.5, [42], {"pr": 42}):
+            with self.subTest(active=active):
+                # Carries real debt, so a lane read as acceptable would report
+                # that debt and a lane skipped entirely would report it too:
+                # only refusing the document gives unknown.
+                self.assert_unknown(
+                    json.dumps({**healthy, "active_pr": active}),
+                    f"an active lane of {active!r}",
+                )
+
+    def test_an_active_candidate_the_drainer_accepts_is_read_normally(self):
+        healthy = self.state_with_debt()
+        for why, document in (
+            ("absent", healthy),
+            ("null", {**healthy, "active_pr": None}),
+            ("a positive pull-request number", {**healthy, "active_pr": 12}),
+            # The lane names a candidate drawn from the eligible pull
+            # requests, not an entry of the state's own table, and
+            # `migrate_drain_state` performs no membership check either.
+            ("a number no entry names", {**healthy, "active_pr": 4242}),
+        ):
+            with self.subTest(why=why):
+                self.write_state(document)
+                self.assertEqual(
+                    [
+                        item["pull_request"]
+                        for item in drain_prs_service.cleanup_obligations(self.repo)
+                    ],
+                    [12, 1079],
+                    why,
+                )
+
+    def test_a_version_3_lane_is_not_checked_at_all(self):
+        # Version 3 predates the lane, and `migrate_drain_state` overwrites
+        # whatever one carries with null *before* validating it. Such a file
+        # is fully usable by the drainer, so its debt is reported rather than
+        # reported unknown -- which validating every cleanup-carrying version
+        # would silently break.
+        self.write_state(
+            {**self.state_with_debt(), "version": 3, "active_pr": "not-a-pr"}
+        )
+
+        self.assertEqual(
+            [
+                item["pull_request"]
+                for item in drain_prs_service.cleanup_obligations(self.repo)
+            ],
+            [12, 1079],
+        )
+
+    def test_a_malformed_lane_leaves_every_other_status_field_alone(self):
+        self.write_status(self.job, self.repo)
+        self.write_state(self.state_with_debt())
+        healthy = drain_prs_service.status_snapshot(self.job)
+        before = self.state_path.read_bytes()
+        listing = sorted(path.name for path in (self.repo / ".git").iterdir())
+        self.write_state({**self.state_with_debt(), "active_pr": "not-a-pr"})
+
+        degraded = drain_prs_service.status_snapshot(self.job)
+
+        self.assertIsNotNone(healthy["cleanup_obligations"])
+        self.assertIsNone(degraded["cleanup_obligations"])
+        self.assertEqual(
+            {
+                key: value
+                for key, value in degraded.items()
+                if key != "cleanup_obligations"
+            },
+            {
+                key: value
+                for key, value in healthy.items()
+                if key != "cleanup_obligations"
+            },
+        )
+        # Read-only about the corrupt document too: nothing is repaired, and
+        # no temporary file is left beside it.
+        self.assertEqual(
+            json.loads(self.state_path.read_text(encoding="utf-8"))["active_pr"],
+            "not-a-pr",
+        )
+        self.assertNotEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(
+            sorted(path.name for path in (self.repo / ".git").iterdir()), listing
+        )
+
     def test_an_unreadable_state_file_reports_unknown(self):
         # Bytes that are not UTF-8 raise a UnicodeDecodeError, which is a
         # ValueError rather than an OSError and so escapes the obvious guard.
@@ -2174,6 +2265,44 @@ class MirroredCleanupVocabularyTests(unittest.TestCase):
         self.assertEqual(
             drain_prs_service.DRAIN_STATE_VERSION, drain_prs.STATE_VERSION
         )
+
+    def test_the_active_lane_is_read_exactly_as_the_drainer_reads_it(self):
+        # Both sides driven over one list of values: whatever the drainer
+        # refuses is unknown to the projection, and whatever it accepts is a
+        # document the projection reads.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name) / "repo"
+        (repo / ".git").mkdir(parents=True)
+        state_path = repo / ".git" / "drain_prs_state.json"
+
+        def document(active):
+            # Built fresh for each side: migrate mutates the dict it is handed,
+            # defaulting fields and nulling a version 3 lane.
+            return {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "active_pr": active,
+                "prs": {},
+            }
+
+        for active in (None, 1, 42, "42", 0, -1, True, 4.5, [42], {"pr": 42}):
+            with self.subTest(active=active):
+                try:
+                    drain_prs.migrate_drain_state(document(active), source="test")
+                except drain_prs.DrainError:
+                    drainer_accepts = False
+                else:
+                    drainer_accepts = True
+                state_path.write_text(json.dumps(document(active)), encoding="utf-8")
+
+                projection = drain_prs_service.cleanup_obligations(repo)
+
+                self.assertEqual(
+                    projection is not None,
+                    drainer_accepts,
+                    f"the two sides disagree about an active lane of {active!r}",
+                )
 
     def test_every_step_is_worded_exactly_as_the_drainer_words_it(self):
         for obligation in (
