@@ -447,8 +447,8 @@ def discovered_commands_for_plugin_file(relative_path, content):
 # repository tools' own external-command surface. These modules spawn through
 # their own thin wrappers at least as often as through subprocess directly,
 # and each module names its wrappers differently: every launchctl call in
-# tools/drain_prs_service.py goes through run_command, while approve_issues.py
-# and drain_prs.py add run_json on top of run. So the callee is matched as a
+# tools/service_manager.py goes through the runner its caller injected, while
+# approve_issues.py and drain_prs.py add run_json on top of run. So the callee is matched as a
 # family — anything spelled `run`, plus the subprocess entry points — rather
 # than as a fixed list of wrapper names that the next wrapper would slip past.
 # The net is deliberately generous: a false positive fails loudly and is
@@ -472,6 +472,27 @@ def discovered_tool_commands(content):
     `sys.executable`: this reads source, and nothing here runs a tool to find
     out what it spawns."""
     return {match.group("name") for match in TOOL_COMMAND_CALL_RE.finditer(content)}
+
+
+# The one module allowed to speak launchd, and every way of speaking it that
+# must therefore appear nowhere else on the tools/ surface. Issue #291 pulled
+# this boundary out of the controller and the installer so a second service
+# manager can be added without rewriting either; a `launchctl` call, a plist
+# read or written, or a hand-built target that drifted back outside it would
+# make that boundary a comment rather than a fact.
+#
+# All three artifacts are checked, not just the command name: `plistlib.dumps`
+# or an f-string starting `gui/` outside the backend is launchd knowledge in
+# exactly the same way, and a check that only caught the token `launchctl`
+# would pass over both. The domain is what every launchd target is built from
+# (`gui/<uid>`, then `<domain>/<label>`), so forbidding the domain literal
+# forbids the targets built on it too.
+LAUNCHD_BACKEND_PATH = "tools/service_manager.py"
+LAUNCHD_ARTIFACTS = (
+    ("a launchctl invocation", re.compile(r"\blaunchctl\b")),
+    ("a plist read or written", re.compile(r"\bplistlib\b")),
+    ("a launchd domain", re.compile(r"""["']gui/""")),
+)
 
 
 def tool_surface_files(tools_dir=TOOLS_DIR):
@@ -1035,6 +1056,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertIn("drain_prs_service.py", paths)
         self.assertIn("install_drainer.py", paths)
         self.assertIn("drain_prs.py", paths)
+        self.assertIn("service_manager.py", paths)
         self.assertNotIn(
             "fake_cli.py",
             paths,
@@ -1047,16 +1069,24 @@ class AgentWorkflowContractTests(unittest.TestCase):
         )
 
     def test_tool_command_discovery_covers_the_run_command_wrapper(self):
-        # Pins the extractor against the two modules that actually spawn
-        # launchctl rather than a synthetic snippet. drain_prs_service.py
-        # reaches launchctl only through its own run_command wrapper, so an
-        # extractor keyed to `run(`/`subprocess.run(` finds zero commands
-        # here and the completeness check silently has nothing to discover.
+        # Pins the extractor against the modules that actually spawn these
+        # commands rather than a synthetic snippet. tools/service_manager.py is
+        # now the only launchctl invoker, and it reaches it through the
+        # injected `self._run` wrapper — a run-family callee rather than
+        # `run(`/`subprocess.run(`, so an extractor keyed to those two
+        # spellings finds zero commands here and the completeness check
+        # silently has nothing to discover. Its two callers keep git, which is
+        # what proves this pin is reading real modules and not a fixture.
+        self.assertEqual(
+            discovered_tool_commands(
+                (REPO_ROOT / LAUNCHD_BACKEND_PATH).read_text(encoding="utf-8")
+            ),
+            {"launchctl"},
+            LAUNCHD_BACKEND_PATH,
+        )
         for relative_path in ("tools/drain_prs_service.py", "tools/install_drainer.py"):
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertEqual(
-                discovered_tool_commands(content), {"git", "launchctl"}, relative_path
-            )
+            self.assertEqual(discovered_tool_commands(content), {"git"}, relative_path)
         # Either Python quote style, so a tool written with single quotes is
         # held to the same standard as the ones already here.
         self.assertEqual(
@@ -1089,9 +1119,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         entry = by_id["launchctl-cli"]
         self.assertEqual(entry["kind"], "executable")
         self.assertEqual(entry["token"], "launchctl")
-        self.assertEqual(
-            entry["files"], ["tools/drain_prs_service.py", "tools/install_drainer.py"]
-        )
+        self.assertEqual(entry["files"], [LAUNCHD_BACKEND_PATH])
         # mandatory: no, matching §2.6 — the drainer is an optional component.
         self.assertEqual(entry["mandatory"], "no")
         # And the row is load-bearing rather than decorative: drop it while
@@ -1103,10 +1131,41 @@ class AgentWorkflowContractTests(unittest.TestCase):
         }
         self.assertEqual(
             tool_surface_findings(without_launchctl),
-            [
-                ("tools/drain_prs_service.py", "launchctl"),
-                ("tools/install_drainer.py", "launchctl"),
-            ],
+            [(LAUNCHD_BACKEND_PATH, "launchctl")],
+        )
+
+    def test_launchd_artifacts_are_confined_to_the_service_manager_backend(self):
+        # Grounded against the tracked tree rather than a fixture, and in both
+        # directions: the backend must still contain all three artifacts, so
+        # deleting the launchd implementation cannot make this pass vacuously,
+        # and no other module on the scanned surface may contain any of them.
+        # The scan is the same discovered surface the manifest check walks, so
+        # a tools/ module added later is covered the moment it lands.
+        backend = (REPO_ROOT / LAUNCHD_BACKEND_PATH).read_text(encoding="utf-8")
+        for description, pattern in LAUNCHD_ARTIFACTS:
+            self.assertRegex(
+                backend,
+                pattern,
+                f"{LAUNCHD_BACKEND_PATH} no longer contains {description}; the "
+                "launchd backend is where it belongs",
+            )
+        offenders = []
+        for path in tool_surface_files():
+            relative_path = path.relative_to(TOOLS_DIR.parent).as_posix()
+            if relative_path == LAUNCHD_BACKEND_PATH:
+                continue
+            content = path.read_text(encoding="utf-8")
+            for description, pattern in LAUNCHD_ARTIFACTS:
+                if pattern.search(content):
+                    offenders.append((relative_path, description))
+        self.assertEqual(
+            offenders,
+            [],
+            "; ".join(
+                f"{relative_path} contains {description}; reach launchd through "
+                f"{LAUNCHD_BACKEND_PATH} instead"
+                for relative_path, description in offenders
+            ),
         )
 
     def test_undeclared_tool_command_fails_the_tool_surface_check(self):
@@ -1213,7 +1272,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # only proves the token still appears in its declared file; this one
         # proves nothing else restates it.
         entry = {row["id"]: row for row in self.manifest}["drainer-launchagent-label"]
-        self.assertEqual(entry["files"], ["tools/drain_prs_service.py"])
+        self.assertEqual(entry["files"], [LAUNCHD_BACKEND_PATH])
         label = entry["token"]
         sources = [
             *REPO_ROOT.glob("src/**/*.hs"),

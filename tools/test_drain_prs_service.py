@@ -20,10 +20,103 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import service_manager
 
 
 def _completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+def rendered_definition(job):
+    """The bytes the selected backend writes for `job`, through the same seam
+    `install_job` writes them through."""
+    return drain_prs_service.service_backend().render_definition(
+        drain_prs_service.service_definition(job)
+    )
+
+
+class RecordingBackend(service_manager.ServiceManagerBackend):
+    """A stand-in service manager that records what it was asked to do.
+
+    It spawns nothing, so a lifecycle driven through it proves the controller
+    reaches its service manager only through this boundary — anything left
+    behind would still show up as a `launchctl` argument vector in the
+    fixture's own command log. Its identifiers deliberately do not look like
+    launchd's, so a job named by the real derivation could not pass for one
+    named through the seam.
+    """
+
+    def __init__(self, definitions_dir, *, loaded=False, running=False):
+        self.calls = []
+        self.definitions_dir = definitions_dir
+        self.loaded = loaded
+        self.running = running
+        self.legacy_installed = False
+        self.legacy_repository = None
+        self.written = []
+
+    def _record(self, name, *arguments):
+        self.calls.append((name, *arguments))
+
+    def names(self):
+        return [call[0] for call in self.calls]
+
+    def service_identifier(self, slug):
+        return f"fake-service.{slug}"
+
+    def identifier_fits(self, slug):
+        return len(slug) <= 40
+
+    def legacy_identifier(self):
+        return "fake-service.legacy"
+
+    def definition_path(self, identifier):
+        return self.definitions_dir / f"{identifier}.definition"
+
+    def legacy_definition_path(self):
+        return self.definitions_dir / "legacy.definition"
+
+    def manager_target(self, identifier):
+        return f"fake-manager/{identifier}"
+
+    def render_definition(self, definition):
+        return f"definition for {definition.identifier}".encode("utf-8")
+
+    def write_definition(self, definition):
+        self._record("write_definition", definition.identifier)
+        path = self.definition_path(definition.identifier)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.render_definition(definition))
+        self.written.append(definition)
+        return path
+
+    def load_definition(self, identifier):
+        self._record("load_definition", identifier)
+        self.loaded = True
+
+    def is_loaded(self, identifier):
+        return self.loaded
+
+    def is_running(self, identifier):
+        self._record("is_running", identifier)
+        return self.running
+
+    def kick(self, identifier):
+        self._record("kick", identifier)
+
+    def request_stop(self, identifier):
+        self._record("request_stop", identifier)
+
+    def legacy_definition_exists(self):
+        return self.legacy_installed
+
+    def legacy_service_repository(self):
+        return self.legacy_repository
+
+    def retire_legacy(self):
+        self._record("retire_legacy")
+        self.legacy_installed = False
+        return self.definitions_dir / "legacy.definition.retired"
 
 
 class RedirectedControllerTestCase(unittest.TestCase):
@@ -45,10 +138,9 @@ class RedirectedControllerTestCase(unittest.TestCase):
             ("CONTROLLER_PATH", self.install_dir / "drain_prs_service.py"),
             ("DRAINER_PATH", self.install_dir / "drain_prs.py"),
             ("CONFIG_MODULE_PATH", self.install_dir / "kanban_config.py"),
-            ("LAUNCH_AGENTS_DIR", self.launch_agents),
             (
-                "LEGACY_PLIST_PATH",
-                self.launch_agents / f"{drain_prs_service.LEGACY_LABEL}.plist",
+                "SERVICE_MANAGER_MODULE_PATH",
+                self.install_dir / "service_manager.py",
             ),
             ("RUNTIME_ROOT", self.runtime_root),
             ("LOG_ROOT", self.log_root),
@@ -58,6 +150,19 @@ class RedirectedControllerTestCase(unittest.TestCase):
             ("NTFY_URL", None),
         ):
             patched = mock.patch.object(drain_prs_service, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+
+        # The launchd artifacts belong to the backend, so they are redirected
+        # on the module that owns them rather than on the controller.
+        for name, value in (
+            ("LAUNCH_AGENTS_DIR", self.launch_agents),
+            (
+                "LEGACY_PLIST_PATH",
+                self.launch_agents / f"{service_manager.LEGACY_LABEL}.plist",
+            ),
+        ):
+            patched = mock.patch.object(service_manager, name, value)
             patched.start()
             self.addCleanup(patched.stop)
 
@@ -124,7 +229,7 @@ class RedirectedControllerTestCase(unittest.TestCase):
             ),
         ):
             result = drain_prs_service.install_job(job)
-        self.loaded.add(drain_prs_service.launch_target(job))
+        self.loaded.add(service_manager.launch_target_for(job.label))
         return result
 
     def read_record(self):
@@ -229,7 +334,7 @@ class RepositoryIdentityTests(unittest.TestCase):
         for identity in identities:
             with self.subTest(identity=identity):
                 slug = drain_prs_service.repository_slug(identity)
-                label = f"{drain_prs_service.LABEL_PREFIX}.{slug}"
+                label = f"{service_manager.LABEL_PREFIX}.{slug}"
                 self.assertTrue(label)
                 self.assertRegex(label, r"\A[A-Za-z0-9._-]+\Z")
                 # `<label>.plist` has to stay inside the 255-byte filename
@@ -245,8 +350,8 @@ class RepositoryIdentityTests(unittest.TestCase):
         for identity in ("coghex/kanban", "a/b", "o" * 300 + "/" + "n" * 300):
             slug = drain_prs_service.repository_slug(identity)
             self.assertNotEqual(
-                f"{drain_prs_service.LABEL_PREFIX}.{slug}",
-                drain_prs_service.LEGACY_LABEL,
+                f"{service_manager.LABEL_PREFIX}.{slug}",
+                service_manager.LEGACY_LABEL,
             )
 
 
@@ -292,8 +397,8 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
         job = drain_prs_service.job_for_identity(self.root / "a", "acme/widgets")
         self.assertEqual(job.plist_path.name, f"{job.label}.plist")
         self.assertTrue(
-            drain_prs_service.launch_target(job).endswith(f"/{job.label}"),
-            drain_prs_service.launch_target(job),
+            service_manager.launch_target_for(job.label).endswith(f"/{job.label}"),
+            service_manager.launch_target_for(job.label),
         )
 
 
@@ -319,11 +424,281 @@ class ModuleDefaultTests(unittest.TestCase):
         )
 
     def test_the_singleton_label_survives_only_as_the_job_to_retire(self):
-        self.assertEqual(drain_prs_service.LEGACY_LABEL, "com.coghex.drain-prs")
+        self.assertEqual(service_manager.LEGACY_LABEL, "com.coghex.drain-prs")
         self.assertEqual(
-            drain_prs_service.LEGACY_PLIST_PATH,
+            service_manager.LEGACY_PLIST_PATH,
             Path.home() / "Library" / "LaunchAgents" / "com.coghex.drain-prs.plist",
         )
+
+
+class PinnedServiceDefinitionTests(unittest.TestCase):
+    """The generated plist, byte for byte.
+
+    Every input that would otherwise be the developer's own — the interpreter
+    running the tests, `HOME`, and the install, runtime and log roots — is
+    redirected to a fixed value, so this pin says the same thing on any host
+    rather than passing only where it was recorded. The bytes below are the
+    ones the controller produced before issue #291 moved plist rendering
+    behind the service-manager backend; a difference here is a change to what
+    launchd is asked to run, whatever the diff looks like.
+    """
+
+    HOME = Path("/Users/pinned")
+    INSTALL_DIR = HOME / "Library" / "Application Support" / "kanban" / "pr-drainer"
+    GOLDEN = "\n".join(
+        [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+            '<plist version="1.0">',
+            "<dict>",
+            "\t<key>Label</key>",
+            "\t<string>com.coghex.drain-prs.acme.widgets</string>",
+            "\t<key>ProgramArguments</key>",
+            "\t<array>",
+            "\t\t<string>/usr/bin/python3</string>",
+            "\t\t<string>/Users/pinned/Library/Application Support/kanban/"
+            "pr-drainer/drain_prs_service.py</string>",
+            "\t\t<string>--path</string>",
+            "\t\t<string>/Users/pinned/work/widgets</string>",
+            "\t\t<string>--repo</string>",
+            "\t\t<string>acme/widgets</string>",
+            "\t\t<string>run</string>",
+            "\t</array>",
+            "\t<key>WorkingDirectory</key>",
+            "\t<string>/Users/pinned/work/widgets</string>",
+            "\t<key>RunAtLoad</key>",
+            "\t<false/>",
+            "\t<key>KeepAlive</key>",
+            "\t<false/>",
+            "\t<key>ProcessType</key>",
+            "\t<string>Background</string>",
+            "\t<key>ThrottleInterval</key>",
+            "\t<integer>10</integer>",
+            "\t<key>StandardOutPath</key>",
+            "\t<string>/Users/pinned/Library/Logs/kanban/pr-drainer/acme.widgets/"
+            "service.out</string>",
+            "\t<key>StandardErrorPath</key>",
+            "\t<string>/Users/pinned/Library/Logs/kanban/pr-drainer/acme.widgets/"
+            "service.err</string>",
+            "\t<key>EnvironmentVariables</key>",
+            "\t<dict>",
+            "\t\t<key>HOME</key>",
+            "\t\t<string>/Users/pinned</string>",
+            "\t\t<key>PATH</key>",
+            "\t\t<string>/Users/pinned/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+            "/usr/bin:/bin:/usr/sbin:/sbin</string>",
+            "\t\t<key>PYTHONUNBUFFERED</key>",
+            "\t\t<string>1</string>",
+            "\t\t<key>KANBAN_DRAINER_INSTALL_DIR</key>",
+            "\t\t<string>/Users/pinned/Library/Application Support/kanban/"
+            "pr-drainer</string>",
+            "\t</dict>",
+            "</dict>",
+            "</plist>",
+            "",
+        ]
+    ).encode("utf-8")
+
+    def setUp(self):
+        for module, name, value in (
+            (drain_prs_service, "HOME", self.HOME),
+            (drain_prs_service, "INSTALL_DIR", self.INSTALL_DIR),
+            (
+                drain_prs_service,
+                "CONTROLLER_PATH",
+                self.INSTALL_DIR / "drain_prs_service.py",
+            ),
+            (drain_prs_service, "RUNTIME_ROOT", self.INSTALL_DIR / "runtime"),
+            (
+                drain_prs_service,
+                "LOG_ROOT",
+                self.HOME / "Library" / "Logs" / "kanban" / "pr-drainer",
+            ),
+            (
+                service_manager,
+                "LAUNCH_AGENTS_DIR",
+                self.HOME / "Library" / "LaunchAgents",
+            ),
+            # The interpreter the definition names is this process's own, which
+            # differs between a system python3, a virtualenv, and CI.
+            (drain_prs_service.sys, "executable", "/usr/bin/python3"),
+        ):
+            patched = mock.patch.object(module, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def test_the_generated_definition_is_byte_identical_to_the_pin(self):
+        job = drain_prs_service.job_for_identity(
+            self.HOME / "work" / "widgets", "acme/widgets"
+        )
+        self.assertEqual(rendered_definition(job), self.GOLDEN)
+
+
+class BackendDelegationTests(RedirectedControllerTestCase):
+    """The lifecycle drives whichever backend was selected, and nothing else.
+
+    Issue #291's point: the controller owns identity, records, incidents and
+    stabilization, while every service-manager interaction is the backend's.
+    Replacing the backend is therefore enough to exercise install, start and
+    stop with no service manager present at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.backend = RecordingBackend(self.root / "definitions")
+        patched = mock.patch.object(
+            drain_prs_service, "service_backend", return_value=self.backend
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+        self.commands.clear()
+
+    def service_manager_commands(self):
+        return [args for args in self.commands if args[0] != "git"]
+
+    def test_the_job_is_named_and_placed_by_the_selected_backend(self):
+        self.assertEqual(self.job.label, "fake-service.acme.widgets")
+        self.assertEqual(
+            self.job.plist_path, self.backend.definition_path(self.job.label)
+        )
+
+    def test_the_slug_falls_back_when_the_backend_refuses_the_identifier(self):
+        # The limit is the manager's, so the fallback follows whatever it says
+        # rather than a length this module restates.
+        slug = drain_prs_service.repository_slug("o" * 30 + "/" + "n" * 30)
+        self.assertTrue(slug.startswith("h"))
+        self.assertNotIn(".", slug)
+
+    def test_installing_writes_the_record_between_the_definition_and_the_load(self):
+        # The record describes where the job is, so it has to be true from the
+        # moment the definition exists and before the manager is told to load
+        # it — an ordering only visible across the boundary.
+        real_record = drain_prs_service.write_discovery_record
+
+        def recording(job):
+            self.backend.calls.append(("discovery_record",))
+            return real_record(job)
+
+        with (
+            mock.patch.object(
+                drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+            ),
+            mock.patch.object(
+                drain_prs_service, "write_discovery_record", side_effect=recording
+            ),
+        ):
+            result = drain_prs_service.install_job(self.job)
+
+        self.assertEqual(
+            self.backend.names(),
+            ["write_definition", "discovery_record", "load_definition"],
+        )
+        self.assertEqual(result["target"], "fake-manager/fake-service.acme.widgets")
+        self.assertEqual(self.service_manager_commands(), [])
+
+    def test_a_legacy_singleton_is_retired_before_the_replacement_is_written(self):
+        self.backend.legacy_installed = True
+        self.backend.legacy_repository = self.repo
+        with mock.patch.object(
+            drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+        ):
+            result = drain_prs_service.install_job(self.job)
+        self.assertEqual(
+            self.backend.names(),
+            ["retire_legacy", "write_definition", "load_definition"],
+        )
+        self.assertTrue(result["legacy_job"]["retired"])
+        self.assertEqual(result["legacy_job"]["label"], "fake-service.legacy")
+
+    def test_a_legacy_singleton_for_another_repository_is_never_retired(self):
+        # The identity comparison stays the controller's: the backend reports
+        # which checkout the singleton names and nothing more.
+        other = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.backend.legacy_installed = True
+        self.backend.legacy_repository = other
+        with mock.patch.object(
+            drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+        ):
+            result = drain_prs_service.install_job(self.job)
+        self.assertNotIn("retire_legacy", self.backend.names())
+        self.assertFalse(result["legacy_job"]["retired"])
+        self.assertEqual(result["legacy_job"]["repository"], "acme/gadgets")
+
+    def test_starting_kicks_the_job_through_the_backend(self):
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        running = {"state": "running", "drainer_pid": 4242, "active_repo": str(self.repo)}
+        with (
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "install_job"),
+            mock.patch.object(drain_prs_service, "START_STABILITY_SECONDS", 0),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[stopped, running, running],
+            ),
+        ):
+            result = drain_prs_service.start_service(self.job)
+        self.assertTrue(result["started"])
+        self.assertEqual(self.backend.names(), ["kick"])
+        self.assertEqual(self.service_manager_commands(), [])
+
+    def test_stopping_asks_the_backend_to_terminate_the_job(self):
+        running = {
+            "state": "running",
+            "drainer_pid": 4242,
+            "active_repo": str(self.repo),
+            "cleanup_obligations": [],
+        }
+        stopped = {"state": "stopped", "drainer_pid": None, "cleanup_obligations": []}
+        with (
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[running, stopped, stopped],
+            ),
+        ):
+            result = drain_prs_service.stop_service(self.job)
+        self.assertTrue(result["stopped"])
+        self.assertEqual(self.backend.calls, [("request_stop", self.job.label)])
+        self.assertEqual(self.service_manager_commands(), [])
+
+    def test_status_reads_its_loaded_answer_from_the_backend(self):
+        self.backend.loaded = True
+        self.assertTrue(drain_prs_service.status_snapshot(self.job)["launchd_loaded"])
+        self.backend.loaded = False
+        self.assertFalse(drain_prs_service.status_snapshot(self.job)["launchd_loaded"])
+
+
+class BackendFailureVocabularyTests(RedirectedControllerTestCase):
+    def test_a_failing_command_reaches_the_caller_as_a_service_error(self):
+        # The backend is constructed with this module's own `run_command`, so
+        # a failure crossing the boundary is the error every caller here
+        # already handles rather than a third exception type.
+        with mock.patch.object(
+            drain_prs_service,
+            "run_command",
+            side_effect=drain_prs_service.ServiceError("Command failed: launchctl"),
+        ):
+            with self.assertRaises(drain_prs_service.ServiceError):
+                drain_prs_service.service_backend().kick("com.example.job")
+
+    def test_an_unknown_job_is_reported_as_not_loaded_rather_than_a_failure(self):
+        with mock.patch.object(
+            drain_prs_service.subprocess,
+            "run",
+            return_value=_completed(1, stderr="Could not find service"),
+        ):
+            self.assertFalse(
+                drain_prs_service.service_backend().is_loaded("com.example.job")
+            )
 
 
 class ControllerConfigurationTests(RedirectedControllerTestCase):
@@ -335,7 +710,7 @@ class ControllerConfigurationTests(RedirectedControllerTestCase):
             "CONTROLLER_PATH",
             self.install_dir / "drain_prs_service.py",
         ):
-            value = plistlib.loads(drain_prs_service.render_plist(job))
+            value = plistlib.loads(rendered_definition(job))
         self.assertEqual(value["Label"], job.label)
         self.assertEqual(
             value["ProgramArguments"][1:],
@@ -358,7 +733,7 @@ class ControllerConfigurationTests(RedirectedControllerTestCase):
         with mock.patch.object(
             drain_prs_service, "NTFY_URL", "https://notify.example.test/topic"
         ):
-            value = plistlib.loads(drain_prs_service.render_plist(job))
+            value = plistlib.loads(rendered_definition(job))
         self.assertNotIn("KANBAN_DRAINER_NTFY_URL", value["EnvironmentVariables"])
 
     def test_the_shared_document_is_read_with_a_legacy_install_dir_copy_under_it(self):
@@ -627,7 +1002,7 @@ class DiscoveryRecordTests(RedirectedControllerTestCase):
             [
                 "launchctl",
                 "bootstrap",
-                drain_prs_service.launch_domain(),
+                service_manager.launch_domain(),
                 entry["plist_path"],
             ],
             self.commands,
@@ -914,7 +1289,7 @@ class IndependentDrainerTests(RedirectedControllerTestCase):
     def test_stopping_one_leaves_the_other_running_and_correctly_reported(self):
         self.write_status(self.widgets_job, self.widgets)
         self.write_status(self.gadgets_job, self.gadgets)
-        widgets_target = drain_prs_service.launch_target(self.widgets_job)
+        widgets_target = service_manager.launch_target_for(self.widgets_job.label)
 
         def stopping(args, *, check=True):
             if args[:2] == ["launchctl", "kill"] and args[3] == widgets_target:
@@ -1073,17 +1448,17 @@ class LegacyJobMigrationTests(RedirectedControllerTestCase):
         self.gadgets = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
         self.widgets_job = drain_prs_service.resolve_job(self.widgets)
         self.legacy_plist = self.launch_agents / (
-            drain_prs_service.LEGACY_LABEL + ".plist"
+            service_manager.LEGACY_LABEL + ".plist"
         )
-        self.legacy_target = drain_prs_service.launch_target_for(
-            drain_prs_service.LEGACY_LABEL
+        self.legacy_target = service_manager.launch_target_for(
+            service_manager.LEGACY_LABEL
         )
 
     def write_legacy_plist(self, repo):
         self.legacy_plist.write_bytes(
             plistlib.dumps(
                 {
-                    "Label": drain_prs_service.LEGACY_LABEL,
+                    "Label": service_manager.LEGACY_LABEL,
                     "ProgramArguments": [
                         "/usr/bin/python3",
                         "/tmp/drain_prs_service.py",
@@ -1112,7 +1487,7 @@ class LegacyJobMigrationTests(RedirectedControllerTestCase):
             [
                 "launchctl",
                 "bootstrap",
-                drain_prs_service.launch_domain(),
+                service_manager.launch_domain(),
                 str(self.widgets_job.plist_path),
             ]
         )
@@ -1376,7 +1751,7 @@ class IncidentSelectionTests(RedirectedControllerTestCase):
 
         self.assertTrue(result["started"])
         self.assertIn(
-            ["launchctl", "kickstart", drain_prs_service.launch_target(self.job)],
+            ["launchctl", "kickstart", service_manager.launch_target_for(self.job.label)],
             self.commands,
         )
         # A start resolves nothing either: both survivors are still open.
@@ -1640,7 +2015,6 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
             mock.patch.object(drain_prs_service, "lock_pid", return_value=None),
             mock.patch.object(drain_prs_service, "incident_files", return_value=[]),
             mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
-            mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
             mock.patch.object(
                 drain_prs_service, "in_progress_operation", return_value=operation
             ),
@@ -1777,7 +2151,7 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         ):
             result = drain_prs_service.stop_service(self.job)
         self.assertIn(
-            ["launchctl", "kill", "SIGTERM", drain_prs_service.launch_target(self.job)],
+            ["launchctl", "kill", "SIGTERM", service_manager.launch_target_for(self.job.label)],
             self.commands,
         )
         resolve_crash_incidents.assert_called_once_with(
@@ -2864,7 +3238,12 @@ class MirroredCleanupVocabularyTests(unittest.TestCase):
             self.assertNotIn("unknown cleanup step", step)
 
 
-SOURCE_NAMES = ("drain_prs.py", "drain_prs_service.py", "kanban_config.py")
+SOURCE_NAMES = (
+    "drain_prs.py",
+    "drain_prs_service.py",
+    "kanban_config.py",
+    "service_manager.py",
+)
 
 
 def _git(repo, *args):
@@ -2905,6 +3284,7 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
             controller=self.install / "drain_prs_service.py",
             drainer=self.install / "drain_prs.py",
             config=self.install / "kanban_config.py",
+            backend=self.install / "service_manager.py",
         )
 
     def _make_checkout(self, path, push=True):
@@ -2923,11 +3303,12 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
             _git(path, "fetch", "-q", "origin")
         return path
 
-    def point_at(self, *, controller=None, drainer=None, config=None):
+    def point_at(self, *, controller=None, drainer=None, config=None, backend=None):
         for name, value in (
             ("CONTROLLER_PATH", controller),
             ("DRAINER_PATH", drainer),
             ("CONFIG_MODULE_PATH", config),
+            ("SERVICE_MANAGER_MODULE_PATH", backend),
         ):
             if value is None:
                 continue
@@ -3086,7 +3467,7 @@ class InstalledSourceAdvisoryTests(unittest.TestCase):
         ):
             audit = self.audit()
         self.assertEqual(audit.diverged, ())
-        self.assertEqual(len(audit.unavailable), 3)
+        self.assertEqual(len(audit.unavailable), 4)
         self.assertEqual(len(drain_prs_service.source_advisory_lines(audit)), 1)
 
     def test_an_unexpected_comparison_failure_is_contained(self):

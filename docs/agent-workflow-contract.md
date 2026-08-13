@@ -289,8 +289,10 @@ arithmetic, which §2.3 owns.
 ### 2.4 Incident/controller capability — the PR drainer
 
 - **Owning source:** `tools/drain_prs_service.py` (incident storage and
-  lifecycle, plus the service loop) and `tools/install_drainer.py`
-  (installer), surfaced in-app by `src/Kanban/Drainer.hs`. The
+  lifecycle, plus the service loop), `tools/service_manager.py` (the one
+  service-manager backend both of the others reach launchd through), and
+  `tools/install_drainer.py` (installer), surfaced in-app by
+  `src/Kanban/Drainer.hs`. The
   drainer (`tools/drain_prs.py`) records and resolves its own per-pull
   -request conflict incidents through that same storage. Kanban's in-app
   surface is read-only for everything the *service* owns — status, incidents,
@@ -299,7 +301,10 @@ arithmetic, which §2.3 owns.
   selected pull request. It owns neither merge policy nor cleanup; every gate,
   the merge, and the post-merge obligations stay with `tools/drain_prs.py`.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
-  `kill`) manages the LaunchAgent. The drainer's own PR-merge loop
+  `kill`) manages the LaunchAgent, spawned only by `tools/service_manager.py`
+  — the controller and the installer both reach it through that backend, and
+  neither builds a `launchctl` argument vector, reads its output, or writes or
+  parses a plist. The drainer's own PR-merge loop
   (`tools/drain_prs.py`) shells out to `git` and `gh` for every repository
   operation, and, only for automated stale-head rereview rounds, to
   `codex exec`. Every executable these Python tools spawn is declared in the
@@ -313,8 +318,8 @@ arithmetic, which §2.3 owns.
   (`~/Library/LaunchAgents`, the drainer's log root, the legacy
   `~/work/approve-issues.py` launcher), and reconciling them is #146's work,
   not this surface's. Their behavior stays covered by
-  `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`, and
-  `tools/test_install_drainer.py`.
+  `tools/test_pure_logic.py`, `tools/test_drain_prs_service.py`,
+  `tools/test_service_manager.py`, and `tools/test_install_drainer.py`.
   `tools/drain_prs.py --pr <number>` is the same merge path driven for one
   named pull request instead of the queue: it applies the identical gates,
   guards, ordering and post-merge audit, reads and mutates only that pull
@@ -747,10 +752,10 @@ git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;t
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs | kanban | supported | no
-launchctl-cli | executable | launchctl | tools/drain_prs_service.py;tools/install_drainer.py | kanban | supported | no
+launchctl-cli | executable | launchctl | tools/service_manager.py | kanban | supported | no
 approve-issues-backend | personal-path | /Library/Application Support/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/Review/Canonical.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md | kanban | supported | no
-drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/drain_prs_service.py | kanban | supported | no
+drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 drainer-install-dir | personal-path | /Library/Application Support/kanban/pr-drainer | tools/drain_prs_service.py;src/Kanban/Drainer.hs | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md | kanban | supported | no
@@ -773,7 +778,10 @@ token can be: an installed job's label appends the repository's own slug to it
 (`com.coghex.drain-prs.coghex.kanban`), so there is one label per canonical
 GitHub repository rather than one for the account. The bare prefix is also the
 label of the machine-wide singleton that predates per-repository jobs, which
-`tools/drain_prs_service.py` retires rather than installs.
+`tools/service_manager.py` retires rather than installs. The label belongs to
+that module because the label is launchd's: it is the service-manager backend
+that names, writes, and targets a job, and every other component reads the
+label from it or out of the discovery record rather than restating it.
 
 `codex-plugin-cache-root` is the only user-scoped path this repository declares
 that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's own
@@ -820,20 +828,21 @@ nothing else, which is what `mandatory: no` records.
   the drainer installer's default install directory is
   `~/Library/Application Support/kanban/pr-drainer`, and its LaunchAgent
   labels and plist paths are a Kanban-owned convention rather than a personal
-  one. The component that writes the plists owns the labels:
-  `tools/drain_prs_service.py` derives each one from its repository's
-  normalized canonical GitHub identity — resolved through the remote the
-  shared Kanban configuration names, the same one the dashboard resolves its
-  own repository through — renders the plist from it, builds
-  every `launchctl` target from it, partitions the runtime and log paths by
-  the same identity, and — from those same values — records that job's label,
-  the plist's absolute path, and the checkout it was installed for under that
-  repository's entry in
+  one. The component that writes the plists owns the labels, and that is the
+  service-manager backend:
+  `tools/drain_prs_service.py` resolves each repository's normalized canonical
+  GitHub identity — through the remote the shared Kanban configuration names,
+  the same one the dashboard resolves its own repository through — and
+  `tools/service_manager.py` derives that job's label from it, renders and
+  writes the plist, and builds every `launchctl` target from the same label.
+  The controller partitions the runtime and log paths by that identity and —
+  from those same values — records the job's label, the plist's absolute path,
+  and the checkout it was installed for under that repository's entry in
   `~/Library/Application Support/kanban/pr-drainer/config.json`. The
   derivation is total, produces a valid nonempty label for every supported
   `owner/name`, and is injective across distinct normalized identities, so no
   two repositories can name one job. `tools/install_drainer.py` resolves a job
-  through that module rather than restating any of it, and
+  through those two modules rather than restating any of it, and
   `src/Kanban/Drainer.hs` derives no label at all: it selects the entry for
   the identity it resolved and reads the label and plist path out of it.
   Haskell cannot import a Python constant, so a record one side writes and the

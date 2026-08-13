@@ -209,15 +209,23 @@ class ControllerOperationDetectionTests(_OperationFixture):
         return drain_prs_service.job_for_identity(self.repo, "acme/widgets")
 
     def _stopped_snapshot(self):
+        # Resolved before the backend is replaced, so the job keeps its real
+        # identifier and paths; the stand-in only answers whether the service
+        # manager holds the job, which no test here may ask a real one.
+        job = self._job()
+        backend = mock.Mock()
+        backend.is_loaded.return_value = False
         with (
             mock.patch.object(drain_prs_service, "read_json", return_value={}),
             mock.patch.object(drain_prs_service, "pid_alive", return_value=False),
             mock.patch.object(drain_prs_service, "lock_pid", return_value=None),
             mock.patch.object(drain_prs_service, "incident_files", return_value=[]),
             mock.patch.object(drain_prs_service, "latest_log_path", return_value=None),
-            mock.patch.object(drain_prs_service, "launchd_loaded", return_value=False),
+            mock.patch.object(
+                drain_prs_service, "service_backend", return_value=backend
+            ),
         ):
-            return drain_prs_service.status_snapshot(self._job())
+            return drain_prs_service.status_snapshot(job)
 
     def _start(self):
         with (
