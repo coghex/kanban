@@ -3,8 +3,12 @@
 Both packaged coordinators publish through their own copy of review_pr.py, so
 the same behavioral contract is exercised against each copy. An approval must
 mark a draft ready for review and verify the new state; changes requested must
-leave draft state alone. If publication becomes stale after the ready
-transition, the coordinator restores the draft while clearing verdict labels.
+leave draft state alone. Rollback is scoped to ownership: if publication
+becomes stale after the coordinator's own ready command succeeded, the
+coordinator restores the draft while clearing verdict labels, but a ready
+state whose ownership it cannot establish -- the case where its ready command
+failed, which is indistinguishable from a concurrent actor's transition -- is
+left exactly as it stands.
 """
 
 from __future__ import annotations
@@ -211,7 +215,18 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                 restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
                 self.assertIn("draft state was restored", str(excinfo.exception))
 
-    def test_failed_ready_command_reconciles_and_restores_a_server_side_transition(self):
+    def test_failed_ready_command_leaves_a_concurrent_transition_alone(self):
+        """A ready state the coordinator cannot prove it created stays put.
+
+        Another actor marks the PR ready after the initial verification read a
+        draft, and the coordinator's own ready command then fails without
+        applying anything. Nothing observable separates that from the command
+        having applied before reporting failure -- both act through the same
+        credentials -- so publication must not undo it. That is the trade this
+        test buys: in the mirror case, a command that did apply before failing
+        leaves the PR ready for review with both verdict labels cleared, which
+        the board classifies Reviewing and the drainer will not merge.
+        """
         for brand, module in self.modules.items():
             with self.subTest(brand=brand):
                 pr = self.pr(draft=True)
@@ -224,11 +239,18 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     module, pr, "APPROVE", [before]
                 )
 
-                def transition_then_fail(*_args):
+                def verify_then_external_transition(*_args, **_kwargs):
+                    # The concurrency window itself: this read observes the
+                    # draft, and only afterwards does someone else mark the PR
+                    # ready. pr_view returns this same dict, so a coordinator
+                    # that re-read isDraft to reconcile the failure below would
+                    # see non-draft and restore a transition that is not its.
                     pr["isDraft"] = False
-                    raise module.WorkflowError("gh pr ready failed after applying the transition")
+                    return before
 
-                ready.side_effect = transition_then_fail
+                verify.side_effect = verify_then_external_transition
+                ready.side_effect = module.WorkflowError("gh pr ready failed")
+
                 with stack, self.assertRaises(module.WorkflowError) as excinfo:
                     self.publish(module, pr, "APPROVE")
 
@@ -241,8 +263,9 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
                     "reviewed:approve",
                     "reviewed:changes",
                 )
-                restore.assert_called_once_with(Path("/fake-repo"), "coghex/kanban", 89)
-                self.assertIn("draft state was restored", str(excinfo.exception))
+                restore.assert_not_called()
+                self.assertFalse(pr["isDraft"])
+                self.assertNotIn("draft state was restored", str(excinfo.exception))
 
     def test_failed_ready_command_does_not_restore_when_the_pr_remains_a_draft(self):
         for brand, module in self.modules.items():

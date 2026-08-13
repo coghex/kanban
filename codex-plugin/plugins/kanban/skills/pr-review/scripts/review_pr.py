@@ -1134,7 +1134,6 @@ def publish_results(
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
-    ready_transition_attempted = False
     made_ready = False
     try:
         require_current_review_state(
@@ -1161,7 +1160,6 @@ def publish_results(
             config_path=config_path,
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
-            ready_transition_attempted = True
             mark_ready_for_review(root, repo, number)
             made_ready = True
             verified = verify_publication(
@@ -1185,11 +1183,20 @@ def publish_results(
             clear_verdict_labels(root, repo, number, approval_label, changes_requested_label)
         except WorkflowError as cleanup_exc:
             cleanup_errors.append(f"verdict-label cleanup failed ({cleanup_exc})")
-        if ready_transition_attempted and not made_ready:
-            try:
-                made_ready = not bool(pr_view(root, repo, number).get("isDraft"))
-            except WorkflowError as cleanup_exc:
-                cleanup_errors.append(f"draft-state reconciliation failed ({cleanup_exc})")
+        # made_ready is the only ownership evidence there is: it is set only
+        # after mark_ready_for_review returns. Deliberately no post-failure
+        # isDraft read here -- a failed ready command leaves no signal
+        # separating "ours applied, then reported failure" from "another actor
+        # marked it ready" (both act through the same credentials), so
+        # inferring ownership from the state would undo a concurrent actor's
+        # transition. Accepted residual, in exchange: when the command did
+        # apply before failing, the PR is left ready for review with both
+        # verdict labels cleared -- which the board classifies Reviewing and
+        # the drainer, merging only approval-labelled PRs, leaves alone. Do
+        # not reintroduce the state read to "fix" that. This scopes the
+        # failed/outcome-uncertain path only: a ready command that succeeded
+        # as a no-op because another actor won the same race still sets
+        # made_ready, and is rolled back below.
         if made_ready:
             try:
                 restore_draft(root, repo, number)
