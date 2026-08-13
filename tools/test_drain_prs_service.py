@@ -2558,7 +2558,27 @@ class AutostashInventoryTests(RedirectedControllerTestCase):
                 f"refs/heads/master {sha} {date}\n",
             ),
             ("a date that is not one", "for-each-ref", f"{ref} {sha} yesterday\n"),
+            ("a field the format does not have", "for-each-ref", f"{good} extra\n"),
+            # The format prints one row per ref and never a blank, so a blank
+            # is output it cannot have produced -- and skipping one is exactly
+            # how nothing-was-parsed would come back as nothing-is-there.
+            ("nothing but a blank row", "for-each-ref", "\n"),
+            ("a readable row beside a blank one", "for-each-ref", f"{good}\n\n"),
+            ("a row of only whitespace", "for-each-ref", "   \n"),
             ("a truncated stash record", "stash", "stash@{0}\x00"),
+            # `-z` terminates every record, so one trailing empty is the whole
+            # expected supply of them.
+            ("nothing but a record separator", "stash", "\x00"),
+            (
+                "a readable record beside an empty one",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1f{date}\x1fmessage\x00\x00",
+            ),
+            (
+                "output that stops mid-record",
+                "stash",
+                f"stash@{{0}}\x1f{sha}\x1f{date}\x1fmessage",
+            ),
             (
                 "a stash selector that is not one",
                 "stash",

@@ -1136,9 +1136,11 @@ def _snapshot_anchor_rows(repo_path: Path) -> list[tuple[str, str, str]] | None:
     if out is None:
         return None
     rows: list[tuple[str, str, str]] = []
+    # No row is skipped, blank ones included: the format emits one row per ref
+    # and never a blank, so skipping one is how `"\n"` would become "no anchor
+    # holds a sole copy" and a blank beside a real row would become a partial
+    # list. An empty output is the only empty answer, and it means no ref.
     for line in out.splitlines():
-        if not line.strip():
-            continue
         ref, _, rest = line.strip().partition(" ")
         sha, _, date = rest.partition(" ")
         date = date.strip()
@@ -1178,10 +1180,21 @@ def _stash_rows(repo_path: Path) -> list[tuple[str, str, str, str]] | None:
     )
     if out is None:
         return None
+    if out == "":
+        # The only empty answer: a stash with no entries prints nothing.
+        return []
+    records = out.split("\0")
+    # `-z` terminates every record, so exactly one trailing empty is expected
+    # and anything else -- output that stops mid-record, a bare separator, an
+    # extra one -- is not this format. Skipping those is how `"\0"` would
+    # become verified-empty and a real entry beside one would become a
+    # partial list that reads as the whole stash.
+    if records.pop() != "":
+        return None
     rows: list[tuple[str, str, str, str]] = []
-    for record in out.split("\0"):
+    for record in records:
         if not record:
-            continue
+            return None
         fields = record.split("\x1f", 3)
         if len(fields) != 4:
             # A partial list would read as a complete one, and this collection
