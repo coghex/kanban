@@ -559,11 +559,15 @@ directory prefixes, and extension matching are not implied, and a rename counts
 both its source and its destination, so every path you mean has to be listed.
 The key defaults to empty; a repository that sets nothing requests a branch
 update for every advance, exactly as the drainer always has. Never list a
-document a test parses — in this repository `docs/agent-workflow-contract.md`
-and `docs/drafting-workflow-contract.md` are parsed by
-`tools/test_agent_workflow_contract.py` and
-`tools/test_drafting_workflow_contract.py`, so a change to either really can
-fail `build-test`, and that is a rebuild worth paying for.
+document a test parses — a change to one really can fail `build-test`, and that
+is a rebuild worth paying for. In this repository the authoritative set is the
+`test-parsed` rows of
+[agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification),
+which is where a newly parsed document gets classified, so consult it rather
+than any list repeated here. Two of those rows are directories —
+`claude-plugin/` and `codex-plugin/` — and each covers every tracked Markdown
+workflow beneath it, so the documents those rows reach are more numerous than
+the rows themselves.
 
 The drainer merges past an advance only when all of this holds:
 

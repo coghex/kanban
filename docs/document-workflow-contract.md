@@ -235,7 +235,16 @@ parses §2 and fails if:
   (§5.1), or `$design-epic` or `$process-design-doc` drops one of the authority
   clauses that boundary summarizes — the design pair's counterpart to the §5
   check above, and the reason §5.1's semantics cannot regress in the assets
-  while the document still describes them.
+  while the document still describes them;
+- a declared asset drops one of the ownership-resolution clauses of §8, or
+  reintroduces the unscoped docs-worktree fallback §8 replaced;
+- this document drops §8's resolution order, its fail-closed rule, its
+  separation of repository routing from the publication lane, or its statement
+  that `docs/agent-workflow-contract.md` §7 classifies Kanban paths only;
+- a `gh` invocation in any declared asset stops binding to the resolved owner —
+  the check that keeps the eight tracker operations in `/process-report`,
+  `$process-report`, and `$process-design-doc` from reverting to the unscoped
+  form that binds them to the shell's current directory.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -243,3 +252,78 @@ with the rest of each plugin's structural coverage in
 external-command surface is reconciled against the §4 dependency manifest of
 [agent-workflow-contract.md](agent-workflow-contract.md#4-dependency-manifest)
 by `tools/test_agent_workflow_contract.py`.
+
+## 8. Owning repository and publication target
+
+Every declared asset writes a durable document and, for the three processing
+assets, mutates a tracker. Neither action is reversible in the wrong
+repository: moving a Markdown file afterward does not undo an issue already
+filed somewhere it does not belong. So each asset resolves an explicit owner
+before its first durable write and before its first tracker mutation, rather
+than inheriting whichever checkout the session happened to start in.
+
+This is not hypothetical. `docs/document_workflow_findings.md` — an audit of
+Kanban's own workflow system — was first created under a different repository
+solely because that was the active checkout, and at that moment the Kanban
+checkout was on a feature branch, so naming the right repository still would
+not have identified a safe publication target.
+
+### 8.1 What gets resolved
+
+Three values, all required together:
+
+- `$DOC_REPO` — the owning repository as an explicit `owner/repo` slug. It
+  scopes every `gh` command the workflow runs.
+- `$DOC_BRANCH` — that repository's default branch, which is the publication
+  target. It is never assumed to be the current checkout's branch.
+- `$DOC_ROOT` — a validated local checkout of `$DOC_REPO`, under which every
+  document read and write resolves, including the `$DOCS_WT` docs-worktree
+  lookup. A slug alone names no place to write, so binding the first two
+  without the third would leave the wrong-repository failure in place.
+
+### 8.2 Resolution order
+
+Two tiers, and the first tier that matches wins:
+
+a. **Explicit input** — a repository or a document path the user supplied,
+   after validation. First-match-wins applies between tiers, not between
+   explicit inputs: when the user names both a repository and a path, both must
+   validate and resolve to the same repository. Conflicting explicit inputs are
+   unresolved, not a preference to rank.
+b. **A §7 row** — for a document path that is Git-tracked in the checkout
+   holding it, coverage by exactly one row of
+   [agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+   declares the document Kanban-owned. Coverage means the tracked path matches
+   exactly one row, whether an exact file row or a component-aware directory
+   row; no row, more than one row, or an untracked path resolves nothing.
+
+Anything else leaves the owner unresolved.
+
+### 8.3 The fail-closed rule
+
+An unresolved owner creates no file, edits no document, and issues no `gh`
+mutation. The workflow reports which of the three values it could not determine
+and asks the user for the owning repository, and for a local path as well when
+no checkout of it is available. A failed or ambiguous default-branch resolution
+fails closed identically — falling back to the current branch would contradict
+§8.1 exactly as falling back to the active checkout would.
+
+A new document that no §7 row covers is the expected case for tier (b), not an
+error condition: it resolves nothing, and the workflow asks.
+
+Reading code, tests, or history from another repository as evidence stays
+allowed, and is never an ownership signal.
+
+### 8.4 Routing is not the publication lane
+
+Resolving `$DOC_REPO` and `$DOC_BRANCH` answers *where* a document and its
+tracker items belong. Whether that document then publishes as `coordination` or
+`pr-atomic` is the separate question
+[agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+answers about an already-routed document. The two decisions share a source
+table but are not the same decision, and the lane is never a substitute for
+resolving the owner.
+
+That §7 table is Kanban's own: it describes this repository and nothing else,
+so it can identify Kanban as an owner and can never identify a consuming
+repository's. A consuming repository resolves its documents through tier (a).
