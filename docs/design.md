@@ -2390,6 +2390,1026 @@ refresh key.
 These are intentionally outside the first release so the core remains a small,
 predictable, read-only dashboard.
 
+## 21. Release evidence
+
+Permanent records of the manual release gates D-1 requires, one subsection per
+gate (D-13). These outlive the `Epic contract` through `Delivery plan`
+scaffolding above.
+
+### REL-1. Installed performance calibration, macOS, 2026-08-13
+
+All six D-4 gates pass. Mean tree CPU over the idle minute was **1.53%**
+against a 2% ceiling, peak tree resident memory **69.59 MiB** against 512 MiB,
+and all three launches reached the GitHub-populated board in **under 1.3
+seconds** against a 10 second ceiling.
+
+The margin is narrower than the headline suggests, and the reason is the one
+D-10 anticipated. The PR drainer's ten-second status poll accounted for
+**95.6% of all CPU consumed during the idle minute**; Kanban's own steady-state
+cost was 0.0673% mean. D-10 estimated the poll at "about 0.07 s of CPU every
+ten seconds, roughly 0.7% of a core". The measured cost is **0.1464 s per
+poll, 1.46% mean** — roughly twice that estimate, consuming about 73% of D-4's
+entire 2% budget. This did not fail the gate and is not treated as one, but it
+is the number a later release should tighten, and it is recorded here so that
+tightening can start from evidence rather than from the estimate.
+
+#### Scope reconciliation: process group versus process tree
+
+D-10 and the Verification strategy above both say "process group". This record
+samples the **PPID process tree** rooted at the Kanban PID instead. The two are
+not the same here: Kanban spawns its managed children as their own process
+group leaders (`src/Kanban/Drainer.hs`, `src/Kanban/Process.hs`), so a
+process-group sample would omit exactly the drainer controller D-10 exists to
+capture. The tree reading is therefore the one that satisfies D-10's intent,
+and "Kanban and its children" is measured as the tree. Later records under this
+section use the same reading.
+
+#### Build provenance
+
+Every measurement below used an executable installed from a `cabal sdist`
+archive into a clean temporary directory (D-12). No working-tree installation
+was measured.
+
+| Item | Value |
+| --- | --- |
+| Commit (`git rev-parse HEAD`) | `878f8a2ed6a8d32c4066ead3db9e4d666bbde2bd` |
+| Working tree at that commit | `git status --porcelain=v1 --untracked-files=all` returned empty |
+| Archive | `kanban-1.0.0.0.tar.gz` |
+| Installed `--version` | `kanban 1.0.0.0` |
+| Install directory | a temporary directory; neither `~/.local/bin` nor `~/.cabal/bin` was used or written |
+
+```console
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+BUILD_COMMIT="$(git rev-parse HEAD)"
+TMP="$(mktemp -d)"
+mkdir -p "$TMP/unpacked" "$TMP/bin"
+cabal sdist all --builddir "$TMP/dist" --output-directory "$TMP/sdist"
+tar -xzf "$TMP"/sdist/kanban-*.tar.gz -C "$TMP/unpacked"
+cd "$TMP"/unpacked/kanban-*
+cabal install exe:kanban --installdir "$TMP/bin" --install-method=copy
+"$TMP/bin/kanban" --version
+```
+
+The issue that commissioned this record predicted `kanban 0.1.0.0`. The
+recorded output is `kanban 1.0.0.0` because the version bump to 1.0.0.0 landed
+on the default branch after that issue was written; D-5 fixes the first release
+at 1.0.0.0, so the observed string is the correct one and the issue's expected
+string was stale.
+
+#### Measurement environment
+
+| Item | Value |
+| --- | --- |
+| macOS | 26.6 (build 25G5065a) |
+| Architecture | arm64, Apple M3 Max, 16 logical CPUs |
+| Host terminal | Ghostty 1.3.2-HEAD-+bb30526 |
+| tmux | 3.5a |
+| Pane geometry | 200 columns × 50 rows, detached session |
+| `TERM` inside the pane | `screen-256color` |
+| Monotonic clock | `mach_absolute_time()`, resolution 4.1667e-08 s (41.67 ns) |
+| Mach timebase | `numer=125 denom=3`, i.e. 41.6667 ns per absolute-time unit |
+| Toolchain | GHC 9.12.2, cabal-install 3.16.1.0 |
+| Repository identity | `coghex/kanban` |
+| Checkout path | `~/worktrees/coghex/kanban/issue-269-release-evidence`, a linked worktree of that repository, passed as `--path` (home abbreviated per D-8) |
+| Worker sessions attached | none — the per-repository worker cache directory did not exist, so `discoverWorkers` found nothing to attach |
+| Cache precondition | warm; `~/.cache/kanban` held `claude-probe`, `gh-groups`, `logs`, `repos`, `usage-command`, `usage.json`, with `repos/coghex-kanban.json` present before every launch |
+| Config precondition | `~/.config/kanban/settings.json` present |
+| launchd drainer job | `com.coghex.drain-prs.coghex.kanban` loaded throughout, before and after the measured window |
+
+The "no worker sessions attached" precondition matters: startup attaches every
+discovered worker and forks a 200 ms monitor poll per worker, which would both
+add root CPU and produce non-controller child activity that invalidates the
+drainer attribution below.
+
+The drainer controller resolved from the loaded job's `ProgramArguments`,
+rebased onto this checkout, and invoked with `--json status` appended last, is:
+
+```text
+<python3.14 from the launchd job> \
+  <Application Support>/kanban/pr-drainer/drain_prs_service.py \
+  --path <checkout> --repo coghex/kanban --json status
+```
+
+The controller is resolved from the launchd job, not from the measured sdist
+artifact; it is not part of the installed archive. One detail matters for
+classification: the interpreter the job names is a macOS framework Python whose
+live processes report the `Python.app/Contents/MacOS/Python` stub as their
+executable, a second spelling of the same installation. Matching the plist's
+own path string against a live child therefore never fires, and the classifier
+below matches on the interpreter installation directory plus the exact argv
+tail instead.
+
+#### Method: the CPU and memory probe
+
+CPU is measured with a temporary, unprivileged `proc_pid_rusage` probe created
+outside the checkout. It resolves the live PPID tree rooted at the Kanban PID,
+keys every process by PID **and** `ri_proc_start_abstime` so PID reuse cannot
+corrupt a delta, reads self user/system and accumulated child user/system CPU
+for every live member, converts Mach absolute-time units with
+`mach_timebase_info`, and retries a boundary reading until two consecutive
+censuses agree on the set of process identities.
+
+Aggregate cumulative tree CPU is the sum of self **and accumulated child** CPU
+over the stable live tree. The accumulated child counters are what make the
+ten-second drainer poll measurable at all: a controller that starts and exits
+between two one-second boundaries is never seen alive, but its CPU folds into
+its parent's accumulated-child counters when it is reaped, so summing
+self + child over the live tree neither loses it nor counts it twice. In this
+run 6 polls occurred and only 1 was ever caught alive by a boundary census;
+the other 5 are present in the totals solely through those counters.
+
+The probe's synthetic self-test must pass before any Kanban measurement:
+
+```console
+python3 "$TMP/measure_tree.py" --self-test
+```
+
+Recorded output:
+
+```text
+mach_timebase_info: numer=125 denom=3 (41.6667 ns per unit)
+reaped child: burned ~0.40s, retained 0.4198s -> PASS
+reaped grandchild: burned ~0.40s, retained 0.4457s -> PASS
+timebase conversion: 0.4198s lies in [0.20, 1.20] -> PASS
+pid/start identity: pid 34449 start 10593681876078 matches, start 10593681876079 is rejected -> PASS
+stable reading: settled after 1 census comparison(s), 1 live process(es)
+SELF-TEST PASSED: reaped-child and reaped-grandchild CPU retained, Mach timebase conversion applied, PID/start-identity matching enforced
+```
+
+The timebase check has teeth on this host: one absolute-time unit is 41.67 ns,
+so an unconverted reading would be about 24× too small and would fall outside
+the stated plausibility band.
+
+The probe is recreated exactly by this here-document:
+
+```console
+cat > "$TMP/measure_tree.py" <<'PROBE'
+#!/usr/bin/env python3
+"""REL-1 process-tree CPU/RSS probe for an installed Kanban (macOS, unprivileged).
+
+Measures the PPID tree rooted at a Kanban PID using proc_pid_rusage(2), keying
+every process by (pid, ri_proc_start_abstime) so PID reuse cannot corrupt a
+delta, and defining aggregate cumulative tree CPU as the sum of self and
+accumulated-child CPU over the stable live tree. Accumulated child counters are
+required because they retain CPU from descendants reaped between boundaries.
+
+Temporary measurement artifact for issue #269. Not part of the repository.
+"""
+
+import argparse
+import ctypes
+import ctypes.util
+import errno
+import json
+import os
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------- libproc FFI
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+RUSAGE_INFO_V4 = 4
+PROC_PIDPATHINFO_MAXSIZE = 4096
+PROC_PIDTBSDINFO = 3
+
+
+class MachTimebaseInfo(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+class RusageInfoV4(ctypes.Structure):
+    """<sys/resource.h> struct rusage_info_v4.
+
+    Only the v0/v1 prefix is read; the tail is declared so the buffer the
+    kernel fills for RUSAGE_INFO_V4 is exactly the right size.
+    """
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_cpu_time_qos_default", ctypes.c_uint64),
+        ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+        ("ri_cpu_time_qos_background", ctypes.c_uint64),
+        ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+        ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+        ("ri_billed_system_time", ctypes.c_uint64),
+        ("ri_serviced_system_time", ctypes.c_uint64),
+        ("ri_logical_writes", ctypes.c_uint64),
+        ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+        ("ri_instructions", ctypes.c_uint64),
+        ("ri_cycles", ctypes.c_uint64),
+        ("ri_billed_energy", ctypes.c_uint64),
+        ("ri_serviced_energy", ctypes.c_uint64),
+        ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+        ("ri_runnable_time", ctypes.c_uint64),
+    ]
+
+
+class ProcBsdInfo(ctypes.Structure):
+    """<sys/proc_info.h> struct proc_bsdinfo — read only for pbi_ppid."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+libc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+libc.proc_pid_rusage.restype = ctypes.c_int
+libc.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+libc.proc_listallpids.restype = ctypes.c_int
+libc.proc_pidinfo.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.c_void_p,
+    ctypes.c_int,
+]
+libc.proc_pidinfo.restype = ctypes.c_int
+libc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+libc.proc_pidpath.restype = ctypes.c_int
+libc.mach_timebase_info.argtypes = [ctypes.POINTER(MachTimebaseInfo)]
+libc.mach_timebase_info.restype = ctypes.c_int
+
+
+def mach_timebase():
+    """Mach absolute-time units -> nanoseconds, as (numer, denom)."""
+    info = MachTimebaseInfo()
+    if libc.mach_timebase_info(ctypes.byref(info)) != 0:
+        raise RuntimeError("mach_timebase_info failed")
+    if info.numer == 0 or info.denom == 0:
+        raise RuntimeError(f"implausible mach timebase {info.numer}/{info.denom}")
+    return info.numer, info.denom
+
+
+TIMEBASE_NUMER, TIMEBASE_DENOM = mach_timebase()
+
+
+def abs_to_seconds(units):
+    """Convert Mach absolute-time units to seconds via mach_timebase_info."""
+    return units * TIMEBASE_NUMER / TIMEBASE_DENOM / 1e9
+
+
+def rusage(pid):
+    """proc_pid_rusage(pid, RUSAGE_INFO_V4). None when the process is gone."""
+    buffer = RusageInfoV4()
+    result = libc.proc_pid_rusage(pid, RUSAGE_INFO_V4, ctypes.byref(buffer))
+    if result != 0:
+        code = ctypes.get_errno()
+        if code in (errno.ESRCH, errno.EPERM, errno.EINVAL):
+            return None
+        raise OSError(code, f"proc_pid_rusage({pid}) failed: {os.strerror(code)}")
+    return buffer
+
+
+def proc_path(pid):
+    buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+    size = libc.proc_pidpath(pid, buffer, PROC_PIDPATHINFO_MAXSIZE)
+    if size <= 0:
+        return None
+    return buffer.value.decode("utf-8", "replace")
+
+
+def parent_map():
+    """{pid: ppid} for every process this user may inspect."""
+    count = libc.proc_listallpids(None, 0)
+    if count <= 0:
+        raise OSError(ctypes.get_errno(), "proc_listallpids failed")
+    capacity = count + 512
+    buffer = (ctypes.c_int32 * capacity)()
+    size = libc.proc_listallpids(buffer, ctypes.sizeof(buffer))
+    if size <= 0:
+        raise OSError(ctypes.get_errno(), "proc_listallpids failed")
+    pids = [buffer[index] for index in range(size // ctypes.sizeof(ctypes.c_int32))]
+    parents = {}
+    info = ProcBsdInfo()
+    for pid in pids:
+        if pid <= 0:
+            continue
+        written = libc.proc_pidinfo(
+            pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if written == ctypes.sizeof(info):
+            parents[pid] = info.pbi_ppid
+    return parents
+
+
+def descendants(root):
+    """Live PPID tree rooted at `root`, root included."""
+    parents = parent_map()
+    children = {}
+    for pid, ppid in parents.items():
+        children.setdefault(ppid, []).append(pid)
+    tree, frontier = [], [root]
+    seen = set()
+    while frontier:
+        pid = frontier.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        tree.append(pid)
+        frontier.extend(children.get(pid, []))
+    return sorted(tree)
+
+
+def argv_of(pid):
+    """Best-effort argv for classifying a child. Empty list when unavailable."""
+    try:
+        output = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return output.stdout.strip() if output.returncode == 0 else ""
+
+# ------------------------------------------------------------------- census
+
+
+def census(root, want_argv=False):
+    """One reading of the whole live tree.
+
+    Returns (identities, records). `identities` is the frozenset of
+    (pid, ri_proc_start_abstime) pairs — the stability key. `records` carries
+    the per-process CPU/RSS values.
+    """
+    identities, records = set(), {}
+    parents = parent_map()
+    for pid in descendants(root):
+        usage = rusage(pid)
+        if usage is None:
+            continue
+        identity = (pid, usage.ri_proc_start_abstime)
+        identities.add(identity)
+        records[identity] = {
+            "pid": pid,
+            "ppid": parents.get(pid),
+            "start_abstime": usage.ri_proc_start_abstime,
+            "self_cpu_seconds": abs_to_seconds(
+                usage.ri_user_time + usage.ri_system_time
+            ),
+            "child_cpu_seconds": abs_to_seconds(
+                usage.ri_child_user_time + usage.ri_child_system_time
+            ),
+            "resident_bytes": usage.ri_resident_size,
+            "command": argv_of(pid) if want_argv else None,
+        }
+    return frozenset(identities), records
+
+
+def stable_reading(root, retries=12):
+    """A boundary reading whose before/after censuses agree on tree identity.
+
+    Retries until two consecutive censuses expose the same set of
+    (pid, start_abstime) identities, so a process that appears or exits across
+    the reading cannot land a half-counted value in a delta.
+    """
+    attempts = 0
+    before_ids, before = census(root, want_argv=True)
+    while attempts < retries:
+        attempts += 1
+        after_ids, after = census(root, want_argv=True)
+        if before_ids == after_ids:
+            aggregate = sum(
+                record["self_cpu_seconds"] + record["child_cpu_seconds"]
+                for record in after.values()
+            )
+            resident = sum(record["resident_bytes"] for record in after.values())
+            return {
+                "monotonic": time.monotonic(),
+                "wall_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "attempts": attempts,
+                "aggregate_cpu_seconds": aggregate,
+                "tree_resident_bytes": resident,
+                "tree_resident_mib": resident / 1048576,
+                "processes": list(after.values()),
+                "identities": sorted((pid, start) for pid, start in after_ids),
+            }
+        before_ids, before = after_ids, after
+    raise RuntimeError(
+        f"tree identity did not stabilise for pid {root} after {retries} retries"
+    )
+
+# ------------------------------------------------------- drainer attribution
+
+
+def classify_controller(record, root, interpreter_root, argv_tail):
+    """Is this live *direct child* the drainer controller's `--json status` call?
+
+    Identity has three parts, all required:
+
+      * it is a direct child of the Kanban root PID;
+      * its executable lies inside the interpreter installation the loaded
+        launchd job names. A macOS framework Python execs the
+        `Python.app/Contents/MacOS/Python` stub, so the live executable path is
+        a second spelling of the interpreter the plist records rather than the
+        plist path itself — matching the plist string alone never fires;
+      * its command ends with the exact resolved argv tail, which is the
+        controller script plus the `--path`/`--repo` pair Kanban rebases onto
+        it plus the `--json status` appended last at invocation.
+    """
+    if record.get("ppid") != root:
+        return False
+    command = (record.get("command") or "").rstrip()
+    if not command:
+        return False
+    if interpreter_root and not command.startswith(interpreter_root):
+        return False
+    return command.endswith(argv_tail)
+
+# ----------------------------------------------------------------- self-test
+
+
+BURN_CHILD = (
+    "import time\n"
+    "deadline = time.process_time() + {seconds}\n"
+    "while time.process_time() < deadline:\n"
+    "    pass\n"
+)
+
+SPAWN_GRANDCHILD = (
+    "import subprocess, sys\n"
+    "subprocess.run([sys.executable, '-c', {burn!r}], check=True)\n"
+)
+
+
+def own_child_cpu():
+    usage = rusage(os.getpid())
+    return abs_to_seconds(usage.ri_child_user_time + usage.ri_child_system_time)
+
+
+def self_test():
+    burn_seconds = 0.40
+    tolerance = 0.5  # retained CPU must be at least half the requested burn
+    results = {}
+    failures = []
+
+    print(f"mach_timebase_info: numer={TIMEBASE_NUMER} denom={TIMEBASE_DENOM} "
+          f"({TIMEBASE_NUMER / TIMEBASE_DENOM:.6g} ns per unit)")
+    results["timebase"] = {"numer": TIMEBASE_NUMER, "denom": TIMEBASE_DENOM}
+
+    # 1. CPU from a short-lived, reaped CHILD is retained after it is gone.
+    before = own_child_cpu()
+    child = subprocess.run(
+        [sys.executable, "-c", BURN_CHILD.format(seconds=burn_seconds)]
+    )
+    assert child.returncode == 0
+    after = own_child_cpu()
+    child_retained = after - before
+    results["reaped_child_cpu_seconds"] = child_retained
+    ok_child = child_retained >= burn_seconds * tolerance
+    failures += [] if ok_child else ["reaped child CPU was not retained"]
+    print(f"reaped child: burned ~{burn_seconds:.2f}s, "
+          f"retained {child_retained:.4f}s -> {'PASS' if ok_child else 'FAIL'}")
+
+    # 2. CPU from a short-lived, reaped GRANDCHILD is retained too: the child
+    #    folds its own accumulated-child counters into ours when it is reaped.
+    before = own_child_cpu()
+    grandparent = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            SPAWN_GRANDCHILD.format(
+                burn=BURN_CHILD.format(seconds=burn_seconds)
+            ),
+        ]
+    )
+    assert grandparent.returncode == 0
+    after = own_child_cpu()
+    grandchild_retained = after - before
+    results["reaped_grandchild_cpu_seconds"] = grandchild_retained
+    ok_grandchild = grandchild_retained >= burn_seconds * tolerance
+    failures += [] if ok_grandchild else ["reaped grandchild CPU was not retained"]
+    print(f"reaped grandchild: burned ~{burn_seconds:.2f}s, "
+          f"retained {grandchild_retained:.4f}s -> "
+          f"{'PASS' if ok_grandchild else 'FAIL'}")
+
+    # 3. Mach timebase conversion is actually applied. On this arm64 host one
+    #    unit is 41.67 ns, so an unconverted reading would be ~24x too small;
+    #    the plausibility band below is what makes that a real check.
+    plausible = burn_seconds * 0.5 <= child_retained <= burn_seconds * 3.0
+    results["timebase_conversion_plausible"] = plausible
+    failures += [] if plausible else ["converted CPU value is not plausible"]
+    print(f"timebase conversion: {child_retained:.4f}s lies in "
+          f"[{burn_seconds * 0.5:.2f}, {burn_seconds * 3.0:.2f}] -> "
+          f"{'PASS' if plausible else 'FAIL'}")
+
+    # 4. PID/start-identity matching is enforced: a tampered start_abstime for
+    #    a live PID must not match the identity the census records for it.
+    identities, records = census(os.getpid())
+    live = [identity for identity in identities if identity[0] == os.getpid()]
+    assert len(live) == 1
+    genuine = live[0]
+    tampered = (genuine[0], genuine[1] + 1)
+    enforced = tampered not in identities and genuine in identities
+    results["pid_start_identity_enforced"] = enforced
+    failures += [] if enforced else ["PID/start-identity matching is not enforced"]
+    print(f"pid/start identity: pid {genuine[0]} start {genuine[1]} matches, "
+          f"start {tampered[1]} is rejected -> "
+          f"{'PASS' if enforced else 'FAIL'}")
+
+    # 5. The stability retry loop produces a usable reading.
+    reading = stable_reading(os.getpid())
+    results["stable_reading_attempts"] = reading["attempts"]
+    print(f"stable reading: settled after {reading['attempts']} census "
+          f"comparison(s), {len(reading['processes'])} live process(es)")
+
+    if failures:
+        print("SELF-TEST FAILED: " + "; ".join(failures))
+        return 1
+    print("SELF-TEST PASSED: reaped-child and reaped-grandchild CPU retained, "
+          "Mach timebase conversion applied, PID/start-identity matching enforced")
+    return 0
+
+# ---------------------------------------------------------------- measurement
+
+
+def measure(arguments):
+    root = arguments.pid
+    path = proc_path(root)
+    if arguments.expect_executable:
+        if path != arguments.expect_executable:
+            print(
+                f"root pid {root} runs {path!r}, not the archive-installed "
+                f"{arguments.expect_executable!r}; refusing to measure",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"root pid {root} verified as {path}")
+
+    interpreter_root = arguments.controller_interpreter_root
+    argv_tail = arguments.controller_argv_tail
+    boundaries, pane_snapshots = [], []
+
+    def capture_pane():
+        if not arguments.tmux_target:
+            return None
+        try:
+            output = subprocess.run(
+                ["tmux", "capture-pane", "-p", "-t", arguments.tmux_target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return output.stdout if output.returncode == 0 else None
+
+    total = arguments.intervals + 1
+    for index in range(total):
+        if index:
+            target = start_monotonic + index * arguments.interval_seconds
+            delay = target - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        reading = stable_reading(root)
+        if index == 0:
+            start_monotonic = reading["monotonic"]
+        boundaries.append(reading)
+        pane_snapshots.append(capture_pane())
+        print(
+            f"boundary {index:2d}/{arguments.intervals}  "
+            f"cpu={reading['aggregate_cpu_seconds']:.6f}s  "
+            f"rss={reading['tree_resident_mib']:.1f}MiB  "
+            f"procs={len(reading['processes'])}  "
+            f"attempts={reading['attempts']}",
+            flush=True,
+        )
+
+    intervals = []
+    for index in range(1, len(boundaries)):
+        previous, current = boundaries[index - 1], boundaries[index]
+        elapsed = current["monotonic"] - previous["monotonic"]
+        delta = current["aggregate_cpu_seconds"] - previous["aggregate_cpu_seconds"]
+        intervals.append(
+            {
+                "index": index,
+                "elapsed_seconds": elapsed,
+                "cpu_delta_seconds": delta,
+                "tree_cpu_percent": 100.0 * delta / elapsed if elapsed > 0 else 0.0,
+                "tree_resident_mib": current["tree_resident_mib"],
+                "process_count": len(current["processes"]),
+            }
+        )
+
+    total_elapsed = sum(interval["elapsed_seconds"] for interval in intervals)
+    total_cpu = sum(interval["cpu_delta_seconds"] for interval in intervals)
+    weighted_mean = 100.0 * total_cpu / total_elapsed if total_elapsed > 0 else 0.0
+
+    high_run, worst_run = 0, 0
+    for interval in intervals:
+        high_run = high_run + 1 if interval["tree_cpu_percent"] > 5.0 else 0
+        worst_run = max(worst_run, high_run)
+
+    peak_mib = max(boundary["tree_resident_mib"] for boundary in boundaries)
+
+    # Drainer attribution: the root's accumulated-child CPU baselined at the
+    # start of the window, plus any live controller child at each boundary.
+    def classified(boundary):
+        value, live = 0.0, 0
+        for record in boundary["processes"]:
+            if record["pid"] == root:
+                value += record["child_cpu_seconds"]
+            elif classify_controller(record, root, interpreter_root, argv_tail):
+                value += record["self_cpu_seconds"] + record["child_cpu_seconds"]
+                live += 1
+        return value, live
+
+    controller_identities = set()
+    first_classified, _ = classified(boundaries[0])
+    last_classified, _ = classified(boundaries[-1])
+    controller_sightings = []
+    non_controller_children = []
+    for index, boundary in enumerate(boundaries):
+        for record in boundary["processes"]:
+            if record["pid"] == root:
+                continue
+            command = record.get("command") or ""
+            if classify_controller(record, root, interpreter_root, argv_tail):
+                identity = (record["pid"], record["start_abstime"])
+                controller_identities.add(identity)
+                controller_sightings.append(
+                    {"boundary": index, "pid": record["pid"], "command": command})
+            else:
+                non_controller_children.append(
+                    {"boundary": index, "pid": record["pid"], "command": command}
+                )
+
+    diffs = []
+    for index in range(1, len(pane_snapshots)):
+        previous, current = pane_snapshots[index - 1], pane_snapshots[index]
+        if previous is None or current is None:
+            continue
+        if previous != current:
+            previous_lines, current_lines = previous.splitlines(), current.splitlines()
+            changed = [
+                {
+                    "line": line_index + 1,
+                    "before": before,
+                    "after": after,
+                }
+                for line_index, (before, after) in enumerate(
+                    zip(previous_lines, current_lines)
+                )
+                if before != after
+            ]
+            diffs.append({"boundary": index, "changed_lines": changed})
+
+    document = {
+        "root_pid": root,
+        "root_executable": path,
+        "timebase": {"numer": TIMEBASE_NUMER, "denom": TIMEBASE_DENOM},
+        "controller_interpreter_root": arguments.controller_interpreter_root,
+        "controller_argv_tail": arguments.controller_argv_tail,
+        "boundaries": boundaries,
+        "intervals": intervals,
+        "summary": {
+            "boundary_count": len(boundaries),
+            "interval_count": len(intervals),
+            "total_elapsed_seconds": total_elapsed,
+            "total_cpu_seconds": total_cpu,
+            "wall_weighted_mean_cpu_percent": weighted_mean,
+            "max_interval_cpu_percent": max(
+                interval["tree_cpu_percent"] for interval in intervals
+            ),
+            "longest_run_above_5_percent": worst_run,
+            "peak_tree_resident_mib": peak_mib,
+            "drainer_classified_cpu_seconds": last_classified - first_classified,
+            "drainer_controller_identity": {
+                "interpreter_root": interpreter_root,
+                "argv_tail": argv_tail,
+            },
+            "drainer_observed_poll_count": len(controller_identities),
+            "drainer_controller_sightings": controller_sightings,
+            "non_controller_child_sightings": non_controller_children,
+            "pane_diff_count": len(diffs),
+        },
+        "pane_diffs": diffs,
+        "pane_snapshots": pane_snapshots if arguments.keep_snapshots else None,
+    }
+
+    if arguments.output:
+        with open(arguments.output, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+        print(f"wrote {arguments.output}")
+
+    summary = document["summary"]
+    print(json.dumps(summary, indent=2, default=str)[:4000])
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--pid", type=int)
+    parser.add_argument("--intervals", type=int, default=60)
+    parser.add_argument("--interval-seconds", type=float, default=1.0)
+    parser.add_argument("--tmux-target")
+    parser.add_argument("--output")
+    parser.add_argument("--controller-interpreter-root", default="")
+    parser.add_argument("--controller-argv-tail", default="")
+    parser.add_argument("--expect-executable", default="")
+    parser.add_argument("--keep-snapshots", action="store_true")
+    arguments = parser.parse_args()
+
+    if arguments.self_test:
+        return self_test()
+    if arguments.pid is None:
+        parser.error("--pid is required unless --self-test is given")
+    return measure(arguments)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PROBE
+```
+
+#### Startup: three consecutive launches
+
+Each launch started a monotonic clock immediately before `tmux new-session`,
+captured the pane every 100 ms, and stopped only at the first capture that
+showed **both** the declared known card and `board: updated …`. The declared
+known card is issue **#268**, "Epic: Complete Kanban's first-release readiness
+gate", matched by the literal pane text `#268  Epic: Complete Kanban's`. A
+capture cap of 60 seconds — comfortably beyond the 10 second ceiling — bounded
+each launch; a launch reaching the cap, or reaching a terminal non-`updated`
+footer such as `board: unavailable`, `board: unsupported`, or `board: stale ·
+last updated …`, is recorded as a failed launch and re-run under D-11 rather
+than waited on indefinitely. No launch hit either outcome.
+
+```console
+SESSION="rel1-$$"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 \
+  "exec \"$TMP/bin/kanban\" --path \"$ROOT\""
+KANBAN_PID="$(tmux display-message -p -t "$SESSION" '#{pane_pid}')"
+tmux capture-pane -t "$SESSION" -p
+```
+
+| Launch | Outcome | Elapsed to populated board | ≤ 10 s | First non-blank frame | Captures | Cadence mean / max |
+| ---: | --- | ---: | :---: | ---: | ---: | --- |
+| 1 | populated | 0.9050 s | yes | 0.1025 s | 9 | 0.1003 s / 0.1032 s |
+| 2 | populated | 1.2030 s | yes | 0.1010 s | 12 | 0.1002 s / 0.1041 s |
+| 3 | populated | 0.9025 s | yes | 0.1051 s | 9 | 0.0997 s / 0.1049 s |
+
+No cache-backed frame stopped the clock, and this is structural rather than
+lucky: `startBoardRefresh` sets board freshness to `Loading` synchronously
+before forking the fetch, so the first drawn frame shows `board: refreshing…`
+even when a warm cache loaded `Fresh`. Every launch above showed
+`board: refreshing…` from its first non-blank frame onward — 8, 11 and 8
+consecutive frames respectively — and the card itself appeared only in the
+final, stopping capture.
+
+All three launches ran back to back under the same declared warm-cache
+precondition, re-read before each launch. An earlier orientation launch,
+outside this series, was used only to choose the known card. Three earlier
+rehearsals of the series were discarded; they are itemised under Conclusions
+below.
+
+#### Settling sequence for the measured window
+
+The third launch is the measured one. Requirement ordering here is D-4's plus
+the settling rules: confirm terminal states, one explicit `u`, a harmless UI
+action while that refresh is still in flight, terminal states again, and only
+then the full 30 second settling period. The idle minute begins after that
+period, not after the `u`.
+
+| Wall clock (UTC) | t (s) | Event |
+| --- | ---: | --- |
+| 2026-08-13T22:59:44Z | 1.991 | board `updated now`, Codex and Claude both terminal (pre-refresh check) |
+| 2026-08-13T22:59:44Z | 1.996 | explicit `u` sent |
+| 2026-08-13T22:59:44Z | 2.112 | refresh observed active (`board: refreshing…`) |
+| 2026-08-13T22:59:44Z | 2.478 | Help overlay opened **during** the active refresh and rendered |
+| 2026-08-13T22:59:45Z | 2.842 | Help overlay closed with `Esc` |
+| 2026-08-13T22:59:50Z | 7.763 | board, Codex and Claude all terminal again |
+| 2026-08-13T22:59:50Z | 7.763 | 30 s settling period began |
+| 2026-08-13T23:00:20Z | 37.770 | settling complete; idle window permitted to begin |
+
+The Help overlay opened and drew while the board footer still read
+`board: refreshing…`, and closed on `Esc`; that is the recorded evidence that
+the UI stayed responsive during the explicit refresh.
+
+#### Idle window: CPU
+
+61 boundary readings produced exactly 60 elapsed intervals targeted at one
+second each. Every interval uses its own actual monotonic elapsed time:
+
+`tree CPU % = 100 × aggregate CPU-time delta / elapsed wall time`
+
+Total elapsed 60.0098 s; total aggregate tree CPU 0.918990 s. Interval
+durations ranged 0.9911–1.0120 s, mean 1.0002 s. Every one of the 61 boundary
+readings stabilised on its first census comparison.
+
+| # | elapsed (s) | CPU delta (s) | tree CPU % | # | elapsed (s) | CPU delta (s) | tree CPU % |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.0120 | 0.000000 | 0.000 | 31 | 0.9997 | 0.000000 | 0.000 |
+| 2 | 1.0015 | 0.000000 | 0.000 | 32 | 1.0047 | 0.000000 | 0.000 |
+| 3 | 0.9968 | 0.152767 | 15.326 | 33 | 1.0013 | 0.000000 | 0.000 |
+| 4 | 0.9994 | 0.001760 | 0.176 | 34 | 0.9952 | 0.151745 | 15.247 |
+| 5 | 1.0010 | 0.000000 | 0.000 | 35 | 1.0009 | 0.000000 | 0.000 |
+| 6 | 1.0003 | 0.000000 | 0.000 | 36 | 0.9961 | 0.000000 | 0.000 |
+| 7 | 0.9972 | 0.000000 | 0.000 | 37 | 1.0018 | 0.000000 | 0.000 |
+| 8 | 1.0040 | 0.000000 | 0.000 | 38 | 1.0007 | 0.000000 | 0.000 |
+| 9 | 0.9990 | 0.000000 | 0.000 | 39 | 1.0007 | 0.000000 | 0.000 |
+| 10 | 1.0008 | 0.000000 | 0.000 | 40 | 1.0058 | 0.000000 | 0.000 |
+| 11 | 0.9981 | 0.000000 | 0.000 | 41 | 0.9945 | 0.000000 | 0.000 |
+| 12 | 1.0027 | 0.000000 | 0.000 | 42 | 0.9971 | 0.000000 | 0.000 |
+| 13 | 1.0054 | 0.104037 | 10.348 | 43 | 1.0013 | 0.000000 | 0.000 |
+| 14 | 0.9911 | 0.050163 | 5.061 | 44 | 1.0032 | 0.151185 | 15.070 |
+| 15 | 1.0027 | 0.000000 | 0.000 | 45 | 0.9976 | 0.000000 | 0.000 |
+| 16 | 0.9966 | 0.000000 | 0.000 | 46 | 0.9980 | 0.000000 | 0.000 |
+| 17 | 1.0029 | 0.000000 | 0.000 | 47 | 1.0020 | 0.000000 | 0.000 |
+| 18 | 1.0004 | 0.000000 | 0.000 | 48 | 0.9972 | 0.000000 | 0.000 |
+| 19 | 1.0003 | 0.000000 | 0.000 | 49 | 1.0049 | 0.000000 | 0.000 |
+| 20 | 1.0010 | 0.000000 | 0.000 | 50 | 0.9955 | 0.000000 | 0.000 |
+| 21 | 1.0000 | 0.000000 | 0.000 | 51 | 1.0020 | 0.000000 | 0.000 |
+| 22 | 0.9955 | 0.000000 | 0.000 | 52 | 1.0051 | 0.000000 | 0.000 |
+| 23 | 1.0020 | 0.000000 | 0.000 | 53 | 0.9929 | 0.000000 | 0.000 |
+| 24 | 0.9985 | 0.155209 | 15.544 | 54 | 1.0051 | 0.150653 | 14.989 |
+| 25 | 1.0026 | 0.000000 | 0.000 | 55 | 1.0007 | 0.001472 | 0.147 |
+| 26 | 0.9975 | 0.000000 | 0.000 | 56 | 1.0010 | 0.000000 | 0.000 |
+| 27 | 1.0054 | 0.000000 | 0.000 | 57 | 0.9941 | 0.000000 | 0.000 |
+| 28 | 0.9993 | 0.000000 | 0.000 | 58 | 1.0013 | 0.000000 | 0.000 |
+| 29 | 0.9985 | 0.000000 | 0.000 | 59 | 1.0039 | 0.000000 | 0.000 |
+| 30 | 0.9986 | 0.000000 | 0.000 | 60 | 0.9943 | 0.000000 | 0.000 |
+
+Wall-time-weighted mean tree CPU: **1.5314%** (gate: ≤ 2% — **pass**).
+
+51 of the 60 intervals recorded exactly zero CPU. Intervals above 5% were
+3, 13, 14, 24, 34, 44 and 54 — the ten-interval spacing of the drainer poll.
+The longest run of consecutive intervals above 5% was **2** (intervals 13 and
+14, a single poll straddling a boundary), against a failure condition of five
+(**pass**).
+
+#### Idle window: resident memory
+
+At the same 61 boundaries, `ri_resident_size` was summed across the Kanban root
+and every live descendant, converted at 1 MiB = 1,048,576 bytes. Peak resident
+memory is the maximum of those sampled tree sums, not the maximum RSS of any
+single process.
+
+| Item | Value |
+| --- | ---: |
+| Kanban root alone, typical | 35.34 MiB |
+| Peak sampled tree sum | **69.59 MiB** |
+| Boundary of peak | 13 (root 35.34 MiB + live controller 34.25 MiB) |
+| Gate | ≤ 512 MiB — **pass** |
+
+The peak is a tree sum by construction: it occurs at the one boundary where a
+drainer controller happened to be alive, and is nearly double the root-only
+figure. A single-process reading would have recorded 35.34 MiB and missed it.
+
+#### Drainer poll attribution
+
+The poll is reported as a classified **subset** of total tree CPU, never added
+to it a second time. The classified value at a boundary is the Kanban root's
+accumulated-child CPU, baselined at the start of the idle window, plus the self
+and child CPU of any live direct child identified as the controller. A live
+direct child is classified as the controller when its executable lies inside
+the interpreter installation the loaded launchd job names and its command ends
+with the exact resolved argv tail — the controller script, the `--path`/`--repo`
+pair Kanban rebases onto it, and the `--json status` appended last.
+
+| Item | Value |
+| --- | ---: |
+| Polls observed via classified CPU deltas | 6 (intervals 3, 13, 24, 34, 44, 54) |
+| Polls caught alive by a boundary census | 1 (boundary 13) |
+| Classified drainer CPU over the window | 0.878602 s |
+| As a share of total tree CPU (0.918990 s) | 95.6% |
+| Mean CPU attributable to the poll | 1.4641% |
+| Mean CPU attributable to everything else | 0.0673% |
+| Cost per poll | 0.1464 s |
+
+Attribution is valid for this window: **no non-controller child activity was
+observed at any of the 61 boundaries**, and no GitHub, Codex or Claude refresh
+occurred during the window. The observed poll count is non-zero, which is the
+check that the window really did run with the launchd job loaded — when
+`discoverDrainerController` fails, Kanban never forks the poll at all, and a
+quiet tree would otherwise pass the CPU gate without having measured D-10's
+configuration. The launchd-managed drainer service itself is outside the
+measured tree; only the controller Kanban invokes is inside it.
+
+The 0.1464 s per poll against D-10's 0.07 s estimate is the headline finding of
+this record. It is not a gate failure and does not block the release. It does
+mean the poll, not the dashboard, is what would consume D-4's budget first.
+
+#### Refresh attribution
+
+Observed separately for the board and both usage providers across all 61
+boundary captures of the idle minute:
+
+| Condition | Observation |
+| --- | --- |
+| `board: refreshing…` reappears | never — 0 of 61 captures |
+| Board age resets | no — the footer aged `updated now` → `updated 1m ago` and never reset |
+| Codex `refreshing…` reappears | never — 0 usage-panel occurrences |
+| Claude `refreshing…` reappears | never — 0 usage-panel occurrences |
+| Non-drainer subprocess activity | none — 0 non-controller children at any boundary |
+| UI responsive during the explicit `u` | yes — Help drew and closed while the board read `refreshing…` |
+
+All four success conditions hold.
+
+#### Content churn
+
+The pane was captured at every idle boundary and successive snapshots diffed.
+Two content changes occurred in the 60 diffs, both explained:
+
+| Boundary | Line | Change | Classification |
+| ---: | ---: | --- | --- |
+| 24 | 48 | `board: updated now` → `board: updated 1m ago` | expected freshness-age change |
+| 44 | 17 | detail panel `@coghex · updated 15m ago` → `16m ago` | expected freshness-age change |
+
+Both are relative-age text, and both landed on drainer-poll boundaries, which
+is the only way they can occur: `appNow` advances only when an event is
+handled, so with no other activity the age strings can only change on the
+~10 second drainer events. There were **no unexplained changes** after the UI
+settled (**pass**).
+
+True flicker — repaint volume against unchanged screen content — is **not
+measured for 1.0**, because `capture-pane` observes content, not repaint
+operations. This record therefore makes no claim about repainting, only about
+observable content churn (D-9).
+
+#### Conclusions
+
+| Gate | Threshold | Observed | Result |
+| --- | --- | --- | :---: |
+| Startup, 3 consecutive launches | usable first frame ≤ 10 s | 0.9050 s, 1.2030 s, 0.9025 s | **pass** |
+| Mean tree CPU | ≤ 2% | 1.5314% | **pass** |
+| Consecutive high CPU | no 5 consecutive samples > 5% | longest run 2 | **pass** |
+| Peak resident memory | ≤ 512 MiB | 69.59 MiB | **pass** |
+| Refresh attribution | no further GitHub or usage refresh; `u` stays responsive | none observed; responsive | **pass** |
+| Content churn | no unexplained content change once settled | 2 changes, both expected freshness ages | **pass** |
+
+All six gates pass. The drainer poll's reconciled subset, 1.4641% of the
+1.5314% mean, did not cause a failure; it is recorded above as the number a
+later release should reduce or re-threshold, and it is the reason the remaining
+headroom under D-4 belongs to the poll rather than to the dashboard.
+
+Neither the method nor any threshold was altered to obtain these results, and
+no discarded run was reinterpreted into a pass. Three rehearsals preceded the
+recorded one:
+
+1. A startup-only series, discarded because the harness had not held the final
+   session open for the settled window, so there was no measured window at all.
+2. A complete series whose idle window was **invalidated** by the rule in
+   Drainer poll attribution above: the classifier matched the launchd plist's
+   interpreter path literally, so the one live controller sighting was misfiled
+   as non-controller child activity and the observed poll count came out zero.
+   Both conditions require the window to be repeated rather than reinterpreted,
+   and it was.
+3. A complete series with the classifier corrected, whose numbers agreed with
+   those recorded here (mean 1.5603%, peak 69.34 MiB, six polls, zero
+   non-controller children). It was superseded only so that the probe source
+   published above is byte-for-byte the source that produced the recorded
+   numbers, after unused code left over from developing the probe was removed.
+
+The run recorded here is the fourth.
+
 ## Decisions
 
 ### D-1. First-release evidence includes a real installed-terminal run
