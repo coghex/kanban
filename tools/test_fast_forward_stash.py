@@ -32,6 +32,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import drain_prs
+import drain_prs_service
 
 
 def run_git(args, *, cwd, check=True):
@@ -1085,6 +1086,138 @@ class AnchorSweepFailuresAreNonFatalTest(_AnchorSweepFixture):
         deleted = self._logged_containing("Deleted redundant autostash anchor")
         self.assertEqual(len(deleted), 1)
         self.assertIn(other_ref, deleted[0])
+
+
+class KeptAnchorsReachDrainerStatusTest(_AnchorSweepFixture):
+    """What the sweep keeps is what `status` reports.
+
+    The kept-anchor log line is otherwise the only place an anchor holding a
+    sole copy of someone's work is named, and it repeats identically every
+    pass. The controller restates the classification rather than importing the
+    sweep -- it may not run a reaper to answer a status call -- so this holds
+    the two sides equal on one repository: same anchors, same facts.
+    """
+
+    def _kept(self):
+        return drain_prs_service.autostash_inventory(self.main)["kept_autostash_anchors"]
+
+    def test_the_anchor_the_sweep_keeps_is_the_anchor_status_names(self):
+        self._seed_unrelated_stash()
+        sha = self._snapshot_commit("line3-orphaned")
+        ref = drain_prs._anchor_snapshot(self.ctx, sha)
+
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+        kept = self._kept()
+
+        self.assertEqual(self._anchor_ref_names(), [ref])
+        logged = self._logged_containing("Keeping autostash anchor")
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(
+            kept,
+            [
+                {
+                    "ref": ref,
+                    "commit": sha,
+                    "date": self._commit_date(sha),
+                    "restore": f"git stash apply --index {sha}",
+                }
+            ],
+        )
+        # Every fact the projection reports is a fact that log line reports,
+        # so a reader moving between them is reading one contract.
+        for fact in kept[0].values():
+            self.assertIn(fact, logged[0])
+
+    def test_the_anchor_the_sweep_reaps_leaves_status_verified_empty(self):
+        self._redundant_anchor("line3-recovered")
+
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=False)
+
+        self.assertEqual(self._logged_containing("Keeping autostash anchor"), [])
+        self.assertEqual(self._kept(), [])
+
+    def test_status_keeps_what_a_dry_run_sweep_only_reported(self):
+        # A `--dry-run` sweep deletes nothing, so the anchor it would have
+        # reaped is still there -- and still redundant, so status does not
+        # report it as holding a sole copy of anything.
+        ref, sha = self._redundant_anchor("line3-recovered")
+        orphan = self._snapshot_commit("line3-orphaned")
+        orphan_ref = drain_prs._anchor_snapshot(self.ctx, orphan)
+
+        drain_prs.sweep_snapshot_anchors(self.ctx, dry_run=True)
+
+        self.assertEqual(sorted(self._anchor_ref_names()), sorted([ref, orphan_ref]))
+        self.assertEqual([entry["ref"] for entry in self._kept()], [orphan_ref])
+
+
+class DrainerStashMessagesReachDrainerStatusTest(_FastForwardStashFixture):
+    """The controller restates the drainer's own stash messages rather than
+    importing them, exactly as it restates the drainer's cleanup vocabulary.
+    These drive the real paths that write one and hold the two sides equal.
+    """
+
+    def _claimed(self):
+        return [
+            drain_prs_service.drainer_stash_message(subject)
+            for subject in run_git(
+                ["stash", "list", "--format=%gs"], cwd=self.main
+            ).stdout.splitlines()
+        ]
+
+    def test_a_conflicted_restore_writes_an_entry_the_controller_claims(self):
+        user_stash_sha = self._seed_unrelated_stash()
+        (self.main / "shared.txt").write_text(
+            "line1-local\nline2\nline3\n", encoding="utf-8"
+        )
+        self._advance_origin_line1("line1-remote")
+
+        with self.assertRaises(drain_prs.DrainError):
+            drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        shas = stash_shas(self.main)
+        self.assertEqual(len(shas), 2)
+        recovered = next(sha for sha in shas if sha != user_stash_sha)
+        # The drainer's entry is claimed by its exact payload; the user's,
+        # which was pushed rather than stored, is not claimed at all.
+        self.assertEqual(
+            self._claimed(), [f"drain-prs-autostash-recovery {recovered}", None]
+        )
+        self.assertEqual(
+            [
+                entry["message"]
+                for entry in drain_prs_service.autostash_inventory(self.main)[
+                    "drainer_stashes"
+                ]
+            ],
+            [f"drain-prs-autostash-recovery {recovered}"],
+        )
+
+
+class UnpreparedSnapshotReachesDrainerStatusTest(_LateTrackedEditFixture):
+    """The drainer's other stash message: a pass whose snapshot could not be
+    prepared stores the orphaned commit under the message it had already built
+    for `git stash create`, which is the `<epoch>-<pid>` form.
+    """
+
+    def test_a_failed_preparation_writes_an_entry_the_controller_claims(self):
+        self._dirty_the_checkout()
+        self._advance_origin_line1("line1-updated")
+        patcher, _ = self._edit_after_initial_snapshot(
+            "line1\nline2\nline3-written-after-the-snapshot\n"
+        )
+        calls = []
+
+        with self._recording_run(calls, fail_later_snapshots_with="injected"), patcher:
+            with self.assertRaises(drain_prs.DrainError):
+                drain_prs.fast_forward_default_branch(self.ctx, dry_run=False)
+
+        reported = drain_prs_service.autostash_inventory(self.main)["drainer_stashes"]
+
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0]["stash"], "stash@{0}")
+        self.assertRegex(
+            reported[0]["message"], rf"^drain-prs-autostash-[0-9]+-{os.getpid()}$"
+        )
 
 
 class FastForwardNeverSweepsAnchorsTest(_FastForwardStashFixture):
