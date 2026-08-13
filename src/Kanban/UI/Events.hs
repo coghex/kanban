@@ -2,6 +2,7 @@ module Kanban.UI.Events
   ( BoardMouseAction (..),
     IncidentsAction (..),
     OverlayMouseAction (..),
+    QuitDecision (..),
     applyCardClick,
     applyIncidentsAction,
     applyRunningProcessClick,
@@ -11,11 +12,14 @@ module Kanban.UI.Events
     incidentsAction,
     killSelectionNotice,
     overlayMouseAction,
+    quitDecision,
+    stoppingGitHubWorkNotice,
   )
 where
 
 
 import Brick
+import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO )
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
@@ -26,6 +30,12 @@ import qualified Data.Text as Text
 import Data.Time (getCurrentTime )
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
+import Kanban.GitHub
+  ( GhCleanupFailure (..),
+    GhCleanupGuard (..),
+    coordinatorMustSettle,
+    shutdownRefreshCoordinator
+    )
 import Kanban.Process (killManagedProcess )
 import Kanban.Review
   ( interruptReview,
@@ -69,6 +79,9 @@ handleEvent event = do
   state <- get
   case (state.appOverlay, event) of
     (_, AppEvent (BoardRefreshFinished result)) -> applyBoardRefresh result
+    (_, AppEvent BoardRefreshStarted) -> markBoardRefreshRunning
+    (_, AppEvent (BoardHistoryPaused resetAt)) -> setNotice (historyPausedNotice state.appTimeZone resetAt)
+    (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result
     (_, AppEvent (DrainerStatusRefreshed result)) -> applyDrainerStatus result
@@ -280,6 +293,16 @@ handleSearchInput :: SearchInput -> EventM Name AppState ()
 handleSearchInput SearchOpenDetails = modify openSearchResult
 handleSearchInput input = modify (applySearchInput input)
 
+-- | The quit key's decision.
+--
+-- A live interactive review still refuses the quit exactly as it did, and is
+-- asked first: it is the one refusal the user can act on. Everything past it
+-- is about the @gh@ this dashboard owns. With nothing queued or running there
+-- is nothing to stop and the halt is immediate, which is what keeps an
+-- ordinary quit instant; otherwise the queued work is cancelled and the
+-- running fetch is put through the same verified cleanup a refresh timeout
+-- puts it through, and the dashboard stops only once that has reached a
+-- verdict.
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
   state <- get
@@ -288,9 +311,8 @@ requestDashboardQuit = do
           (reviewBackendReady state.appReviewBackend)
           (Map.keysSet state.appCanonicalReviewProcesses)
           state.appReviewSessions
-  if null liveInteractiveReviews
-    then halt
-    else
+  if not (null liveInteractiveReviews)
+    then
       modify
         ( \current ->
             current
@@ -304,6 +326,55 @@ requestDashboardQuit = do
                     )
               }
         )
+    else
+      if state.appQuitPending
+        then setNotice stoppingGitHubWorkNotice
+        else do
+          mustSettle <- liftIO (coordinatorMustSettle state.appRefreshCoordinator)
+          if not mustSettle
+            then halt
+            else do
+              modify (\current -> current {appOverlay = Nothing, appQuitPending = True, appNotice = Just stoppingGitHubWorkNotice})
+              void . liftIO . forkIO $
+                shutdownRefreshCoordinator state.appRefreshCoordinator
+                  >>= writeBChan state.appEventChannel . BoardRefreshShutdownFinished
+
+stoppingGitHubWorkNotice :: Text
+stoppingGitHubWorkNotice = "Stopping GitHub work…"
+
+-- | What a finished cancellation lets the dashboard do.
+data QuitDecision
+  = QuitHalts
+  | -- | The dashboard stays up, and says why.
+    QuitHeldBack Text
+  deriving stock (Eq, Show)
+
+-- | Whether the cleanup verdict leaves anything ambiguous behind.
+--
+-- A cleanup that proved the group gone, and one that could not but wrote the
+-- group to the durable record, both leave nothing ambiguous: the first because
+-- there is nothing left, the second because the next run of the dashboard
+-- re-checks the record before it spawns anything. An in-memory-only guard is
+-- neither — it is a possibly-live @gh@ whose only remaining guard is this
+-- process's own refusal to start another. Stopping there would drop exactly
+-- that, so the quit is refused and says so; and because the coordinator stays
+-- cancelled, this dashboard starts no further @gh@ either.
+quitDecision :: Maybe GhCleanupFailure -> QuitDecision
+quitDecision Nothing = QuitHalts
+quitDecision (Just failure) = case failure.ghCleanupGuard of
+  GuardRecorded -> QuitHalts
+  GuardInMemoryOnly ->
+    QuitHeldBack
+      ( "Not quitting: a gh process this dashboard started could not be confirmed stopped ("
+          <> failure.ghCleanupMessage
+          <> ") and nothing durable records it, so this process's refusal is all that holds the next one back"
+          <> " -- stop the stray gh, then end this dashboard from outside"
+      )
+
+completeDashboardQuit :: Maybe GhCleanupFailure -> EventM Name AppState ()
+completeDashboardQuit verdict = case quitDecision verdict of
+  QuitHalts -> halt
+  QuitHeldBack notice -> modify (\current -> current {appQuitPending = False, appNotice = Just notice})
 
 -- | The decision a content overlay's shared mouse policy reaches for a given
 -- event, independent of how that decision gets carried out. Wheel events

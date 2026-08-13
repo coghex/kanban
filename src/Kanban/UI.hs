@@ -80,6 +80,13 @@ runDashboard options config repository = do
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
+  -- One coordinator per repository for the dashboard's lifetime, started
+  -- before any refresh can be asked for. Every board-refresh entry point --
+  -- startup, `u`, and the refreshes a finished review, solve, or
+  -- pull-request action requires -- converges on 'startBoardRefresh' or
+  -- 'requireBoardRefresh', so routing those two through it routes all of
+  -- them (§15).
+  refreshCoordinator <- newBoardRefreshCoordinator options config repository eventChannel
   let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState config.resolvedWorkflow config.resolvedLimits now cacheLoad
       (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
@@ -122,6 +129,8 @@ runDashboard options config repository = do
             appDirectMergePending = Nothing,
             appDirectMergeResult = Nothing,
             appBoardRefreshQueued = False,
+            appRefreshCoordinator = refreshCoordinator,
+            appQuitPending = False,
             appReviewBackend = ReviewBackendStopped,
             appReviewSessions = Map.empty,
             appSolveSessions = Map.empty,

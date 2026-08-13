@@ -90,7 +90,7 @@ runGh guard repository arguments = afterLaunch $ do
     -- the barrier reads EOF, and the child exits without ever having
     -- executed anything.
     run spawned@(input, _, _, _) = do
-      registered <- registerSpawnedGh repository spawned
+      registered <- registerSpawnedGh guard repository spawned
       case registered of
         Left message -> throwIO (GhGuardUnwritable message)
         -- The PID comes from the registration, captured while the child was
@@ -146,7 +146,7 @@ runGh guard repository arguments = afterLaunch $ do
         -- has nothing left to cover.
         Right () -> do
           exitCode <- waitForProcess processHandle
-          dropGhGroup repository groupPid
+          dropGhGroup guard repository groupPid
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
         -- not exiting, and a descendant can do the first without the second.
@@ -163,8 +163,8 @@ runGh guard repository arguments = afterLaunch $ do
         -- about.
         Left (message, survivors) -> do
           setCleanupFailure guard (GhCleanupFailure message GuardInMemoryOnly)
-          void (recordGhGroup repository (OwnedProcessGroup groupPid survivors True))
-          recorded <- ghGroupIsRecorded repository groupPid
+          void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True))
+          recorded <- ghGroupIsRecorded guard repository groupPid
           setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
           -- Deliberately not reaped. Reaping is what frees the PID and with
           -- it the pgid, and the cleanup this throw is about to trigger needs

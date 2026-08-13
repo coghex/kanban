@@ -22,6 +22,7 @@ import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
+import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
 import qualified Spec.UI.AutoSolve as AutoSolve
@@ -64,6 +65,7 @@ suite = do
   Tracker.spec
   GitHubDecoding.spec
   BoardRefresh.spec
+  RefreshCoordinator.spec
   Capture.spec
   SolveChooser.spec
   Usage.spec

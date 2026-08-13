@@ -13,6 +13,11 @@ data ProviderErrorKind
   | UnsupportedVersion
   | RequestTimedOut
   | InvalidResponse
+  | -- | The provider refused the request because its own budget is spent, and
+    -- said so itself. Held apart from 'RequestFailed' because it is the one
+    -- failure whose remedy is waiting a known length of time rather than
+    -- retrying: 'Kanban.GitHub.Coordinator' schedules against it.
+    RateLimited
   | RequestFailed
   deriving stock (Eq, Ord, Show)
 

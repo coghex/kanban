@@ -11,12 +11,14 @@ module Kanban.GitHub.Guard
   ( GhCleanupFailure (..),
     GhCleanupGuard (..),
     GhFetchGuard,
+    GhRecordLock,
     abandonGh,
     clearCleanupFailure,
     dropGhGroup,
     ghFetchCleanupFailure,
     ghGroupIsRecorded,
     newGhFetchGuard,
+    newGhRecordLock,
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
@@ -27,7 +29,7 @@ module Kanban.GitHub.Guard
 where
 
 import Control.Concurrent (forkIOWithUnmask)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar, withMVar)
 import Control.Exception (IOException, finally, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -51,7 +53,30 @@ import System.Timeout (timeout)
 -- @gh@ gets cleaned up, and this is the only channel through which the
 -- outcome of that cleanup can reach the caller. 'Just' means the group may
 -- still be live, so the caller must not report an ordinary clean timeout.
-newtype GhFetchGuard = GhFetchGuard (IORef (Maybe GhCleanupFailure))
+data GhFetchGuard = GhFetchGuard
+  { ghGuardCleanupFailure :: IORef (Maybe GhCleanupFailure),
+    ghGuardRecordLock :: GhRecordLock
+  }
+
+-- | The repository's durable @gh@ group record, held as something that can
+-- only be updated by one writer at a time.
+--
+-- Every update to that record is a read-modify-write of the whole list of
+-- groups: an entry is added or removed by rewriting the others beside it. Two
+-- of those interleaving lose whichever entry the later write had not read,
+-- and a lost entry is a possibly-live @gh@ that no later fetch -- and no later
+-- run of the dashboard -- knows to reclaim. The lock is what the coordinator
+-- owns on behalf of the repository, so every job it schedules writes the
+-- record through the same one (§15).
+newtype GhRecordLock = GhRecordLock (MVar ())
+
+newGhRecordLock :: IO GhRecordLock
+newGhRecordLock = GhRecordLock <$> newMVar ()
+
+-- | Serializes one read-modify-write of the durable record.
+withRecordLock :: GhFetchGuard -> IO result -> IO result
+withRecordLock guard action = case guard.ghGuardRecordLock of
+  GhRecordLock lock -> withMVar lock (const action)
 
 -- | A cleanup that could not confirm its @gh@ group is gone.
 data GhCleanupFailure = GhCleanupFailure
@@ -77,17 +102,23 @@ data GhCleanupGuard
     GuardInMemoryOnly
   deriving stock (Eq, Show)
 
-newGhFetchGuard :: IO GhFetchGuard
-newGhFetchGuard = GhFetchGuard <$> newIORef Nothing
+-- | A guard for one job, sharing the repository's record lock with every
+-- other job the coordinator schedules. The cleanup verdict is per job -- it is
+-- what that job's own outcome is built from -- while the lock is the
+-- repository's, which is exactly the split requirement 1 asks for.
+newGhFetchGuard :: GhRecordLock -> IO GhFetchGuard
+newGhFetchGuard recordLock = do
+  cleanupFailure <- newIORef Nothing
+  pure (GhFetchGuard cleanupFailure recordLock)
 
 ghFetchCleanupFailure :: GhFetchGuard -> IO (Maybe GhCleanupFailure)
-ghFetchCleanupFailure (GhFetchGuard cleanupFailure) = readIORef cleanupFailure
+ghFetchCleanupFailure guard = readIORef guard.ghGuardCleanupFailure
 
 setCleanupFailure :: GhFetchGuard -> GhCleanupFailure -> IO ()
-setCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure . Just
+setCleanupFailure guard = writeIORef guard.ghGuardCleanupFailure . Just
 
 clearCleanupFailure :: GhFetchGuard -> IO ()
-clearCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure Nothing
+clearCleanupFailure guard = writeIORef guard.ghGuardCleanupFailure Nothing
 
 -- | Cleans up the @gh@ an abandoned fetch walked away from: TERM, then KILL,
 -- the whole process group it leads, confirmed against a fresh process
@@ -98,7 +129,8 @@ clearCleanupFailure (GhFetchGuard cleanupFailure) = writeIORef cleanupFailure No
 -- fetch re-verifies it before spawning anything, even if the dashboard is
 -- restarted in between.
 abandonGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
-abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) = do
+abandonGh guard repository (input, _, _, processHandle) = do
+  let cleanupFailure = guard.ghGuardCleanupFailure
   -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
   -- the moment it is reaped and the guard entry is keyed by this PID.
   spawnedPid <- fmap fromIntegral <$> getPid processHandle
@@ -144,7 +176,7 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
     -- block this thread and the refresh would never report anything at all.
     Right proven -> do
       void (try @IOException (waitForProcess processHandle))
-      mapM_ (dropGhGroup repository) spawnedPid
+      mapM_ (dropGhGroup guard repository) spawnedPid
       -- A finding this cleanup did not make is retracted only by evidence
       -- this cleanup did make: proving the group empty. Otherwise the fetch's
       -- own finding stands, since it saw things no longer observable here.
@@ -157,8 +189,8 @@ abandonGh (GhFetchGuard cleanupFailure) repository (input, _, _, processHandle) 
   mapM_ (ignoreIOException . hClose) input
   where
     recordAndConfirm unconfirmed = do
-      void (recordGhGroup repository unconfirmed)
-      ghGroupIsRecorded repository unconfirmed.ownedProcessGroupPid
+      void (recordGhGroup guard repository unconfirmed)
+      ghGroupIsRecorded guard repository unconfirmed.ownedProcessGroupPid
 
 -- | Runs a cleanup that must not be cut short by the refresh timer.
 --
@@ -205,34 +237,41 @@ uninterruptiblyBounded whenInterrupted action = do
 cleanupBudgetMicros :: Int
 cleanupBudgetMicros = 30 * 1000 * 1000
 
-ghGroupIsRecorded :: Repository -> Int -> IO Bool
-ghGroupIsRecorded repository groupPid =
-  any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository
+-- | Whether the durable record still names this group, asked under the record
+-- lock so the answer cannot be taken from a list another writer is midway
+-- through replacing.
+ghGroupIsRecorded :: GhFetchGuard -> Repository -> Int -> IO Bool
+ghGroupIsRecorded guard repository groupPid =
+  withRecordLock guard (any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository)
 
 -- | Writes the guard for a @gh@ that has just been spawned, before it is
 -- used for anything. The entry names only the process group, because that is
 -- all that is known this early and all a later run needs: an uncensused
 -- entry is watched until its pgid is unoccupied, which is exactly the
 -- question "did that gh outlive us?".
-registerSpawnedGh :: Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text Int)
-registerSpawnedGh repository (_, _, _, processHandle) = do
+registerSpawnedGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text Int)
+registerSpawnedGh guard repository (_, _, _, processHandle) = do
   spawnedPid <- getPid processHandle
   case spawnedPid of
     Nothing -> pure (Left "gh reported no process id, so no guard could be written for it")
     Just pid -> do
       let groupPid = fromIntegral pid
-      written <- recordGhGroup repository (OwnedProcessGroup groupPid [] False)
+      written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False)
       pure (groupPid <$ written)
 
 -- | Replaces whatever is recorded for a group with `group`, keeping every
 -- other repository entry.
-recordGhGroup :: Repository -> OwnedProcessGroup -> IO (Either Text ())
-recordGhGroup repository group = do
+--
+-- The read and the write are one critical section. Splitting them is what
+-- loses an entry: the list this rewrites is the list it just read, so a write
+-- that landed in between is discarded wholesale.
+recordGhGroup :: GhFetchGuard -> Repository -> OwnedProcessGroup -> IO (Either Text ())
+recordGhGroup guard repository group = withRecordLock guard $ do
   existing <- recordedGhGroups repository
   writeGhGroupRecord repository (group : withoutGroup group.ownedProcessGroupPid existing)
 
-dropGhGroup :: Repository -> Int -> IO ()
-dropGhGroup repository groupPid = do
+dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO ()
+dropGhGroup guard repository groupPid = withRecordLock guard $ do
   existing <- recordedGhGroups repository
   case withoutGroup groupPid existing of
     [] -> void (removeGhGroupRecord repository)
@@ -269,7 +308,10 @@ reclaimRecordedGhGroups guard repository = do
       outcomes <- traverse reclaimGhGroup groups
       case [message | Left message <- outcomes] of
         [] -> do
-          cleared <- removeGhGroupRecord repository
+          -- Under the record lock like every other rewrite, even though the
+          -- coordinator only ever reclaims with the owner held: clearing the
+          -- record is the one update that discards entries it never read.
+          cleared <- withRecordLock guard (removeGhGroupRecord repository)
           case cleared of
             Left message -> refuse message
             Right () -> do
