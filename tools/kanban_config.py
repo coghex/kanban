@@ -100,8 +100,9 @@ class WorkflowConfig:
 
 @dataclass(frozen=True)
 class LimitsConfig:
-    max_open_issues: int = 250
-    max_open_pull_requests: int = 100
+    # Rendered-card excerpt height, and nothing else. There are no
+    # open-connection caps to configure: a board refresh follows both open
+    # connections to their final page (docs/design.md section 13).
     excerpt_lines: int = 3
 
 
@@ -142,8 +143,6 @@ class WorkflowOverride:
 
 @dataclass(frozen=True)
 class LimitsOverride:
-    max_open_issues: int | None = None
-    max_open_pull_requests: int | None = None
     excerpt_lines: int | None = None
 
 
@@ -467,13 +466,12 @@ def _parse_workflow_override(value: dict, path: str, warnings: list[str]) -> Wor
 
 def _parse_limits_override(value: dict, path: str, warnings: list[str]) -> LimitsOverride:
     table = dict(value)
-    max_open_issues = _pop_positive_int(table, "max_open_issues", path)
-    max_open_pull_requests = _pop_positive_int(table, "max_open_pull_requests", path)
     excerpt_lines = _pop_positive_int(table, "excerpt_lines", path)
+    # max_open_issues and max_open_pull_requests are gone from the schema, so a
+    # file that still sets them reaches _collect_unknown like any other
+    # unrecognized key: one warning apiece, and no effect.
     _collect_unknown(table, path, warnings)
     return LimitsOverride(
-        max_open_issues=max_open_issues,
-        max_open_pull_requests=max_open_pull_requests,
         excerpt_lines=excerpt_lines,
     )
 

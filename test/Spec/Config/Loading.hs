@@ -27,7 +27,7 @@ spec = do
           defaultRawConfig.rawCache `shouldBe` True
           defaultRawConfig.rawRemoteName `shouldBe` "origin"
           defaultRawConfig.rawWorkflow `shouldBe` defaultWorkflowConfig
-          defaultRawConfig.rawLimits `shouldBe` LimitsConfig 250 100 3
+          defaultRawConfig.rawLimits `shouldBe` LimitsConfig 3
           defaultRawConfig.rawTimeouts `shouldBe` TimeoutsConfig 30 10 45
 
     it "honors an explicit --config path pointing at a fixture" $
@@ -65,7 +65,7 @@ spec = do
             uiStyleLabels = Set.fromList ["interface", "input"],
             coordinationPaths = Set.fromList ["docs/status.md", "ROADMAP.md"]
           }
-      config.rawLimits `shouldBe` LimitsConfig 500 200 5
+      config.rawLimits `shouldBe` LimitsConfig 5
       config.rawTimeouts `shouldBe` TimeoutsConfig 60 20 90
       config.rawUsage
         `shouldBe` UsageConfig
@@ -80,7 +80,7 @@ spec = do
           resolved = resolveConfig "coghex/kanban" config
       resolved.resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
       resolved.resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
-      resolved.resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      resolved.resolvedLimits `shouldBe` LimitsConfig 7
       resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
       resolved.resolvedCache `shouldBe` False
       resolved.resolvedRemoteName `shouldBe` "upstream"
@@ -95,7 +95,7 @@ spec = do
       (selected "cOgHeX/kAnBaN").resolvedWorkflow.approvalLabel `shouldBe` "ship-it"
       -- Merge and precedence survive the normalized lookup unchanged.
       (selected "Coghex/Kanban").resolvedWorkflow.changesRequestedLabel `shouldBe` "needs-work"
-      (selected "Coghex/Kanban").resolvedLimits `shouldBe` LimitsConfig 999 200 5
+      (selected "Coghex/Kanban").resolvedLimits `shouldBe` LimitsConfig 7
       (selected "Coghex/Kanban").resolvedTimeouts `shouldBe` TimeoutsConfig 15 20 90
 
     it "folds the resolved identity ASCII-only, the way tools/kanban_config.py does" $ do
@@ -213,7 +213,6 @@ spec = do
       decodeConfigText "remote_name = \"\"\n" `shouldSatisfy` errorContains ["remote_name"]
       decodeConfigText "[workflow]\napproval_mode = \"bogus\"\n" `shouldSatisfy` errorContains ["approval_mode"]
       decodeConfigText "[workflow]\nblocking_severity = \"purple\"\n" `shouldSatisfy` errorContains ["blocking_severity"]
-      decodeConfigText "[limits]\nmax_open_issues = 0\n" `shouldSatisfy` errorContains ["limits", "max_open_issues"]
       decodeConfigText "[limits]\nexcerpt_lines = -1\n" `shouldSatisfy` errorContains ["excerpt_lines"]
       decodeConfigText "[timeouts]\ngithub_seconds = 0\n" `shouldSatisfy` errorContains ["github_seconds"]
       decodeConfigText "[usage.codex]\ncommand = []\n" `shouldSatisfy` errorContains ["command"]
@@ -236,6 +235,28 @@ spec = do
       let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "unexpected_field"
       Data.Text.concat warnings `shouldSatisfy` Data.Text.isInfixOf "workflow"
+
+    -- The open-connection caps are gone from the schema, so a file that still
+    -- sets them is a file with two unknown keys in it -- warned about like any
+    -- other, at either scope, and with no effect whatsoever on what the board
+    -- fetches.
+    it "treats the removed open-connection caps as ordinary unknown keys at both scopes" $ do
+      let toml =
+            "[limits]\n"
+              <> "max_open_issues = 500\n"
+              <> "max_open_pull_requests = 200\n"
+              <> "[repositories.\"coghex/kanban\".limits]\n"
+              <> "max_open_issues = 999\n"
+              <> "max_open_pull_requests = 400\n"
+          (config, warnings) = unsafeConfig (decodeConfigText toml)
+          reported = Data.Text.concat warnings
+      mapM_ (\key -> reported `shouldSatisfy` Data.Text.isInfixOf key) ["max_open_issues", "max_open_pull_requests"]
+      reported `shouldSatisfy` Data.Text.isInfixOf "limits"
+      reported `shouldSatisfy` Data.Text.isInfixOf "coghex/kanban"
+      -- Both scopes warned and neither changed anything: the excerpt height is
+      -- all that is left in the table, and it is still the default.
+      config.rawLimits `shouldBe` defaultLimitsConfig
+      (resolveConfig "coghex/kanban" config).resolvedLimits `shouldBe` defaultLimitsConfig
 
     it "rejects a global approval_label and changes_requested_label that resolve to the same label" $
       decodeConfigText "[workflow]\napproval_label = \"lgtm\"\nchanges_requested_label = \"LGTM\"\n"

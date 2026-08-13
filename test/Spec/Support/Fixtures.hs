@@ -304,8 +304,6 @@ detailsFixtureBoard =
         ]
         [detailsFixturePullRequest, basePullRequest 851 [36] False []]
         epoch
-        False
-        False
     )
 
 testOptions :: Options
@@ -352,8 +350,6 @@ fullFixtureToml =
     <> "coordination_paths = [\"docs/status.md\", \"ROADMAP.md\"]\n"
     <> "\n"
     <> "[limits]\n"
-    <> "max_open_issues = 500\n"
-    <> "max_open_pull_requests = 200\n"
     <> "excerpt_lines = 5\n"
     <> "\n"
     <> "[timeouts]\n"
@@ -373,7 +369,7 @@ fullFixtureToml =
     <> "approval_label = \"ship-it\"\n"
     <> "\n"
     <> "[repositories.\"coghex/kanban\".limits]\n"
-    <> "max_open_issues = 999\n"
+    <> "excerpt_lines = 7\n"
     <> "\n"
     <> "[repositories.\"coghex/kanban\".timeouts]\n"
     <> "github_seconds = 15\n"

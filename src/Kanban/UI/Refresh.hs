@@ -4,11 +4,9 @@ module Kanban.UI.Refresh
     boardRefreshRunner,
     claudeRefreshTimeoutMicros,
     codexRefreshTimeoutMicros,
-    githubRefreshTimeoutMicros,
     historyPausedNotice,
     markBoardRefreshRunning,
     newBoardRefreshCoordinator,
-    persistBoardRefresh,
     releaseQueuedBoardRefresh,
     requireBoardRefresh,
     runBoardRefreshWith,
@@ -29,11 +27,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (TimeZone, UTCTime, addUTCTime, getCurrentTime)
-import Kanban.Cache
-  ( writeRepositoryCache
-    )
-import Kanban.CLI (Options (..))
+import Data.Time (TimeZone, UTCTime)
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
@@ -41,7 +35,6 @@ import Kanban.Domain
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhFetchGuard,
-    GitHubResult (..),
     HistoryPageResult (..),
     OpenRefreshResult (..),
     RateObserver,
@@ -155,14 +148,15 @@ startBoardRefresh = do
     StartRefreshNow -> do
       announceOverDirectMergeResult "Refreshing GitHub…"
       modify (\current -> current {appBoardFreshness = Loading})
-      now <- liftIO getCurrentTime
-      -- The deadline is set here rather than inside the fetch, because from
-      -- the board's side waiting for the owner and waiting for a rate limit
-      -- are indistinguishable from a slow response: all three are this
-      -- request taking too long, and the configured timeout is what bounds
-      -- the whole of it.
-      let deadline = addUTCTime (fromIntegral state.appConfig.resolvedTimeouts.timeoutsGithubSeconds) now
-      liftIO (requestRefreshJob state.appRefreshCoordinator OpenJob (Just deadline))
+      -- No whole-request deadline. `github_seconds` bounds one page now
+      -- (§13), and an uncapped traversal of a large repository legitimately
+      -- takes many pages: bounding the whole of it by a single page's budget
+      -- would fail exactly the repositories this slice exists to serve.
+      -- Waiting for the owner and waiting out a rate limit are likewise not
+      -- the fetch being slow, and neither may spend a page's budget — a
+      -- refusal is published when it happens and the job is reissued once the
+      -- reported reset passes (§15).
+      liftIO (requestRefreshJob state.appRefreshCoordinator OpenJob Nothing)
 
 -- | Records that the coordinator has taken the owner for a foreground cycle.
 --
@@ -175,29 +169,40 @@ startBoardRefresh = do
 -- Only the freshness moves. Whatever notice is on screen -- above all the
 -- rate limit that caused the reissue -- is the explanation for the wait, and
 -- replacing it would remove the one report that says why.
-markBoardRefreshRunning :: EventM Name AppState ()
-markBoardRefreshRunning = modify (\state -> state {appBoardFreshness = Loading})
+--
+-- The generation it carries is recorded as the newest one, which is what
+-- makes a late outcome from the cycle this one superseded droppable.
+markBoardRefreshRunning :: OpenGeneration -> EventM Name AppState ()
+markBoardRefreshRunning generation =
+  modify
+    ( \state ->
+        state
+          { appBoardFreshness = Loading,
+            appOpenGeneration = max state.appOpenGeneration generation
+          }
+    )
 
--- | The configured GitHub/Codex/Claude provider timeouts, converted from
--- whole seconds to the microseconds 'System.Timeout.timeout' takes.
-githubRefreshTimeoutMicros, codexRefreshTimeoutMicros, claudeRefreshTimeoutMicros :: ResolvedConfig -> Int
-githubRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsGithubSeconds * 1000000
+-- | The configured Codex and Claude provider timeouts, converted from whole
+-- seconds to the microseconds 'System.Timeout.timeout' takes. GitHub's has no
+-- equivalent here: it bounds one page from inside the fetch (§13) rather than
+-- a call made from this module.
+codexRefreshTimeoutMicros, claudeRefreshTimeoutMicros :: ResolvedConfig -> Int
 codexRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsCodexSeconds * 1000000
 claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSeconds * 1000000
 
 -- | The repository's one coordinator, wired to the board: outcomes reach the
 -- event channel exactly as a lone refresh thread's did, and what the
 -- scheduler has to say for itself reaches the same notice line.
-newBoardRefreshCoordinator :: Options -> ResolvedConfig -> Repository -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
-newBoardRefreshCoordinator options config repository eventChannel = do
+newBoardRefreshCoordinator :: ResolvedConfig -> Repository -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
+newBoardRefreshCoordinator config repository eventChannel = do
   recordLock <- newGhRecordLock
   newRefreshCoordinator
     recordLock
     (boardRefreshRunner config repository)
-    (\outcome -> persistBoardRefresh options config repository outcome >>= writeBChan eventChannel . BoardRefreshFinished)
+    (\generation outcome -> writeBChan eventChannel (BoardRefreshFinished generation outcome))
     ( \notice -> case notice of
         HistoryPausedUntilReset resetAt -> writeBChan eventChannel (BoardHistoryPaused resetAt)
-        OpenRefreshStarted -> writeBChan eventChannel BoardRefreshStarted
+        OpenRefreshStarted generation -> writeBChan eventChannel (BoardRefreshStarted generation)
     )
 
 -- | What the coordinator's two job kinds do for the board.
@@ -226,14 +231,19 @@ boardRefreshUnanswered config guard = do
   cleanupFailure <- maybe (pure Nothing) ghFetchCleanupFailure guard
   pure (maybe (boardRefreshTimedOut config) BoardRefreshUnverified cleanupFailure)
 
--- | One foreground refresh, bounded by whatever is left of its deadline.
+-- | One foreground refresh: both open connections followed to their end, with
+-- each page bounded by the configured GitHub timeout.
 --
--- It fetches and nothing else. Writing the snapshot to the last-good cache is
--- part of publishing the outcome, not of producing it — see
--- 'persistBoardRefresh'.
+-- It fetches and nothing else. Nothing is persisted afterwards either — open
+-- cards live only in this process's memory, so a generation that completes
+-- leaves no file behind and a generation that is cancelled has nothing to
+-- leave (§13).
 runBoardOpenRefresh :: ResolvedConfig -> Repository -> GhFetchGuard -> RateObserver -> Maybe Int -> IO (OpenRefreshResult BoardRefreshOutcome)
 runBoardOpenRefresh config repository guard observeRate remainingMicros = do
-  timedResult <- withDeadline remainingMicros (fetchGitHubSnapshot guard observeRate config.resolvedLimits config.resolvedWorkflow repository)
+  timedResult <-
+    withDeadline
+      remainingMicros
+      (fetchGitHubSnapshot guard observeRate config.resolvedTimeouts.timeoutsGithubSeconds config.resolvedWorkflow repository)
   -- Read after the fetch has fully unwound, so the abandoned group's
   -- verified cleanup has already run to completion: whatever it recorded is
   -- final by now, and nothing is published before it is known.
@@ -244,26 +254,6 @@ runBoardOpenRefresh config repository guard observeRate remainingMicros = do
         (Nothing, Just (Left providerError)) -> BoardRefreshCompleted (Left providerError)
         (Nothing, Just (Right githubResult)) -> BoardRefreshCompleted (Right githubResult)
   pure (OpenRefreshResult outcome (rateLimitedOutcome outcome))
-
--- | Commits a completed refresh's snapshot to the last-good cache, folding any
--- warning into the outcome that reports it.
---
--- This belongs to publishing rather than to the fetch, and deliberately so. A
--- job the coordinator cancelled must leave behind no board result /and no
--- cache result/, and the cancellation is only known at the publish step a
--- cancelled job never reaches. Writing from inside the fetch would commit a
--- cache in the instant before the cancellation that suppressed everything else
--- about that job — the one result nothing downstream would ever mention, and
--- the one a later launch would load as its own.
-persistBoardRefresh :: Options -> ResolvedConfig -> Repository -> BoardRefreshOutcome -> IO BoardRefreshOutcome
-persistBoardRefresh options config repository outcome = case outcome of
-  BoardRefreshCompleted (Right githubResult)
-    | cacheEnabled options config -> do
-        cacheResult <- writeRepositoryCache repository githubResult.githubSnapshot
-        pure . BoardRefreshCompleted . Right $ case cacheResult of
-          Left warning -> githubResult {githubWarnings = githubResult.githubWarnings <> [warning]}
-          Right () -> githubResult
-  _ -> pure outcome
 
 -- | Whether GitHub refused this refresh against its primary rate limit, which
 -- is what makes the next one wait rather than walk into the same refusal.
@@ -299,13 +289,14 @@ historyPausedNotice timeZone resetAt =
 -- exactly the instant the outcome is published and proves the abandoned @gh@
 -- group is already gone by then, which no assertion made after reading a
 -- 'BChan' could establish. It runs the same open job the coordinator
--- schedules, so what it proves about cleanup holds for the scheduled one too.
-runBoardRefreshWith :: (BoardRefreshOutcome -> IO ()) -> Options -> ResolvedConfig -> Repository -> IO ()
-runBoardRefreshWith publish options config repository = do
+-- schedules, and with the same absence of a whole-request deadline, so what
+-- it proves about per-page bounds and cleanup holds for the scheduled one too.
+runBoardRefreshWith :: (BoardRefreshOutcome -> IO ()) -> ResolvedConfig -> Repository -> IO ()
+runBoardRefreshWith publish config repository = do
   recordLock <- newGhRecordLock
   guard <- newGhFetchGuard recordLock
-  result <- runBoardOpenRefresh config repository guard (const (pure ())) (Just (githubRefreshTimeoutMicros config))
-  persistBoardRefresh options config repository result.openRefreshOutcome >>= publish
+  result <- runBoardOpenRefresh config repository guard (const (pure ())) Nothing
+  publish result.openRefreshOutcome
 
 startCodexRefresh :: EventM Name AppState ()
 startCodexRefresh = do

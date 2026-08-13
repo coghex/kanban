@@ -210,7 +210,6 @@ matchingSpec = describe "matching" $ do
     columnCountText state Issues `shouldBe` "5"
     columnCountText (openSearch state) Issues `shouldBe` "5"
     columnCountText filtered Issues `shouldBe` "1/5"
-    columnCountText filtered {appIssuesTruncated = True} Issues `shouldBe` "1/5+"
     -- Every other column's heading is unchanged.
     columnCountText filtered Active `shouldBe` "2"
 

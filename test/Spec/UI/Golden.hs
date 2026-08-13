@@ -26,7 +26,7 @@ module Spec.UI.Golden (spec) where
 import Brick (AttrMap)
 import Brick.AttrMap (attrMapLookup)
 import Brick.BChan (BChan, newBChan)
-import Data.List (findIndex, isInfixOf)
+import Data.List (findIndex, isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -41,6 +41,8 @@ import Kanban.Fixture (fixtureBoard, fixtureUsage)
 import Kanban.GitHub (RefreshCoordinator)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
+import Kanban.UI.Board (openDataLoadingHeading, openDataUnavailableHeading)
+import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
 import Kanban.UI.Theme
   ( approvedAttr,
@@ -89,6 +91,51 @@ spec = describe "golden frames" $ do
     widths `shouldBe` []
 
   mapM_ frameCaseSpec frameCases
+
+  -- §7: a blocking panel replaces the board rather than covering it. The
+  -- fixture board is in state throughout, so what these prove is that a board
+  -- no complete generation has published draws none of it -- not that there
+  -- happened to be nothing to draw.
+  it "draws no card from any source while either blocking panel is up, at every setting" $ do
+    frames <- traverse renderCase openDataCases
+    let leaked =
+          [ (frameCase.frameCaseName, number)
+          | (frameCase, frame) <- zip openDataCases frames,
+            number <- fixtureNumbers,
+            Data.Text.pack ("#" <> show number) `Data.Text.isInfixOf` frameLines frame
+          ]
+    leaked `shouldBe` []
+
+  it "names the loading panel in every frame that draws it" $ do
+    frames <- traverse renderCase (filter (isPanel "open-loading-") openDataCases)
+    filter (not . Data.Text.isInfixOf openDataLoadingHeading . frameLines) frames `shouldBe` []
+
+  -- The unavailable panel is the only thing on screen, so it has to carry
+  -- both halves of §7's contract: the classified reason, and the key that
+  -- retries.
+  it "names the unavailable panel, its classified reason, and the retry key in every frame that draws it" $ do
+    frames <- traverse renderCase (filter (isPanel "open-unavailable-") openDataCases)
+    let missing expected = filter (not . Data.Text.isInfixOf expected . frameLines) frames
+    mapM_
+      (\expected -> missing expected `shouldBe` [])
+      [openDataUnavailableHeading, "AUTH REQUIRED", "press " <> actionKeyText RefreshAll <> " to retry"]
+
+  -- Requirement 8's other half: once one generation has completed, the board
+  -- it published stays on screen through the next refresh and through its
+  -- failure. Only the freshness marker and the notice move.
+  it "keeps drawing the published board while a later refresh is loading or has failed" $ do
+    let laterStates :: [(String, Freshness)]
+        laterStates =
+          [ ("loading", Loading),
+            ("failed", Stale goldenFetchedAt "REQUEST ERROR: gh fell over")
+          ]
+    mapM_
+      ( \(label, freshness) -> do
+          frame <- renderCase wideCase {frameCaseState = \state -> state {appBoardFreshness = freshness}}
+          let drawn = [number | number <- fixtureNumbers, Data.Text.pack ("#" <> show number) `Data.Text.isInfixOf` frameLines frame]
+          (label, null drawn) `shouldBe` (label, False)
+      )
+      laterStates
 
   it "records the wide frame's attributes beside its characters" $ do
     frame <- renderCase wideCase
@@ -259,6 +306,24 @@ requiredFixtureStates =
     "UNLINKED" -- the pull request GitHub reported no linked issue for
   ]
 
+-- | Every item number the fixture board draws, asked of the board rather than
+-- written down, so a changed fixture cannot quietly narrow what the panel
+-- frames are checked against.
+fixtureNumbers :: [Int]
+fixtureNumbers =
+  [ number
+  | column <- [minBound .. maxBound],
+    entry <- fixtureEntries column,
+    Just number <- [entryNumber entry]
+  ]
+
+-- | A frame as one searchable block of text, rows separated by newlines.
+frameLines :: [[FrameCell]] -> Text
+frameLines frame = Data.Text.unlines (map frameRowText frame)
+
+isPanel :: String -> FrameCase -> Bool
+isPanel prefix frameCase = prefix `isPrefixOf` frameCase.frameCaseName
+
 -- | One captured frame: what it is called, how large the terminal is, and
 -- what it changes about the resting state.
 data FrameCase = FrameCase
@@ -357,6 +422,76 @@ frameCases =
         frameCaseSummary = "--ascii, the box drawn without box glyphs",
         frameCaseState = searching "envelope" . withOptions (\options -> options {optionAscii = True})
       }
+  ]
+    <> openDataCases
+
+-- | §7's two blocking panels at every setting the populated board is captured
+-- at, because a panel that replaces the board has to survive the same
+-- responsive and border decisions the board does.
+--
+-- Both are applied over the fixture board rather than an empty one, so what
+-- the frames show is not that there was nothing to draw: it is that a board
+-- no complete generation has published draws none of it.
+openDataCases :: [FrameCase]
+openDataCases =
+  [ FrameCase
+      { frameCaseName = openDataName panel setting,
+        frameCaseWidth = setting.settingWidth,
+        frameCaseHeight = setting.settingHeight,
+        frameCaseSummary = panelSummary panel <> ", " <> setting.settingSummary,
+        frameCaseState = setting.settingState . panelState panel
+      }
+  | panel <- [OpenDataLoadingPanel, OpenDataUnavailablePanel],
+    setting <- frameSettings
+  ]
+
+data OpenDataPanel = OpenDataLoadingPanel | OpenDataUnavailablePanel
+
+openDataName :: OpenDataPanel -> FrameSetting -> String
+openDataName OpenDataLoadingPanel setting = "open-loading-" <> setting.settingName
+openDataName OpenDataUnavailablePanel setting = "open-unavailable-" <> setting.settingName
+
+panelSummary :: OpenDataPanel -> String
+panelSummary OpenDataLoadingPanel = "the initial loading panel"
+panelSummary OpenDataUnavailablePanel = "the OPEN DATA UNAVAILABLE panel"
+
+-- | Both panels stand for a board no generation has published, which is
+-- exactly 'appLastSuccessfulFetch' being unset; the freshness then decides
+-- which of the two is drawn.
+panelState :: OpenDataPanel -> AppState -> AppState
+panelState OpenDataLoadingPanel state =
+  state
+    { appLastSuccessfulFetch = Nothing,
+      appBoardFreshness = Loading,
+      appNotice = Just "Refreshing GitHub…"
+    }
+panelState OpenDataUnavailablePanel state =
+  state
+    { appLastSuccessfulFetch = Nothing,
+      appBoardFreshness = Unavailable unavailableReason,
+      appNotice = Just ("GitHub refresh failed: " <> unavailableReason)
+    }
+
+unavailableReason :: Text
+unavailableReason = "AUTH REQUIRED: gh: Bad credentials (HTTP 401)"
+
+-- | One terminal size and border mode a frame can be captured at.
+data FrameSetting = FrameSetting
+  { settingName :: String,
+    settingWidth :: Int,
+    settingHeight :: Int,
+    settingSummary :: String,
+    settingState :: AppState -> AppState
+  }
+
+-- | The five settings the populated board is already captured at.
+frameSettings :: [FrameSetting]
+frameSettings =
+  [ FrameSetting "wide" 200 64 "wider than the four-column threshold" id,
+    FrameSetting "minimum" 164 64 "the four-column minimum" id,
+    FrameSetting "narrow" 36 40 "one column at a time, sidebar hidden" (\state -> state {appSidebarVisible = False}),
+    FrameSetting "open-borders" 164 48 "--border open" (withOptions (\options -> options {optionBorder = BorderOpen})),
+    FrameSetting "ascii" 164 48 "--ascii" (withOptions (\options -> options {optionAscii = True}))
   ]
 
 -- | An open, empty search box over the wide board.
@@ -464,8 +599,7 @@ restingState channel refreshCoordinator =
       appNotice = Just "Cached GitHub snapshot loaded · press u to update",
       appBoardFreshness = Fresh goldenFetchedAt,
       appLastSuccessfulFetch = Just goldenFetchedAt,
-      appIssuesTruncated = False,
-      appPullRequestsTruncated = False,
+      appOpenGeneration = 0,
       appDrainerController = Left "no drainer controller in the fixture",
       appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
       -- No controller, so no observation stands: the same unanswered source

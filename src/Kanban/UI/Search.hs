@@ -197,19 +197,15 @@ selectableRows state column = visibleRowsIn (expandedTrackersFor state column) (
 -- | The count in a column's heading.
 --
 -- While a query is live the heading shows the visible result count over the
--- column's full total, and GitHub's @+@ truncation marker stays attached to
--- that total rather than to the result count, which is never truncated.
+-- column's full total. Both are exact: a board is only ever drawn from a
+-- generation that followed both open connections to their end, so no total
+-- here stands for more than it says (§13).
 columnCountText :: AppState -> BoardColumn -> Text
 columnCountText state column = case activeQueryFor state column of
   Nothing -> total
   Just _ -> showText (length (entriesFor state column)) <> "/" <> total
   where
-    total = showText (length (entriesForBoard state.appBoard column)) <> if columnMayBeTruncated then "+" else ""
-    columnMayBeTruncated = case column of
-      Issues -> state.appIssuesTruncated
-      Active -> state.appIssuesTruncated
-      Reviewing -> state.appPullRequestsTruncated
-      Done -> state.appPullRequestsTruncated
+    total = showText (length (entriesForBoard state.appBoard column))
 
 -- | What a selected row is, for the purpose of finding it again once the view
 -- has changed.

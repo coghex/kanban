@@ -331,7 +331,7 @@ spec = do
       activated.appSelectedColumn `shouldBe` Reviewing
 
     it "opens the session of work the board no longer shows, and moves nothing" $ do
-      -- #77 is not on this board: truncated off it, or closed since.
+      -- #77 is not on this board: closed since, or never on it.
       state <- withSolveSession (baseIssue 77 []) SolveFailedPhase <$> navigationState
       let moved = state {appSelectedColumn = Done, appSelectedRows = Map.insert Done 0 state.appSelectedRows}
           activated = activateFirstRow moved
@@ -342,12 +342,11 @@ spec = do
       -- The session is still worth opening.
       activated.appOverlay `shouldBe` Just (SolveOverlay 77)
 
-    it "reports a truncated pull request's absence without opening any session" $ do
+    it "reports an absent pull request without opening any session" $ do
       state <- reportingState [conflictIncident 903]
-      let truncated = state {appPullRequestsTruncated = True}
-          activated = activateFirstRow truncated
+      let activated = activateFirstRow state
       activated.appSelectedColumn `shouldBe` Issues
-      activated.appSelectedRows `shouldBe` truncated.appSelectedRows
+      activated.appSelectedRows `shouldBe` state.appSelectedRows
       activated.appExpandedTrackers `shouldBe` Set.empty
       activated.appNotice `shouldBe` Just "PR #903 is not on the current board"
       activated.appOverlay `shouldBe` Nothing

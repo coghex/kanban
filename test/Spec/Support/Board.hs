@@ -30,7 +30,7 @@ import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.UI.Refresh (runBoardRefreshWith)
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Env (withEnvironmentValue, withFakeOnPath)
-import Spec.Support.Fixtures (testOptions, testResolvedConfig)
+import Spec.Support.Fixtures (testResolvedConfig)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
@@ -99,7 +99,7 @@ inertRefreshCoordinator = do
         openRefreshExpired = const (pure inertOutcome),
         runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
       }
-    (const (pure ()))
+    (\_ _ -> pure ())
     (const (pure ()))
   where
     inertOutcome = BoardRefreshCompleted (Left (ProviderError RequestFailed "no refresh runner is wired up in this test"))
@@ -114,12 +114,16 @@ withFakeGh temporaryRoot body = withFakeOnPath temporaryRoot ("gh", body)
 -- published -- the only way to prove an abandoned gh was already gone by
 -- then, rather than merely gone by the time an assertion got around to
 -- looking.
+--
+-- @githubSeconds@ is the configured GitHub timeout, which now bounds one page
+-- rather than the traversal: a fake @gh@ that never answers stalls its page
+-- and fails the generation there, while a multi-page fake gets the whole
+-- budget for each of its pages.
 captureBoardRefresh :: FilePath -> Int -> IO (BoardRefreshOutcome, Either Text [ProcessIdentity])
 captureBoardRefresh temporaryRoot githubSeconds = do
   published <- newEmptyMVar
   runBoardRefreshWith
     (\outcome -> readProcessSnapshot >>= putMVar published . (,) outcome)
-    testOptions
     testResolvedConfig
       { resolvedCache = False,
         resolvedTimeouts = defaultTimeoutsConfig {timeoutsGithubSeconds = githubSeconds}

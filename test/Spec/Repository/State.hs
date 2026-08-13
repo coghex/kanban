@@ -6,18 +6,21 @@ import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import qualified Data.Map.Strict as Map
 import qualified Data.Text
+import Data.Foldable (for_)
 import Kanban.Cache
   ( CacheLoad (..),
     UsageCacheLoad (..),
     loadRepositoryCache,
     loadUsageCache,
+    ghGroupRecordPath,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
     usageCachePath,
-    writeRepositoryCache,
+    writeGhGroupRecord,
     writeUsageCache
   )
 import Kanban.Domain
+import Spec.Support.Fixtures (epoch)
 import Kanban.Settings (ChatVerbosity (..), Settings (..), saveSettings, settingsPath)
 import Kanban.Transcript (closeSessionLog, openSessionLog, transcriptRoot)
 import Spec.Support.Env
@@ -27,147 +30,78 @@ import Spec.Support.Env
     withTemporaryCacheRoot
   )
 import Spec.Support.Expect (isInvalidCache, isInvalidUsageCache)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, foreignSubIssue, localSubIssue, withSubIssues)
-import Spec.Support.Json (versionFourCacheFile, versionThreeCacheFile, versionTwoCacheFile)
-import System.Directory (createDirectory, createDirectoryIfMissing)
+import Spec.Support.Json
+  ( undecodableCacheFile,
+    versionFiveCacheFile,
+    versionFourCacheFile,
+    versionThreeCacheFile,
+    versionTwoCacheFile
+  )
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 import Test.Hspec
 
 spec :: Spec
 spec = do
-  describe "repository snapshot cache" $ do
-    it "round-trips a versioned snapshot and ignores corrupt JSON" $
+  -- Nothing writes a repository snapshot any more: open cards are live-only
+  -- (§13), so the loader survives only as the gate a file an earlier release
+  -- left behind meets. What it has to do with such a file is nothing at all.
+  describe "legacy repository snapshot compatibility" $ do
+    it "treats the schema 5 file an earlier release wrote as absent, without decoding, rewriting, or removing it" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
-              snapshot = RepoSnapshot [baseIssue 7 []] [] epoch False False
-          writeRepositoryCache repository snapshot `shouldReturn` Right ()
-          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
           cachePath <- repositoryCachePath repository
-          LazyByteString.writeFile cachePath "not JSON"
-          invalid <- loadRepositoryCache repository
-          invalid `shouldSatisfy` isInvalidCache
-
-    it "round-trips the retained per-check detail" $
-      withTemporaryCacheRoot $ \cacheRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let repository = Repository "/tmp/project" "coghex" "kanban"
-              pullRequest =
-                (basePullRequest 823 [36] False [])
-                  { pullRequestChecks =
-                      ChecksFailed 9 12 [CheckDetail "integration-suite" CheckFailed, CheckDetail "docs-lint" CheckPending]
-                  }
-              snapshot = RepoSnapshot [] [pullRequest] epoch False False
-          writeRepositoryCache repository snapshot `shouldReturn` Right ()
-          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
-
-    -- A card restored from cache has to keep saying what it does not know.
-    -- Reloading one with its gaps dropped would put back the amber marker's
-    -- absence and the definite "unassigned" the live decode refused.
-    it "round-trips the per-item data gaps" $
-      withTemporaryCacheRoot $ \cacheRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let repository = Repository "/tmp/project" "coghex" "kanban"
-              issue = (baseIssue 41 []) {issueDataGaps = [AssigneesUnavailable]}
-              pullRequest =
-                (basePullRequest 823 [] False [])
-                  {pullRequestDataGaps = [LabelsUnavailable, ChecksUndecodable]}
-              snapshot = RepoSnapshot [issue] [pullRequest] epoch False False
-          writeRepositoryCache repository snapshot `shouldReturn` Right ()
-          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
-
-    -- A restored snapshot decides §12 membership again from what it carries,
-    -- so all three states have to survive the round trip: an answer GitHub
-    -- gave, one it did not, and a refresh that never asked.
-    it "round-trips every native sub-issue state" $
-      withTemporaryCacheRoot $ \cacheRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let repository = Repository "/tmp/project" "coghex" "kanban"
-              reported =
-                withSubIssues [localSubIssue 11 False, foreignSubIssue 12 True] 1 2 (baseIssue 700 [])
-              unreported = (baseIssue 701 []) {issueSubIssues = SubIssuesUnreported, issueDataGaps = [SubIssuesUnavailable]}
-              snapshot = RepoSnapshot [reported, unreported, baseIssue 702 []] [] epoch False False
-          writeRepositoryCache repository snapshot `shouldReturn` Right ()
-          loadRepositoryCache repository `shouldReturn` CacheLoaded snapshot
-
-    -- §16: an unknown version is absent, not corruption. Meeting a file
-    -- written by another version of the binary is the expected outcome of an
-    -- upgrade or a downgrade, so it must start up exactly as it would with no
-    -- cache at all -- no warning, nothing for the user to act on.
-    it "treats a future schema version as absent rather than as corruption" $
-      withTemporaryCacheRoot $ \cacheRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let repository = Repository "/tmp/project" "coghex" "kanban"
-          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
-          cachePath <- repositoryCachePath repository
-          ByteString.writeFile cachePath (versionThreeCacheFile 999)
+          createDirectoryIfMissing True (takeDirectory cachePath)
+          ByteString.writeFile cachePath (versionFiveCacheFile 5)
+          asFound <- ByteString.readFile cachePath
           loadRepositoryCache repository `shouldReturn` CacheAbsent
+          -- Read but never written back, and never cleaned up: the file is
+          -- simply no longer this build's business.
+          doesFileExist cachePath `shouldReturn` True
+          ByteString.readFile cachePath `shouldReturn` asFound
 
-    -- Version 4 knew nothing of native sub-issues, so restoring one of its
-    -- issues would present a tracker as though GitHub had been asked about
-    -- its relationships and reported none -- turning a natively tracked epic
-    -- back into a warned, childless header off a stale file.
-    it "treats a genuine version 4 file as absent rather than as malformed" $
+    -- Proof the version gate answered rather than the decoder: a payload no
+    -- snapshot decoder could accept is still silently absent while it carries
+    -- an older version, and becomes ordinary corruption the moment the same
+    -- bytes claim the current one.
+    it "answers from the version before the payload, so an unreadable schema 5 snapshot is never decoded" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
-          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
-          ByteString.writeFile cachePath (versionFourCacheFile 4)
+          createDirectoryIfMissing True (takeDirectory cachePath)
+          ByteString.writeFile cachePath (undecodableCacheFile 5)
           loadRepositoryCache repository `shouldReturn` CacheAbsent
-          -- The version gate, not the decoder, is what turned it away:
-          -- relabelled as current, the same file fails on its missing
-          -- sub-issue field and keeps the warning a real corruption earns.
-          ByteString.writeFile cachePath (versionFourCacheFile repositoryCacheSchemaVersion)
+          ByteString.writeFile cachePath (undecodableCacheFile repositoryCacheSchemaVersion)
           relabeled <- loadRepositoryCache repository
           relabeled `shouldSatisfy` isInvalidCache
 
-    -- Version 3 knew nothing of those gaps, so reusing one of its entries
-    -- would restore a card as though every field had arrived.
-    it "treats a genuine version 3 file as absent rather than as malformed" $
+    it "keeps treating every older schema version as absent rather than as corruption" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
-          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
-          ByteString.writeFile cachePath (versionThreeCacheFile 3)
-          loadRepositoryCache repository `shouldReturn` CacheAbsent
-          -- The version gate, not the decoder, is what turned it away:
-          -- relabelled as current, the same file fails on its missing gap
-          -- fields and keeps the warning a real corruption earns.
-          ByteString.writeFile cachePath (versionThreeCacheFile repositoryCacheSchemaVersion)
-          relabeled <- loadRepositoryCache repository
-          relabeled `shouldSatisfy` isInvalidCache
-
-    -- A real version 2 file wrote its check summaries as two aggregate counts,
-    -- so its snapshot cannot decode under the current schema at all. The
-    -- version has to be read before the snapshot, or the user is told the file
-    -- is malformed JSON when the truthful answer is that it is simply old.
-    it "treats a genuine version 2 file as absent rather than as malformed" $
-      withTemporaryCacheRoot $ \cacheRoot ->
-        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let repository = Repository "/tmp/project" "coghex" "kanban"
-          -- Write a current cache first, so the old file lands where the
-          -- loader looks for it.
-          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
-          cachePath <- repositoryCachePath repository
-          ByteString.writeFile cachePath (versionTwoCacheFile 2)
-          loadRepositoryCache repository `shouldReturn` CacheAbsent
-          -- Proof the version gate is what turned it away: relabel that same
-          -- old-shaped file as current, and the snapshot decode fails instead.
-          ByteString.writeFile cachePath (versionTwoCacheFile repositoryCacheSchemaVersion)
-          relabeled <- loadRepositoryCache repository
-          relabeled `shouldSatisfy` isInvalidCache
+          createDirectoryIfMissing True (takeDirectory cachePath)
+          for_
+            [versionTwoCacheFile 2, versionThreeCacheFile 3, versionFourCacheFile 4, versionFiveCacheFile 999]
+            ( \contents -> do
+                ByteString.writeFile cachePath contents
+                loadRepositoryCache repository `shouldReturn` CacheAbsent
+            )
 
     -- Only a version is silent. A file with no integer version to read is not
     -- "from another release", it is unreadable, and still warns.
-    it "keeps warning for a file with no usable schema version" $
+    it "keeps warning for a corrupt file or one with no usable schema version" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
-          writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
           cachePath <- repositoryCachePath repository
+          createDirectoryIfMissing True (takeDirectory cachePath)
+          LazyByteString.writeFile cachePath "not JSON"
+          corrupt <- loadRepositoryCache repository
+          corrupt `shouldSatisfy` isInvalidCache
           ByteString.writeFile cachePath "{\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{}}"
           missing <- loadRepositoryCache repository
           missing `shouldSatisfy` isInvalidCache
@@ -180,14 +114,13 @@ spec = do
     it "still reports a recognised-version file belonging to another repository as invalid" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
-          let mine = Repository "/tmp/project" "coghex" "kanban"
-              theirs = Repository "/tmp/other" "coghex" "other"
-          writeRepositoryCache mine (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
-          minePath <- repositoryCachePath mine
+          let theirs = Repository "/tmp/other" "coghex" "other"
           theirsPath <- repositoryCachePath theirs
-          ByteString.readFile minePath >>= ByteString.writeFile theirsPath
+          createDirectoryIfMissing True (takeDirectory theirsPath)
+          ByteString.writeFile theirsPath (versionFiveCacheFile repositoryCacheSchemaVersion)
           loadRepositoryCache theirs `shouldReturn` CacheInvalid "cache ignored: repository identity mismatch"
 
+  describe "usage snapshot cache" $ do
     it "round-trips global usage snapshots" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
@@ -238,11 +171,14 @@ spec = do
         setFileMode xdgRoot 0o755
         withEnvironmentValue "XDG_CACHE_HOME" xdgRoot $
           withFileCreationMask 0o000 $ do
-            writeRepositoryCache repository (RepoSnapshot [] [] epoch False False) `shouldReturn` Right ()
-            cachePath <- repositoryCachePath repository
+            -- The gh group record is the deepest thing the cache root still
+            -- writes: kanban/gh-groups/<key>.json, so the intermediate level
+            -- an earlier writer might have created loosely is covered too.
+            writeGhGroupRecord repository [] `shouldReturn` Right ()
+            recordPath <- ghGroupRecordPath repository
             permissionsOf (xdgRoot </> "kanban") `shouldReturn` 0o700
-            permissionsOf (takeDirectory cachePath) `shouldReturn` 0o700
-            permissionsOf cachePath `shouldReturn` 0o600
+            permissionsOf (takeDirectory recordPath) `shouldReturn` 0o700
+            permissionsOf recordPath `shouldReturn` 0o600
             permissionsOf xdgRoot `shouldReturn` 0o755
 
     -- The transcript root is three levels deep, so the intermediate "logs"

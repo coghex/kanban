@@ -69,14 +69,13 @@ import Kanban.UI.Refresh
     boardRefreshDispatch,
     boardRefreshRunner,
     historyPausedNotice,
-    persistBoardRefresh,
     releaseQueuedBoardRefresh
   )
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Board (readMarkerPid, withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention)
-import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
+import Spec.Support.Fixtures (epoch, testResolvedConfig)
 import Spec.Support.Json (emptyGraphqlPage, graphqlPageWithRateLimit, rateLimitedGraphqlResponse)
 import System.Directory (doesFileExist)
 import Test.Hspec
@@ -544,7 +543,10 @@ spec = do
           (\_ -> pure (HistoryPageFetched False))
       requestRefreshJob coordinator OpenJob (Just deadline)
       awaitCount probe.probePublished 2
-      readIORef probe.probeNotices `shouldReturn` [OpenRefreshStarted, OpenRefreshStarted]
+      -- Two cycles, under two distinct identities in the order they started:
+      -- the reissue is a generation of its own, so the board can tell its
+      -- answer from the refusal that caused it.
+      readIORef probe.probeNotices `shouldReturn` [OpenRefreshStarted 1, OpenRefreshStarted 2]
 
     it "announces no foreground cycle for a background history page" $ do
       probe <- newProbe
@@ -575,7 +577,7 @@ spec = do
               openRefreshExpired = const (pure "expired"),
               runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
             }
-          ( \_ -> do
+          ( \_ _ -> do
               putMVar publishing ()
               takeMVar release
               atomicModifyIORef' published (\seen -> (seen + 1, ()))
@@ -642,7 +644,7 @@ spec = do
               openRefreshExpired = const (pure "expired"),
               runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
             }
-          (\_ -> putMVar publishing () >> takeMVar release)
+          (\_ _ -> putMVar publishing () >> takeMVar release)
           (const (pure ()))
       requestRefreshJob coordinator OpenJob Nothing
       takeMVar publishing
@@ -682,7 +684,7 @@ spec = do
               openRefreshExpired = \_ -> putMVar answering () >> takeMVar release >> pure "expired",
               runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
             }
-          (\outcome -> atomicModifyIORef' published (\seen -> (seen <> [outcome], ())))
+          (\_ outcome -> atomicModifyIORef' published (\seen -> (seen <> [outcome], ())))
           (const (pure ()))
       -- A deadline already behind us, so the request expires rather than runs.
       alreadyPast <- addUTCTime (-1) <$> getCurrentTime
@@ -859,11 +861,10 @@ spec = do
             providerError.providerErrorMessage `shouldSatisfy` (not . null . show)
           other -> expectationFailure ("expected a rate-limited refresh failure, got " <> show other)
 
-    -- Cancellation is only known at the publish step, so anything the fetch
-    -- itself commits escapes it. A cache written from inside the job would be
-    -- the one result a cancelled refresh still left behind -- and the one a
-    -- later launch would load as its own.
-    it "commits no cache from the fetch itself, only from publishing it" $
+    -- Open cards are live-only, and `cache = true` no longer says otherwise:
+    -- a refresh that completed against an enabled cache still leaves nothing
+    -- on disk for a later launch to load as its own.
+    it "writes no repository snapshot for a completed refresh, even with the cache enabled" $
       withIsolatedCacheRoot $ \temporaryRoot -> do
         let repository = Repository temporaryRoot "coghex" "kanban"
         recordLock <- newGhRecordLock
@@ -875,14 +876,12 @@ spec = do
             ( (boardRefreshRunner (cachedConfig 30) repository).runOpenRefresh
                 guard
                 (const (pure ()))
-                (Just (30 * 1000000))
+                Nothing
             )
         case result.openRefreshOutcome of
           BoardRefreshCompleted (Right _) -> pure ()
           other -> expectationFailure ("expected a completed refresh, got " <> show other)
         (repositoryCachePath repository >>= doesFileExist) `shouldReturn` False
-        void (persistBoardRefresh testOptions (cachedConfig 30) repository result.openRefreshOutcome)
-        (repositoryCachePath repository >>= doesFileExist) `shouldReturn` True
 
     it "leaves no cache behind when a quit cancels the fetch" $
       withIsolatedCacheRoot $ \temporaryRoot -> do
@@ -894,7 +893,7 @@ spec = do
           newRefreshCoordinator
             recordLock
             (boardRefreshRunner (cachedConfig 30) repository)
-            (\outcome -> persistBoardRefresh testOptions (cachedConfig 30) repository outcome >> atomicModifyIORef' published (\seen -> (seen + 1, ())))
+            (\_ _ -> atomicModifyIORef' published (\seen -> (seen + 1, ())))
             (const (pure ()))
         verdict <-
           withFakeGh
@@ -923,7 +922,7 @@ spec = do
           newRefreshCoordinator
             recordLock
             (boardRefreshRunner (uncachedConfig 1) repository)
-            (\outcome -> atomicModifyIORef' outcomes (\seen -> (outcome : seen, ())) >> putMVar settled ())
+            (\_ outcome -> atomicModifyIORef' outcomes (\seen -> (outcome : seen, ())) >> putMVar settled ())
             (const (pure ()))
         withFakeGh
           temporaryRoot
@@ -972,7 +971,7 @@ spec = do
 startBoardCoordinator :: Repository -> (BoardRefreshOutcome -> IO ()) -> IO (RefreshCoordinator BoardRefreshOutcome)
 startBoardCoordinator repository publish = do
   recordLock <- newGhRecordLock
-  newRefreshCoordinator recordLock (boardRefreshRunner (uncachedConfig 30) repository) publish (const (pure ()))
+  newRefreshCoordinator recordLock (boardRefreshRunner (uncachedConfig 30) repository) (const publish) (const (pure ()))
 
 -- | The same, with the last-good cache in play, for the cases that are about
 -- what does and does not reach it.
@@ -1025,7 +1024,7 @@ startProbeCoordinator probe openBody historyBody = do
         openRefreshExpired = const (pure "expired"),
         runHistoryPage = \_ observe -> instrumentedJob probe HistoryJob (historyBody observe)
       }
-    (\value -> atomicModifyIORef' probe.probePublished (\seen -> (seen <> [value], ())))
+    (\_ value -> atomicModifyIORef' probe.probePublished (\seen -> (seen <> [value], ())))
     (\notice -> atomicModifyIORef' probe.probeNotices (\seen -> (seen <> [notice], ())))
 
 -- | Records a job taking and giving back the owner, whatever the job returns.

@@ -39,7 +39,7 @@ spec :: Spec
 spec = do
   describe "workflow classification" $ do
     it "keeps linked issues visible while showing their pull requests as separate cards" $ do
-      let snapshot = RepoSnapshot [baseIssue 1 [], baseIssue 2 [Assignee "agent"]] [basePullRequest 10 [1] False []] epoch False False
+      let snapshot = RepoSnapshot [baseIssue 1 [], baseIssue 2 [Assignee "agent"]] [basePullRequest 10 [1] False []] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1]
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [2]
@@ -47,7 +47,7 @@ spec = do
 
     it "treats a truncated non-empty assignee connection as Active" $ do
       let issue = (baseIssue 1 []) {issueAssigneeOverflow = 1}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch)
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [1]
 
     -- An assignee connection that never arrived is not evidence of nobody
@@ -55,24 +55,24 @@ spec = do
     -- it as unclaimed work waiting to be picked up.
     it "keeps an issue whose assignees GitHub never delivered out of the backlog column" $ do
       let issue = (baseIssue 1 []) {issueDataGaps = [AssigneesUnavailable]}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [issue] [] epoch)
       map (itemNumber . entryItem) (Map.findWithDefault [] Active columns) `shouldBe` [1]
       Map.findWithDefault [] Issues columns `shouldBe` []
 
     it "keeps draft approved pull requests in Reviewing" $ do
       let pullRequest = basePullRequest 10 [] True [Label "reviewed:approve" "00ff00"]
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch)
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10]
       Map.findWithDefault [] Done columns `shouldBe` []
 
     it "classifies non-draft approved pull requests as Done" $ do
       let pullRequest = basePullRequest 10 [] False [Label "reviewed:approve" "00ff00"]
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch)
       map (itemNumber . entryItem) (Map.findWithDefault [] Done columns) `shouldBe` [10]
 
     it "shows labeled trackers without children as empty headers" $ do
       let tracker = (baseIssue 12 []) {issueLabels = [Label "epic" "5319e7"]}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
       case Map.findWithDefault [] Issues columns of
         [TrackerHeader rendered] -> do
           rendered.trackerIssue.issueNumber `shouldBe` 12
@@ -85,7 +85,7 @@ spec = do
     -- and dropped, so the tracker reaches 'deriveBoard' with no children of
     -- its own while #3 falls back to Standalone per §17.
     it "keeps a tracker whose checklist parsed to nothing out of every column's work cards" $ do
-      let snapshot = RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch False False
+      let snapshot = RepoSnapshot [zeroChildTracker, baseIssue 3 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
           workCards = filter (not . isTrackerHeaderEntry) (concat (Map.elems columns))
       map (itemNumber . entryItem) workCards `shouldBe` [3]
@@ -102,14 +102,14 @@ spec = do
     -- assigned to the tracker issue.
     it "places an assigned zero-child tracker in Issues rather than Active" $ do
       let tracker = zeroChildTracker {issueAssignees = [Assignee "agent"]}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
       Map.findWithDefault [] Active columns `shouldBe` []
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [12]
 
     it "recognizes zero-child trackers by configured label rather than a hard-coded epic" $ do
       let config = defaultWorkflowConfig {trackerLabels = Set.singleton "tracker"}
           configured = zeroChildTracker {issueNumber = 20, issueLabels = [Label "tracker" "5319e7"]}
-          Board columns = deriveBoard config (RepoSnapshot [configured, zeroChildTracker] [] epoch False False)
+          Board columns = deriveBoard config (RepoSnapshot [configured, zeroChildTracker] [] epoch)
       case Map.findWithDefault [] Issues columns of
         [TrackerHeader rendered, epicLabelled] -> do
           rendered.trackerIssue.issueNumber `shouldBe` 20
@@ -120,7 +120,7 @@ spec = do
 
     it "uses an Epic: title as a tracker fallback when the issue has no labels" $ do
       let tracker = (baseIssue 12 []) {issueTitle = "Epic: Legacy tracker"}
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
       Map.findWithDefault [] Issues columns `shouldSatisfy` \case [TrackerHeader _] -> True; _ -> False
 
     it "keeps an open tracker visible as a header when none of its children are on the live board" $ do
@@ -129,7 +129,7 @@ spec = do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #2 — A1: Child outside the live board"
               }
-          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch False False)
+          Board columns = deriveBoard defaultWorkflowConfig (RepoSnapshot [tracker] [] epoch)
       Map.findWithDefault [] Issues columns `shouldBe` [TrackerHeader (Tracker tracker ChecklistMembership 1 1 Map.empty [])]
 
     -- Requirement 5: a pull request reaches its tracker through the child it
@@ -138,7 +138,7 @@ spec = do
     it "gives a pull request the tracker memberships of the native child it links" $ do
       let first = nativeTrackerIssue 700 [localSubIssue 10 False] 0 1
           second = nativeTrackerIssue 701 [localSubIssue 10 False] 0 1
-          snapshot = RepoSnapshot [first, second, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch False False
+          snapshot = RepoSnapshot [first, second, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       case Map.findWithDefault [] Reviewing columns of
         [Tracked tracking item] -> do
@@ -151,7 +151,7 @@ spec = do
     -- linking the local #10 must not inherit the foreign parent's tracker.
     it "keeps a pull request out of a tracker whose same-numbered child is another repository's" $ do
       let elsewhere = nativeTrackerIssue 700 [foreignSubIssue 10 False] 0 1
-          snapshot = RepoSnapshot [elsewhere, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch False False
+          snapshot = RepoSnapshot [elsewhere, baseIssue 10 []] [basePullRequest 20 [10] False []] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [20]
       Map.findWithDefault [] Reviewing columns `shouldSatisfy` all isStandaloneEntry
@@ -164,7 +164,7 @@ spec = do
               }
           revised = (baseIssue 3 []) {issueLabels = [Label "ReViEwEd:ReViSeD" "8250DF"]}
           problem = (baseIssue 4 []) {issueLabels = [Label "blocked" "d73a4a"]}
-          snapshot = RepoSnapshot [tracker, baseIssue 2 [], revised, problem] [] epoch False False
+          snapshot = RepoSnapshot [tracker, baseIssue 2 [], revised, problem] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [3, 2, 4]
 
@@ -180,7 +180,7 @@ spec = do
                 issueBody = "## Children\n- [ ] #3 — A1: Ordinary"
               }
           revised = (baseIssue 2 []) {issueLabels = [Label "reviewed:revised" "8250DF"]}
-          snapshot = RepoSnapshot [revisedTracker, ordinaryTracker, baseIssue 1 [], revised, baseIssue 3 []] [] epoch False False
+          snapshot = RepoSnapshot [revisedTracker, ordinaryTracker, baseIssue 1 [], revised, baseIssue 3 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [2, 1, 3]
 
@@ -196,7 +196,7 @@ spec = do
                 issueBody = "## Children\n- [ ] #2 — A1: Revised tracker child"
               }
           problem = (baseIssue 1 []) {issueLabels = [Label "blocked" "d73a4a"]}
-          snapshot = RepoSnapshot [problemTracker, revisedTracker, problem, baseIssue 2 []] [] epoch False False
+          snapshot = RepoSnapshot [problemTracker, revisedTracker, problem, baseIssue 2 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [2, 1]
 
@@ -206,7 +206,7 @@ spec = do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #2 — A10: Later\n- [ ] #1 — A2: Earlier"
               }
-          snapshot = RepoSnapshot [tracker, baseIssue 1 [], baseIssue 2 []] [] epoch False False
+          snapshot = RepoSnapshot [tracker, baseIssue 1 [], baseIssue 2 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
           entries = Map.findWithDefault [] Issues columns
       map (itemNumber . entryItem) entries `shouldBe` [1, 2]
@@ -218,7 +218,7 @@ spec = do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Phase plan\n- [ ] #1 — B1: Child"
               }
-          snapshot = RepoSnapshot [tracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch False False
+          snapshot = RepoSnapshot [tracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       case Map.findWithDefault [] Reviewing columns of
         [Tracked trackingContext item] -> do
@@ -237,7 +237,7 @@ spec = do
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #1 — A2: Child"
               }
-          snapshot = RepoSnapshot [laterTracker, earlierTracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch False False
+          snapshot = RepoSnapshot [laterTracker, earlierTracker, baseIssue 1 []] [basePullRequest 10 [1] False []] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       case Map.findWithDefault [] Reviewing columns of
         [Tracked trackingContext _] -> do
@@ -268,8 +268,6 @@ spec = do
               [neitherNew, bothOld, approvedOld, problemNew, bothNew, neitherOld, approvedNew, problemOld]
               []
               epoch
-              False
-              False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
 
@@ -297,8 +295,6 @@ spec = do
               []
               [neitherNew, bothOld, approvedOld, problemNew, bothNew, neitherOld, approvedNew, problemOld]
               epoch
-              False
-              False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [1, 2, 3, 4, 5, 6, 7, 8]
 
@@ -334,8 +330,6 @@ spec = do
               ([neitherNewTracker, approvedTracker, bothTracker, neitherOldTracker, problemTracker] <> children)
               []
               epoch
-              False
-              False
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [10, 11, 12, 13, 14, 15]
 
@@ -349,7 +343,7 @@ spec = do
                 issueBody = "## Children\n- [ ] #1 — A1: Earlier\n- [ ] #2 — A2: Later problem"
               }
           problemChild = (baseIssue 2 []) {issueLabels = [Label "blocked" "d73a4a"]}
-          snapshot = RepoSnapshot [tracker, baseIssue 1 [], problemChild] [] epoch False False
+          snapshot = RepoSnapshot [tracker, baseIssue 1 [], problemChild] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2]
 
@@ -358,7 +352,7 @@ spec = do
     -- snapshot listed them in rather than picking up an incidental
     -- numeric or canonical-identity ordering.
     it "preserves snapshot input order for standalone issues with equal attention keys" $ do
-      let snapshot = RepoSnapshot [baseIssue 7 [], baseIssue 3 [], baseIssue 9 []] [] epoch False False
+      let snapshot = RepoSnapshot [baseIssue 7 [], baseIssue 3 [], baseIssue 9 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [7, 3, 9]
 

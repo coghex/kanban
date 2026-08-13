@@ -21,6 +21,7 @@ module Kanban.GitHub.Coordinator
     CoordinatorState (..),
     HoldReason (..),
     JobHold (..),
+    OpenGeneration,
     PendingJob (..),
     RefreshJob (..),
     beginCoordinatorShutdown,
@@ -118,12 +119,28 @@ newtype PendingJob = PendingJob
   }
   deriving stock (Eq, Show)
 
+-- | Which open cycle an outcome belongs to.
+--
+-- It counts /starts/, not requests. A press that only manages to queue a
+-- follow-up has not begun a generation, so it cannot retroactively suppress
+-- the cycle already running: that cycle keeps the identity it took the owner
+-- with and is free to publish under it. Once a newer cycle has started,
+-- anything still carrying an older identity is a result nobody is waiting for
+-- and the board drops it.
+type OpenGeneration = Int
+
 data CoordinatorState = CoordinatorState
   { -- | The job holding the owner. While this is set, nothing else may spawn
     -- @gh@ or touch the durable record.
     coordinatorRunning :: Maybe RefreshJob,
     coordinatorPending :: Map RefreshJob PendingJob,
     coordinatorHolds :: Map RefreshJob JobHold,
+    -- | The identity of the newest open cycle to have been answered for:
+    -- taken by one that started, or spent by a request that expired before it
+    -- could. Every open publication carries the value this held when it was
+    -- decided, which is what lets the board tell a current answer from a
+    -- superseded one.
+    coordinatorOpenGeneration :: OpenGeneration,
     -- | What the newest page reported, and nothing older. What is /left/ of a
     -- budget is spent continuously, so an earlier figure describes a balance
     -- that no longer exists; a page that reported nothing usable therefore
@@ -151,6 +168,7 @@ initialCoordinatorState =
     { coordinatorRunning = Nothing,
       coordinatorPending = Map.empty,
       coordinatorHolds = Map.empty,
+      coordinatorOpenGeneration = 0,
       coordinatorRate = Nothing,
       coordinatorResetAt = Nothing,
       coordinatorStopping = False
@@ -186,10 +204,10 @@ planCoordinator now state0
   | isJust state.coordinatorRunning = (state, PlanWait Nothing)
   | otherwise = case Map.lookup OpenJob state.coordinatorPending of
       Just pending
-        | deadlinePassed now pending -> (dropPending OpenJob state, PlanExpire OpenJob)
+        | deadlinePassed now pending -> (nextOpenGeneration (dropPending OpenJob state), PlanExpire OpenJob)
         | Just hold <- Map.lookup OpenJob state.coordinatorHolds ->
             (state, PlanWait (earliest [Just hold.holdUntil, pending.pendingDeadline]))
-        | otherwise -> (takeOwner OpenJob state, PlanRun OpenJob pending.pendingDeadline)
+        | otherwise -> (nextOpenGeneration (takeOwner OpenJob state), PlanRun OpenJob pending.pendingDeadline)
       Nothing -> historyPlan
   where
     -- A hold that has run out is simply gone, which is the whole of "the job
@@ -227,6 +245,13 @@ takeOwner job state =
     { coordinatorRunning = Just job,
       coordinatorPending = Map.delete job state.coordinatorPending
     }
+
+-- | Claims the next open identity. Taken in the same decision that makes an
+-- open cycle answerable — starting it, or spending the request that expired —
+-- so no two publications can ever share one, and the board's rule for
+-- discarding a superseded answer is a plain comparison.
+nextOpenGeneration :: CoordinatorState -> CoordinatorState
+nextOpenGeneration state = state {coordinatorOpenGeneration = state.coordinatorOpenGeneration + 1}
 
 dropPending :: RefreshJob -> CoordinatorState -> CoordinatorState
 dropPending job state =
@@ -416,7 +441,10 @@ data CoordinatorNotice
     -- this, a reissued cycle would run unannounced: the next press would read
     -- an idle board, report no refresh in progress, and leave a follow-up
     -- beside the one already in flight.
-    OpenRefreshStarted
+    --
+    -- It carries the identity the cycle took, which is what the board records
+    -- as the newest generation and compares every later outcome against.
+    OpenRefreshStarted OpenGeneration
   deriving stock (Eq, Show)
 
 data RefreshCoordinator outcome = RefreshCoordinator
@@ -426,7 +454,10 @@ data RefreshCoordinator outcome = RefreshCoordinator
     coordinatorWake :: MVar (),
     coordinatorRecordLock :: GhRecordLock,
     coordinatorRunner :: RefreshRunner outcome,
-    coordinatorPublish :: outcome -> IO (),
+    -- | Hands an open cycle's outcome to the board under the identity that
+    -- cycle was answered for. Only open work publishes; a history page
+    -- reports nothing.
+    coordinatorPublish :: OpenGeneration -> outcome -> IO (),
     coordinatorReport :: CoordinatorNotice -> IO (),
     -- | The last job to hold the owner, as something shutdown can reach: the
     -- thread to interrupt and the guard whose cleanup verdict decides whether
@@ -466,7 +497,7 @@ data LiveJob = LiveJob
 newRefreshCoordinator ::
   GhRecordLock ->
   RefreshRunner outcome ->
-  (outcome -> IO ()) ->
+  (OpenGeneration -> outcome -> IO ()) ->
   (CoordinatorNotice -> IO ()) ->
   IO (RefreshCoordinator outcome)
 newRefreshCoordinator recordLock runner publish report = do
@@ -578,8 +609,11 @@ shutdownRefreshCoordinator coordinator = do
 schedulerLoop :: RefreshCoordinator outcome -> IO ()
 schedulerLoop coordinator = do
   now <- getCurrentTime
-  plan <- modifyMVar coordinator.coordinatorState $ \state -> do
-    let planned@(_, decision) = planCoordinator now state
+  -- The identity comes back out of the same critical section that claimed it,
+  -- rather than being read afterwards: an expiry releases nothing, so a later
+  -- read could already have been overtaken by the next request's claim.
+  (plan, generation) <- modifyMVar coordinator.coordinatorState $ \state -> do
+    let (planned, decision) = planCoordinator now state
     -- Claimed under the state lock, so the owner and the slot that names its
     -- thread are taken together and a shutdown can never observe one without
     -- the other.
@@ -594,7 +628,7 @@ schedulerLoop coordinator = do
       PlanRun _ _ -> void (takeMVar coordinator.coordinatorLive)
       PlanExpire OpenJob -> takeMVar coordinator.coordinatorPublishLock
       _ -> pure ()
-    pure planned
+    pure (planned, (decision, planned.coordinatorOpenGeneration))
   case plan of
     PlanStop -> pure ()
     PlanWait deadline -> awaitWake coordinator deadline >> schedulerLoop coordinator
@@ -606,10 +640,10 @@ schedulerLoop coordinator = do
       -- simply outlived its deadline while waiting for the owner or for a
       -- rate limit to lift, and gets the same timeout outcome a slow fetch
       -- would have earned it.
-      publishReserved coordinator (coordinator.coordinatorRunner.openRefreshExpired Nothing)
+      publishReserved coordinator generation (coordinator.coordinatorRunner.openRefreshExpired Nothing)
       schedulerLoop coordinator
     PlanExpire HistoryJob -> schedulerLoop coordinator
-    PlanRun OpenJob deadline -> runOpenJob coordinator deadline >> schedulerLoop coordinator
+    PlanRun OpenJob deadline -> runOpenJob coordinator generation deadline >> schedulerLoop coordinator
     PlanRun HistoryJob _ -> runHistoryJob coordinator >> schedulerLoop coordinator
 
 -- | Sleeps until a request arrives, or until the moment a plan is waiting for.
@@ -634,9 +668,9 @@ rateObserverFor coordinator sample = do
   modifyMVar_ coordinator.coordinatorState (pure . observeRateSample sample)
   wakeCoordinator coordinator
 
-runOpenJob :: RefreshCoordinator outcome -> Maybe UTCTime -> IO ()
-runOpenJob coordinator deadline = do
-  coordinator.coordinatorReport OpenRefreshStarted
+runOpenJob :: RefreshCoordinator outcome -> OpenGeneration -> Maybe UTCTime -> IO ()
+runOpenJob coordinator generation deadline = do
+  coordinator.coordinatorReport (OpenRefreshStarted generation)
   guard <- newGhFetchGuard coordinator.coordinatorRecordLock
   now <- getCurrentTime
   let remaining = fmap (remainingMicros now) deadline
@@ -663,7 +697,7 @@ runOpenJob coordinator deadline = do
         takeMVar coordinator.coordinatorPublishLock
         pure (settled, Just outcome)
       _ -> pure (settled, Nothing)
-  mapM_ (publishReserved coordinator . pure) publishing
+  mapM_ (publishReserved coordinator generation . pure) publishing
 
 -- | Produces an outcome and hands it to the board, releasing the reservation
 -- already taken for it.
@@ -674,9 +708,9 @@ runOpenJob coordinator deadline = do
 -- Producing the outcome is inside the reservation rather than before it: a
 -- caller that computed one first would reopen the very gap the claim closes,
 -- and an outcome that fails to compute would strand the lock.
-publishReserved :: RefreshCoordinator outcome -> IO outcome -> IO ()
-publishReserved coordinator produce =
-  (produce >>= coordinator.coordinatorPublish)
+publishReserved :: RefreshCoordinator outcome -> OpenGeneration -> IO outcome -> IO ()
+publishReserved coordinator generation produce =
+  (produce >>= coordinator.coordinatorPublish generation)
     `finally` putMVar coordinator.coordinatorPublishLock ()
 
 runHistoryJob :: RefreshCoordinator outcome -> IO ()

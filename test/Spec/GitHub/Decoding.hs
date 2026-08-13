@@ -8,7 +8,6 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Foldable (for_)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Text
-import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub
   ( FetchState (..),
@@ -81,18 +80,14 @@ spec = do
           pullRequest.pullRequestReviewDecision `shouldBe` ReviewApproved
           pullRequest.pullRequestMergeState `shouldBe` MergeConflicting
           pullRequest.pullRequestChecks `shouldBe` ChecksFailed 1 2 [CheckDetail "review-approved" CheckFailed]
-          let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch True True)
-          length warnings `shouldBe` 3
-          warnings `shouldSatisfy` any (Data.Text.isInfixOf "open issues; board is truncated")
-          warnings `shouldSatisfy` any (Data.Text.isInfixOf "open pull requests; board is truncated")
+          -- Nested overflow is the only omission a snapshot can still report.
+          -- Nothing here says the board is truncated, because with both open
+          -- connections followed to their end nothing about it is.
+          let warnings = snapshotWarnings defaultWorkflowConfig (RepoSnapshot [issue] [pullRequest] epoch)
+          length warnings `shouldBe` 1
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
+          warnings `shouldSatisfy` all (not . Data.Text.isInfixOf "board is truncated")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
-
-    it "reports configured truncation caps in the board's GitHub warnings" $ do
-      let configuredLimits = LimitsConfig {limitsMaxOpenIssues = 5, limitsMaxOpenPullRequests = 9, limitsExcerptLines = 3}
-          warnings = snapshotWarnings configuredLimits defaultWorkflowConfig (RepoSnapshot [] [] epoch True True)
-      warnings `shouldSatisfy` any (Data.Text.isInfixOf "5+ open issues")
-      warnings `shouldSatisfy` any (Data.Text.isInfixOf "9+ open pull requests")
 
     it "deduplicates rerun checks and treats mergeable policy blocks as protected" $ do
       case decodeGitHubItems (LazyByteString.pack githubRerunResponse) of
@@ -190,7 +185,7 @@ spec = do
           -- not pick up the incomplete-data marker or warning that a context
           -- this build could not read would earn.
           pullRequest.pullRequestDataGaps `shouldBe` []
-          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch False False)
+          snapshotWarnings defaultWorkflowConfig (RepoSnapshot [] [pullRequest] epoch)
             `shouldSatisfy` not . any (Data.Text.isInfixOf "incomplete data")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
@@ -214,7 +209,7 @@ spec = do
           intact.pullRequestNumber `shouldBe` 10
           intact.pullRequestChecks `shouldBe` ChecksPassed 1
           intact.pullRequestDataGaps `shouldBe` []
-          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch False False)
+          snapshotWarnings defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch)
             `shouldSatisfy` any (Data.Text.isInfixOf "PR #9: incomplete data")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
@@ -251,7 +246,7 @@ spec = do
           degraded.pullRequestDataGaps `shouldBe` [LabelsUnavailable]
           intact.pullRequestLabels `shouldBe` [Label "bug" "d73a4a"]
           intact.pullRequestDataGaps `shouldBe` []
-          snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch False False)
+          snapshotWarnings defaultWorkflowConfig (RepoSnapshot [] [degraded, intact] epoch)
             `shouldSatisfy` any (Data.Text.isInfixOf "PR #9: incomplete data")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
@@ -273,7 +268,7 @@ spec = do
           intact.issueDataGaps `shouldBe` []
           pullRequest.pullRequestLinkedIssues `shouldBe` []
           pullRequest.pullRequestDataGaps `shouldBe` [LinkedIssuesUnavailable]
-          let warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot [degraded, intact] [pullRequest] epoch False False)
+          let warnings = snapshotWarnings defaultWorkflowConfig (RepoSnapshot [degraded, intact] [pullRequest] epoch)
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "Issue #41, PR #9: incomplete data")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
 
@@ -451,7 +446,7 @@ spec = do
     -- and the rest counted -- visibly truncated rather than silently dropped.
     it "names the first few incomplete items and counts the rest" $ do
       let issues = [(baseIssue number []) {issueDataGaps = [AssigneesUnavailable]} | number <- [1 .. 5]]
-          warnings = snapshotWarnings defaultLimitsConfig defaultWorkflowConfig (RepoSnapshot issues [] epoch False False)
+          warnings = snapshotWarnings defaultWorkflowConfig (RepoSnapshot issues [] epoch)
       warnings `shouldSatisfy` any (Data.Text.isInfixOf "Issue #1, Issue #2, Issue #3 +2 more: incomplete data")
 
     -- A connection GitHub did deliver stays strict. These are not one item's
@@ -533,8 +528,6 @@ spec = do
               pullRequestCursor = Nothing,
               fetchMoreIssues = True,
               fetchMorePullRequests = True,
-              issuesTruncated = False,
-              pullRequestsTruncated = False,
               fetchSubIssues = True,
               fetchWarnings = []
             }
@@ -552,7 +545,7 @@ spec = do
               [pullRequestNodeJson 9 [emptyLabelsJson, emptyClosingIssuesJson]]
       case eitherDecode (LazyByteString.pack response) of
         Left message -> expectationFailure message
-        Right page -> case advanceState defaultLimitsConfig initialFetchState page of
+        Right page -> case advanceState initialFetchState page of
           Left providerError -> expectationFailure ("unexpectedly failed: " <> show providerError)
           Right state -> do
             map (.issueNumber) state.fetchedIssues `shouldBe` [41]
@@ -567,7 +560,7 @@ spec = do
       let response = githubPageWith [issueNodeJson 41 [emptyLabelsJson, emptyAssigneesJson]] []
           foldPage state = case eitherDecode (LazyByteString.pack response) of
             Left message -> Left message
-            Right page -> case advanceState defaultLimitsConfig state page of
+            Right page -> case advanceState state page of
               Left providerError -> Left (show providerError)
               Right next -> Right [(issue.issueSubIssues, issue.issueDataGaps) | issue <- next.fetchedIssues]
       foldPage initialFetchState `shouldBe` Right [(SubIssuesUnreported, [SubIssuesUnavailable])]
@@ -589,7 +582,7 @@ spec = do
             ]
       case traverse (eitherDecode . LazyByteString.pack) pages of
         Left message -> expectationFailure message
-        Right decoded -> case foldM (advanceState defaultLimitsConfig) initialFetchState decoded of
+        Right decoded -> case foldM advanceState initialFetchState decoded of
           Left providerError -> expectationFailure ("unexpectedly failed: " <> show providerError)
           Right state -> do
             map (.issueNumber) state.fetchedIssues `shouldBe` [41, 42]
@@ -609,21 +602,24 @@ spec = do
               <> "{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}"
       case eitherDecode response of
         Left message -> expectationFailure message
-        Right page -> case advanceState defaultLimitsConfig initialFetchState page of
+        Right page -> case advanceState initialFetchState page of
           Right state -> expectationFailure ("unexpectedly advanced: " <> show state.fetchWarnings)
           Left providerError -> do
             providerError.providerErrorKind `shouldBe` InvalidResponse
             providerError.providerErrorMessage
               `shouldBe` "GitHub response omitted the pull requests connection: Timeout resolving pullRequests"
 
-    it "marks a capped connection incomplete instead of requesting beyond its limit" $
-      paginationDecision 250 250 True (Just "next") `shouldBe` Right (False, Nothing, True)
+    -- The traversal ends when, and only when, GitHub says there is no next
+    -- page. There is no cap left to stop short of, so a connection that
+    -- reports another page is always followed however many have arrived.
+    it "follows every reported next page rather than stopping at any count" $
+      paginationDecision True (Just "next") `shouldBe` Right (True, Just "next")
 
-    it "does not mark an exact cap incomplete when GitHub reports no next page" $
-      paginationDecision 250 250 False Nothing `shouldBe` Right (False, Nothing, False)
+    it "ends the traversal exactly when GitHub reports no next page" $
+      paginationDecision False Nothing `shouldBe` Right (False, Nothing)
 
     it "requires a cursor whenever another page is needed" $
-      paginationDecision 250 100 True Nothing `shouldSatisfy` isLeft
+      paginationDecision True Nothing `shouldSatisfy` isLeft
 
   describe "GitHub failure classification" $ do
     -- Verbatim from gh 2.83.1: the signed-out text it prints instead of
@@ -678,13 +674,11 @@ spec = do
               pullRequestCursor = Just "true",
               fetchMoreIssues = True,
               fetchMorePullRequests = True,
-              issuesTruncated = False,
-              pullRequestsTruncated = False,
               fetchSubIssues = True,
               fetchWarnings = []
             }
         firstPageState = pagedState {issueCursor = Nothing, pullRequestCursor = Nothing}
-        pagedArguments = graphqlArguments defaultLimitsConfig numericRepository pagedState
+        pagedArguments = graphqlArguments numericRepository pagedState
 
     it "passes every GraphQL String variable raw" $ do
       flagForVariable "owner" pagedArguments `shouldBe` Just "-f"
@@ -706,7 +700,7 @@ spec = do
       pagedArguments `shouldContain` ["-f", "pullRequestCursor=true"]
 
     it "omits absent cursors so the first request starts at the first page" $ do
-      let firstPageArguments = graphqlArguments defaultLimitsConfig numericRepository firstPageState
+      let firstPageArguments = graphqlArguments numericRepository firstPageState
       flagForVariable "issueCursor" firstPageArguments `shouldBe` Nothing
       flagForVariable "pullRequestCursor" firstPageArguments `shouldBe` Nothing
 
@@ -725,7 +719,7 @@ spec = do
     -- A field the schema does not have is rejected at validation, so the only
     -- way to keep refreshing such a deployment is to stop asking for it.
     it "drops the sub-issue selection entirely once the fetch has stopped asking" $ do
-      let query = concat [argument | argument <- graphqlArguments defaultLimitsConfig numericRepository pagedState {fetchSubIssues = False}, "query=" `isPrefixOf` argument]
+      let query = concat [argument | argument <- graphqlArguments numericRepository pagedState {fetchSubIssues = False}, "query=" `isPrefixOf` argument]
       query `shouldSatisfy` not . isInfixOf "subIssues"
       query `shouldSatisfy` isInfixOf "nameWithOwner"
       query `shouldSatisfy` isInfixOf "assignees(first: 10)"

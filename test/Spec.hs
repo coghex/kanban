@@ -31,6 +31,7 @@ import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Keys as Keys
 import qualified Spec.UI.Layout as Layout
+import qualified Spec.UI.OpenData as OpenData
 import qualified Spec.UI.ReviewSession as ReviewSession
 import qualified Spec.UI.Search as Search
 import qualified Spec.UI.SessionCore as SessionCore
@@ -78,6 +79,7 @@ suite = do
   AutoSolve.spec
   ConfigLoading.spec
   Layout.spec
+  OpenData.spec
   Golden.spec
   Incidents.spec
   Keys.spec

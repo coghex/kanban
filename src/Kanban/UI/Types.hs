@@ -17,6 +17,8 @@ module Kanban.UI.Types
     IncidentSelection (..),
     IncidentSource (..),
     Name (..),
+    OpenDataView (..),
+    OpenGeneration,
     Overlay (..),
     PendingReviewInteraction (..),
     ProcessClickOutcome (..),
@@ -30,6 +32,7 @@ module Kanban.UI.Types
     SolveDetail (..),
     SolvePhase (..),
     SolveSession,
+    openDataView,
     withSessionDetail,
   )
 where
@@ -50,7 +53,7 @@ import Kanban.Drainer
     DrainerObservation (..),
     DrainerStatus (..)
     )
-import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), RefreshCoordinator )
+import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), OpenGeneration, RefreshCoordinator )
 import Kanban.Process (ManagedProcess )
 import Kanban.Provider (ProviderError (..) )
 import Kanban.PullRequestFlow
@@ -395,13 +398,55 @@ data BoardRefreshOutcome
   | BoardRefreshUnverified GhCleanupFailure
   deriving stock (Eq, Show)
 
+-- | What the board body draws.
+--
+-- Open cards are live-only, so before the first complete generation publishes
+-- there is nothing to draw a board from — not a cache, not a partial page set
+-- — and the body is a panel instead. Which panel is the same first-load
+-- distinction 'Kanban.UI.Reconcile.failureFreshness' already makes: a failure
+-- with no complete generation behind it is 'Unavailable', and a failure with
+-- one is 'Stale' over a board that stays exactly where it was.
+data OpenDataView
+  = -- | No generation has completed and none has failed yet.
+    OpenDataLoading
+  | -- | The first live generation failed, carrying its classified reason.
+    OpenDataUnavailable Text
+  | -- | A complete generation has published, and its board is what the
+    -- columns draw.
+    OpenDataBoard
+  deriving stock (Eq, Show)
+
+-- | Decided from when the newest complete generation was fetched and how the
+-- board's freshness currently reads, and from nothing else.
+--
+-- A recorded fetch is conclusive: from then on every state — loading, stale,
+-- failed — keeps the last complete board (§15), so only the freshness marker
+-- and the notice change. With no recorded fetch there is no board to keep,
+-- and the freshness says which panel stands in for one.
+openDataView :: Maybe UTCTime -> Freshness -> OpenDataView
+openDataView (Just _) _ = OpenDataBoard
+openDataView Nothing freshness = case freshness of
+  NotLoaded -> OpenDataLoading
+  Loading -> OpenDataLoading
+  -- Neither is reachable with no fetch on record — both are set beside one —
+  -- but a board is only ever drawn from a generation this state has seen
+  -- complete, so the panel is the honest answer rather than empty columns.
+  Fresh _ -> OpenDataLoading
+  Stale _ reason -> OpenDataUnavailable reason
+  Unavailable reason -> OpenDataUnavailable reason
+  Unsupported reason -> OpenDataUnavailable reason
+
 data AppEvent
-  = BoardRefreshFinished BoardRefreshOutcome
+  = -- | One open generation's answer, under the identity that generation was
+    -- started with. An outcome older than the newest generation the board has
+    -- seen start is discarded rather than applied: the board it would replace
+    -- is already the newer one's to publish.
+    BoardRefreshFinished OpenGeneration BoardRefreshOutcome
   | -- | The coordinator has taken the owner for a foreground cycle, whoever
     -- asked for it. The board records that a refresh is running so a press
     -- arriving during one it did not start still coalesces rather than
-    -- starting a second.
-    BoardRefreshStarted
+    -- starting a second, and records its identity as the newest generation.
+    BoardRefreshStarted OpenGeneration
   | -- | Background history yielded the budget reserved for foreground work,
     -- and resumes no earlier than the moment GitHub reported.
     BoardHistoryPaused UTCTime
@@ -455,9 +500,14 @@ data AppState = AppState
     appOverlay :: Maybe Overlay,
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
+    -- | When the newest complete open generation was fetched, and 'Nothing'
+    -- until one has published. It is what separates a first load — which
+    -- shows §7's centered loading and unavailable panels and no cards at all
+    -- — from every refresh after it, which keeps the last complete board.
     appLastSuccessfulFetch :: Maybe UTCTime,
-    appIssuesTruncated :: Bool,
-    appPullRequestsTruncated :: Bool,
+    -- | The newest open generation the coordinator has told this board about.
+    -- An outcome arriving under an older identity is discarded.
+    appOpenGeneration :: OpenGeneration,
     appDrainerController :: Either Text DrainerController,
     appDrainerStatus :: DrainerStatus,
     -- | The last observed set of open incidents, or 'Nothing' whenever no

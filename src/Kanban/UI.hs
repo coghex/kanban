@@ -1,5 +1,10 @@
--- | The dashboard's composition root: it builds the initial state from the
--- cache, assembles the Brick 'App', and runs it.
+-- | The dashboard's composition root: it builds the initial state, assembles
+-- the Brick 'App', and runs it.
+--
+-- The board it starts with is empty and shows §7's centered loading panel,
+-- not a persisted one. Open cards are live-only (§13): nothing is read from
+-- the repository cache here, and there is no state in which the dashboard
+-- renders a card that the current process did not fetch.
 --
 -- Everything it composes lives in @Kanban.UI.*@ — 'Kanban.UI.Types' for the
 -- state, 'Kanban.UI.Board' and 'Kanban.UI.Overlay' for drawing,
@@ -7,7 +12,10 @@
 -- autosolve modules underneath them.
 module Kanban.UI
   ( drawApplication,
+    loadStartupCaches,
     runDashboard,
+    startupBoard,
+    startupNotice,
   )
 where
 
@@ -24,13 +32,11 @@ import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime, getCurrentTimeZone )
 import qualified Graphics.Vty as Vty
 import Kanban.Cache
-  ( CacheLoad (..),
-    UsageCacheLoad (..),
-    loadRepositoryCache,
+  ( UsageCacheLoad (..),
     loadUsageCache
     )
 import Kanban.CLI (Options (..))
-import Kanban.Config (LimitsConfig (..), ResolvedConfig (..) )
+import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Drainer
   ( DrainerActivity (..),
@@ -40,7 +46,6 @@ import Kanban.Drainer
     discoverDrainerController,
     queryDrainerStatus
     )
-import Kanban.GitHub (snapshotWarnings)
 import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Review
   ( stopReviewClient
@@ -61,21 +66,13 @@ import Kanban.UI.Board
 import Kanban.UI.Overlay
 import Kanban.UI.Refresh
 import Kanban.UI.PullRequest
-import Kanban.UI.Reconcile
 import Kanban.UI.Events
 
 runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
 runDashboard options config repository = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
-  cacheLoad <-
-    if cacheEnabled options config
-      then loadRepositoryCache repository
-      else pure CacheAbsent
-  usageCacheLoad <-
-    if cacheEnabled options config
-      then loadUsageCache
-      else pure UsageCacheAbsent
+  usageCacheLoad <- loadStartupCaches options config
   drainerController <- discoverDrainerController repository
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
@@ -86,13 +83,12 @@ runDashboard options config repository = do
   -- pull-request action requires -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
-  refreshCoordinator <- newBoardRefreshCoordinator options config repository eventChannel
-  let (initialBoard, initialFreshness, initialFetchedAt, issuesTruncated, pullRequestsTruncated, initialNotice) = initialBoardState config.resolvedWorkflow config.resolvedLimits now cacheLoad
-      (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
+  refreshCoordinator <- newBoardRefreshCoordinator config repository eventChannel
+  let (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
   let initialState =
         AppState
           { appRepository = repository,
-            appBoard = initialBoard,
+            appBoard = startupBoard config.resolvedWorkflow now,
             appUsage = initialUsage,
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
@@ -108,11 +104,14 @@ runDashboard options config repository = do
             appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
-            appNotice = Just (initialNotice <> maybe "" (" · " <>) usageNotice <> maybe "" (" · " <>) settingsNotice),
-            appBoardFreshness = initialFreshness,
-            appLastSuccessfulFetch = initialFetchedAt,
-            appIssuesTruncated = issuesTruncated,
-            appPullRequestsTruncated = pullRequestsTruncated,
+            appNotice = Just (startupNotice <> maybe "" (" · " <>) usageNotice <> maybe "" (" · " <>) settingsNotice),
+            -- Nothing has been fetched and nothing was restored, which is
+            -- exactly what §7's loading panel stands for. 'startApplication'
+            -- moves this to 'Loading' the moment the startup refresh is
+            -- requested; the panel is the same either way.
+            appBoardFreshness = NotLoaded,
+            appLastSuccessfulFetch = Nothing,
+            appOpenGeneration = 0,
             appDrainerController = drainerController,
             appDrainerStatus =
               case drainerController of
@@ -155,32 +154,30 @@ runDashboard options config repository = do
   mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appPullRequestProcesses))
   Vty.shutdown finalVty
 
-initialBoardState :: WorkflowConfig -> LimitsConfig -> UTCTime -> CacheLoad -> (Board, Freshness, Maybe UTCTime, Bool, Bool, Text)
-initialBoardState workflowConfig limits now cacheLoad = case cacheLoad of
-  CacheLoaded snapshot ->
-    ( deriveBoard workflowConfig snapshot,
-      Fresh snapshot.snapshotFetchedAt,
-      Just snapshot.snapshotFetchedAt,
-      snapshot.snapshotIssuesTruncated,
-      snapshot.snapshotPullRequestsTruncated,
-      appendWarnings ("Cached GitHub snapshot loaded · press " <> actionKeyText RefreshAll <> " to update") (snapshotWarnings limits workflowConfig snapshot)
-    )
-  CacheAbsent ->
-    ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
-      NotLoaded,
-      Nothing,
-      False,
-      False,
-      ("No cached GitHub snapshot · press " <> actionKeyText RefreshAll <> " to update")
-    )
-  CacheInvalid warning ->
-    ( deriveBoard workflowConfig (RepoSnapshot [] [] now False False),
-      NotLoaded,
-      Nothing,
-      False,
-      False,
-      warning <> " · press " <> actionKeyText RefreshAll <> " to update"
-    )
+-- | The whole of what the dashboard reads from the durable caches before it
+-- draws anything: the usage cache, and nothing else.
+--
+-- It is a seam rather than two inline lines because "startup consults no
+-- repository snapshot" is a property worth asserting rather than reading off
+-- 'runDashboard'. A repository cache an earlier release left behind is not
+-- loaded, not decoded, not rewritten, and not removed — it is simply never
+-- opened (§13).
+loadStartupCaches :: Options -> ResolvedConfig -> IO UsageCacheLoad
+loadStartupCaches options config
+  | cacheEnabled options config = loadUsageCache
+  | otherwise = pure UsageCacheAbsent
+
+-- | The board the dashboard starts with: no issues, no pull requests, nothing
+-- restored. §7's loading panel is drawn over it until the first complete
+-- generation publishes, so nothing here ever reaches the screen as a card.
+startupBoard :: WorkflowConfig -> UTCTime -> Board
+startupBoard workflowConfig now = deriveBoard workflowConfig (RepoSnapshot [] [] now)
+
+-- | What the notice line says before the startup refresh has answered. There
+-- is no cached snapshot to report on either way, so it names the one thing
+-- that is true: open data is being fetched, and @u@ asks again.
+startupNotice :: Text
+startupNotice = "Loading open GitHub data · press " <> actionKeyText RefreshAll <> " to update"
 
 initialUsageState :: UsageCacheLoad -> (Map UsageProvider UsageSnapshot, Map UsageProvider Freshness, Maybe Text)
 initialUsageState cacheLoad = case cacheLoad of

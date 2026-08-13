@@ -39,11 +39,12 @@ ui_style_labels = []
 coordination_paths = []
 
 [limits]
-max_open_issues = 250
-max_open_pull_requests = 100
 excerpt_lines = 3
 
-# Values are positive whole seconds.
+# github_seconds bounds one page of the open-issue and open-pull-request
+# traversal rather than the whole refresh: a repository large enough to need
+# many pages gets the full budget for each of them. Values are positive whole
+# seconds.
 [timeouts]
 github_seconds = 30
 codex_seconds = 10
@@ -89,8 +90,6 @@ claude_seconds = 45
 # coordination_paths = []
 
 [repositories."owner/name".limits]
-# max_open_issues = 250
-# max_open_pull_requests = 100
 # excerpt_lines = 3
 
 [repositories."owner/name".timeouts]
