@@ -48,6 +48,7 @@ import Kanban.GitHub
     RefreshCoordinator,
     RefreshJob (..),
     RefreshRunner (..),
+    coordinatorOpenCycleInFlight,
     fetchGitHubSnapshot,
     ghFetchCleanupFailure,
     newGhFetchGuard,
@@ -81,12 +82,20 @@ startUsageRefreshes = do
 -- update pressed during a cycle wants the state after it, not the state it is
 -- already fetching. Neither may start a second cycle beside the first, so both
 -- leave one follow-up behind instead.
+--
+-- It takes two answers because neither alone is complete. The board's own
+-- freshness is what a running cycle is normally read off, but it is updated by
+-- an event, so a cycle the coordinator started of its own accord -- the
+-- reissue after a rate limit -- is in flight for a moment before the board
+-- knows. The coordinator's answer has no such window and covers that moment;
+-- the board's covers the mirror case, a cycle requested but not yet taken up.
 data BoardRefreshDispatch = StartRefreshNow | QueueRefreshUntilIdle
   deriving stock (Eq, Show)
 
-boardRefreshDispatch :: Freshness -> BoardRefreshDispatch
-boardRefreshDispatch Loading = QueueRefreshUntilIdle
-boardRefreshDispatch _ = StartRefreshNow
+boardRefreshDispatch :: Freshness -> Bool -> BoardRefreshDispatch
+boardRefreshDispatch Loading _ = QueueRefreshUntilIdle
+boardRefreshDispatch _ True = QueueRefreshUntilIdle
+boardRefreshDispatch _ False = StartRefreshNow
 
 -- | Whether a queued required refresh may start now that a fetch has
 -- published its outcome. A board still 'Loading' afterwards is one a failed
@@ -102,7 +111,8 @@ releaseQueuedBoardRefresh queued freshness = queued && freshness /= Loading
 requireBoardRefresh :: EventM Name AppState ()
 requireBoardRefresh = do
   state <- get
-  case boardRefreshDispatch state.appBoardFreshness of
+  inFlight <- liftIO (coordinatorOpenCycleInFlight state.appRefreshCoordinator)
+  case boardRefreshDispatch state.appBoardFreshness inFlight of
     StartRefreshNow -> startBoardRefresh
     QueueRefreshUntilIdle -> modify (\current -> current {appBoardRefreshQueued = True})
 
@@ -137,7 +147,8 @@ announceOverDirectMergeResult notice =
 startBoardRefresh :: EventM Name AppState ()
 startBoardRefresh = do
   state <- get
-  case boardRefreshDispatch state.appBoardFreshness of
+  inFlight <- liftIO (coordinatorOpenCycleInFlight state.appRefreshCoordinator)
+  case boardRefreshDispatch state.appBoardFreshness inFlight of
     QueueRefreshUntilIdle -> do
       announceOverDirectMergeResult "GitHub refresh is already running"
       modify (\current -> current {appBoardRefreshQueued = True})

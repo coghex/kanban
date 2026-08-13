@@ -1466,13 +1466,16 @@ a countdown.
   by something this dashboard already committed is never dropped is unchanged.
   This is about GitHub board jobs only: Codex and Claude usage refreshes stay
   independent, with their own workers, timeouts, and freshness (§14).
-- That coalescing is decided from the board's own "a refresh is running" state,
-  so the coordinator reports every foreground cycle it takes the owner for —
-  including one it reissued itself after a rate limit, which no press asked for.
-  A cycle that ran unannounced would leave the next press reading an idle board
-  and starting a second one beside it. The report moves the freshness only: the
-  notice already on screen, above all the rate limit that caused the reissue, is
-  what explains the wait.
+- That coalescing is decided from two answers, because neither alone is
+  complete. The coordinator reports every foreground cycle it takes the owner
+  for — including one it reissued itself after a rate limit, which no press
+  asked for — and the board records it as a refresh in progress; the report
+  moves the freshness only, so the notice already on screen, above all the rate
+  limit that caused the reissue, still explains the wait. But that report
+  travels through the event channel, so a press can land while a cycle is
+  running and the board has not heard yet. A press therefore also asks the
+  coordinator directly, which has no such window, and either answer is enough to
+  turn it into the one queued follow-up.
 - Background history yields to a reserve held for foreground work. Before
   starting or resuming a history job the coordinator compares the remaining
   budget against a fixed internal reserve of 200 GraphQL points — a named
@@ -1523,7 +1526,11 @@ a countdown.
   publishing rather than of fetching for exactly that reason: cancellation is
   only known at the publish step, so a cache written from inside the fetch would
   be the one result a cancelled refresh still left behind — and the one a later
-  launch would load as its own. The dashboard halts once the cleanup reaches a verdict
+  launch would load as its own. Releasing a finished job and deciding to publish
+  it are one step, so a quit lands on one side or the other: before it, and
+  nothing is published; after it, and the quit waits for the publication already
+  committed to rather than halting while a board update and a cache write are
+  still to land. The dashboard halts once the cleanup reaches a verdict
   that leaves nothing ambiguous — the group confirmed gone, or durably recorded
   for a later run to re-check before it spawns anything. A group that is
   neither, possibly live with only this process's in-memory refusal covering it,

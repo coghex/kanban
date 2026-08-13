@@ -8,7 +8,7 @@
 -- against a model of it.
 module Spec.GitHub.RefreshCoordinator (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay, tryTakeMVar)
 import Control.Monad (unless, void)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -38,6 +38,7 @@ import Kanban.GitHub
     beginCoordinatorShutdown,
     classifyFailure,
     coordinatorMustSettle,
+    coordinatorOpenCycleInFlight,
     finishCoordinatorJob,
     foregroundRateReserve,
     historyRateVerdict,
@@ -277,6 +278,12 @@ spec = do
       plan `shouldBe` PlanExpire OpenJob
       expired.coordinatorPending `shouldBe` Map.empty
       expired.coordinatorHolds `shouldBe` Map.empty
+
+    -- The reissue is the cycle continuing, so the board has to keep coalescing
+    -- presses against it rather than starting a second one beside it.
+    it "still counts as a foreground cycle in flight while the reissue waits" $ do
+      let settled = settleOpenJob epoch (Just (secondsAfterEpoch 7200)) True (observeRateSample (Just (sampleWith 0)) initialCoordinatorState)
+      Map.member OpenJob settled.coordinatorPending `shouldBe` True
 
     it "requeues nothing for an open job that failed for any other reason" $ do
       let settled = settleOpenJob epoch (Just (secondsAfterEpoch 300)) False initialCoordinatorState
@@ -550,6 +557,75 @@ spec = do
       threadDelay 200000
       readIORef probe.probeNotices `shouldReturn` []
 
+    -- Releasing the owner and deciding to publish are one step, so a quit can
+    -- only land on one side of it. On the far side it has to wait: halting
+    -- with a publication still running would let a board update, and a cache
+    -- write, land on behalf of a dashboard that had already stopped.
+    it "cannot finish a quit while a publication it committed to is still in flight" $ do
+      recordLock <- newGhRecordLock
+      publishing <- newEmptyMVar
+      release <- newEmptyMVar
+      published <- newIORef (0 :: Int)
+      coordinator <-
+        newRefreshCoordinator
+          recordLock
+          RefreshRunner
+            { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult ("open" :: Text) False),
+              openRefreshExpired = pure "expired",
+              runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
+            }
+          ( \_ -> do
+              putMVar publishing ()
+              takeMVar release
+              atomicModifyIORef' published (\seen -> (seen + 1, ()))
+          )
+          (const (pure ()))
+      requestRefreshJob coordinator OpenJob Nothing
+      takeMVar publishing
+      settled <- newEmptyMVar
+      void (forkIO (shutdownRefreshCoordinator coordinator >>= putMVar settled))
+      threadDelay 200000
+      tryTakeMVar settled `shouldReturn` Nothing
+      putMVar release ()
+      void (takeMVar settled)
+      readIORef published `shouldReturn` 1
+
+    -- The board's own freshness is updated by an event, so a press can arrive
+    -- while a coordinator-started cycle is running and the board has not heard
+    -- yet. Asking the coordinator has no such window.
+    it "reports a foreground cycle in flight for the whole of it, however it started" $ do
+      probe <- newProbe
+      release <- newEmptyMVar
+      coordinator <-
+        startProbeCoordinator
+          probe
+          (\_ _ -> takeMVar release >> pure (OpenRefreshResult "open" False))
+          (\_ -> pure (HistoryPageFetched False))
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` False
+      requestRefreshJob coordinator OpenJob Nothing
+      awaitCount probe.probeStarted 1
+      -- Running, and the board has been told nothing yet.
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` True
+      boardRefreshDispatch (Fresh epoch) True `shouldBe` QueueRefreshUntilIdle
+      putMVar release ()
+      awaitCount probe.probePublished 1
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` False
+
+    -- A background traversal is not a foreground cycle, so it must not turn a
+    -- press away.
+    it "reports no foreground cycle in flight while only history runs" $ do
+      probe <- newProbe
+      release <- newEmptyMVar
+      coordinator <-
+        startProbeCoordinator
+          probe
+          (\_ _ -> pure (OpenRefreshResult "open" False))
+          (\_ -> takeMVar release >> pure (HistoryPageFetched False))
+      requestRefreshJob coordinator HistoryJob Nothing
+      awaitCount probe.probeStarted 1
+      coordinatorOpenCycleInFlight coordinator `shouldReturn` False
+      putMVar release ()
+
     it "publishes nothing from a job shutdown cancelled, and starts nothing after" $ do
       probe <- newProbe
       running <- newEmptyMVar
@@ -572,9 +648,12 @@ spec = do
     -- cycle and leaves one follow-up, and the one flag it leaves it in is
     -- what makes any number of presses collapse onto one.
     it "queues a follow-up rather than starting a second cycle" $ do
-      boardRefreshDispatch Loading `shouldBe` QueueRefreshUntilIdle
-      boardRefreshDispatch NotLoaded `shouldBe` StartRefreshNow
-      boardRefreshDispatch (Fresh epoch) `shouldBe` StartRefreshNow
+      boardRefreshDispatch Loading False `shouldBe` QueueRefreshUntilIdle
+      boardRefreshDispatch NotLoaded False `shouldBe` StartRefreshNow
+      boardRefreshDispatch (Fresh epoch) False `shouldBe` StartRefreshNow
+      -- And a cycle the board has not been told about yet turns a press away
+      -- just as its own 'Loading' would.
+      boardRefreshDispatch (Fresh epoch) True `shouldBe` QueueRefreshUntilIdle
 
     it "releases that follow-up once the running cycle has published" $ do
       releaseQueuedBoardRefresh True (Fresh epoch) `shouldBe` True

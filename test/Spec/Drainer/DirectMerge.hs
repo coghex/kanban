@@ -414,9 +414,9 @@ examples = do
     -- queued rather than dropped, which is what 'startBoardRefresh' alone
     -- would do.
     it "queues behind a fetch that is already running" $ do
-      boardRefreshDispatch Loading `shouldBe` QueueRefreshUntilIdle
-      boardRefreshDispatch NotLoaded `shouldBe` StartRefreshNow
-      boardRefreshDispatch (Unavailable "offline") `shouldBe` StartRefreshNow
+      boardRefreshDispatch Loading False `shouldBe` QueueRefreshUntilIdle
+      boardRefreshDispatch NotLoaded False `shouldBe` StartRefreshNow
+      boardRefreshDispatch (Unavailable "offline") False `shouldBe` StartRefreshNow
 
     it "releases the queued refresh once that fetch has published" $ do
       releaseQueuedBoardRefresh True (Unavailable "offline") `shouldBe` True

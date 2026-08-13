@@ -42,6 +42,7 @@ module Kanban.GitHub.Coordinator
     RefreshCoordinator,
     RefreshRunner (..),
     coordinatorMustSettle,
+    coordinatorOpenCycleInFlight,
     newRefreshCoordinator,
     requestRefreshJob,
     shutdownRefreshCoordinator,
@@ -53,6 +54,7 @@ import Control.Concurrent.MVar
   ( MVar,
     modifyMVar,
     modifyMVar_,
+    withMVar,
     newEmptyMVar,
     newMVar,
     putMVar,
@@ -429,7 +431,22 @@ data RefreshCoordinator outcome = RefreshCoordinator
     -- takes the owner and refills it once the job is registered, so a
     -- shutdown arriving in between blocks on it instead of reading an empty
     -- slot and concluding — wrongly — that no @gh@ was ever started.
-    coordinatorLive :: MVar (Maybe LiveJob)
+    coordinatorLive :: MVar (Maybe LiveJob),
+    -- | Held for as long as a publication is actually in flight.
+    --
+    -- Whether to publish is decided in the same critical section that releases
+    -- the owner, so a shutdown either wins that section — and the publication
+    -- never happens — or loses it and must wait here for the one already
+    -- committed to. Without the wait, a quit could return while a publisher was
+    -- still running and let the dashboard halt with a board update, and a cache
+    -- write, still to land.
+    --
+    -- It is a lock of its own rather than the state lock because publishing
+    -- writes to the event channel the dashboard drains. Holding the state lock
+    -- across that would deadlock the moment the channel filled: the publisher
+    -- would wait for the dashboard to drain it, and the dashboard would be
+    -- waiting on the state lock to answer whether a cycle was in flight.
+    coordinatorPublishLock :: MVar ()
   }
 
 data LiveJob = LiveJob
@@ -450,6 +467,7 @@ newRefreshCoordinator recordLock runner publish report = do
   state <- newMVar initialCoordinatorState
   wake <- newEmptyMVar
   live <- newMVar Nothing
+  publishLock <- newMVar ()
   let coordinator =
         RefreshCoordinator
           { coordinatorState = state,
@@ -458,7 +476,8 @@ newRefreshCoordinator recordLock runner publish report = do
             coordinatorRunner = runner,
             coordinatorPublish = publish,
             coordinatorReport = report,
-            coordinatorLive = live
+            coordinatorLive = live,
+            coordinatorPublishLock = publishLock
           }
   void (forkIO (schedulerLoop coordinator))
   pure coordinator
@@ -467,9 +486,6 @@ requestRefreshJob :: RefreshCoordinator outcome -> RefreshJob -> Maybe UTCTime -
 requestRefreshJob coordinator job deadline = do
   modifyMVar_ coordinator.coordinatorState (pure . queueCoordinatorJob job deadline)
   wakeCoordinator coordinator
-
-coordinatorStateSnapshot :: RefreshCoordinator outcome -> IO CoordinatorState
-coordinatorStateSnapshot coordinator = readMVar coordinator.coordinatorState
 
 -- | Whether a quit has to go through the coordinator before the dashboard may
 -- halt.
@@ -481,6 +497,19 @@ coordinatorStateSnapshot coordinator = readMVar coordinator.coordinatorState
 -- would drop exactly the guard that makes it safe, so it counts as something
 -- to settle even though nothing is running — which is the difference between
 -- asking "is work in flight?" and asking "may this dashboard stop?".
+-- | Whether a foreground cycle is already running or waiting to run.
+--
+-- The board coalesces update requests against its own "a refresh is running"
+-- state, which the coordinator keeps current by announcing every cycle it
+-- starts. That announcement travels through the event channel, so there is a
+-- window in which a cycle is running and the board has not heard yet -- and a
+-- press landing in it would read an idle board. This is the same question
+-- asked of the coordinator directly, which has no such window.
+coordinatorOpenCycleInFlight :: RefreshCoordinator outcome -> IO Bool
+coordinatorOpenCycleInFlight coordinator = do
+  state <- readMVar coordinator.coordinatorState
+  pure (state.coordinatorRunning == Just OpenJob || Map.member OpenJob state.coordinatorPending)
+
 coordinatorMustSettle :: RefreshCoordinator outcome -> IO Bool
 coordinatorMustSettle coordinator = do
   state <- readMVar coordinator.coordinatorState
@@ -512,6 +541,10 @@ shutdownRefreshCoordinator :: RefreshCoordinator outcome -> IO (Maybe GhCleanupF
 shutdownRefreshCoordinator coordinator = do
   modifyMVar_ coordinator.coordinatorState (pure . beginCoordinatorShutdown)
   wakeCoordinator coordinator
+  -- Stopping is set, so nothing new will be published. This waits out the one
+  -- publication that may already have been committed to before that, which is
+  -- what makes "the dashboard may halt" true rather than merely likely.
+  withMVar coordinator.coordinatorPublishLock (const (pure ()))
   -- Blocks for exactly as long as a job that has taken the owner is still
   -- being registered, which is the window in which the slot is empty and a
   -- plain read would answer "nothing running" about a @gh@ that is about to
@@ -554,8 +587,9 @@ schedulerLoop coordinator = do
       -- simply outlived its deadline while waiting for the owner or for a
       -- rate limit to lift, and gets the same timeout outcome a slow fetch
       -- would have earned it.
-      stopping <- (.coordinatorStopping) <$> coordinatorStateSnapshot coordinator
-      unless stopping (coordinator.coordinatorRunner.openRefreshExpired >>= coordinator.coordinatorPublish)
+      outcome <- coordinator.coordinatorRunner.openRefreshExpired
+      stopping <- modifyMVar coordinator.coordinatorState (\state -> pure (state, state.coordinatorStopping))
+      unless stopping (publishOutcome coordinator outcome)
       schedulerLoop coordinator
     PlanExpire HistoryJob -> schedulerLoop coordinator
     PlanRun OpenJob deadline -> runOpenJob coordinator deadline >> schedulerLoop coordinator
@@ -591,16 +625,24 @@ runOpenJob coordinator deadline = do
   let remaining = fmap (remainingMicros now) deadline
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runOpenRefresh guard (rateObserverFor coordinator) remaining)
   finished <- getCurrentTime
-  modifyMVar_
-    coordinator.coordinatorState
-    (pure . settleOpenJob finished deadline (maybe False (.openRefreshRateLimited) result))
-  -- Read after the state settled, and checked before anything reaches the
-  -- board: a job the shutdown cancelled must publish nothing, or a dashboard
-  -- on its way out would take a board update from work it just abandoned.
-  stopping <- (.coordinatorStopping) <$> readMVar coordinator.coordinatorState
-  case result of
-    Just openResult | not stopping -> coordinator.coordinatorPublish openResult.openRefreshOutcome
-    _ -> pure ()
+  -- Deciding whether to publish and releasing the owner are one step. Split
+  -- apart, a quit landing between them would find nothing left to settle,
+  -- halt without ever telling the coordinator, and leave a publisher free to
+  -- run afterwards -- committing a board update, and a cache, on behalf of a
+  -- dashboard that had already stopped.
+  publishing <- modifyMVar coordinator.coordinatorState $ \state ->
+    pure
+      ( settleOpenJob finished deadline (maybe False (.openRefreshRateLimited) result) state,
+        if state.coordinatorStopping then Nothing else result
+      )
+  mapM_ (publishOutcome coordinator . (.openRefreshOutcome)) publishing
+
+-- | Hands one outcome to the board, holding the publication lock for exactly
+-- as long as that takes, so a concurrent shutdown waits rather than returning
+-- while it is still in flight.
+publishOutcome :: RefreshCoordinator outcome -> outcome -> IO ()
+publishOutcome coordinator outcome =
+  withMVar coordinator.coordinatorPublishLock (const (coordinator.coordinatorPublish outcome))
 
 runHistoryJob :: RefreshCoordinator outcome -> IO ()
 runHistoryJob coordinator = do
