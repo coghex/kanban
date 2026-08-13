@@ -121,10 +121,21 @@ data CoordinatorState = CoordinatorState
     coordinatorRunning :: Maybe RefreshJob,
     coordinatorPending :: Map RefreshJob PendingJob,
     coordinatorHolds :: Map RefreshJob JobHold,
-    -- | The newest budget any page reported, or 'Nothing' while no page has
-    -- reported a usable one. A page that reported nothing leaves this alone:
-    -- silence is not evidence that an earlier report has stopped being true.
+    -- | What the newest page reported, and nothing older. What is /left/ of a
+    -- budget is spent continuously, so an earlier figure describes a balance
+    -- that no longer exists; a page that reported nothing usable therefore
+    -- clears this rather than leaving the last one standing.
     coordinatorRate :: Maybe RateSample,
+    -- | The newest reset time any page has reported, which deliberately
+    -- outlives the report that carried it.
+    --
+    -- A reset names a fixed moment rather than a balance, so unlike the figure
+    -- above it stays true until it passes. It has to outlive the report
+    -- because the response GitHub refuses a request with carries no rate
+    -- report at all: without this, the one case that most needs the reported
+    -- reset — deciding when a refused job may be reissued — would never have
+    -- one to obey.
+    coordinatorResetAt :: Maybe UTCTime,
     -- | Set once shutdown begins. From then on nothing is queued, nothing is
     -- published, and no job requeues itself.
     coordinatorStopping :: Bool
@@ -138,6 +149,7 @@ initialCoordinatorState =
       coordinatorPending = Map.empty,
       coordinatorHolds = Map.empty,
       coordinatorRate = Nothing,
+      coordinatorResetAt = Nothing,
       coordinatorStopping = False
     }
 
@@ -251,18 +263,27 @@ holdCoordinatorJob job hold state =
 -- only one that does not wait for the reset: paused history cannot produce a
 -- page of its own, so without this a pause taken at the start of a window
 -- would outlast the foreground refreshes that went on to prove there was
--- plenty left. A rate-limit hold is deliberately not ended this way — GitHub
--- refused a request outright, and only the reset it named answers that.
+-- plenty left.
+--
+-- A page that reported nothing usable ends a reserve pause too, because
+-- section 13 makes an unknown budget one that pauses nothing. Leaving the
+-- previous report standing would be the same mistake in slower motion: history
+-- would stay paused on a figure the newest page did not confirm, until a reset
+-- that nothing currently reports.
+--
+-- A rate-limit hold is ended by neither. GitHub refused a request outright,
+-- and only the moment it named answers that.
 observeRateSample :: Maybe RateSample -> CoordinatorState -> CoordinatorState
-observeRateSample Nothing state = state
-observeRateSample (Just sample) state =
+observeRateSample sample state =
   state
-    { coordinatorRate = Just sample,
-      coordinatorHolds = Map.filter (not . endedBySample) state.coordinatorHolds
+    { coordinatorRate = sample,
+      coordinatorResetAt = maybe state.coordinatorResetAt (Just . (.rateSampleResetAt)) sample,
+      coordinatorHolds = Map.filter (not . endedByReport) state.coordinatorHolds
     }
   where
-    endedBySample hold =
-      hold.holdReason == HeldForReserve && sample.rateSampleRemaining > foregroundRateReserve
+    endedByReport hold =
+      hold.holdReason == HeldForReserve
+        && maybe True ((> foregroundRateReserve) . (.rateSampleRemaining)) sample
 
 -- | Begins shutdown: queued work is discarded, and nothing further is
 -- accepted, published, or requeued.
@@ -286,9 +307,13 @@ rateLimitFallbackHold :: NominalDiffTime
 rateLimitFallbackHold = 60
 
 -- | When a job refused against the primary rate limit may be tried again.
+--
+-- Read off the newest reported reset rather than the newest report, since the
+-- refusal itself arrives carrying no report: the reset a page named earlier in
+-- the same window is the one GitHub actually gave for it.
 rateLimitHoldUntil :: UTCTime -> CoordinatorState -> UTCTime
-rateLimitHoldUntil now state = case state.coordinatorRate of
-  Just sample | sample.rateSampleResetAt > now -> sample.rateSampleResetAt
+rateLimitHoldUntil now state = case state.coordinatorResetAt of
+  Just resetAt | resetAt > now -> resetAt
   _ -> addUTCTime rateLimitFallbackHold now
 
 -- | Where a finished foreground job leaves the coordinator.

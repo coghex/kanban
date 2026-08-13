@@ -180,6 +180,15 @@ spec = do
       Map.lookup HistoryJob woken.coordinatorHolds `shouldBe` Nothing
       snd (planCoordinator epoch woken) `shouldBe` PlanRun HistoryJob Nothing
 
+    -- Section 13 makes an unknown budget one that pauses nothing, so a page
+    -- that reported nothing usable has to end a pause an earlier page caused
+    -- rather than leaving history held on a figure nothing now stands behind.
+    it "resumes a paused history job once a later page reports nothing usable" $ do
+      let woken = observeRateSample Nothing pausedHistoryState
+      woken.coordinatorRate `shouldBe` Nothing
+      Map.lookup HistoryJob woken.coordinatorHolds `shouldBe` Nothing
+      snd (planCoordinator epoch woken) `shouldBe` PlanRun HistoryJob Nothing
+
     it "resumes a paused history job once the reported reset has passed" $
       snd (planCoordinator (secondsAfterEpoch 3601) pausedHistoryState)
         `shouldBe` PlanRun HistoryJob Nothing
@@ -206,8 +215,30 @@ spec = do
       rateLimitHoldUntil (secondsAfterEpoch 7200) observed
         `shouldBe` addUTCTime rateLimitFallbackHold (secondsAfterEpoch 7200)
 
-    -- GitHub refused the request outright, so a page that happens to report a
-    -- healthy budget is not a reason to walk back into the same refusal.
+    -- The response GitHub refuses a request with carries no rate report at
+    -- all, so a reset that only survived alongside its own report would leave
+    -- exactly this case with nothing to obey.
+    it "keeps obeying the reported reset after a later page reports nothing" $ do
+      let observed = observeRateSample Nothing (observeRateSample (Just (sampleWith 0)) initialCoordinatorState)
+      observed.coordinatorRate `shouldBe` Nothing
+      rateLimitHoldUntil epoch observed `shouldBe` secondsAfterEpoch 3600
+
+    -- GitHub refused the request outright, so neither a page reporting a
+    -- healthy budget nor one reporting nothing is a reason to walk back into
+    -- the same refusal.
+    it "does not let a later page of any kind cut a rate-limit hold short" $ do
+      let held =
+            holdCoordinatorJob HistoryJob (JobHold HeldForRateLimit (secondsAfterEpoch 3600))
+              (queueCoordinatorJob HistoryJob Nothing initialCoordinatorState)
+      mapM_
+        ( \report -> do
+            let observed = observeRateSample report held
+            Map.lookup HistoryJob observed.coordinatorHolds
+              `shouldBe` Just (JobHold HeldForRateLimit (secondsAfterEpoch 3600))
+            snd (planCoordinator epoch observed) `shouldBe` PlanWait (Just (secondsAfterEpoch 3600))
+        )
+        [Nothing, Just (sampleWith (foregroundRateReserve + 1))]
+
     it "does not let a healthy later page cut a rate-limit hold short" $ do
       let held =
             holdCoordinatorJob HistoryJob (JobHold HeldForRateLimit (secondsAfterEpoch 3600))

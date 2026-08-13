@@ -1477,7 +1477,16 @@ a countdown.
   notice line using GitHub's reported reset. It resumes on its own once that
   reset has passed, or once a later foreground page reports sufficient budget —
   a paused history job cannot produce that page itself, which is why the
-  foreground's counts. An unknown budget pauses nothing.
+  foreground's counts.
+- Only the newest report counts, and an unknown budget pauses nothing. What is
+  *left* of a budget is spent continuously, so a page that reported nothing
+  usable replaces an earlier figure rather than leaving it standing, and ends a
+  pause that figure caused; history stays paused only while the newest page
+  actually says the budget is at or below the reserve. The reset time is the one
+  part that outlives its report — it names a fixed moment rather than a balance,
+  and the response GitHub refuses a request with carries no report at all, so
+  the reset an earlier page named in the same window is what a refused job waits
+  out. Neither an unknown report nor a healthy one ends a rate-limit hold.
 - A job GitHub refuses against its primary rate limit is reissued, not merely
   delayed: it goes back in the queue under a hold until the reported reset, so
   it is tried again once the budget returns rather than dropped when the hold
