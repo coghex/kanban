@@ -230,6 +230,7 @@ renderProviderErrorMessage providerError =
       UnsupportedVersion -> "UNSUPPORTED VERSION"
       RequestTimedOut -> "TIMED OUT"
       InvalidResponse -> "INVALID RESPONSE"
+      RateLimited -> "RATE LIMITED"
       RequestFailed -> "REQUEST ERROR"
 
 refreshSuccessNotice :: RepoSnapshot -> [Text] -> Text

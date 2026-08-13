@@ -1245,6 +1245,13 @@ only the fields required by the board. Expected data includes:
   base/head branches, creation/update timestamps, closing issue references,
   mergeability, merge-state status, review decision, and status-check rollup.
 - Open tracker issue bodies so ordered checklist membership can be parsed.
+- Each page's own rate report under `rateLimit` — what that page cost, what is
+  left of the budget, and when the budget resets — as GitHub reports them.
+  Every page asks, because only the newest report is worth anything to the
+  scheduler in §15. A response that omits the field, or answers it with
+  something this build cannot reason about (a missing part, a reset that is not
+  a time, a negative cost or remaining), is not a refresh failure: the budget is
+  simply unknown, the page counts as it always did, and nothing pauses.
 - Each open issue's immediate native sub-issues — number, state, and owning
   repository — and GitHub's completed/total sub-issue summary, plus the
   repository's own `nameWithOwner`, so §12's second membership source can be
@@ -1307,8 +1314,14 @@ decoded text depends on the environment's locale, so a board with non-ASCII
 titles or bodies behaves identically under a UTF-8 locale and under the
 C/POSIX locale an SSH, cron, or launchd session commonly supplies (§1).
 
-No request is retried in a tight loop. Rate limits and transient failures are
-shown to the user while retaining the last good snapshot.
+No request is retried in a tight loop. A failure GitHub attributes to its own
+primary rate limit is classified apart from an ordinary request error, so the
+job it refused waits for the reported reset instead of being reissued straight
+back into the same refusal (§15). The match is against the phrases GitHub uses
+for that limit, never a bare word such as `token` or `limit`; GitHub's
+secondary limit reports no reset to wait for and stays an ordinary request
+error. Rate limits and transient failures are shown to the user while retaining
+the last good snapshot.
 
 ## 14. Usage acquisition
 
@@ -1426,6 +1439,63 @@ a countdown.
 - Brick owns the blocking terminal event loop.
 - The GitHub and usage providers each run once in short-lived startup workers
   and again only after an explicit unified update.
+- One repository-scoped coordinator owns every `gh` a board refresh starts and
+  the durable `gh` group record for that repository, and decides the order that
+  repository's refresh jobs run in. Every production board-refresh entry point
+  goes through it — startup, `u`, and the refreshes a finished review, solve, or
+  pull-request action requires — so two requests arriving together resolve to
+  one owner, neither can spawn `gh` while the other holds it, and no
+  interleaving of the record's read-modify-write updates can lose an entry.
+  Scope is one coordinator per repository within one dashboard process. Nothing
+  here schedules across processes; the durable record and the restart-time
+  reclaim refusal remain what covers that.
+- The coordinator schedules typed jobs rather than one anonymous refresh: a
+  foreground open job and a background history job. When both are runnable the
+  open job runs first; a history job never starts or resumes while an open job
+  is pending or running, including one waiting out a rate limit; and a history
+  job gives the owner back at every page boundary, so a newly requested open job
+  takes it without waiting for the traversal to finish.
+- `u` during a running cycle still reports that an update is already running,
+  and now also leaves at most one newest follow-up cycle queued. Any number of
+  presses leave exactly one follow-up, none of them starts an overlapping
+  provider worker, and the follow-up starts once the running cycle publishes its
+  outcome — but only when the board can accept work. A cycle ending in an
+  unverified cleanup that could not be recorded deliberately leaves the board
+  `Loading`, and the follow-up stays queued rather than being spent on a call
+  that would only be turned away. The existing guarantee that a refresh required
+  by something this dashboard already committed is never dropped is unchanged.
+  This is about GitHub board jobs only: Codex and Claude usage refreshes stay
+  independent, with their own workers, timeouts, and freshness (§14).
+- Background history yields to a reserve held for foreground work. Before
+  starting or resuming a history job the coordinator compares the remaining
+  budget against a fixed internal reserve of 200 GraphQL points — a named
+  constant in the source with no configuration key, since a value that could be
+  lowered to zero would silently retire the guarantee. History pauses when the
+  remaining budget is at or below the reserve, which is what makes the reserve a
+  balance that survives rather than one the last page may spend, and the board
+  reports `History paused · GitHub limit resets <time>` through the existing
+  notice line using GitHub's reported reset. It resumes on its own once that
+  reset has passed, or once a later foreground page reports sufficient budget —
+  a paused history job cannot produce that page itself, which is why the
+  foreground's counts. An unknown budget pauses nothing.
+- The configured GitHub timeout covers the whole request, coordinator waiting
+  and rate-limit delay included, because from the board's side those are
+  indistinguishable from a slow response. Expiry cancels that job and any retry
+  scheduled for it, performs the verified cleanup, and publishes the existing
+  timeout outcome, rather than letting a stale retry or completion publish
+  afterwards.
+- Quitting while any board-refresh job is queued or running cancels the queued
+  work and interrupts the running one exactly as a refresh timeout does, so it
+  unwinds through the same verified `gh` cleanup, bounded by that cleanup's own
+  budget. The board says it is stopping GitHub work while this happens; a
+  cancelled job publishes no board or cache result and requeues nothing; and
+  nothing requested afterwards is accepted. The dashboard halts once the cleanup
+  reaches a verdict that leaves nothing ambiguous — the group confirmed gone, or
+  durably recorded for a later run to re-check before it spawns anything. A
+  group that is neither, possibly live with only this process's in-memory
+  refusal covering it, refuses the quit and reports that instead: halting there
+  would drop the one thing holding the next `gh` back. A live interactive review
+  still refuses the quit exactly as it did, and is asked first.
 - Every canonical GitHub repository has its own PR drainer: its own LaunchAgent
   label and plist, its own runtime status, its own service and dated logs, and
   its own `--config` selection. Starting, stopping, querying, logs, status, and
@@ -1772,6 +1842,11 @@ repository at all.
   working installation is never reported as absent.
 - Unsupported CLI format or protocol: provider shows `UNSUPPORTED VERSION`.
 - Timeout: provider shows `TIMED OUT` and retains cached data.
+- Primary rate limit: a refusal GitHub attributes to its own primary rate limit
+  shows `RATE LIMITED` and retains cached data. It is held apart from a request
+  error because it is the one failure whose remedy is waiting a known length of
+  time, which §15's scheduler acts on; GitHub's secondary limit reports no such
+  time and stays a request error.
 - GitHub truncation: affected count shows its configured cap followed by `+`
   and an amber banner.
 - Cached data after refresh failure: dashed/dim treatment plus snapshot time.

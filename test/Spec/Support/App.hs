@@ -43,11 +43,13 @@ import Kanban.UI.Types
     SolvePhase (..),
     SolveSession,
   )
+import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 
 testAppState :: Board -> IO AppState
 testAppState board = do
   eventChannel <- newBChan 16
+  refreshCoordinator <- inertRefreshCoordinator
   pure
     AppState
       { appRepository = Repository "/tmp/example-project" "example" "project",
@@ -77,6 +79,8 @@ testAppState board = do
         appDirectMergePending = Nothing,
         appDirectMergeResult = Nothing,
         appBoardRefreshQueued = False,
+        appRefreshCoordinator = refreshCoordinator,
+        appQuitPending = False,
         appReviewBackend = ReviewBackendStopped,
         appReviewSessions = Map.empty,
         appSolveSessions = Map.empty,

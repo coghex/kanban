@@ -9,6 +9,7 @@
 module Kanban.GitHub.Fetch
   ( FetchState (..),
     GitHubResult (..),
+    RateObserver,
     advanceState,
     decodeGitHubItems,
     fetchGitHubSnapshot,
@@ -29,7 +30,8 @@ import Kanban.Config (LimitsConfig (..))
 import Kanban.Domain
 import Kanban.GitHub.Decode (Connection (..), GitHubPage (..), PageInfo (..))
 import Kanban.GitHub.Guard (GhFetchGuard, reclaimRecordedGhGroups, uninterruptiblyBounded)
-import Kanban.GitHub.Message (classifyFailure, compactError, decodeGhOutput, partialResponseWarning, withGraphQLErrors)
+import Kanban.GitHub.Message (classifyFailure, compactError, decodeGhOutput, partialResponseWarning, primaryRateLimited, withGraphQLErrors)
+import Kanban.GitHub.Rate (RateSample (..), rateSampleFromResponse)
 import Kanban.GitHub.Run (GhFetchAborted (..), GhProcessFailed (..), ghFailureKind, runGh)
 import Kanban.GitHub.Warnings (snapshotWarnings)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
@@ -66,8 +68,18 @@ data FetchState = FetchState
 pageLimit :: Int
 pageLimit = 100
 
-fetchGitHubSnapshot :: GhFetchGuard -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
-fetchGitHubSnapshot guard limits workflowConfig repository = do
+-- | Told what each page reported about the budget, in the order the pages
+-- were fetched.
+--
+-- Every page reports, whether or not it succeeded and whether or not GitHub
+-- said anything usable: 'Nothing' is the honest answer for a response that
+-- omitted or malformed its rate report, and the fetch carries on exactly as it
+-- would have without one (§13). Only the scheduler above acts on these; the
+-- fetch itself never changes course over a budget.
+type RateObserver = Maybe RateSample -> IO ()
+
+fetchGitHubSnapshot :: GhFetchGuard -> RateObserver -> LimitsConfig -> WorkflowConfig -> Repository -> IO (Either ProviderError GitHubResult)
+fetchGitHubSnapshot guard observeRate limits workflowConfig repository = do
   -- Reclaim signals process groups and then confirms what it did, so it is
   -- held to the same rule as cleanup: the refresh timer may not land between
   -- those halves. Without that, a timeout arriving mid-freeze would leave the
@@ -99,7 +111,7 @@ fetchGitHubSnapshot guard limits workflowConfig repository = do
                   state.pullRequestsTruncated
           pure (Right (GitHubResult repoSnapshot (snapshotWarnings limits workflowConfig repoSnapshot <> state.fetchWarnings)))
       | otherwise = do
-          pageResult <- fetchPage guard limits repository state
+          pageResult <- fetchPage guard observeRate limits repository state
           case pageResult of
             Left providerError
               | state.fetchSubIssues && subIssueSchemaUnsupported providerError.providerErrorMessage ->
@@ -142,14 +154,23 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: GhFetchGuard -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage guard limits repository state = do
+fetchPage :: GhFetchGuard -> RateObserver -> LimitsConfig -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
+fetchPage guard observeRate limits repository state = do
   -- The unwritable-guard failure is deliberately not folded in with the
   -- IOExceptions below: those mean gh could not be run, while this means gh
   -- ran and was then stopped again because nothing durable could account for
   -- it. Reporting it as a missing executable would send the user looking in
   -- entirely the wrong place.
   guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (graphqlArguments limits repository state)))
+  -- Reported off the response body rather than off a decoded page, and for a
+  -- failed request as readily as a successful one: gh prints what GitHub
+  -- answered whatever the status was, and a rejected page's own report is the
+  -- one that says when the budget returns. A run that produced no body at all
+  -- reports an unknown budget, which is what every other unusable answer
+  -- reports too.
+  observeRate $ case guarded of
+    Right (Right (_, standardOutput, _)) -> rateSampleFromResponse standardOutput
+    _ -> Nothing
   pure $ case guarded of
     Left (GhGuardUnwritable message) ->
       Left
@@ -178,12 +199,26 @@ fetchPage guard limits repository state = do
               }
     Right (Right (ExitSuccess, standardOutput, _)) ->
       case eitherDecode (LazyByteString.fromStrict (TextEncoding.encodeUtf8 (decodeGhOutput standardOutput))) of
-        Left message ->
-          Left
-            ProviderError
-              { providerErrorKind = InvalidResponse,
-                providerErrorMessage = "GitHub returned invalid JSON: " <> Text.pack message
-              }
+        -- GitHub answers an exhausted budget at the GraphQL layer rather than
+        -- the HTTP one: a 200 carrying no @data@ and a rate-limit error. That
+        -- reaches here as a decode failure whose text is GitHub's own
+        -- explanation (see the 'GitHubPage' decoder), so it is sorted by what
+        -- GitHub said rather than reported as malformed JSON -- which would
+        -- send the user looking at a response that is perfectly well-formed
+        -- and hide the one failure the scheduler can wait out.
+        Left message
+          | primaryRateLimited (Text.pack message) ->
+              Left
+                ProviderError
+                  { providerErrorKind = RateLimited,
+                    providerErrorMessage = compactError (Text.pack message)
+                  }
+          | otherwise ->
+              Left
+                ProviderError
+                  { providerErrorKind = InvalidResponse,
+                    providerErrorMessage = "GitHub returned invalid JSON: " <> Text.pack message
+                  }
         Right page -> Right page
 
 -- | Folds one decoded page into the fetch, deciding what a response GitHub
@@ -343,6 +378,11 @@ graphqlQuery withSubIssues =
       "  $fetchIssues: Boolean!,",
       "  $fetchPullRequests: Boolean!",
       ") {",
+      -- What the page cost, what is left, and when it returns. Requested on
+      -- every page because the budget is what the scheduler above reserves
+      -- foreground work out of, and a report is only worth anything while it
+      -- is the newest one. The field is free: GitHub does not score it.
+      "  rateLimit { cost remaining resetAt }",
       "  repository(owner: $owner, name: $name) {",
       "    nameWithOwner",
       "    issues(first: $issuePageSize, after: $issueCursor, states: OPEN) @include(if: $fetchIssues) {",

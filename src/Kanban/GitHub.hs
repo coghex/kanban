@@ -23,7 +23,9 @@ module Kanban.GitHub
     groupConfirmedEmpty,
     GhFailurePhase (..),
     GhFetchGuard,
+    GhRecordLock,
     GitHubResult (..),
+    RateObserver,
     advanceState,
     classifyFailure,
     compactError,
@@ -33,15 +35,76 @@ module Kanban.GitHub
     ghFetchCleanupFailure,
     graphqlArguments,
     newGhFetchGuard,
+    newGhRecordLock,
     paginationDecision,
     reclaimRecordedGhGroups,
+    setCleanupFailure,
     snapshotWarnings,
+
+    -- * The repository's refresh coordinator
+    CoordinatorNotice (..),
+    CoordinatorPlan (..),
+    CoordinatorState (..),
+    HistoryPageResult (..),
+    HistoryRateVerdict (..),
+    HoldReason (..),
+    JobHold (..),
+    OpenRefreshResult (..),
+    PendingJob (..),
+    RateSample (..),
+    RefreshCoordinator,
+    RefreshJob (..),
+    RefreshRunner (..),
+    beginCoordinatorShutdown,
+    coordinatorHasWork,
+    finishCoordinatorJob,
+    foregroundRateReserve,
+    historyRateVerdict,
+    holdCoordinatorJob,
+    initialCoordinatorState,
+    newRefreshCoordinator,
+    observeRateSample,
+    planCoordinator,
+    queueCoordinatorJob,
+    rateLimitFallbackHold,
+    rateLimitHoldUntil,
+    rateSampleFromResponse,
+    requestRefreshJob,
+    shutdownRefreshCoordinator,
+    usableRateSample,
   )
 where
 
-import Kanban.GitHub.Fetch (FetchState (..), GitHubResult (..), advanceState, decodeGitHubItems, fetchGitHubSnapshot, graphqlArguments, paginationDecision)
+import Kanban.GitHub.Coordinator
+  ( CoordinatorNotice (..),
+    CoordinatorPlan (..),
+    CoordinatorState (..),
+    HistoryPageResult (..),
+    HoldReason (..),
+    JobHold (..),
+    OpenRefreshResult (..),
+    PendingJob (..),
+    RefreshCoordinator,
+    RefreshJob (..),
+    RefreshRunner (..),
+    beginCoordinatorShutdown,
+    coordinatorHasWork,
+    finishCoordinatorJob,
+    holdCoordinatorJob,
+    initialCoordinatorState,
+    newRefreshCoordinator,
+    observeRateSample,
+    planCoordinator,
+    queueCoordinatorJob,
+    rateLimitFallbackHold,
+    rateLimitHoldUntil,
+    requestRefreshJob,
+    shutdownRefreshCoordinator,
+  )
+import Kanban.GitHub.Fetch (FetchState (..), GitHubResult (..), RateObserver, advanceState, decodeGitHubItems, fetchGitHubSnapshot, graphqlArguments, paginationDecision)
 import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupConfirmedEmpty)
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, ghFetchCleanupFailure, newGhFetchGuard, reclaimRecordedGhGroups)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
+import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)
 import Kanban.GitHub.Run (GhFailurePhase (..), ghBehindBarrier, ghFailureKind)
 import Kanban.GitHub.Warnings (snapshotWarnings)

@@ -1,6 +1,7 @@
 -- | The board refresh cleanup harness.
 module Spec.Support.Board
   ( forcedCleanupRun,
+    inertRefreshCoordinator,
     withFakeGh,
     captureBoardRefresh,
     heldOffMessage,
@@ -14,8 +15,18 @@ import Data.Text (Text)
 import qualified Data.Text
 import Kanban.Config
 import Kanban.Domain
-import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..))
+import Kanban.GitHub
+  ( GhCleanupFailure (..),
+    GhCleanupGuard (..),
+    HistoryPageResult (..),
+    OpenRefreshResult (..),
+    RefreshCoordinator,
+    RefreshRunner (..),
+    newGhRecordLock,
+    newRefreshCoordinator
+  )
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
+import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.UI.Refresh (runBoardRefreshWith)
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Spec.Support.Env (withEnvironmentValue, withFakeOnPath)
@@ -71,6 +82,27 @@ forcedCleanupRun temporaryRoot githubSeconds psFailures = do
     Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
     Right identities ->
       pure (outcome, filter (Data.Text.isInfixOf (Data.Text.pack binaryRoot) . processIdentityCommand) identities)
+
+-- | A coordinator for states that only have to hold one.
+--
+-- Nothing ever asks it for a job: it exists so an 'AppState' a drawing or
+-- dispatch test builds is complete. Its runners answer immediately rather than
+-- blocking, so a test that did request one would fail on the answer rather
+-- than hang on the wait.
+inertRefreshCoordinator :: IO (RefreshCoordinator BoardRefreshOutcome)
+inertRefreshCoordinator = do
+  recordLock <- newGhRecordLock
+  newRefreshCoordinator
+    recordLock
+    RefreshRunner
+      { runOpenRefresh = \_ _ _ -> pure (OpenRefreshResult inertOutcome False),
+        openRefreshExpired = pure inertOutcome,
+        runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
+      }
+    (const (pure ()))
+    (const (pure ()))
+  where
+    inertOutcome = BoardRefreshCompleted (Left (ProviderError RequestFailed "no refresh runner is wired up in this test"))
 
 -- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
 -- it instead of the real thing.

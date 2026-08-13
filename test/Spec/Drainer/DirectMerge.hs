@@ -36,7 +36,7 @@ import Kanban.Drainer
 import Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
     releaseQueuedBoardRefresh,
-    requiredBoardRefreshDispatch,
+    boardRefreshDispatch,
   )
 import Kanban.UI.Types (DirectMergeReport (..))
 import Kanban.UI.Util
@@ -414,9 +414,9 @@ examples = do
     -- queued rather than dropped, which is what 'startBoardRefresh' alone
     -- would do.
     it "queues behind a fetch that is already running" $ do
-      requiredBoardRefreshDispatch Loading `shouldBe` QueueRefreshUntilIdle
-      requiredBoardRefreshDispatch NotLoaded `shouldBe` StartRefreshNow
-      requiredBoardRefreshDispatch (Unavailable "offline") `shouldBe` StartRefreshNow
+      boardRefreshDispatch Loading `shouldBe` QueueRefreshUntilIdle
+      boardRefreshDispatch NotLoaded `shouldBe` StartRefreshNow
+      boardRefreshDispatch (Unavailable "offline") `shouldBe` StartRefreshNow
 
     it "releases the queued refresh once that fetch has published" $ do
       releaseQueuedBoardRefresh True (Unavailable "offline") `shouldBe` True
