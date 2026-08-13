@@ -3169,6 +3169,48 @@ if __name__ == "__main__":
 PROBE
 ```
 
+The recorded 61-boundary measurement was produced by exactly this invocation,
+run after the settling period below completed:
+
+```console
+python3 "$TMP/measure_tree.py" \
+  --pid "$KANBAN_PID" \
+  --intervals 60 \
+  --interval-seconds 1 \
+  --tmux-target "$SESSION" \
+  --expect-executable "$TMP/bin/kanban" \
+  --controller-interpreter-root \
+    "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/" \
+  --controller-argv-tail \
+    "$HOME/Library/Application Support/kanban/pr-drainer/drain_prs_service.py --path $ROOT --repo coghex/kanban --json status" \
+  --keep-snapshots \
+  --output "$TMP/rel1-measurement.json"
+```
+
+`$TMP` and `$ROOT` are the build-provenance variables above, `$SESSION` and
+`$KANBAN_PID` come from the launch block below; for this record they were the
+third launch's session and its pane PID `35969`. `$HOME` is written as the
+variable rather than expanded, per D-8.
+
+Two of those arguments are the checks the review method depends on, so their
+effect is recorded rather than assumed:
+
+- `--expect-executable` made the probe resolve the root PID's executable with
+  `proc_pidpath` and refuse to measure anything else **before** its first
+  boundary reading; the run's output records `root_pid` 35969 with
+  `root_executable` equal to the archive-installed `$TMP/bin/kanban`. Without
+  that check, a pane whose `exec` had failed would have yielded a full set of
+  numbers describing `/bin/sh` while still satisfying the build-provenance
+  record above.
+- `--controller-interpreter-root` and `--controller-argv-tail` together are the
+  controller identity described under Measurement environment: the interpreter
+  installation the launchd job names, and the exact resolved argv tail. Both
+  are required, and a live direct child must match both to be classified as a
+  poll rather than as attribution-invalidating child activity.
+
+`--keep-snapshots` retained the 61 pane captures that the content-churn diffs
+below were computed from.
+
 #### Startup: three consecutive launches
 
 Each launch started a monotonic clock immediately before `tmux new-session`,
