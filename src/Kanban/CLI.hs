@@ -108,4 +108,4 @@ parseBorderPolicy "box" = Right BorderBox
 parseBorderPolicy input = Left ("unknown border policy: " <> input)
 
 versionOption :: Parser (a -> a)
-versionOption = infoOption "kanban 0.1.0.0" (long "version" <> help "Show version")
+versionOption = infoOption "kanban 1.0.0.0" (long "version" <> help "Show version")

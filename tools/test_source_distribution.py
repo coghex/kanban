@@ -27,10 +27,13 @@ tracked file has none:
 * In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
   the one session contract under the two names Claude and Codex each read
   it by -- `LICENSE`, `kanban.cabal`, `config.toml.example`, the ten user
-  and workflow-contract documents under `docs/`, and `cabal.project` --
-  the last because the packaged `CLAUDE.md` describes it as what applies
-  the mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
-  runs the packaged `README.md` tells the recipient to make.
+  and workflow-contract documents under `docs/`, `cabal.project` -- that
+  one because the packaged `CLAUDE.md` describes it as what applies the
+  mandatory `-Werror` gate to the `cabal build all` and `cabal test all`
+  runs the packaged `README.md` tells the recipient to make -- and
+  `CHANGELOG.md`, whose top section is the notes for the very version the
+  archive carries, so a recipient holding only the unpacked tree can tell
+  what that version contains without consulting the upstream repository.
 * Out: `.drain-prs.json`, which `docs/pr-drainer.md` documents as optional
   per-repository drainer configuration and which is therefore the local
   configuration requirement 2 excludes; `.gitignore` and `.github/workflows/`,
@@ -76,6 +79,7 @@ RELEASE_TREES = (
 # Tracked files outside those trees that ship.
 RELEASE_ROOT_FILES = (
     "AGENTS.md",
+    "CHANGELOG.md",
     "CLAUDE.md",
     "LICENSE",
     "README.md",

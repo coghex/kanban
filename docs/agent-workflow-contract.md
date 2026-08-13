@@ -1069,6 +1069,7 @@ recording only one would understate what a change to it can break:
 
 ```text
 AGENTS.md | pr-atomic | release-document;implementation-coupled
+CHANGELOG.md | pr-atomic | release-document
 CLAUDE.md | pr-atomic | release-document;implementation-coupled
 README.md | pr-atomic | release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
