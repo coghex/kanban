@@ -10,14 +10,19 @@ a repository pull request can change and verify them.
 Reconciles the responsibility matrix in docs/document-workflow-contract.md
 against the tracked Claude and Codex plugin trees, so a declared asset cannot
 vanish, an undeclared design or report workflow cannot appear, the document
-cannot silently drop the declared Codex-only asymmetry or the design-pipeline
+cannot silently drop the remaining Codex-only asymmetry or the design-pipeline
 epic-planner boundary, the decision-authority clauses of §5.1 cannot regress out
-of either tracked design workflow (issue #239), and the status vocabulary the
-two process-report variants must share cannot drift. The two variants are
+of any tracked design workflow (issue #239), and the status vocabulary the
+cross-brand variants must share cannot drift. Paired variants are
 deliberately not
 reconciled into one text (requirement 3 of issue #229): what is pinned here is
-the surface a report started by one brand and resumed by the other depends on,
+the surface a document started by one brand and resumed by the other depends on,
 not their wording.
+
+Issue #241 transposed /design-epic and /process-design-doc into the Claude
+bundle from the post-#239 tracked Codex skills, so §3.5's asymmetry is now
+partial: $draft-report is the sole remaining Codex-only workflow, the declared
+set is seven assets, and three of the four workflow names are cross-brand pairs.
 
 Discovery, frontmatter, and no-personal-path coverage for the same assets lives
 in tools/test_claude_plugin.py and tools/test_codex_plugin.py; their
@@ -51,6 +56,8 @@ DOCUMENT_WORKFLOW_NAMES = {
 }
 
 EXPECTED_DECLARED_PATHS = {
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
@@ -58,10 +65,11 @@ EXPECTED_DECLARED_PATHS = {
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
 }
 
-# The three workflows §3.5 declares Codex-only. The Claude plugin must not grow
-# a counterpart under this contract: authoring one would be new behavior no
-# pinned source defines.
-CODEX_ONLY_WORKFLOWS = ("design-epic", "process-design-doc", "draft-report")
+# The one workflow §3.5 still declares Codex-only after issue #241 closed the
+# design half of the asymmetry. The Claude plugin must not grow a counterpart
+# under this contract: authoring one would be new behavior no pinned source
+# defines.
+CODEX_ONLY_WORKFLOWS = ("draft-report",)
 
 # The marker vocabulary every declared asset states, as raw literals: these are
 # the interface between two runs, two brands, and two sessions, so an
@@ -69,23 +77,45 @@ CODEX_ONLY_WORKFLOWS = ("design-epic", "process-design-doc", "draft-report")
 STATUS_MARKER_LITERALS = ("[#N]", "[no-issue]", "[deferred]")
 
 # The status-checklist form. Both are required of every asset that applies a
-# disposition; $design-epic and $draft-report never write a terminal marker, so
-# they carry only the unchecked form (§4).
+# disposition; the design-capture pair and $draft-report never write a terminal
+# marker, so they carry only the unchecked form (§4).
 CHECKED_FORM = "- [x]"
 UNCHECKED_FORM = "- [ ]"
 
 DISPOSITION_APPLYING_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
 )
 
-# The one cross-brand pair in this contract, and therefore the only place a
-# report started by one brand can stop being resumable by the other.
-PROCESS_REPORT_ASSETS = (
-    "claude-plugin/plugins/kanban/commands/process-report.md",
-    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
+# The capture assets, which select no disposition and therefore may never write
+# a checked box (§4). The counterpart to DISPOSITION_APPLYING_ASSETS above.
+CAPTURE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
 )
+
+# The three cross-brand pairs in this contract, and therefore the only places a
+# report or design document started by one brand can stop being resumable by
+# the other.
+CROSS_BRAND_PAIRS = {
+    "design-epic": (
+        "claude-plugin/plugins/kanban/commands/design-epic.md",
+        "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    ),
+    "process-design-doc": (
+        "claude-plugin/plugins/kanban/commands/process-design-doc.md",
+        "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+    ),
+    "process-report": (
+        "claude-plugin/plugins/kanban/commands/process-report.md",
+        "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
+    ),
+}
+
+PROCESS_REPORT_ASSETS = CROSS_BRAND_PAIRS["process-report"]
 
 # §5's boundaries, asserted against both process-report variants as well as the
 # document. Lowercase: compared against canonical() output, because the same
@@ -104,13 +134,29 @@ PROCESS_REPORT_SHARED_BOUNDARIES = (
 # does not fail CI.
 CONTRACT_STATEMENTS = {
     "haskell-parity-exclusion": "user-invoked and never spawned by Kanban's CLI",
+    # Issue #241 closed the design half of §3.5's asymmetry. What the document
+    # must still state is the residue — one Codex-only workflow, still
+    # declared rather than accidental — plus the closure record that says why
+    # the other two stopped being one.
     "codex-only-asymmetry": (
-        "$design-epic, $process-design-doc, and $draft-report are Codex-only"
+        "$draft-report is the sole remaining Codex-only workflow"
     ),
-    "codex-only-has-no-counterpart": "No Claude counterpart exists",
+    "codex-only-has-no-counterpart": (
+        "No Claude counterpart to $draft-report exists"
+    ),
     "codex-only-is-declared": "a declared gap rather than an oversight",
+    "design-pair-closure-is-recorded": (
+        "$design-epic and $process-design-doc were Codex-only under the same "
+        "rule until issue #239 landed their decision-authority guardrails in "
+        "the tracked Codex skills"
+    ),
+    "design-pair-closure-names-its-source": (
+        "is the pinned source /design-epic and /process-design-doc were "
+        "transposed from"
+    ),
     "design-epic-creates-nothing": (
-        "$design-epic produces a durable design document and creates no tracker items"
+        "/design-epic and $design-epic produce a durable design document and "
+        "create no tracker items"
     ),
     "epic-stays-unpackaged": "remains unpackaged in both plugins",
     "one-artifact-per-invocation": "One artifact per invocation",
@@ -274,6 +320,8 @@ DESIGN_AUTHORITY_CLAUSES = {
 }
 
 DESIGN_AUTHORITY_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
 )
@@ -282,10 +330,17 @@ DESIGN_AUTHORITY_ASSETS = (
 # lesser uncertainty in the document instead of blocking useful progress",
 # which states the opposite of the ambiguity clause above. Pinned as forbidden
 # prose so the permissive instruction cannot return beside the section that
-# replaced it.
+# replaced it — in either brand's capture workflow, since issue #241 transposed
+# the Claude one from this same text and a later edit could reintroduce it
+# there alone.
 DESIGN_EPIC_FORBIDDEN_PROSE = (
     "leave lesser uncertainty in the document",
     "instead of blocking useful progress",
+)
+
+DESIGN_EPIC_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
 )
 
 DECLARED_ASSET_ROW_RE = re.compile(
@@ -430,7 +485,7 @@ class DeclaredAssetTests(unittest.TestCase):
     def setUp(self):
         self.declared = parse_declared_assets()
 
-    def test_declared_assets_are_exactly_the_five_packaged_workflows(self):
+    def test_declared_assets_are_exactly_the_seven_packaged_workflows(self):
         self.assertEqual(set(self.declared), EXPECTED_DECLARED_PATHS)
 
     def test_every_declared_asset_exists_in_the_tracked_tree(self):
@@ -467,15 +522,18 @@ class DeclaredAssetTests(unittest.TestCase):
         )
 
     def test_an_undeclared_asset_added_to_either_plugin_is_reported(self):
-        # The realistic regression this guards is a Claude counterpart to one
-        # of the Codex-only workflows appearing without §3.5 being revisited.
+        # The realistic regression this guards is a Claude counterpart to the
+        # one workflow §3.5 still declares Codex-only appearing without that
+        # section being revisited. /design-epic used to be the planted asset
+        # here; issue #241 declared it, so the plant moved to /draft-report,
+        # which is the remaining case the rule protects.
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
             commands = repo_root / "claude-plugin" / "plugins" / "kanban" / "commands"
             skills = repo_root / "codex-plugin" / "plugins" / "kanban" / "skills"
             commands.mkdir(parents=True)
             (skills / "draft-report").mkdir(parents=True)
-            (commands / "design-epic.md").write_text("---\n---\n", encoding="utf-8")
+            (commands / "draft-report.md").write_text("---\n---\n", encoding="utf-8")
             (commands / "solve.md").write_text("---\n---\n", encoding="utf-8")
             (skills / "draft-report" / "SKILL.md").write_text("x\n", encoding="utf-8")
             found = discovered_document_assets(
@@ -485,7 +543,7 @@ class DeclaredAssetTests(unittest.TestCase):
             )
         self.assertEqual(
             sorted(found - EXPECTED_DECLARED_PATHS),
-            ["claude-plugin/plugins/kanban/commands/design-epic.md"],
+            ["claude-plugin/plugins/kanban/commands/draft-report.md"],
         )
 
     def test_declared_brand_and_invocation_match_the_assets_own_plugin_and_name(self):
@@ -515,7 +573,7 @@ class DeclaredAssetTests(unittest.TestCase):
                 f"{path} does not implement its declared invocation {row['invocation']!r}",
             )
 
-    def test_the_three_codex_only_workflows_are_declared_for_codex_alone(self):
+    def test_the_remaining_codex_only_workflow_is_declared_for_codex_alone(self):
         for name in CODEX_ONLY_WORKFLOWS:
             rows = [
                 row
@@ -530,31 +588,49 @@ class DeclaredAssetTests(unittest.TestCase):
                 "the Claude plugin must not package a counterpart",
             )
 
-    def test_process_report_is_the_only_cross_brand_pair(self):
+    def test_the_three_cross_brand_pairs_are_declared_for_both_brands(self):
         by_workflow = {}
         for row in self.declared.values():
             by_workflow.setdefault(row["invocation"][1:], set()).add(row["brand"])
-        self.assertEqual(by_workflow["process-report"], {"claude", "codex"})
+        for name in CROSS_BRAND_PAIRS:
+            self.assertEqual(by_workflow[name], {"claude", "codex"}, name)
         self.assertEqual(
             sorted(name for name, brands in by_workflow.items() if len(brands) > 1),
-            ["process-report"],
+            sorted(CROSS_BRAND_PAIRS),
         )
 
-    def test_claude_epic_disposition_routes_to_packaged_codex_workflows(self):
+    def test_each_cross_brand_pair_declares_its_two_actual_files(self):
+        # The set comparison above proves two brands claim each name; this
+        # proves the declared rows are the files CROSS_BRAND_PAIRS drives every
+        # per-pair assertion in this module against.
+        for name, paths in sorted(CROSS_BRAND_PAIRS.items()):
+            with self.subTest(workflow=name):
+                declared_for_name = sorted(
+                    path
+                    for path, row in self.declared.items()
+                    if row["invocation"][1:] == name
+                )
+                self.assertEqual(declared_for_name, sorted(paths))
+
+    def test_claude_epic_disposition_routes_to_packaged_claude_workflows(self):
+        # Inverted by issue #241. While §3.5 declared the design pair
+        # Codex-only, /process-report had to hand an Epic disposition to
+        # Codex's $design-epic; now that the Claude commands exist, naming the
+        # Codex sigil would route a Claude session out of its own bundle.
         path = "claude-plugin/plugins/kanban/commands/process-report.md"
         text = (REPO_ROOT / path).read_text(encoding="utf-8")
         for workflow in ("design-epic", "process-design-doc"):
-            self.assertNotIn(
+            self.assertIn(
                 f"/{workflow}",
                 text,
-                f"{path}: {workflow} is Codex-only; do not name a nonexistent "
-                "Claude slash command",
+                f"{path}: Epic dispositions must hand off to the packaged "
+                f"Claude /{workflow} command",
             )
-            self.assertIn(
+            self.assertNotIn(
                 f"${workflow}",
                 text,
-                f"{path}: Epic dispositions must hand off to the packaged Codex "
-                f"${workflow} workflow while the §3.5 asymmetry remains",
+                f"{path}: /{workflow} is packaged for Claude; do not route an "
+                "Epic disposition to the Codex sigil",
             )
 
 
@@ -617,18 +693,18 @@ class DesignDecisionAuthorityTests(unittest.TestCase):
                     mutated = asset.replace(clause, "")
                     self.assertEqual(missing_design_authority_clauses(mutated), [key])
 
-    def test_design_epic_no_longer_defers_lesser_uncertainty(self):
-        text = canonical(
-            self.asset_text("codex-plugin/plugins/kanban/skills/design-epic/SKILL.md")
-        )
-        for phrase in DESIGN_EPIC_FORBIDDEN_PROSE:
-            self.assertNotIn(
-                phrase,
-                text,
-                "$design-epic must not instruct leaving an ambiguity in the "
-                "document in place of asking; it contradicts the "
-                f"ambiguity-is-never-minor clause (§5.1): {phrase!r}",
-            )
+    def test_no_design_epic_variant_defers_lesser_uncertainty(self):
+        for path in DESIGN_EPIC_ASSETS:
+            text = canonical(self.asset_text(path))
+            for phrase in DESIGN_EPIC_FORBIDDEN_PROSE:
+                with self.subTest(path=path, phrase=phrase):
+                    self.assertNotIn(
+                        phrase,
+                        text,
+                        f"{path} must not instruct leaving an ambiguity in the "
+                        "document in place of asking; it contradicts the "
+                        f"ambiguity-is-never-minor clause (§5.1): {phrase!r}",
+                    )
 
 
 class OwningRepositoryTests(unittest.TestCase):
@@ -720,8 +796,8 @@ class OwningRepositoryTests(unittest.TestCase):
                     )
 
     def test_every_gh_invocation_binds_to_the_resolved_owner(self):
-        # Requirement 4: the three processing assets carry the eight tracker
-        # operations this issue scopes; the two capture assets carry only the
+        # Requirement 4: the four processing assets carry the ten tracker
+        # operations this issue scopes; the three capture assets carry only the
         # ownership block's own `gh repo view` calls, bound by $DOC_ROOT's own
         # remote. Both shapes are checked the same way, so a tracker mutation
         # added to a capture asset later cannot arrive unscoped.
@@ -735,7 +811,7 @@ class OwningRepositoryTests(unittest.TestCase):
                     f"directory rather than to $DOC_REPO: {unbound}",
                 )
 
-    def test_the_eight_scoped_tracker_operations_are_all_present(self):
+    def test_the_ten_scoped_tracker_operations_are_all_present(self):
         # Pins what the scan above actually recovers. Without this, deleting
         # every `gh issue` command would leave the check with nothing to find
         # and still pass.
@@ -747,6 +823,8 @@ class OwningRepositoryTests(unittest.TestCase):
         self.assertEqual(
             recovered,
             {
+                "claude-plugin/plugins/kanban/commands/design-epic.md": 0,
+                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 2,
                 "claude-plugin/plugins/kanban/commands/process-report.md": 3,
                 "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
@@ -758,11 +836,7 @@ class OwningRepositoryTests(unittest.TestCase):
     def test_reverting_a_tracker_command_to_an_unscoped_form_is_reported(self):
         # The negative case issue #278's acceptance names: drop the -R from one
         # tracker operation and the scan names that operation.
-        for path in (
-            "claude-plugin/plugins/kanban/commands/process-report.md",
-            "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
-            "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
-        ):
+        for path in DISPOSITION_APPLYING_ASSETS:
             with self.subTest(path=path):
                 reverted = self.asset_text(path).replace(
                     'gh issue create -R "$DOC_REPO" --body-file',
@@ -849,15 +923,12 @@ class SharedStatusVocabularyTests(unittest.TestCase):
             )
 
     def test_the_capture_workflows_never_write_a_checked_box(self):
-        # §4: $design-epic and $draft-report apply no disposition, so a checked
-        # box in a document they just produced would be a bug. This is the
-        # other half of the assertion above, not decoration: without it, the
-        # checked form could quietly spread to the workflows that must not
-        # write one.
-        for path in (
-            "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
-            "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
-        ):
+        # §4: the design-capture pair and $draft-report apply no disposition,
+        # so a checked box in a document they just produced would be a bug.
+        # This is the other half of the assertion above, not decoration:
+        # without it, the checked form could quietly spread to the workflows
+        # that must not write one.
+        for path in CAPTURE_ASSETS:
             text = (REPO_ROOT / path).read_text(encoding="utf-8")
             self.assertNotIn(
                 CHECKED_FORM,
@@ -865,6 +936,17 @@ class SharedStatusVocabularyTests(unittest.TestCase):
                 f"{path} creates a document rather than processing one; it must "
                 "not write a terminal checklist entry",
             )
+
+    def test_every_declared_asset_is_a_capture_or_disposition_asset(self):
+        # The two lists above partition the declared set. Without this, an
+        # asset added to neither would be checked by neither rule.
+        self.assertEqual(
+            set(CAPTURE_ASSETS) | set(DISPOSITION_APPLYING_ASSETS),
+            EXPECTED_DECLARED_PATHS,
+        )
+        self.assertEqual(
+            set(CAPTURE_ASSETS) & set(DISPOSITION_APPLYING_ASSETS), set()
+        )
 
     def test_both_process_report_variants_state_the_same_shared_surface(self):
         variants = {
@@ -887,6 +969,25 @@ class SharedStatusVocabularyTests(unittest.TestCase):
             "the surface docs/document-workflow-contract.md §4-§5 pins:\n"
             + "\n".join(differences),
         )
+
+    def test_every_cross_brand_pair_states_the_same_marker_vocabulary(self):
+        # §4 after issue #241: the portability surface is per pair, not per
+        # workflow name, so the design pair is held to it exactly as
+        # process-report already was.
+        differences = []
+        for name, paths in sorted(CROSS_BRAND_PAIRS.items()):
+            for path in paths:
+                text = (REPO_ROOT / path).read_text(encoding="utf-8")
+                for literal in STATUS_MARKER_LITERALS:
+                    if literal not in text:
+                        differences.append(
+                            f"{name}: {path} missing shared literal {literal!r}"
+                        )
+                if UNCHECKED_FORM not in text:
+                    differences.append(
+                        f"{name}: {path} missing shared form {UNCHECKED_FORM!r}"
+                    )
+        self.assertEqual(differences, [], "\n".join(differences))
 
 
 if __name__ == "__main__":

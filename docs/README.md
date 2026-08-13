@@ -5,6 +5,6 @@
 - [PR drainer](pr-drainer.md) — installation, configuration, operation, and logs.
 - [Agent-workflow contract](agent-workflow-contract.md) — every external workflow Kanban's AI actions depend on, ownership, and the portable-install policy.
 - [Drafting and issue-review workflow contract](drafting-workflow-contract.md) — the packaged issue-drafting and canonical issue-review workflows, their responsibilities, and their boundaries.
-- [Design and report document workflow contract](document-workflow-contract.md) — the packaged design-document and findings-report workflows, their shared status vocabulary, and the declared Codex-only gap.
+- [Design and report document workflow contract](document-workflow-contract.md) — the packaged design-document and findings-report workflows, their shared status vocabulary, the three cross-brand pairs, and the one remaining declared Codex-only gap.
 - [Development](development.md) — source layout, build commands, and tests.
 - [Design and implementation notes](design.md) — detailed behavior and engineering decisions.

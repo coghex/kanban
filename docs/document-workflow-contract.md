@@ -25,8 +25,8 @@ Scope boundaries:
   in [drafting-workflow-contract.md](drafting-workflow-contract.md); nothing
   here redeclares them.
 - Each brand's asset is vendored as that brand's own text. Brand-specific
-  wording may differ, and the two `process-report` variants are deliberately
-  not reconciled into one file. What may not differ is the shared status
+  wording may differ, and the three cross-brand pairs are deliberately not
+  reconciled into one file each. What may not differ is the shared status
   vocabulary in §4 and the processing boundaries in §5.
 
 ## 2. Declared assets
@@ -36,6 +36,8 @@ Machine-readable; parsed verbatim by
 `brand | invocation | path`.
 
 ```text
+claude | /design-epic | claude-plugin/plugins/kanban/commands/design-epic.md
+claude | /process-design-doc | claude-plugin/plugins/kanban/commands/process-design-doc.md
 claude | /process-report | claude-plugin/plugins/kanban/commands/process-report.md
 codex | $design-epic | codex-plugin/plugins/kanban/skills/design-epic/SKILL.md
 codex | $process-design-doc | codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md
@@ -51,31 +53,33 @@ does a row whose path is missing from the tracked tree.
 
 | Workflow | Brands | Produces | Creates tracker items? | Durable cursor |
 | --- | --- | --- | --- | --- |
-| `$design-epic` | **Codex only** | One `*_design.md` document | No — never | The document's `Design state` and processing ledger |
-| `$process-design-doc` | **Codex only** | One approved epic or child disposition per run | Yes, after per-artifact signoff | The design document's `## Processing status` ledger |
+| `/design-epic`, `$design-epic` | Claude and Codex | One `*_design.md` document | No — never | The document's `Design state` and processing ledger |
+| `/process-design-doc`, `$process-design-doc` | Claude and Codex | One approved epic or child disposition per run | Yes, after per-artifact signoff | The design document's `## Processing status` ledger |
 | `$draft-report` | **Codex only** | One `*_findings.md` report | No — never | The report it creates, with every box unchecked |
 | `/process-report`, `$process-report` | Claude and Codex | One approved finding disposition per run | Yes, after per-finding signoff | The report's status checklist and heading markers |
 
-### 3.1 Design capture: `$design-epic`
+### 3.1 Design capture: `/design-epic` and `$design-epic`
 
-`$design-epic` maintains one Markdown document as the source of truth for an
+`/design-epic` and `$design-epic` maintain one Markdown document as the source
+of truth for an
 epic-sized design: verified current state, decisions with stable `D-N`
 identifiers, open questions with stable `Q-N` identifiers, and
-dependency-ordered delivery slices. It modifies only that document. It creates
-no GitHub issues, labels, or comments, and it drafts no final issue bodies —
-tracker work belongs to `$process-design-doc`.
+dependency-ordered delivery slices. Each modifies only that document. Neither
+creates GitHub issues, labels, or comments, and neither drafts a final issue
+body — tracker work belongs to `/process-design-doc` and `$process-design-doc`.
 
 The document is only handed on once the user explicitly says so and the
 readiness conditions hold, at which point its state becomes exactly
 `Design state: ready for issue processing`.
 
-### 3.2 Design processing: `$process-design-doc`
+### 3.2 Design processing: `/process-design-doc` and `$process-design-doc`
 
-`$process-design-doc` turns a ready design document into tracker artifacts, one
+`/process-design-doc` and `$process-design-doc` turn a ready design document
+into tracker artifacts, one
 per invocation, using the document as the durable cursor: the epic first, then
-one dependency-ready child. It requires the ready state, and returns a document
-whose ledger and delivery plan disagree to `$design-epic` rather than guessing
-which representation wins.
+one dependency-ready child. Each requires the ready state, and returns a
+document whose ledger and delivery plan disagree to its own brand's
+design-capture workflow rather than guessing which representation wins.
 
 ### 3.3 Report drafting: `$draft-report`
 
@@ -93,32 +97,46 @@ Each verifies the finding against the current repository, deduplicates it
 against the tracker, recommends exactly one disposition, and applies it only
 after explicit approval.
 
-These two are the only cross-brand pair in this contract, so §4's status
-vocabulary is a hard compatibility surface between them: a report started by
-one brand must be resumable by the other without translation.
+These two are one of the three cross-brand pairs in this contract, so §4's
+status vocabulary is a hard compatibility surface between them: a report started
+by one brand must be resumable by the other without translation.
 
-While the Codex-only asymmetry in §3.5 remains, an Epic disposition reached
-through `/process-report` hands the user to Codex's `$design-epic` and
-`$process-design-doc` workflows. The tracked Claude command must not name
-nonexistent Claude counterparts or depend on owner-maintained personal copies.
+An Epic disposition reached through `/process-report` hands the user to the
+Claude `/design-epic` and `/process-design-doc` commands, and one reached
+through `$process-report` to Codex's `$design-epic` and `$process-design-doc`.
+Neither variant may name a nonexistent counterpart in the other brand's sigil or
+depend on owner-maintained personal copies.
 
-### 3.5 Declared Codex-only asymmetry
+### 3.5 Declared Codex-only asymmetry, partially closed
 
-`$design-epic`, `$process-design-doc`, and `$draft-report` are Codex-only. No
-Claude counterpart exists, and that is a declared gap rather than an oversight:
-authoring one would be new behavior that no pinned source defines, which is
-precisely what the SHA-pinned vendoring model of issue #118 refused to do. The
-Claude plugin must not grow one under this contract until a pinned source
-exists to vendor.
+`$draft-report` is the sole remaining Codex-only workflow. No Claude
+counterpart to `$draft-report` exists, and that is a declared gap rather than an
+oversight: authoring one would be new behavior that no pinned source defines,
+which is precisely what the SHA-pinned vendoring model of issue #118 refused to
+do. The Claude plugin must not grow one under this contract until a pinned
+source exists to vendor.
 
-The asymmetry runs opposite to the Claude-only `/draft-issues` boundary in
+`$design-epic` and `$process-design-doc` were Codex-only under the same rule
+until issue #239 landed their decision-authority guardrails in the tracked Codex
+skills. That reviewed, tracked text — `design-epic/SKILL.md` and
+`process-design-doc/SKILL.md` under `codex-plugin/plugins/kanban/skills/` — is
+the pinned source `/design-epic` and `/process-design-doc` were transposed
+from, so the clearing condition this section states was satisfied for the design
+pair and for it alone. The Claude commands are that source's text under Claude
+command frontmatter, `$ARGUMENTS` plumbing, Claude tool names, and Claude
+origin markers; nothing else about them is new behavior.
+
+The remaining asymmetry runs opposite to the Claude-only `/draft-issues`
+boundary in
 [drafting-workflow-contract.md §3.2](drafting-workflow-contract.md#32-claude-only-breadth-draft-issues),
 and is recorded the same way rather than closed.
 
-### 3.6 The epic planner: `$design-epic` with `$process-design-doc`
+### 3.6 The epic planner: the design pair with the processing pair
 
-`$design-epic` produces a durable design document and creates no tracker items;
-`$process-design-doc` — not `$design-epic` — is what later turns an approved
+`/design-epic` and `$design-epic` produce a durable design document and create
+no tracker items;
+`/process-design-doc` and `$process-design-doc` — not the capture pair — are
+what later turn an approved
 slice into an issue. Together they are the arc-decomposition pipeline: an
 `epic` asset that would decompose a user-supplied arc into issues directly
 remains unpackaged in both plugins per
@@ -143,18 +161,20 @@ and two sessions:
 The at-a-glance index is a Markdown task list, one line per entry, using
 exactly `- [x]` for a terminal disposition and `- [ ]` for anything still
 outstanding. `[deferred]` and unmarked entries stay `- [ ]`, so the count of
-unchecked boxes is the count of entries a document still owes. `$design-epic`
-and `$draft-report` write only the unchecked form: neither applies a
-disposition, so a checked box in a document they just produced would be a bug.
+unchecked boxes is the count of entries a document still owes. `/design-epic`,
+`$design-epic`, and `$draft-report` write only the unchecked form: none of them
+applies a disposition, so a checked box in a document they just produced would
+be a bug.
 
 `[no-issue]` and `[deferred]` are not interchangeable: the first closes an
 entry, the second keeps it open behind a stated precondition. "Needs more
 thought", "low priority", and "revisit later" are not preconditions.
 
-`/process-report` and `$process-report` must state these literals identically.
-That is what makes a report portable between the brands, and it is the part of
-the two variants' otherwise-permitted textual divergence that this contract
-does not allow.
+Every cross-brand pair must state these literals identically — `/process-report`
+with `$process-report`, `/design-epic` with `$design-epic`, and
+`/process-design-doc` with `$process-design-doc`. That is what makes a report or
+a design document portable between the brands, and it is the part of each pair's
+otherwise-permitted textual divergence that this contract does not allow.
 
 ## 5. One artifact per invocation, and the approval stop
 
@@ -175,9 +195,10 @@ spawn unattended.
 
 ### 5.1 Decision authority in the design workflows
 
-`$design-epic` and `$process-design-doc` carry a third boundary the report
+`/design-epic`, `$design-epic`, `/process-design-doc`, and
+`$process-design-doc` carry a third boundary the report
 workflows do not, because a design conversation settles behavior long before
-there is an artifact to approve: the user owns every design decision. Both
+there is an artifact to approve: the user owns every design decision. All four
 assets state that the session is human-led, that agent-authored directions are
 Proposals and never Decisions, that a `D-N` decision entry changes only on
 explicit user approval of that exact choice, that a serious decision gets its
@@ -221,7 +242,7 @@ parses §2 and fails if:
   not declare;
 - a declared row's brand, invocation sigil, or workflow name disagrees with the
   plugin and file the row points at;
-- this document stops stating the Codex-only asymmetry (§3.5), the
+- this document stops stating the remaining Codex-only asymmetry (§3.5), the
   design-pipeline epic-planner boundary (§3.6), or the Haskell
   invocation-parity exclusion (§1);
 - this document or a declared asset drops one of the exact `[#N]`,
@@ -232,8 +253,11 @@ parses §2 and fails if:
   stop-for-explicit-approval boundary of §5, or either `process-report` variant
   stops stating both;
 - this document stops stating the design-workflow decision-authority boundary
-  (§5.1), or `$design-epic` or `$process-design-doc` drops one of the authority
-  clauses that boundary summarizes — the design pair's counterpart to the §5
+  (§5.1), or any of the four design assets — `/design-epic`, `$design-epic`,
+  `/process-design-doc`, `$process-design-doc` — drops one of the authority
+  clauses that boundary summarizes, or `/design-epic` or `$design-epic`
+  reintroduces the permissive leave-lesser-uncertainty instruction issue #239
+  removed; this is the design pair's counterpart to the §5
   check above, and the reason §5.1's semantics cannot regress in the assets
   while the document still describes them;
 - a declared asset drops one of the ownership-resolution clauses of §8, or
@@ -242,9 +266,10 @@ parses §2 and fails if:
   separation of repository routing from the publication lane, or its statement
   that `docs/agent-workflow-contract.md` §7 classifies Kanban paths only;
 - a `gh` invocation in any declared asset stops binding to the resolved owner —
-  the check that keeps the eight tracker operations in `/process-report`,
-  `$process-report`, and `$process-design-doc` from reverting to the unscoped
-  form that binds them to the shell's current directory.
+  the check that keeps the ten tracker operations in `/process-report`,
+  `$process-report`, `/process-design-doc`, and `$process-design-doc` from
+  reverting to the unscoped form that binds them to the shell's current
+  directory.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -255,7 +280,7 @@ by `tools/test_agent_workflow_contract.py`.
 
 ## 8. Owning repository and publication target
 
-Every declared asset writes a durable document and, for the three processing
+Every declared asset writes a durable document and, for the four processing
 assets, mutates a tracker. Neither action is reversible in the wrong
 repository: moving a Markdown file afterward does not undo an issue already
 filed somewhere it does not belong. So each asset resolves an explicit owner

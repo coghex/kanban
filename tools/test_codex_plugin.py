@@ -22,8 +22,9 @@ EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
 own Haskell code spawns by name (the five above). Both later sets are user- or
 daemon-invoked and are deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
-by design, and three of the four document workflows are Codex-only in the
-opposite direction. See docs/drafting-workflow-contract.md and
+by design, and one of the four document workflows — $draft-report — is
+Codex-only in the opposite direction, since issue #241 gave the design pair
+Claude counterparts. See docs/drafting-workflow-contract.md and
 docs/document-workflow-contract.md. The new skills are still subject to every
 structural policy this module enforces: frontmatter name matching, forbidden
 configuration keys, and no personal paths.
@@ -113,9 +114,10 @@ HASKELL_PARITY_SKILL_NAMES = {"solve", "pr-review", "pr-rereview", "pr-revise", 
 DRAFTING_SKILL_NAMES = {"issue", "autoissue", "issue-review", "issue-rereview"}
 
 # The design and report document workflows vendored by issue #229. Also user-
-# invoked and excluded from Haskell name parity. Three of the four are
-# Codex-only by declaration (docs/document-workflow-contract.md §3.5); only
-# process-report has a Claude counterpart.
+# invoked and excluded from Haskell name parity. One of the four —
+# draft-report — is Codex-only by declaration
+# (docs/document-workflow-contract.md §3.5); the other three are cross-brand
+# pairs since issue #241 transposed the design pair into the Claude bundle.
 DOCUMENT_SKILL_NAMES = {
     "design-epic",
     "process-design-doc",
