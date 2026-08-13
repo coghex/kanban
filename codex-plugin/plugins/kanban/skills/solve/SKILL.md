@@ -123,8 +123,18 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 ## Stop Condition
 
-Do not review, label, merge, or finalize the PR. End with exactly:
+Do not review, label, merge, or finalize the PR. That prohibition is absolute
+and holds however this workflow was invoked: the review is the opposite brand's
+to perform, and this session is the pull request's own origin brand.
+
+End this workflow with exactly:
 
 ```text
 PR #<number> - <one-sentence summary>
 ```
+
+That line ends *this workflow*. It does not end a larger run that delegated to
+it: a caller which invoked this workflow as one of its own steps — an
+auto-solve loop that must still obtain a review, for instance — reads the line
+as the handoff back and continues with its remaining steps. Emit it and stop
+only when nothing delegated to this workflow.
