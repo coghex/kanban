@@ -484,7 +484,9 @@ intact rather than clobbered, and is examined only afterwards. Anything that is
 not the baseline is preserved in the object database, put back, and the run
 fails closed. The new content is then put in place with a primitive that
 refuses rather than overwrites, so a file created while the path was briefly
-empty wins and is left alone. The document is absent for that instant; a reader
+empty wins and is left alone — and putting a captured document *back* follows
+the same rule, because a recovery that overwrites is still a write destroyed,
+whichever step performs it. The document is absent for that instant; a reader
 seeing no file is the price of never destroying somebody else's write. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the

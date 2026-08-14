@@ -467,6 +467,21 @@ def link_into_place(scratch: Path, target: Path) -> None:
     os.link(scratch, target)
 
 
+def put_back(aside: Path, target: Path) -> bool:
+    """Return the captured document to its path without overwriting anything.
+
+    `link` refuses when the path is occupied, which is the point: by the time a
+    recovery runs, another writer may already have created a file there, and
+    that file is newer than what is being put back. Restoring must never be the
+    step that destroys a write — the same rule the swap itself follows.
+    """
+    try:
+        link_into_place(aside, target)
+    except FileExistsError:
+        return False
+    return True
+
+
 def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
     """Replace the document, refusing if it is not the baseline — and never
     overwriting whatever is actually there.
@@ -521,13 +536,19 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         captured, _ = read_for_write(aside)
         if git_blob_hash(captured) != baseline:
             preserved = _preserve(root, captured)
-            os.rename(aside, target)
-            aside = None
+            restored = put_back(aside, target)
             raise PublishError(
                 "document-changed-before-write",
                 f"{document} was changed between its verification and the swap; "
-                "the change was put back and nothing was published",
+                + (
+                    "the change was put back and nothing was published"
+                    if restored
+                    else "another writer had already recreated the document, so "
+                    "that file was left in place and the captured change is "
+                    "recoverable from the object database; nothing was published"
+                ),
                 preserved_blob=preserved,
+                restored=restored,
             )
 
         try:

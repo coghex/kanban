@@ -502,6 +502,46 @@ class PublishTests(unittest.TestCase):
         self.assertIn("- replaced wholesale", target.read_text())
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
+    def test_a_file_created_during_the_recovery_is_left_alone(self):
+        # The recovery window: the captured edit is being put back when yet
+        # another writer creates the document. Putting back must not be the
+        # step that destroys a write, so the newer file wins and the captured
+        # edit stays recoverable from the object database.
+        original_rename = publisher.rename_aside
+        original_link = publisher.link_into_place
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def racing_rename(src, dst):
+            with open(src, "r+") as handle:
+                handle.seek(0)
+                handle.write("# UI\n\n- captured edit\n")
+                handle.truncate()
+            return original_rename(src, dst)
+
+        def racing_link(scratch, dest):
+            # Fires on the put-back: something has just recreated the document.
+            if not dest.exists():
+                dest.write_text("# UI\n\n- created during recovery\n")
+            return original_link(scratch, dest)
+
+        publisher.rename_aside = racing_rename
+        publisher.link_into_place = racing_link
+        self.addCleanup(setattr, publisher, "rename_aside", original_rename)
+        self.addCleanup(setattr, publisher, "link_into_place", original_link)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        self.assertFalse(detail["restored"])
+        # The newer write survives untouched...
+        self.assertIn("- created during recovery", target.read_text())
+        # ...and the captured edit is not lost.
+        self.assertIn(
+            "- captured edit",
+            run(["git", "cat-file", "-p", detail["preserved_blob"]], self.fx.docs),
+        )
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
     def test_a_file_recreated_during_the_swap_is_left_alone(self):
         # The remaining gap: the document is briefly absent between the capture
         # and the link. A writer creating a file there wins, because `link`
