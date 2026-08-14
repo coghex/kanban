@@ -672,6 +672,7 @@ PUB_RECONCILED=no
 [ "$PUB_PUBLISHED" = yes ] \
   && [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \
     = "$PUB_BLOB" ] \
+  && [ "$(git -C "$DOCS_WT" rev-parse ":${DOC_RELATIVE_PATH}")" = "$PUB_BLOB" ] \
   && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
   && PUB_RECONCILED=yes
 [ "$PUB_RECONCILED" = yes ] \
@@ -698,9 +699,13 @@ the next run's scan would then read the local copy as a pending mutation and
 republish it *over* the concurrent edit. That is why `PUB_PUBLISHED` is set by
 `merge-base --is-ancestor` and by nothing else.
 
-**The reconciliation is itself gated on the document still being the approved
-blob.** `checkout` overwrites the working copy and the index for that path, so
-running it unconditionally discards whatever the file holds — and after the push
+**The reconciliation is itself gated on the working tree and the index both
+still being the approved blob.** `checkout` overwrites the working copy and the
+index entry for that path, so both have to be checked: an index-only edit — what
+`git apply --cached` leaves behind — keeps the file itself at `$PUB_BLOB` while
+the staged content differs, so a working-tree check alone passes and the staged
+work is destroyed anyway. Running it unconditionally discards whatever either
+holds — and after the push
 gate that can be an edit somebody made outside this protocol, which was never
 approved and never published. The lock deliberately cannot exclude those, so the
 reconciliation re-checks the hash and simply does not run when it fails: the

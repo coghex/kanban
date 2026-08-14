@@ -240,6 +240,10 @@ CONTRACT_STATEMENTS = {
         "Reachability of that commit is the whole verdict, and whether the local "
         "file still equals the branch may form no part of it"
     ),
+    "publication-reconciliation-checks-the-index": (
+        "It runs only when the working tree and the index both still hold the "
+        "approved blob"
+    ),
     "publication-reconciliation-is-one-directional": (
         "the local document moves to the branch, never the branch to the local "
         "document"
@@ -384,8 +388,8 @@ PUBLICATION_CLAUSES = {
         "validating first and locking second leaves exactly that gap"
     ),
     "reconciliation-rechecks-the-blob": (
-        "the reconciliation is itself gated on the document still being the "
-        "approved blob"
+        "the reconciliation is itself gated on the working tree and the index "
+        "both still being the approved blob"
     ),
     "skipped-reconciliation-preserves-the-edit": (
         "the foreign edit is left exactly where it is, and the report says the "
@@ -668,6 +672,7 @@ PUBLICATION_SHELL_BINDINGS = (
     '[ "$PUB_PUBLISHED" = yes ] \\ '
     '&& [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \\ '
     '= "$PUB_BLOB" ] \\ '
+    '&& [ "$(git -C "$DOCS_WT" rev-parse ":${DOC_RELATIVE_PATH}")" = "$PUB_BLOB" ] \\ '
     '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
     '&& PUB_RECONCILED=yes',
     'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "$PUB_TIP"',

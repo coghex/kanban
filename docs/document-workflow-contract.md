@@ -583,10 +583,12 @@ without the approved mutation. Run ungated, the step that converges a successful
 publication is the step that destroys an unsuccessful one, and §9.4's
 recoverability guarantee would hold only when it was not needed.
 
-It runs only when the document is still the approved blob — `checkout` replaces
-the working copy and index for that path, so running it unconditionally would
-silently discard an outside-protocol edit that was never approved and never
-published. When the hash no longer matches, the publication is still reported as
+It runs only when the working tree **and the index** both still hold the
+approved blob. `checkout` replaces the working copy and the index entry for that
+path, so checking only the file leaves an index-only edit — what
+`git apply --cached` produces — passing the guard and being destroyed anyway;
+running it unconditionally would silently discard an outside-protocol edit that
+was never approved and never published. When the hash no longer matches, the publication is still reported as
 succeeded, the foreign edit is left untouched, and the report says the local
 copy was not reconciled and why.
 
