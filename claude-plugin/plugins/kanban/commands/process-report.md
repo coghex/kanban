@@ -420,20 +420,25 @@ from that checkout. Publication is one more step of the disposition that was
 already approved; it carries no second one, and it is never batched or deferred
 merely to reduce commit or push frequency.
 
-**Pin the publication tip once.** Every question below — is this document
-eligible, is the mutation isolated, did the publication land — has to be
-answered against one state of the publication branch. Fetching again between the
-answers reopens the very window each check exists to close, so fetch once and
-pin the tip:
+**One pin, established before the edit and never refreshed.** `$PUB_TIP` was
+pinned by the scan in step 1, and the document was validated equal to it there,
+before the disposition was applied. That pairing is the entire basis for
+publishing: the local blob is *that* tip's content plus this run's approved
+mutation, so it is a safe publication onto that tip and onto no other.
 
-```bash
-git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
-PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"
-```
+**Do not fetch again here, and do not re-pin.** A refreshed pin silently changes
+what the blob means. If the remote advanced this same document between the scan
+and now, the local blob is the *old* content plus the approved edit; building it
+onto the newer tip produces a one-path change that passes every gate below while
+erasing the concurrent edit — a lost update no check downstream can see, because
+the commit looks exactly like a correct publication. Keeping the original pin
+turns that case into a plain non-fast-forward rejection instead: `$PUB_COMMIT`'s
+parent is no longer the branch tip, so the push fails closed and the mutation
+stays recoverable.
 
-Everything below names `$PUB_TIP`, never `origin/$DOC_BRANCH`, until the
-verification step deliberately refetches to learn whether the push landed. A
-check answered against one tip and acted on against another is not a check.
+Everything below therefore names `$PUB_TIP`, never `origin/$DOC_BRANCH`, until
+the verification step deliberately refetches to learn whether the push landed —
+and that step reads the refreshed remote without ever reassigning the pin.
 
 **Eligibility.** Publishing at all requires the `$DOC_REPO`, `$DOC_BRANCH`, and
 `$DOC_ROOT` the ownership step resolved; an owner or publication branch that

@@ -438,12 +438,23 @@ exactly the state being published onto. **A publication branch that carries no
 such contract at all has no `coordination` lane**, so nothing is published
 there.
 
-**One pinned tip answers every question.** Eligibility, isolation, and the
-commit's own parent are three questions about one state of the publication
-branch, so the branch is fetched once, its tip pinned, and that pin used for all
-of them. Re-resolving the branch between them reopens exactly the window each
-check exists to close: a classification read from one tip and a commit built on
-another can publish a document the state it was built on never classified.
+**One pinned tip answers every question, and it is pinned before the edit.**
+Eligibility, isolation, and the commit's own parent are three questions about
+one state of the publication branch, so the branch is fetched once — before the
+disposition is applied, as part of establishing that the document equals that
+tip — and that single pin answers all of them. Re-resolving the branch afterwards
+reopens exactly the window each check exists to close.
+
+**Re-pinning after the edit is a lost update, not a refresh.** The local blob is
+the pinned tip's content plus this run's mutation, and that is what makes it
+publishable onto that tip and no other. If the branch advanced with its own
+change to the same document, a commit built from that blob onto the newer tip is
+a one-path change carrying the old content — it passes every gate while erasing
+the concurrent edit, and nothing downstream can distinguish it from a correct
+publication. Retaining the original pin makes the same situation a plain
+non-fast-forward rejection, because the candidate's parent is no longer the
+branch tip. The verification step reads the refreshed remote without reassigning
+the pin.
 
 **The classification is parsed and gated on, not merely displayed.** Printing §7
 for a human to read leaves the lane unenforced, and the isolation check cannot

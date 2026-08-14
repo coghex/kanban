@@ -214,7 +214,10 @@ CONTRACT_STATEMENTS = {
         "§7 is therefore read out of the fetched publication tip"
     ),
     "publication-one-pinned-tip": (
-        "One pinned tip answers every question"
+        "One pinned tip answers every question, and it is pinned before the edit"
+    ),
+    "publication-repinning-is-a-lost-update": (
+        "Re-pinning after the edit is a lost update, not a refresh"
     ),
     "publication-classification-is-parsed": (
         "The classification is parsed and gated on, not merely displayed"
@@ -330,11 +333,25 @@ PUBLICATION_CLAUSES = {
         "§7 is read out of $pub_tip — the exact state being published onto"
     ),
     "the-tip-is-pinned-once": (
-        "fetch once and pin the tip"
+        "one pin, established before the edit and never refreshed"
+    ),
+    "never-refetch-in-the-publication-step": (
+        "do not fetch again here, and do not re-pin"
+    ),
+    "a-refreshed-pin-erases-a-concurrent-edit": (
+        "building it onto the newer tip produces a one-path change that passes "
+        "every gate below while erasing the concurrent edit"
+    ),
+    "the-old-pin-turns-it-into-a-rejection": (
+        "keeping the original pin turns that case into a plain "
+        "non-fast-forward rejection instead"
     ),
     "everything-names-the-pin": (
-        "everything below names $pub_tip, never origin/$doc_branch, until the "
-        "verification step deliberately refetches"
+        "everything below therefore names $pub_tip, never origin/$doc_branch, "
+        "until the verification step deliberately refetches"
+    ),
+    "verification-never-reassigns-the-pin": (
+        "that step reads the refreshed remote without ever reassigning the pin"
     ),
     "the-gate-is-the-test-not-a-display": (
         "that pipeline is the eligibility test, not a display of §7 for a human "
