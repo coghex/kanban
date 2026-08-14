@@ -1244,6 +1244,41 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(owner["document"], "docs/ui-bugs.md")
         self.assertEqual(owner["repository"], "coghex/kanban")
 
+    def test_a_deletion_before_the_rename_is_not_turned_into_a_blank_file(self):
+        # Nothing was captured, so there is nothing to give back. Recreating
+        # the document from the placeholder would turn somebody's deletion into
+        # an unapproved empty file that looks like a document.
+        original = publisher.rename_aside
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def deleting_rename(src, dst):
+            src.unlink()          # removed by another process
+            return original(src, dst)  # ...so this fails
+
+        publisher.rename_aside = deleting_rename
+        self.addCleanup(setattr, publisher, "rename_aside", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-unwritable")
+        # Absent, not resurrected empty.
+        self.assertFalse(target.exists())
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_a_staged_ineligible_document_is_refused(self):
+        # The unstaged end state is promised on every outcome, not only the
+        # ones that could publish.
+        blob = run(
+            ["git", "hash-object", "-w", "--stdin"], self.fx.docs,
+            input="# Design\n\nstaged\n",
+        )
+        run(
+            ["git", "update-index", "--cacheinfo", f"100644,{blob},docs/design.md"],
+            self.fx.docs,
+        )
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
+        self.assertEqual(caught.exception.status, "document-staged")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

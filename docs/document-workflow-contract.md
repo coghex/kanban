@@ -458,7 +458,10 @@ callers name is shared state written before any lock is taken: two runs would
 overwrite one another's approved content, and one document would publish the
 other's. A document with a staged change is refused for the same reason — the
 end state the module promises is that the document path is left unstaged, and
-an index-only edit is invisible to a check that hashes the file alone.
+an index-only edit is invisible to a check that hashes the file alone. That
+refusal applies to every outcome, including those where no publication was
+possible: the state the module promises does not depend on whether it could
+publish.
 
 **The write root is ordinarily not the publication branch.** The assets write in
 the `docs-wip` linked worktree while publication targets the default branch, so

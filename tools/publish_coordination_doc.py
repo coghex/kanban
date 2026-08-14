@@ -597,6 +597,10 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
     target = root / document
     handle = scratch = aside = None
     captured, captured_mode = b"", 0o644
+    # Only a completed capture may be restored. Before it, `captured` is a
+    # placeholder rather than the document, and putting *that* back would
+    # invent a file rather than return one.
+    captured_ok = False
     try:
         existing, _ = read_for_write(target)
         if git_blob_hash(existing) != baseline:
@@ -626,6 +630,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         rename_aside(target, aside)
 
         captured, _ = read_for_write(aside)
+        captured_ok = True
         # Unconditionally, and before anything else can fail: from here the
         # document exists only as this temporary, so its content belongs
         # somewhere durable whatever happens next.
@@ -688,8 +693,14 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             # invariant on the way out rather than repeated at each raise,
             # because the failure that matters here is the one not enumerated.
             restored = True
-            if not target.exists():
+            if captured_ok and not target.exists():
                 restored = put_back(aside, target, captured, captured_mode)
+            elif not captured_ok:
+                # The rename never completed, so nothing was taken and there is
+                # nothing to give back. A missing document here was removed by
+                # somebody else; recreating it from the placeholder would turn
+                # their deletion into an unapproved empty file.
+                restored = True
             if restored:
                 _quietly(aside.unlink, missing_ok=True)
                 _quietly(aside.parent.rmdir)
@@ -1164,6 +1175,12 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
     if already is not None:
         return {"repository": owner, "publication_tip": tip} | already
 
+    # Before any outcome, including the ineligible one: the state this module
+    # promises to leave is "the document path is unstaged", and returning a
+    # normal result while it is staged contradicts that whether or not a
+    # publication was possible.
+    require_unstaged(root, document)
+
     if not publishable:
         # The disposition was still approved, and by now the caller has very
         # likely already mutated the tracker. Refusing to publish must not also
@@ -1173,7 +1190,6 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         preserved = _preserve(root, content)
         applied = False
         if baseline is not None and working_blob(root, document) == baseline:
-            require_unstaged(root, document)
             verify_and_write(root, document, baseline, content)
             applied = True
         return {
@@ -1193,8 +1209,6 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
                 "path": document,
             },
         }
-
-    require_unstaged(root, document)
 
     # A record that has not landed and is not being resumed is unresolved
     # work, not debris. Publishing fresh would overwrite the ref and lose the
