@@ -23,7 +23,18 @@ Every tracked file gets a stated release decision, and
 tracked file has none:
 
 * In, as a whole tree: `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
-  and `claude-plugin/` ship every tracked file they contain.
+  `claude-plugin/`, and `docs/media/` ship every tracked file they contain.
+  `docs/media/` is a tree rather than a list of files because the packaged
+  `README.md` shows `docs/media/board-wide.png` through a repository-relative
+  path: an asset that document names has to be in the archive or
+  `test_packaged_document_links_resolve_inside_the_archive` fails, and a
+  second asset added later inherits that decision instead of needing a new
+  one. Its regeneration procedure ships for the same reason the other
+  documents do -- a recipient holding only the unpacked tree can remake the
+  image from `test/golden/`, which the archive also carries -- and is named
+  in `RELEASE_DOCUMENTS` as well as covered by the tree, because that tuple
+  is what `docs/agent-workflow-contract.md` §7's `release-document` reason is
+  reconciled against.
 * In, individually: `README.md`, `CLAUDE.md` and its `AGENTS.md` alias --
   the one session contract under the two names Claude and Codex each read
   it by -- `LICENSE`, `kanban.cabal`, `config.toml.example`, the ten user
@@ -71,6 +82,7 @@ RELEASE_TREES = (
     "app",
     "claude-plugin",
     "codex-plugin",
+    "docs/media",
     "src",
     "test",
     "tools",
@@ -96,6 +108,11 @@ RELEASE_DOCUMENTS = (
     "docs/development.md",
     "docs/document-workflow-contract.md",
     "docs/drafting-workflow-contract.md",
+    # Also reached by the `docs/media` tree above. Named here as well because
+    # this is the tuple §7's `release-document` reason is reconciled against,
+    # so a media document's publication lane stays stated where the other
+    # documents' are.
+    "docs/media/README.md",
     "docs/pr-drainer.md",
     "docs/user-guide.md",
     "docs/workflow-setup.md",
