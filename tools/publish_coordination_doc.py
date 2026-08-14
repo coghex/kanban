@@ -243,7 +243,7 @@ def acquire_lock(root: Path, ref: str, tip: str) -> str:
     return commit
 
 
-def release_lock(root: Path, ref: str, value: str | None = None) -> None:
+def release_lock(root: Path, ref: str, value: str | None = None) -> bool:
     """Drop the lock, and only ever *this* run's lock.
 
     `update-ref -d <ref> <old>` deletes only while the ref still holds that
@@ -252,7 +252,10 @@ def release_lock(root: Path, ref: str, value: str | None = None) -> None:
     gone — and two publishers holding a lock each is the one thing it exists to
     prevent.
     """
-    git(["update-ref", "-d", ref] + ([value] if value else []), cwd=root, check=False)
+    proc = git(
+        ["update-ref", "-d", ref] + ([value] if value else []), cwd=root, check=False
+    )
+    return proc.returncode == 0
 
 
 def process_is_live(pid: int) -> bool:
@@ -841,7 +844,11 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     recorded = git(
         ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
     ).stdout.decode().strip()
-    git(["fetch", "origin", branch], cwd=resolved, check=False)
+    # Not check=False: the tip this returns becomes the caller's binding, and a
+    # binding minted from a stale cached ref is worse than no preflight at all
+    # — it reads as current and licenses a publication against a document that
+    # has already moved.
+    git(["fetch", "origin", branch], cwd=resolved)
     observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
     if not recorded:
         return {
@@ -936,7 +943,9 @@ def clear_record_or_report_divergence(
         )
 
 
-def resolve_landed_pending(root: Path, branch: str, pending: str, document: str):
+def resolve_landed_pending(
+    root: Path, branch: str, pending: str, document: str, approved_blob: str
+):
     """A recorded publication that already reached the branch, if there is one.
 
     This is asked before the baseline is compared, because a landed record is
@@ -952,6 +961,22 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
     if not recorded or not is_ancestor(root, recorded, f"origin/{branch}"):
         return None
     approved = blob_at(root, recorded, document)
+    if approved != approved_blob:
+        # Only the recorded mutation landed. Reporting this call as published
+        # would tell a caller that has already created its own tracker item
+        # that its disposition reached the branch, when nothing of it did —
+        # the same confusion the unlanded resumption path refuses.
+        raise PublishError(
+            "pending-differs-from-approved",
+            f"the publication recorded for {document} reached {branch}, but it is "
+            "not the content supplied now; reconcile that record before "
+            "publishing a different disposition",
+            recorded_blob=approved,
+            approved_blob=approved_blob,
+            remote_contains_commit=True,
+            local_commit=recorded,
+            pending_ref=pending,
+        )
     clear_record_or_report_divergence(
         root, document, pending, approved, branch, recorded
     )
@@ -1010,12 +1035,26 @@ def publish(
         pending = pending_ref(owner, document)
         held = acquire_lock(resolved, lock, tip)
         try:
-            return _publish_locked(
+            outcome = _publish_locked(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
             )
         finally:
-            release_lock(resolved, lock, held)
+            released = release_lock(resolved, lock, held)
+        if not released:
+            # A lock still standing blocks every later run for this document,
+            # so a publication that could not release its own says so rather
+            # than reporting plain success. Checked like every other reference
+            # this module removes.
+            raise PublishError(
+                "lock-retained",
+                f"{document} was published, but its publication lock could not be "
+                "released; later runs will be blocked until it is cleared",
+                remote_contains_commit=outcome.get("remote_contains_commit"),
+                local_commit=outcome.get("commit"),
+                lock_ref=lock,
+            )
+        return outcome
     except PublishError as error:
         try:
             states = failure_states(
@@ -1050,7 +1089,8 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
             "stays local until a pull request adds it and its classification"
         )
 
-    already = resolve_landed_pending(root, branch, pending, document)
+    approved_blob = git_blob_hash(content)
+    already = resolve_landed_pending(root, branch, pending, document, approved_blob)
     if already is not None:
         return {"repository": owner, "publication_tip": tip} | already
 
@@ -1095,7 +1135,6 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
     ).stdout.decode().strip()
 
     current = working_blob(root, document)
-    approved_blob = git_blob_hash(content)
     if current == baseline and outstanding:
         raise PublishError(
             "pending-unresolved",

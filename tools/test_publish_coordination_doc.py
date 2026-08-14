@@ -992,6 +992,69 @@ class PublishTests(unittest.TestCase):
         self.assertTrue(caught.exception.detail["remote_contains_commit"])
         self.assertIn("- two", self.fx.remote_content())
 
+    def test_a_lock_that_cannot_be_released_is_reported(self):
+        # A lock still standing blocks every later run for this document, so a
+        # publication that could not release its own must say so.
+        original = publisher.git
+
+        def failing_release(args, *, cwd, check=True, input_bytes=None):
+            if (
+                len(args) >= 3
+                and args[0] == "update-ref"
+                and args[1] == "-d"
+                and "publish-lock" in args[2]
+            ):
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_release
+        self.addCleanup(setattr, publisher, "git", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "lock-retained")
+        # The publication itself landed and is reported as having done so.
+        self.assertIn("- two", self.fx.remote_content())
+
+    def test_a_preflight_that_cannot_refresh_fails_rather_than_binding(self):
+        # The tip a preflight reports becomes the caller's binding. One minted
+        # from a stale cached ref reads as current and licenses a publication
+        # against a document that has already moved.
+        original = publisher.git
+
+        def failing_fetch(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["fetch", "origin"]:
+                raise publisher.PublishError("git-failed", "simulated fetch failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_fetch
+        self.addCleanup(setattr, publisher, "git", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            publisher.check_pending(
+                self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+            )
+        self.assertEqual(caught.exception.status, "git-failed")
+
+    def test_a_landed_record_refuses_a_different_disposition(self):
+        # Only the recorded mutation landed. Reporting this call as published
+        # would tell a caller that has already created its tracker item that
+        # its disposition reached the branch, when none of it did.
+        original = publisher.is_ancestor
+        publisher.is_ancestor = lambda root, commit, revision: False
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- first\n")
+        finally:
+            publisher.is_ancestor = original
+        self.assertIn("- first", self.fx.remote_content())
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- SECOND\n")
+        self.assertEqual(caught.exception.status, "pending-differs-from-approved")
+        self.assertTrue(caught.exception.detail["remote_contains_commit"])
+        self.assertNotIn("- SECOND", self.fx.remote_content())
+        # Supplying the recorded content still reconciles and clears it.
+        result = self.fx.publish("# UI\n\n- one\n- first\n")
+        self.assertEqual(result["resumed"], "already-landed")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

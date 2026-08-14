@@ -472,8 +472,12 @@ value it means to remove — two clearers can agree one owner is dead, and an
 unconditional delete would let the slower of them remove a live publisher's
 lock instead. Every reference it removes follows that rule, the pending record
 as much as the lock, and every removal is checked rather than assumed: a record
-still standing stops the next run's preflight, so a publication that could not
-clear one reports it. Every scratch path is minted rather than named, in the
+still standing stops the next run's preflight and a lock still standing blocks
+every later run, so a publication that could not remove either reports it
+instead of claiming plain success. A preflight that cannot refresh the remote
+fails rather than issuing a binding from a stale cached ref, which would read as
+current while licensing a publication against a document that had already
+moved. Every scratch path is minted rather than named, in the
 shared Git directory as much as the working tree, because a predictable path is
 somebody else's file waiting to be rewritten and deleted. It refuses when the
 document does not match the
@@ -516,7 +520,9 @@ publication. An unresolved record is outstanding work, and it is the only
 pointer to the mutation it names — so a run that supplies a *different*
 approved mutation while one is outstanding is refused rather than served the
 recorded one, which would report success while the disposition just approved
-never reached the document.
+never reached the document. That holds whether or not the record has since
+landed: a recorded publication reaching the branch says nothing about a
+different mutation supplied afterwards.
 
 **That refusal is askable before the tracker is touched, and the assets ask.**
 A processing run mutates the tracker before it publishes, so discovering an
