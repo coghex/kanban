@@ -183,14 +183,26 @@ DOCUMENT_SURFACE_FILES = [
 # sources' fences, so it inherits their command sets too. Pinned so a rewrite
 # that stops invoking anything cannot leave the completeness check with nothing
 # to discover.
+# The four processing assets invoke `python3` and the three drafting assets do
+# not: issue #315 moved the publication mechanism into
+# tools/publish_coordination_doc.py, which the processing assets call and the
+# drafting assets have no reason to, since they publish nothing.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/design-epic.md": {"git", "awk", "gh"},
-    "claude-plugin/plugins/kanban/commands/process-design-doc.md": {"git", "awk", "gh"},
-    "claude-plugin/plugins/kanban/commands/process-report.md": {"git", "awk", "gh", "rg"},
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md": {
+        "git", "awk", "gh", "python3",
+    },
+    "claude-plugin/plugins/kanban/commands/process-report.md": {
+        "git", "awk", "gh", "rg", "python3",
+    },
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk", "gh"},
-    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {"git", "awk", "gh"},
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {
+        "git", "awk", "gh", "python3",
+    },
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk", "gh"},
-    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {"git", "awk", "gh"},
+    "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {
+        "git", "awk", "gh", "python3",
+    },
 }
 
 # The repository's own tools (issue #149): the drainer, its installer and

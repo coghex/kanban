@@ -185,7 +185,177 @@ CONTRACT_STATEMENTS = {
     "section-7-classifies-kanban-only": (
         "it describes this repository and nothing else"
     ),
+    # Issue #237's policy and issue #315's division of labour, in §9. What is
+    # pinned here is the policy the assets must keep stating; the mechanism's
+    # behavior is executed by tools/test_publish_coordination_doc.py rather
+    # than asserted as prose, which is the whole point of the split.
+    "publication-assets-are-the-processing-ones": (
+        "The four processing assets — /process-report, $process-report, "
+        "/process-design-doc, and $process-design-doc — publish the approved "
+        "document mutation during the same invocation that applies it"
+    ),
+    "publication-drafting-assets-stay-local": (
+        "The three drafting assets — /design-epic, $design-epic, and "
+        "$draft-report — publish nothing at all"
+    ),
+    "publication-unmatched-fails-closed": (
+        "pr-atomic is the fail-closed default for an unmatched path"
+    ),
+    "publication-is-kanban-only": (
+        "coghex/kanban is the only repository with a coordination lane here"
+    ),
+    "publication-carries-one-mutation": (
+        "A publication carries the single approved mutation to the one eligible "
+        "document and nothing else"
+    ),
+    "publication-is-never-batched": (
+        "never batched or deferred merely to reduce commit or push frequency"
+    ),
+    "publication-mechanism-is-one-module": (
+        "tools/publish_coordination_doc.py is the whole mechanism, and the "
+        "declared assets invoke it rather than restating it"
+    ),
+    "publication-caller-does-not-write": (
+        "The caller renders the approved document; the module writes it"
+    ),
+    "publication-write-root-is-not-the-branch": (
+        "The write root is ordinarily not the publication branch"
+    ),
+    "publication-is-reported-on-reachability": (
+        "the module reports it only when the intended commit is reachable from "
+        "the remote publication branch"
+    ),
+    "publication-preserves-outside-work": (
+        "Nothing an outside process wrote is destroyed to make a publication "
+        "possible"
+    ),
+    "publication-failure-has-three-states": (
+        "reported with all three states rather than collapsed into one"
+    ),
 }
+
+# Issue #315: what each processing asset must state about publication. These
+# are policy and delegation, not mechanism — the sequence lives in
+# tools/publish_coordination_doc.py and is executed by its own tests.
+PUBLICATION_CLAUSES = {
+    "publishes-in-the-same-run": "publish the approved mutation in this same run",
+    "is-never-batched": (
+        "never batched or deferred merely to reduce commit or push frequency"
+    ),
+    "caller-does-not-write-the-document": (
+        "render the complete approved document and hand it over — do not write it "
+        "yourself"
+    ),
+    "helper-is-the-only-writer": (
+        "tools/publish_coordination_doc.py is the only writer of the document"
+    ),
+    "resolved-from-the-owning-write-root": (
+        "resolve the helper from the already-resolved $doc_root — the local "
+        "checkout of the owning repository"
+    ),
+    "never-a-personal-or-session-path": (
+        "never from the session's own checkout, a personal path, or an inline "
+        "fallback"
+    ),
+    "missing-helper-fails-closed": (
+        "a helper that cannot be resolved there fails closed"
+    ),
+    "does-not-reimplement-the-mechanism": (
+        "do not reimplement, precede, or compensate for any part of it"
+    ),
+    "checks-the-changed-line-summary": (
+        "an unintended rewrite of the rest of it changes the same single path a "
+        "correct publication does, and the summary is what makes the difference "
+        "visible"
+    ),
+    "reports-three-states-on-failure": (
+        "whether the edit exists locally and in which worktree and path, whether a "
+        "local publication commit exists and its id, and whether the remote "
+        "publication branch contains it"
+    ),
+    "never-publishes-by-hand": "never publish by hand instead",
+    "binds-content-to-the-tip": (
+        "always pass it: it is what binds this content to the document state it "
+        "was rendered from"
+    ),
+    "a-moved-tip-means-re-render": (
+        "a tip-moved result means re-reading the document and rendering the "
+        "disposition again rather than publishing what you have"
+    ),
+    "the-helper-mints-the-scratch-path": (
+        "never choose that path yourself"
+    ),
+    "a-shared-scratch-path-crosses-runs": (
+        "a run reads the other's approved content and publishes it under its own "
+        "document's name"
+    ),
+}
+
+# The one command the assets carry. Anything more would be mechanism.
+PUBLICATION_INVOCATION = (
+    'python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
+    '--repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\ '
+    '--path "$DOC_RELATIVE_PATH" --content "$APPROVED" \\ '
+    '--expected-tip "$PREFLIGHT_TIP"'
+)
+
+# The scratch path is minted by the helper, never named by the asset. An asset
+# that spells its own path reintroduces a cross-run collision the lock cannot
+# see, because the content is written before any lock is taken.
+# The binding has to be *extracted*, not merely mentioned: a `--expected-tip`
+# that expands to nothing disabled the guard entirely and survived a review
+# round, because the pin below only proved the flag was written down.
+# tools/test_publish_coordination_doc.py executes these lines for real.
+PUBLICATION_TIP_EXTRACTION = (
+    'PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \\ '
+    '\'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])\')"'
+)
+
+PUBLICATION_SCRATCH_INVOCATION = (
+    'APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--new-content-file)"'
+)
+
+# The mechanism the assets must never carry again. Each of these is a step
+# issue #315 moved into the module, and a step that took a review round to get
+# right when it lived here.
+PUBLICATION_FORBIDDEN_COMMANDS = (
+    "commit-tree",
+    "read-tree",
+    "update-index",
+    "update-ref",
+    "merge-base",
+    "hash-object",
+    "push origin",
+)
+
+BOOTSTRAP_CLAUSES = {
+    "novel-document-is-local": (
+        "a document this workflow newly creates is local and unpublished, and "
+        "this workflow never publishes one"
+    ),
+    "unmatched-is-pr-atomic": (
+        "an unmatched path is pr-atomic by the fail-closed default"
+    ),
+    "never-directly-publishable": (
+        "there is no moment at which a novel document is directly publishable"
+    ),
+    "first-publication-needs-a-pull-request": (
+        "its first publication requires a separate pull request that adds both "
+        "the document and its coordination classification"
+    ),
+    "only-then-may-processing-publish": (
+        "only after that pull request lands may a later processing run publish "
+        "direct-to-master mutations to it"
+    ),
+    "enrollment-is-out-of-scope": (
+        "creating that enrollment pull request is not this workflow's job either"
+    ),
+}
+
+PROCESSING_ASSETS = DISPOSITION_APPLYING_ASSETS
+DRAFTING_ASSETS = CAPTURE_ASSETS
 
 # Issue #278: the ownership-resolution step every declared asset states, as the
 # load-bearing prose fragments. Compared against canonical() output for the
@@ -458,6 +628,30 @@ def reintroduced_unscoped_roots(text):
     """The pre-§8 active-checkout resolutions `text` has brought back."""
     asset = normalized(text)
     return [form for form in OWNERSHIP_FORBIDDEN_SHELL if form in asset]
+
+
+def missing_publication_clauses(text):
+    """The §9 publication clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in PUBLICATION_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_bootstrap_clauses(text):
+    """The §9.1 novel-document clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in BOOTSTRAP_CLAUSES.items() if clause not in asset
+    )
+
+
+def reintroduced_mechanism(text):
+    """Publication plumbing that has come back into an asset. The mechanism is
+    tools/publish_coordination_doc.py's; an asset carrying any of it again is
+    the regression issue #315 exists to prevent."""
+    body = normalized(text)
+    return [command for command in PUBLICATION_FORBIDDEN_COMMANDS if command in body]
 
 
 def unbound_gh_invocations(text):
@@ -883,6 +1077,152 @@ class OwningRepositoryTests(unittest.TestCase):
                     ),
                     [key],
                 )
+
+
+class PublicationTests(unittest.TestCase):
+    """Issue #315. The four processing assets delegate the publication
+    mechanism to tools/publish_coordination_doc.py and keep only the policy
+    §9 states; the three drafting assets publish nothing at all.
+
+    What is asserted here is that division. The mechanism's behavior is not
+    prose to be pinned — tools/test_publish_coordination_doc.py executes it
+    against temporary repositories, which is precisely what asserting it as
+    prose could not do.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_the_two_asset_groups_partition_the_declared_set(self):
+        self.assertEqual(
+            set(PROCESSING_ASSETS) | set(DRAFTING_ASSETS), EXPECTED_DECLARED_PATHS
+        )
+        self.assertEqual(set(PROCESSING_ASSETS) & set(DRAFTING_ASSETS), set())
+
+    def test_every_processing_asset_states_the_publication_policy(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_publication_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states the publication policy "
+                    f"docs/document-workflow-contract.md §9 pins: {missing}",
+                )
+
+    def test_removing_a_publication_clause_from_an_asset_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in PUBLICATION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_publication_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_every_processing_asset_invokes_the_helper(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    PUBLICATION_INVOCATION,
+                    normalized(self.asset_text(path)),
+                    f"{path} must invoke the publication helper, resolved from the "
+                    "owning repository's own write root",
+                )
+
+    def test_every_processing_asset_lets_the_helper_mint_the_scratch_path(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    PUBLICATION_SCRATCH_INVOCATION,
+                    normalized(self.asset_text(path)),
+                    f"{path} must ask the helper for its content path rather than "
+                    "naming one, which would collide across runs",
+                )
+
+    def test_every_processing_asset_extracts_the_tip_binding(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                body = normalized(self.asset_text(path))
+                self.assertIn(
+                    PUBLICATION_TIP_EXTRACTION,
+                    body,
+                    f"{path} must extract publication_tip from the preflight; a "
+                    "binding that expands to nothing publishes with the "
+                    "moved-tip check switched off",
+                )
+                self.assertIn('[ -n "$PREFLIGHT_TIP" ]', body, path)
+
+    def test_no_asset_carries_the_publication_mechanism(self):
+        # The regression this issue exists to prevent: the sequence creeping
+        # back into the assets one command at a time.
+        for path in EXPECTED_DECLARED_PATHS:
+            with self.subTest(path=path):
+                reintroduced = reintroduced_mechanism(self.asset_text(path))
+                self.assertEqual(
+                    reintroduced,
+                    [],
+                    f"{path} carries publication plumbing that belongs to "
+                    f"tools/publish_coordination_doc.py: {reintroduced}",
+                )
+
+    def test_reintroducing_a_mechanism_command_is_reported(self):
+        for command in PUBLICATION_FORBIDDEN_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    reintroduced_mechanism(f"some prose then git {command} more"),
+                    [command],
+                )
+
+    def test_every_drafting_asset_states_the_novel_document_rule(self):
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_bootstrap_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states that its novel output remains local "
+                    f"until separately classified and published: {missing}",
+                )
+
+    def test_removing_the_bootstrap_rule_from_an_asset_is_reported(self):
+        for path in DRAFTING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in BOOTSTRAP_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_bootstrap_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_no_drafting_asset_invokes_the_helper(self):
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "publish_coordination_doc.py", self.asset_text(path), path
+                )
+
+    def test_the_contract_states_the_publication_policy(self):
+        document = normalized(contract_text())
+        for key in sorted(
+            key for key in CONTRACT_STATEMENTS if key.startswith("publication-")
+        ):
+            with self.subTest(statement=key):
+                self.assertIn(CONTRACT_STATEMENTS[key], document)
+                self.assertEqual(
+                    missing_contract_statements(
+                        document.replace(CONTRACT_STATEMENTS[key], "")
+                    ),
+                    [key],
+                )
+
+    def test_the_contract_names_the_module_that_owns_the_mechanism(self):
+        # §9.4's division of labour is the load-bearing part: a contract that
+        # described the sequence again would invite an asset to restate it.
+        self.assertIn(
+            "tools/publish_coordination_doc.py", contract_text()
+        )
+        self.assertIn(
+            "tools/test_publish_coordination_doc.py", contract_text()
+        )
 
 
 class SharedStatusVocabularyTests(unittest.TestCase):

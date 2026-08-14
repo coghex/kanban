@@ -269,7 +269,22 @@ parses §2 and fails if:
   the check that keeps the ten tracker operations in `/process-report`,
   `$process-report`, `/process-design-doc`, and `$process-design-doc` from
   reverting to the unscoped form that binds them to the shell's current
-  directory.
+  directory;
+- a processing asset loses its §9 publication step, or stops resolving
+  `tools/publish_coordination_doc.py` from the owning repository's own write
+  root;
+- a processing asset carries any part of the publication sequence itself rather
+  than invoking that module, or writes the document instead of handing over its
+  approved content;
+- a drafting asset stops stating that a novel document remains local until it is
+  separately classified and published;
+- this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
+  boundary, or its rule that publication is reported only on reachability.
+
+The mechanism's own behavior is not this module's subject:
+`tools/test_publish_coordination_doc.py` executes it against temporary
+repositories, and `tools/test_document_classification.py` owns §7's rows and the
+`coghex/kanban` `workflow.coordination_paths` example that mirrors them.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -352,3 +367,230 @@ resolving the owner.
 That §7 table is Kanban's own: it describes this repository and nothing else,
 so it can identify Kanban as an owner and can never identify a consuming
 repository's. A consuming repository resolves its documents through tier (a).
+
+## 9. Publishing an approved coordination mutation
+
+§8 answers *where* a document belongs. This section answers what happens to an
+approved mutation once it has been applied there. These workflows present their
+Markdown files as durable cursors a fresh session can resume, but a cursor that
+only ever exists in one checkout is resumable only from that checkout. So a
+document whose resolved path takes the `coordination` lane is published in the
+same run that mutates it, rather than left for a later manual commit.
+
+### 9.1 Which assets publish, and which do not
+
+- The four **processing** assets — `/process-report`, `$process-report`,
+  `/process-design-doc`, and `$process-design-doc` — publish the approved
+  document mutation during the same invocation that applies it, whenever the
+  document is eligible under §9.2. These are the assets that publish, and no
+  other asset does.
+- The three **drafting** assets — `/design-epic`, `$design-epic`, and
+  `$draft-report` — publish nothing at all. A document one of them newly
+  creates is local and unpublished. Its first publication requires a separate
+  pull request that adds both the document and its `coordination`
+  classification; only after that pull request lands may a later processing run
+  publish direct-to-`master` mutations to it. Automating that enrollment pull
+  request is outside this contract.
+
+The split follows from §7 rather than from convenience: the classifier's subject
+inventory is `git ls-files '*.md'`, so a document a drafting asset just created
+is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
+moment at which a novel document is directly publishable.
+
+### 9.2 Eligibility, and the fail-closed default
+
+[agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+is the authoritative classification, and eligibility means exactly one thing:
+the resolved document's repository-relative path is classified `coordination`
+there. **A `pr-atomic` path, and a path no row matches, is never published
+directly** — `pr-atomic` is the fail-closed default for an unmatched path, so an
+unrecognized document is left unpublished rather than guessed into the direct
+lane.
+
+§8's ownership resolution is a prerequisite, not a parallel check: a document
+whose owning repository or publication branch could not be verified fails closed
+and stays unpublished. §7 is Kanban's own statement about Kanban, so
+`coghex/kanban` is the only repository with a `coordination` lane here; a
+consuming repository that installed these plugins has none, and neither does a
+fork.
+
+### 9.3 What a publication may contain
+
+A publication carries the single approved mutation to the one eligible document
+and nothing else. It must not carry unrelated dirty paths, earlier `docs-wip`
+commits, unrelated changes already present in the same document, or a second
+disposition or document mutation. Publication happens after each individually
+approved disposition and is never batched or deferred merely to reduce commit or
+push frequency, so §5's one-artifact boundary is untouched: an approved
+publication is the same artifact's last step, never a licence to sweep in a
+second.
+
+### 9.4 The mechanism lives in one tested module
+
+`tools/publish_coordination_doc.py` is the whole mechanism, and the declared
+assets invoke it rather than restating it. That division is deliberate and is
+the subject of issue #315: the mechanism was first written as shell inside the
+four processing assets, where twelve review rounds found twenty defects — lost
+updates, checks that gated nothing, a variable used before it was assigned — and
+nothing in the tree could execute the sequence to find them. Two properties
+follow from it being a module:
+
+- the sequence is one process holding one lock, rather than a chain a reader can
+  reorder or half-apply; and
+- every safety property below is a test in
+  `tools/test_publish_coordination_doc.py` that performs a real publication
+  against a temporary repository, so a regression fails `build-test` rather than
+  waiting for a reviewer to notice.
+
+The assets keep the policy this document states — eligibility is required,
+approval precedes publication, one artifact per invocation, and what to report
+on each outcome — and hold no part of the sequence. This contract states the
+same division: what follows is the module's contract, not a transcript of its
+steps.
+
+**The caller renders the approved document; the module writes it.** A processing
+asset composes the complete approved content and hands it over, and never edits
+or stages the document itself. That is what makes an edit somebody else makes
+beside the run unpublishable rather than merely unlikely: the published bytes
+come from what the caller passed, never from the working tree. The module also
+mints the scratch path that content is handed over in, because a path the
+callers name is shared state written before any lock is taken: two runs would
+overwrite one another's approved content, and one document would publish the
+other's. A document with a staged change is refused for the same reason — the
+end state the module promises is that the document path is left unstaged, and
+an index-only edit is invisible to a check that hashes the file alone. That
+refusal applies to every outcome, including those where no publication was
+possible: the state the module promises does not depend on whether it could
+publish.
+
+**The write root is ordinarily not the publication branch.** The assets write in
+the `docs-wip` linked worktree while publication targets the default branch, so
+eligibility, the baseline, and resumption are all decided against the publication
+tip's own blob for the path, and the module never checks out, resets, switches,
+or advances any branch or HEAD in the write root.
+
+**A publication is guaranteed, not hoped for.** The module holds a per-document
+lock across the whole sequence — per document meaning exactly that, since a
+reference name two documents can share is a lock one of them takes from the
+other and a pending record either might resolve; because that name is a digest,
+the lock carries in its own payload the repository and document it holds, so a
+stale-lock sweep can still see what it is looking at. It releases and clears
+only by the exact value it means to remove — two clearers can agree one owner is dead, and an
+unconditional delete would let the slower of them remove a live publisher's
+lock instead. Every reference it removes follows that rule, the pending record
+as much as the lock, and every removal is checked rather than assumed: a record
+still standing stops the next run's preflight and a lock still standing blocks
+every later run, so a publication that could not remove either reports it
+instead of claiming plain success — and reports it on a failed publication as
+well, where the original failure keeps priority but the retained lock travels
+with it, since a run that was already going to be retried must not be blocked
+by a lock nobody was told about. A preflight that cannot refresh the remote
+fails rather than issuing a binding from a stale cached ref, which would read as
+current while licensing a publication against a document that had already
+moved. Every scratch path is minted rather than named, in the
+shared Git directory as much as the working tree, because a predictable path is
+somebody else's file waiting to be rewritten and deleted. It refuses when the
+document does not match the
+publication tip before it writes, checking that with the read and the write
+adjacent so no subprocess sits in the gap; refuses a commit that changes any
+path but the one; never force-pushes and never overwrites a concurrent advance;
+treats reachability from the remote branch as the sole definition of published;
+and records an unfinished publication so a later run resumes exactly it, or
+fails closed when the document or the branch has moved underneath it.
+
+**Nothing an outside process wrote is destroyed to make a publication
+possible.** There is no compare-and-swap for file content, and a check followed
+by a write can always be raced, so the module does not check and then write. It
+captures: the document is moved aside atomically, so whatever occupied that
+path — an in-place edit, a wholesale replacement — is carried out of the way
+intact rather than clobbered, and is examined only afterwards. Anything that is
+not the baseline is preserved in the object database, put back, and the run
+fails closed. The new content is then put in place with a primitive that
+refuses rather than overwrites, so a file created while the path was briefly
+empty wins and is left alone — and putting a captured document *back* follows
+the same rule, because a recovery that overwrites is still a write destroyed,
+whichever step performs it. The document is absent for that instant; a reader
+seeing no file is the price of never destroying somebody else's write.
+
+**Nothing the module does can leave the document deleted.** For the length of
+that instant the captured copy is the only one, so its content reaches the
+object database before anything else can fail, and every way out of the swap —
+including failures the code did not anticipate — puts the document back before
+dropping that copy. A restoration never raises and never overwrites: it must
+not replace the error that caused it, and it must not become the write that
+destroys another — including in its own fallbacks, which recreate the document
+exclusively rather than renaming over whatever is there. Where it cannot restore, the captured file is kept rather
+than removed, and its path travels with the failure: a file kept somewhere
+nobody is told about is only marginally better than one deleted. Content it declines to publish is written to the object database first,
+so an edit made outside this protocol is recoverable rather than lost. A
+recorded publication that already reached the branch is not cleared while the
+write root has diverged from it — checked at the moment of clearing rather than
+earlier, and identically however the publication got there, freshly or by
+resumption — and a record that has not landed is not overwritten by a fresh
+publication. An unresolved record is outstanding work, and it is the only
+pointer to the mutation it names — so a run that supplies a *different*
+approved mutation while one is outstanding is refused rather than served the
+recorded one, which would report success while the disposition just approved
+never reached the document. That holds whether or not the record has since
+landed: a recorded publication reaching the branch says nothing about a
+different mutation supplied afterwards.
+
+**That refusal is askable before the tracker is touched, and the assets ask.**
+A processing run mutates the tracker before it publishes, so discovering an
+outstanding record at publication time is discovering it after a second issue
+already exists for a disposition the document will never receive. The check is
+read-only, takes no lock, and is the first step of applying a disposition
+rather than the last.
+
+**Approved content is bound to the document state it was rendered from.** That
+check cannot hold a lock across the user's approval, so two runs can pass it at
+the same moment, each create a tracker item, and each render a whole-file image
+of the same document. Whichever publishes second would then overwrite the
+first's disposition — invisibly, because it changes exactly the one path a
+correct publication changes. So the publication tip the run was rendered
+against travels with the content, and a branch that has moved since refuses the
+publication and asks for the disposition to be rendered again.
+
+**A binding that is absent is a failure, not a waived check.** Publication
+requires it, and an empty one is refused rather than treated as "no tip to
+compare" — otherwise a caller that never managed to extract it would publish
+with the guard silently switched off, which is indistinguishable from having no
+guard at all. The assets are held to extracting it for real rather than to
+mentioning the flag, because a binding that expanded to nothing is exactly the
+defect this rule exists to have caught.
+
+### 9.5 What "published" means, and the three-state failure report
+
+A run may describe a document as published only when the module reports it, and
+the module reports it only when the intended commit is reachable from the remote
+publication branch. A push that appeared to succeed is not that verification.
+
+**Every** other outcome is an unpublished failure, reported with all three
+states rather than collapsed into one — including the ones the module never
+modelled. A caller branches on the result, so a traceback where a result
+belongs leaves it with nothing to report and no way to learn what became of its
+document — and being structured is not enough on its own: an unmodelled failure
+can happen after the document already holds the approved bytes, so the states
+are collected against the resolved write root and say where that edit is,
+rather than reporting it as unknown. Every failure that has a candidate commit
+names it in the same field, whichever step produced it; and cleanup, which runs on the way out with a failure often already
+propagating, may never raise at all — nor may the reporting that accompanies
+it, whose own inputs must be defined on every path that can reach it, since an
+exception from either would replace the real error and skip the lock release on
+its way past. The states:
+
+- whether the document edit exists locally, and in which worktree and at which
+  path;
+- whether a local publication commit exists and, if so, its commit ID; and
+- whether the remote publication branch contains that commit.
+
+A failed publication leaves the mutation recoverable and never diverges the
+checkout's default branch from its remote — the PR drainer fast-forwards that
+branch after every merge, and an unpushed local commit on it would wedge every
+later pass.
+
+Because the caller hands over the whole document, a successful publication also
+reports what it changed: an unintended rewrite of the rest of the document
+changes the same single path a correct publication does, so the changed-line
+summary, not the changed-path check, is what makes it visible to the run that
+caused it.

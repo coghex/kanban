@@ -336,7 +336,37 @@ through `process-design-doc`. Do not force epic-sized work into one issue.
 
 ## 5. Apply the approved disposition
 
-Only after explicit approval:
+**First, before any tracker mutation, check for an outstanding publication.**
+
+```bash
+PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
+  --path "$DOC_RELATIVE_PATH" --check-pending)"
+PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \
+  'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])')"
+[ -n "$PREFLIGHT_TIP" ]
+```
+
+`$PREFLIGHT_TIP` must be extracted, not assumed: publication refuses to run
+without it, and an empty one is a failure rather than a publication with the
+check quietly switched off.
+
+Keep the `publication_tip` it reports. The document you are about to read and
+re-render is that tip's, and the content you produce is a whole-file image of
+it, so publication must be refused if the branch has moved on since — a second
+run doing the same thing would otherwise drop this one's disposition while
+changing exactly the one path a correct publication changes.
+
+A `"pending"` result means an earlier approved mutation of this document has
+not reached the branch. **Stop here.** Do not create or link a tracker item and
+do not apply this disposition: the helper will refuse to publish a different
+mutation while that record stands, and by then the new issue would already
+exist for a disposition the document never receives. Report what the record
+names and the resolution the helper suggests, and let the user decide. This
+check is read-only and takes no lock — it is asked here, before the first
+irreversible step, precisely because asking afterwards is too late.
+
+Only after explicit approval, and a `"clear"` preflight:
 
 - **New issue:** create the approved body with `gh issue create -R "$DOC_REPO" --body-file`
   using a temporary file and approved existing labels. Confirm the returned
@@ -363,13 +393,91 @@ Then update only the selected finding:
   precondition. A run that marks a heading and leaves the checklist stale has
   produced two contradictory answers to the same question.
 - Preserve the finding body and unrelated user changes.
-- Use `apply_patch` for the report edit.
+- Compose the complete updated report as text; do not write it to the file and
+  do not stage it. The publication step below hands that text to the helper,
+  which is the only writer of the document.
 - Do not mark a finding if issue creation or lookup failed.
-- Do not commit, push, or open a PR unless separately requested.
+- Beyond the publication step below, do not commit, push, or open a PR unless
+  separately requested.
 
 Verify heading and checklist agree, and that the run changed exactly one finding,
 with `rg -n '<item-key>' <report>` and `git diff --stat -- <report>`. For a
 created or linked issue, also verify its title, state, labels, and URL.
+
+## 6. Publish the approved mutation
+
+Publish the approved mutation in this same run. The document is a durable
+cursor, and a cursor that only ever exists in one checkout is resumable only
+from that checkout. Publication is one more step of the disposition that was
+already approved; it carries no second one, and it is never batched or deferred
+merely to reduce commit or push frequency.
+
+**Render the complete approved document and hand it over — do not write it
+yourself.** `tools/publish_coordination_doc.py` is the only writer of the
+document, and that is what keeps an edit somebody else makes beside this run out
+of the published commit: the published bytes come from what you pass, never from
+the working tree. Ask the helper for a scratch path, write the rendered
+document there, and hand it back:
+
+```bash
+APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --new-content-file)"
+python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
+  --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
+  --expected-tip "$PREFLIGHT_TIP"
+```
+
+`$PREFLIGHT_TIP` is the `publication_tip` the preflight reported. Always pass
+it: it is what binds this content to the document state it was rendered from,
+and a `tip-moved` result means re-reading the document and rendering the
+disposition again rather than publishing what you have.
+
+**Never choose that path yourself.** A fixed name collides between any two
+runs, and a name derived from the document collides between two runs of the
+same one; either way a run reads the other's approved content and publishes it
+under its own document's name. The helper mints a path unique to this
+invocation, which is the property no naming convention here can promise.
+
+Resolve the helper from the already-resolved `$DOC_ROOT` — the local checkout of
+the owning repository — and never from the session's own checkout, a personal
+path, or an inline fallback. These plugins install into repositories that do not
+track it, so a helper that cannot be resolved there fails closed: report that
+publication was not attempted and why, and never publish by hand instead.
+
+The helper owns the entire mechanism — eligibility against §7 as the publication
+branch itself carries it, the per-document lock, the baseline, isolation, the
+push, verification by reachability, and the resumption of an unfinished earlier
+publication. Do not reimplement, precede, or compensate for any part of it. Act
+on the one structured result it returns:
+
+- **`"status": "published"`.** Say so, and quote the commit it reports together
+  with its changed-line summary. Check that summary against the disposition you
+  applied: because the whole document is handed over, an unintended rewrite of
+  the rest of it changes the same single path a correct publication does, and
+  the summary is what makes the difference visible.
+- **`"status": "not-published"`.** The document is not direct-publication
+  eligible — it is `pr-atomic`, matched no §7 row, or belongs to a repository
+  with no coordination lane. The approved mutation is not lost: the helper
+  reports `approved_blob`, recoverable with `git cat-file -p`, and
+  `document_written` says whether it also applied it to the document. Say which
+  it did and why publication was declined. This is the ordinary outcome for a
+  `pr-atomic` document, not a failure of this run.
+- **Any other status.** The document was not published. Report the three states
+  the helper returns — whether the edit exists locally and in which worktree and
+  path, whether a local publication commit exists and its ID, and whether the
+  remote publication branch contains it — and say plainly which one applies.
+  Leave the document as the helper left it.
+
+**A recorded publication is resolved before any new disposition.** When the
+helper reports `pending-unresolved` or `pending-differs-from-approved`, an
+earlier approved mutation of this document has not reached the branch. Do not
+apply a second disposition over it and do not create tracker items for one:
+resolve that record first, or the run you just approved will be reported
+published while its mutation is absent from the document.
+
+Publication ends this finding. Do not select another.
 
 Report, in this order: the disposition and its tracker link if any; the report
 line as it now reads; and the number of findings still unchecked, so the next run

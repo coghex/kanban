@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -35,6 +36,12 @@ from pathlib import Path, PurePosixPath
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 CLAUDE_MD_PATH = REPO_ROOT / "CLAUDE.md"
+CONFIG_EXAMPLE_PATH = REPO_ROOT / "config.toml.example"
+
+# The one repository the example configuration declares live coordination paths
+# for. §7's table is Kanban's own, so its rows may only ever reach a
+# per-repository override keyed by Kanban's own canonical slug.
+KANBAN_REPOSITORY_KEY = "coghex/kanban"
 
 CLASSES = ("coordination", "pr-atomic")
 
@@ -162,6 +169,56 @@ def _release_inventory():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _config_loader():
+    """tools/kanban_config.py, loaded by path under a private name for the same
+    reason _release_inventory() is: this module is discovered both as a bare
+    top-level name and inside a `tools.` namespace package, and the copy loaded
+    here must never shadow the one the loader's own tests import."""
+    source = REPO_ROOT / "tools" / "kanban_config.py"
+    spec = importlib.util.spec_from_file_location("_kanban_config_loader", source)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before execution because @dataclass resolves each class's own
+    # module out of sys.modules while the body is still running; an unregistered
+    # module raises there rather than at import.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_example_config(path=CONFIG_EXAMPLE_PATH):
+    """`path` through the real configuration loader, as (module, raw, warnings).
+
+    Read through tools/kanban_config.py rather than a private TOML parse, so
+    what is asserted is the value a drainer actually resolves — including the
+    per-repository merge, which is the whole point of putting Kanban's rows
+    under an override instead of the global default."""
+    config = _config_loader()
+    raw, warnings = config.load_raw_config(str(path))
+    return config, raw, warnings
+
+
+def configured_coordination_paths(config, raw, key=KANBAN_REPOSITORY_KEY):
+    """The coordination paths `key` resolves to, as a set."""
+    return set(config.resolve_config(key, raw).workflow.coordination_paths)
+
+
+def coordination_drift(configured, coordination_rows):
+    """(configured but unclassified, classified but unconfigured). Empty on both
+    sides is the only agreement between §7's rows and the example override."""
+    return (
+        sorted(set(configured) - set(coordination_rows)),
+        sorted(set(coordination_rows) - set(configured)),
+    )
+
+
+def configured_test_parsed_paths(configured, declared=TEST_PARSED_PATHS):
+    """Configured coordination paths a tracked test reads as data. Matched
+    through row_covers() rather than by set intersection, because two of the
+    declared entries are directory rows: a bundle document listed by its own
+    path would slip past `in TEST_PARSED_PATHS`."""
+    return sorted(path for path in configured if matching_rows(declared, path))
 
 
 def tracked_markdown(repo_root=REPO_ROOT):
@@ -545,6 +602,149 @@ class ReleaseInventoryReconciliationTests(unittest.TestCase):
                     excluded,
                     f"{path} publishes direct-to-master but ships in the release",
                 )
+
+
+class CoordinationPathConfigurationTests(unittest.TestCase):
+    """Issue #237: §7 says which documents may publish direct-to-master, and
+    `workflow.coordination_paths` is what a drainer actually reads. Those are
+    two independent statements of one policy, so they are reconciled here rather
+    than left to agree by hand — beside the §7 parser that already exists, so
+    the example configuration is not checked behind a second one.
+
+    The classification is Kanban's own (§7), which is why the paths live under a
+    `coghex/kanban` override and the global default ships empty: a consuming
+    repository must declare its own rather than inherit Kanban's.
+
+    Each negative case runs against its own miniature fixture, following this
+    module's convention, so a planted violation reports its own cause instead of
+    failing again for whatever the live tree happens to be missing.
+    """
+
+    def setUp(self):
+        self.rows = parse_classification()
+        self.coordination = {
+            path for path, row in self.rows.items() if row["klass"] == "coordination"
+        }
+        self.config, self.raw, self.warnings = load_example_config()
+
+    def write_fixture(self, directory, global_paths, override_paths):
+        """A miniature config with only the keys these tests assert."""
+        def render(paths):
+            return "[" + ", ".join(f'"{path}"' for path in paths) + "]"
+
+        path = Path(directory) / "config.toml"
+        path.write_text(
+            "[workflow]\n"
+            f"coordination_paths = {render(global_paths)}\n\n"
+            f'[repositories."{KANBAN_REPOSITORY_KEY}".workflow]\n'
+            f"coordination_paths = {render(override_paths)}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_the_tracked_example_loads_with_no_warnings(self):
+        # Guards every assertion below: an unknown key or a rejected table would
+        # warn here and leave the override silently never applying.
+        self.assertEqual(self.warnings, [])
+
+    def test_the_global_coordination_default_is_empty(self):
+        self.assertEqual(
+            self.raw.workflow.coordination_paths,
+            frozenset(),
+            "config.toml.example's global workflow.coordination_paths must stay "
+            "empty: §7's classification describes Kanban and is never inferred "
+            "for a consuming repository",
+        )
+
+    def test_the_kanban_override_is_exactly_the_section_7_coordination_rows(self):
+        configured = configured_coordination_paths(self.config, self.raw)
+        unclassified, unconfigured = coordination_drift(configured, self.coordination)
+        self.assertEqual(
+            (unclassified, unconfigured),
+            ([], []),
+            "config.toml.example's coghex/kanban coordination_paths and the "
+            "coordination rows of docs/agent-workflow-contract.md §7 disagree",
+        )
+
+    def test_no_configured_coordination_path_is_a_test_parsed_document(self):
+        # config.toml.example's own warning above the global default: never list
+        # a document a test parses, because changing one alone really can fail
+        # CI. §7 already forbids it through the audit-report reason; this is the
+        # same rule asserted where the drainer reads it.
+        configured = configured_coordination_paths(self.config, self.raw)
+        self.assertEqual(configured_test_parsed_paths(configured), [])
+
+    def test_another_repository_inherits_the_empty_global_default(self):
+        # The override must not leak: a consuming repository resolving through
+        # the same file gets nothing, which is what keeps §7 Kanban-only.
+        self.assertEqual(
+            configured_coordination_paths(self.config, self.raw, key="someone/other"),
+            set(),
+        )
+
+    def test_an_override_that_drifts_from_the_rows_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            drifted = (self.coordination - {"docs/ui-bugs.md"}) | {"docs/design.md"}
+            path = self.write_fixture(temp_dir, [], sorted(drifted))
+            config, raw, _ = load_example_config(path)
+            self.assertEqual(
+                coordination_drift(
+                    configured_coordination_paths(config, raw), self.coordination
+                ),
+                (["docs/design.md"], ["docs/ui-bugs.md"]),
+            )
+
+    def test_a_test_parsed_path_added_to_the_override_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(
+                temp_dir,
+                [],
+                sorted(self.coordination | {"docs/design.md"}),
+            )
+            config, raw, _ = load_example_config(path)
+            self.assertEqual(
+                configured_test_parsed_paths(
+                    configured_coordination_paths(config, raw)
+                ),
+                ["docs/design.md"],
+            )
+
+    def test_a_bundle_document_added_to_the_override_is_reported(self):
+        # The directory-row half of the same check: `codex-plugin/` is
+        # test-parsed, so a file beneath it is too even though its own path
+        # appears in no TEST_PARSED_PATHS entry.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            planted = "codex-plugin/plugins/kanban/skills/solve/SKILL.md"
+            path = self.write_fixture(temp_dir, [], sorted(self.coordination | {planted}))
+            config, raw, _ = load_example_config(path)
+            self.assertEqual(
+                configured_test_parsed_paths(
+                    configured_coordination_paths(config, raw)
+                ),
+                [planted],
+            )
+
+    def test_a_non_empty_global_default_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(
+                temp_dir, ["docs/ui-bugs.md"], sorted(self.coordination)
+            )
+            _, raw, _ = load_example_config(path)
+            self.assertEqual(raw.workflow.coordination_paths, frozenset({"docs/ui-bugs.md"}))
+            self.assertNotEqual(raw.workflow.coordination_paths, frozenset())
+
+    def test_the_fixture_shape_agrees_with_the_tracked_example(self):
+        # Keeps the negative cases honest: a fixture the loader parsed
+        # differently from config.toml.example would prove nothing about it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self.write_fixture(temp_dir, [], sorted(self.coordination))
+            config, raw, warnings = load_example_config(path)
+            self.assertEqual(warnings, [])
+            self.assertEqual(raw.workflow.coordination_paths, frozenset())
+            self.assertEqual(
+                configured_coordination_paths(config, raw),
+                configured_coordination_paths(self.config, self.raw),
+            )
 
 
 class DocumentedBoundaryTests(unittest.TestCase):
