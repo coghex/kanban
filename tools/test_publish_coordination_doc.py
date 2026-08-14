@@ -710,7 +710,7 @@ class PublishTests(unittest.TestCase):
         # publisher's.
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        dead = subprocess.Popen(["true"])
+        dead = subprocess.Popen([sys.executable, "-c", ""])
         dead.wait()
         token = json.dumps(
             {"host": publisher.socket.gethostname(), "pid": dead.pid},
@@ -905,7 +905,15 @@ class PublishTests(unittest.TestCase):
             '[ -n "$PREFLIGHT_TIP" ]',
             'printf %s "$PREFLIGHT_TIP"',
         ])
-        for shell in ("/bin/bash", "/bin/zsh"):
+        # Whichever of these the machine actually has. bash is everywhere;
+        # zsh is the interactive default on macOS and absent from the Linux CI
+        # runner, and it is the shell whose `:r` modifier mangled an unbraced
+        # refspec earlier in this work — so it is exercised where present
+        # rather than assumed or dropped.
+        shells = [sh for sh in ("/bin/bash", "/bin/zsh", "/bin/sh")
+                  if Path(sh).exists()]
+        self.assertTrue(shells, "no POSIX shell available to exercise")
+        for shell in shells:
             with self.subTest(shell=shell):
                 proc = subprocess.run(
                     [shell, "-c", script], capture_output=True, text=True
@@ -1746,7 +1754,7 @@ class PublishTests(unittest.TestCase):
     def test_a_dead_owners_lock_clears(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        dead = subprocess.Popen(["true"])
+        dead = subprocess.Popen([sys.executable, "-c", ""])
         dead.wait()
         token = json.dumps(
             {"host": publisher.socket.gethostname(), "pid": dead.pid},
