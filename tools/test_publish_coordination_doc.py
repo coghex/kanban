@@ -23,6 +23,7 @@ import json
 import shlex
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1334,6 +1335,115 @@ class PublishTests(unittest.TestCase):
         self.assertIn("captured_file", detail)
         self.assertTrue(Path(detail["captured_file"]).is_file())
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def _make_pending(self, landed=False):
+        """Leave a pending record behind, optionally one that reached the
+        branch."""
+        original = publisher.git
+
+        def failing_push(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["push", "origin"]:
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_push
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- approved\n")
+        finally:
+            publisher.git = original
+        if landed:
+            pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+            commit = run(["git", "rev-parse", pending], self.fx.docs)
+            run(["git", "push", "-q", "origin", f"{commit}:refs/heads/master"], self.fx.docs)
+            run(["git", "fetch", "-q", "origin", "master"], self.fx.docs)
+
+    def test_every_entry_state_produces_a_defined_outcome(self):
+        # Organised by the state the world is in when the module is called,
+        # rather than by rule or by exit. What is asserted is that no
+        # combination reaches a traceback and none publishes when it should
+        # not: the outcome names differ, but every one of them is a decision.
+        cases = [
+            ("matches-tip", "absent", "published"),
+            ("matches-tip", "unlanded", "pending-unresolved"),
+            ("matches-tip", "landed", "published"),
+            ("foreign", "absent", "document-not-baseline"),
+            ("foreign", "unlanded", "document-not-baseline"),
+            ("foreign", "landed", "landed-but-divergent"),
+            ("absent", "absent", "document-not-baseline"),
+            ("absent", "unlanded", "document-not-baseline"),
+            ("absent", "landed", "landed-but-divergent"),
+            ("staged", "absent", "document-staged"),
+            ("staged", "unlanded", "document-staged"),
+            ("staged", "landed", "landed-but-divergent"),
+        ]
+        for doc_state, record_state, expected in cases:
+            with self.subTest(document=doc_state, record=record_state):
+                self._tmp.cleanup()
+                self._tmp = tempfile.TemporaryDirectory()
+                self.fx = Fixture(Path(self._tmp.name))
+                target = self.fx.docs / "docs" / "ui-bugs.md"
+                if record_state != "absent":
+                    self._make_pending(landed=(record_state == "landed"))
+                if doc_state == "matches-tip":
+                    run(["git", "fetch", "-q", "origin", "master"], self.fx.docs)
+                    tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+                    target.write_text(
+                        run(["git", "show", f"{tip}:docs/ui-bugs.md"], self.fx.docs) + "\n"
+                    )
+                elif doc_state == "foreign":
+                    target.write_text("# UI\n\n- one\n- somebody else\n")
+                elif doc_state == "absent":
+                    target.unlink(missing_ok=True)
+                elif doc_state == "staged":
+                    blob = run(
+                        ["git", "hash-object", "-w", "--stdin"], self.fx.docs,
+                        input="staged\n",
+                    )
+                    run(
+                        ["git", "update-index", "--cacheinfo",
+                         f"100644,{blob},docs/ui-bugs.md"],
+                        self.fx.docs,
+                    )
+                try:
+                    outcome = self.fx.publish("# UI\n\n- one\n- approved\n")["status"]
+                except publisher.PublishError as error:
+                    outcome = error.status
+                self.assertEqual(outcome, expected)
+
+    def test_two_real_processes_publishing_at_once(self):
+        # Every other concurrency case here simulates an interleaving by
+        # patching. This one does not: two operating-system processes race for
+        # the same document, which is the thing the lock is actually for.
+        helper = REPO_ROOT / "tools" / "publish_coordination_doc.py"
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        running = []
+        for name in ("alpha", "beta"):
+            blob = Path(self._tmp.name) / f"{name}.md"
+            blob.write_text(f"# UI\n\n- one\n- {name}\n", encoding="utf-8")
+            running.append((name, subprocess.Popen(
+                [sys.executable, str(helper),
+                 "--repo", "coghex/kanban", "--branch", "master",
+                 "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                 "--content", str(blob), "--expected-tip", tip],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)))
+        statuses = {}
+        for name, proc in running:
+            out, err = proc.communicate(timeout=120)
+            self.assertTrue(out.strip(), f"{name} produced no result: {err}")
+            statuses[name] = json.loads(out)["status"]
+        # Exactly one publishes; the other is refused by the lock rather than
+        # by luck, and never by a traceback.
+        self.assertEqual(sorted(statuses.values()), ["locked", "published"])
+        remote = self.fx.remote_content()
+        winners = [n for n in ("alpha", "beta") if f"- {n}" in remote]
+        self.assertEqual(len(winners), 1, remote)
+        self.assertTrue((self.fx.docs / "docs" / "ui-bugs.md").read_text().strip())
+        self.assertEqual(
+            run(["git", "for-each-ref", "--format=%(refname)",
+                 "refs/kanban/publish-lock"], self.fx.docs),
+            "",
+        )
 
     # -- eligibility ---------------------------------------------------------
 
