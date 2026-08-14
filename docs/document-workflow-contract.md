@@ -558,8 +558,13 @@ A run may describe a document as published only when the module reports it, and
 the module reports it only when the intended commit is reachable from the remote
 publication branch. A push that appeared to succeed is not that verification.
 
-Every other outcome is an unpublished failure, reported with all three states
-rather than collapsed into one:
+**Every** other outcome is an unpublished failure, reported with all three
+states rather than collapsed into one — including the ones the module never
+modelled. A caller branches on the result, so a traceback where a result
+belongs leaves it with nothing to report and no way to learn what became of its
+document; and cleanup, which runs on the way out with a failure often already
+propagating, may never raise at all, since an exception from there would
+replace the real one and skip the lock release on its way past. The states:
 
 - whether the document edit exists locally, and in which worktree and at which
   path;

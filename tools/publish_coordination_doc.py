@@ -466,6 +466,22 @@ def git_blob_hash(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def _quietly(action, *args, **kwargs) -> bool:
+    """Run a cleanup step that must never raise.
+
+    Cleanup happens on the way out, often with an exception already
+    propagating and always after the document may have been replaced. A raise
+    from here would substitute itself for the real error, escape the structured
+    result every other failure returns, and skip the lock release on its way
+    past. Failing to tidy up is worth strictly less than any of that.
+    """
+    try:
+        action(*args, **kwargs)
+        return True
+    except OSError:
+        return False
+
+
 def read_for_write(target: Path):
     """The document's bytes and the stat they were read from, together.
 
@@ -631,11 +647,16 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             f"{document} could not be read or replaced: {error}",
         ) from error
     finally:
+        # Cleanup runs after the document may already have been replaced, so
+        # nothing in here may raise: an exception thrown from a `finally`
+        # replaces whatever was propagating, and one thrown from *here* would
+        # escape the result contract entirely and skip the lock release with
+        # it. Every step below is best-effort by construction.
         if handle is not None:
-            os.close(handle)
+            _quietly(os.close, handle)
         # Only this invocation's own temporaries, each created exclusively.
         if scratch is not None:
-            scratch.unlink(missing_ok=True)
+            _quietly(scratch.unlink, missing_ok=True)
         if aside is not None:
             # Between the rename and the link the document does not exist, and
             # `aside` holds the only copy of it. *Any* failure in that gap —
@@ -648,8 +669,8 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             if not target.exists():
                 restored = put_back(aside, target, captured, captured_mode)
             if restored:
-                aside.unlink(missing_ok=True)
-                aside.parent.rmdir()
+                _quietly(aside.unlink, missing_ok=True)
+                _quietly(aside.parent.rmdir)
             else:
                 # Kept — but a file kept somewhere nobody is told about is only
                 # marginally better than one deleted, so the path travels with
@@ -1053,13 +1074,19 @@ def publish(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
             )
-        except PublishError as error:
+        except BaseException as error:
             # A `finally` here would release and then re-raise, and the check
             # below would never run — so a lock that outlived a *failed*
             # publication would block every later run while the report named
             # only the original failure. The failure keeps priority; the
             # retained lock travels with it.
-            if not release_lock(resolved, lock, held):
+            #
+            # BaseException rather than PublishError: the lock must come off
+            # for anything that leaves this block, including the failures this
+            # module did not model. Only a PublishError can carry the detail.
+            if not release_lock(resolved, lock, held) and isinstance(
+                error, PublishError
+            ):
                 error.detail.setdefault("lock_retained", True)
                 error.detail.setdefault("lock_ref", lock)
             raise
@@ -1325,11 +1352,18 @@ def main(argv: list[str] | None = None) -> int:
                 or f"docs: publish the approved mutation to {args.path}",
                 expected_tip=args.expected_tip,
             )
-    except PublishError as error:
+    except Exception as error:  # noqa: BLE001 - the boundary is the point
         # The envelope is guaranteed at this boundary, not only inside
         # publish(): a failure raised before the sequence starts — unreadable
         # content, an unusable write root — is still an unpublished outcome the
-        # caller must report all three states for.
+        # caller must report all three states for. And an error this module
+        # never modelled is still an unpublished outcome: the caller branches
+        # on the result, so a traceback where a result belongs leaves it with
+        # nothing to report and no way to tell what happened to its document.
+        if not isinstance(error, PublishError):
+            error = PublishError(
+                "internal-error", f"{type(error).__name__}: {error}"
+            )
         payload = {
             "document_edit": {
                 "exists": None,

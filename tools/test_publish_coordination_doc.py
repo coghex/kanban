@@ -1130,6 +1130,70 @@ class PublishTests(unittest.TestCase):
             run(["git", "cat-file", "-p", detail["captured_blob"]], self.fx.docs),
         )
 
+    def test_a_cleanup_failure_is_structured_and_releases_the_lock(self):
+        # Cleanup runs after the document may already have been replaced, with
+        # an exception possibly already propagating. A raise from there used to
+        # escape the result contract and skip the lock release with it.
+        original = publisher._quietly
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def failing_cleanup(action, *args, **kwargs):
+            raise OSError(5, "I/O error during cleanup")
+
+        publisher._quietly = failing_cleanup
+        self.addCleanup(setattr, publisher, "_quietly", original)
+        buffer = io.StringIO()
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--content", str(blob), "--expected-tip", tip,
+            ])
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue())
+        # Structured rather than a traceback, with all three states...
+        for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
+            self.assertIn(key, payload)
+        # ...and the lock is not left standing.
+        self.assertIsNone(
+            publisher.read_lock_owner(
+                self.fx.docs, publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+            )
+        )
+        self.assertTrue(target.is_file())
+
+    def test_an_unmodelled_error_is_still_a_structured_result(self):
+        original = publisher.build_commit
+
+        def surprising(*args, **kwargs):
+            raise ValueError("something this module never modelled")
+
+        publisher.build_commit = surprising
+        self.addCleanup(setattr, publisher, "build_commit", original)
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--content", str(blob), "--expected-tip", tip,
+            ])
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["status"], "internal-error")
+        self.assertIn("ValueError", payload["message"])
+        # The lock came off even for a failure the module never modelled.
+        self.assertIsNone(
+            publisher.read_lock_owner(
+                self.fx.docs, publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+            )
+        )
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
