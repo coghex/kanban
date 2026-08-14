@@ -569,7 +569,11 @@ publication branch. A push that appeared to succeed is not that verification.
 states rather than collapsed into one — including the ones the module never
 modelled. A caller branches on the result, so a traceback where a result
 belongs leaves it with nothing to report and no way to learn what became of its
-document; and cleanup, which runs on the way out with a failure often already
+document — and being structured is not enough on its own: an unmodelled failure
+can happen after the document already holds the approved bytes, so the states
+are collected against the resolved write root and say where that edit is,
+rather than reporting it as unknown. Every failure that has a candidate commit
+names it in the same field, whichever step produced it; and cleanup, which runs on the way out with a failure often already
 propagating, may never raise at all — nor may the reporting that accompanies
 it, whose own inputs must be defined on every path that can reach it, since an
 exception from either would replace the real error and skip the lock release on

@@ -730,10 +730,16 @@ def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -
     # directory is somebody else's file waiting to happen — an interrupted
     # run's, another tool's — and this both rewrites it via `read-tree` and
     # deletes it afterwards. The same rule the working-tree temporaries follow.
-    handle, scratch_name = tempfile.mkstemp(
-        prefix="kanban-publish-index-", dir=str(common_git_dir(root))
-    )
-    os.close(handle)
+    try:
+        handle, scratch_name = tempfile.mkstemp(
+            prefix="kanban-publish-index-", dir=str(common_git_dir(root))
+        )
+        os.close(handle)
+    except OSError as error:
+        raise PublishError(
+            "scratch-index-unavailable",
+            f"a scratch index for {document} could not be created: {error}",
+        ) from error
     scratch = Path(scratch_name)
     env = dict(os.environ, GIT_INDEX_FILE=str(scratch))
     try:
@@ -848,6 +854,8 @@ def _resume(
             "it carries work beyond the approved mutation",
             recorded_blob=recorded_blob,
             working_blob=current,
+            local_commit=recorded,
+            pending_ref=pending,
         )
     if recorded_blob != approved_blob:
         # The caller is publishing a *different* disposition from the one the
@@ -872,7 +880,7 @@ def _resume(
             f"the pending publication for {document} was built on {parent[:12]}, but "
             f"the branch has advanced to {tip[:12]}; retrying would replace the "
             "advance with pre-advance content",
-            pending_commit=recorded,
+            local_commit=recorded,
             pending_parent=parent,
             publication_tip=tip,
         )
@@ -1140,7 +1148,14 @@ def publish(
                 lock_ref=lock,
             )
         return outcome
-    except PublishError as error:
+    except Exception as error:  # noqa: BLE001 - the collector is the point
+        if not isinstance(error, PublishError):
+            # An unmodelled failure is still an unpublished outcome, and by the
+            # time one happens the document may already hold the approved
+            # bytes. Converting it here rather than at the CLI boundary is what
+            # lets the state collector run against a resolved write root and
+            # report where that edit actually is.
+            error = PublishError("internal-error", f"{type(error).__name__}: {error}")
         try:
             states = failure_states(
                 Path(git_out(["rev-parse", "--show-toplevel"], cwd=root)),
@@ -1159,7 +1174,10 @@ def publish(
                 "remote_contains_commit": error.detail.get("remote_contains_commit"),
             }
         error.detail = {**states, **error.detail}
-        raise
+        # `raise` alone re-raises the *original*, which for an unmodelled
+        # failure is the very exception this handler just converted — the
+        # conversion would be assigned and then discarded.
+        raise error
 
 
 def _publish_locked(*, root, owner, branch, tip, document, content, message, pending):

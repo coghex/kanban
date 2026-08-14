@@ -1445,6 +1445,79 @@ class PublishTests(unittest.TestCase):
             "",
         )
 
+    def test_every_resume_failure_names_its_candidate_commit(self):
+        # A resume failure happens with a candidate already recorded; a report
+        # that cannot name it leaves the caller unable to say what may have
+        # landed, which is the whole point of the three states.
+        for setup, expected in (
+            ("stale", "pending-stale"),
+            ("foreign", "document-not-baseline"),
+            ("different", "pending-differs-from-approved"),
+        ):
+            with self.subTest(case=setup):
+                self._tmp.cleanup()
+                self._tmp = tempfile.TemporaryDirectory()
+                self.fx = Fixture(Path(self._tmp.name))
+                self._make_pending()
+                target = self.fx.docs / "docs" / "ui-bugs.md"
+                if setup == "stale":
+                    self.fx.advance_remote()
+                    content = "# UI\n\n- one\n- approved\n"
+                elif setup == "foreign":
+                    target.write_text(target.read_text() + "- foreign\n")
+                    content = "# UI\n\n- one\n- approved\n"
+                else:
+                    content = "# UI\n\n- one\n- a different disposition\n"
+                with self.assertRaises(publisher.PublishError) as caught:
+                    self.fx.publish(content)
+                self.assertEqual(caught.exception.status, expected)
+                self.assertIsNotNone(
+                    caught.exception.detail["local_publication_commit"],
+                    f"{expected} must name the candidate it found",
+                )
+
+    def test_a_post_write_failure_reports_where_the_edit_is(self):
+        # The scratch index is allocated after the document already holds the
+        # approved bytes. A failure there used to escape unmodelled, so the CLI
+        # reported unknown state for an edit it could have located exactly.
+        original = publisher.tempfile.mkstemp
+
+        def failing_mkstemp(*args, **kwargs):
+            if str(kwargs.get("prefix", "")).startswith("kanban-publish-index-"):
+                raise OSError(28, "No space left on device")
+            return original(*args, **kwargs)
+
+        publisher.tempfile.mkstemp = failing_mkstemp
+        self.addCleanup(setattr, publisher.tempfile, "mkstemp", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "scratch-index-unavailable")
+        # The document holds the approved bytes, and the report says so.
+        self.assertTrue(detail["document_edit"]["exists"])
+        self.assertEqual(
+            detail["document_edit"]["path"], "docs/ui-bugs.md"
+        )
+        self.assertIn("- two", (self.fx.docs / "docs" / "ui-bugs.md").read_text())
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_unmodelled_failure_still_locates_the_edit(self):
+        # Not just structured — located. The collector must run against the
+        # resolved write root rather than the CLI's fallback.
+        original = publisher.build_commit
+
+        def surprising(*args, **kwargs):
+            raise ValueError("never modelled")
+
+        publisher.build_commit = surprising
+        self.addCleanup(setattr, publisher, "build_commit", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "internal-error")
+        self.assertTrue(detail["document_edit"]["exists"])
+        self.assertIn("- two", (self.fx.docs / "docs" / "ui-bugs.md").read_text())
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
