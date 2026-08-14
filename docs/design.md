@@ -3461,8 +3461,8 @@ refresh.
 
 | Provider | Configured timeout | Startup refresh | Explicit `u` refresh | Result |
 | --- | --- | --- | --- | :---: |
-| Codex | 10 s | fresh in 0.489 s | fresh in 0.486 s | **pass** |
-| Claude | 45 s | fresh in 5.981 s | fresh in 5.799 s | **pass** |
+| Codex | 10 s | fresh in 0.690 s | fresh in 0.827 s | **pass** |
+| Claude | 45 s | fresh in 6.190 s | fresh in 5.827 s | **pass** |
 
 The two outcomes were recorded independently and neither depended on the other
 (Requirement 9); had one failed, the other's result would still stand as
@@ -3535,6 +3535,8 @@ binary itself. A deliberately malformed TOML file makes `loadRawConfig` report
 the path it actually read, so three probes pin all three branches:
 
 ```console
+PROBE="$TMP/configprobe"
+mkdir -p "$PROBE/xdg/kanban" "$PROBE/home/.config/kanban"
 printf 'this is not toml =\n' > "$PROBE/xdg/kanban/config.toml"
 printf 'this is not toml =\n' > "$PROBE/home/.config/kanban/config.toml"
 env XDG_CONFIG_HOME="$PROBE/xdg" "$TMP/bin/kanban" --path "$ROOT"
@@ -3542,6 +3544,10 @@ env -u XDG_CONFIG_HOME HOME="$PROBE/home" "$TMP/bin/kanban" --path "$ROOT"
 env XDG_CONFIG_HOME="$PROBE/xdg" "$TMP/bin/kanban" \
   --config "$PROBE/home/.config/kanban/config.toml" --path "$ROOT"
 ```
+
+`$TMP` and `$ROOT` are the variables set in Build provenance above; the probe
+directories are created under the same temporary root, and nothing is written
+to the operator's own configuration directory.
 
 Each named the file it had read, in the message
 `kanban: configuration file <path> is invalid: 1:6: parse error: unexpected bare
@@ -3615,7 +3621,9 @@ because nothing was asked.
 
 #### Observed states and elapsed times
 
-Two rounds were observed, and the record states which is which (Requirement 6).
+Two rounds supply the recorded figures, and the record states which is which
+(Requirement 6); a third round, covering the solver-nesting question, is
+reported separately below.
 The sidebar was sampled every 0.15 s with `capture-pane`, and each provider's
 block was classified independently. The classification is unambiguous once a
 snapshot exists, because a failed refresh over an existing snapshot renders
@@ -3624,25 +3632,41 @@ clears the status line entirely (`src/Kanban/UI/Board.hs:152-160`); reaching
 `Fresh` is therefore only possible on the `Right snapshot` branch of
 `applyUsageRefresh`.
 
+Each round's clock starts at that round's real dispatch instant, and the reading
+is taken *before* the dispatching action rather than after it, so no part of the
+interval being measured is discounted. Round A's is read immediately before
+`tmux new-session` is invoked and handed to the observer; round B's is read
+immediately before the keystroke is injected. Both are `time.monotonic()`
+readings, which are system-wide and therefore comparable across the processes
+that take and use them. The observer is started before the Kanban pid is
+resolved and before the census watcher starts, so neither delays the first
+sample: it landed 0.048 s after dispatch in round A and 0.006 s in round B.
+
 **Round A — the startup refresh, against a cold usage cache.**
 `~/.cache/kanban/usage.json` was moved aside before launch, so Kanban started
-with no snapshot for either provider. At the first sample both blocks showed
-`refreshing…` and **zero** windows; windows appeared only as each provider
-turned fresh. A rendered window in this round therefore cannot have come from
-the cache — it can only have come from the live refresh. Elapsed time is
-measured from the launch of the process, so it includes Kanban's own startup and
-is an upper bound on dispatch-to-fresh.
+with no snapshot for either provider. The first sample caught the pane before
+Kanban had drawn; by 0.213 s both blocks showed `refreshing…` with **zero**
+windows, and windows appeared only as each provider turned fresh. A rendered
+window in this round therefore cannot have come from the cache — it can only
+have come from the live refresh. Because the clock starts before tmux is asked
+to create the session, this figure includes tmux session creation and Kanban's
+own startup, and is an upper bound on dispatch-to-fresh.
 
-**Round B — a later explicit `u`.** Dispatch is the keystroke itself, so these
-figures are the tighter ones. Both blocks returned to `refreshing…` within one
-sample and then to fresh.
+**Round B — a later explicit `u`.** Dispatch is the keystroke itself, and the
+clock is read immediately before it, so the interval covers tmux's delivery of
+the key as well as the refresh. The first sample still showed the previous
+round's fresh state; by the second, at 0.167 s, both blocks had returned to
+`refreshing…`, and both then reached fresh again.
 
 | Round | Provider | Dispatch instant | Elapsed to fresh | Configured timeout | Margin used |
 | --- | --- | --- | --- | --- | --- |
-| A (startup) | Codex | process launch | 0.489 s | 10 s | 4.9% |
-| A (startup) | Claude | process launch | 5.981 s | 45 s | 13.3% |
-| B (explicit `u`) | Codex | `u` keystroke | 0.486 s | 10 s | 4.9% |
-| B (explicit `u`) | Claude | `u` keystroke | 5.799 s | 45 s | 12.9% |
+| A (startup) | Codex | immediately before `tmux new-session` | 0.690 s | 10 s | 6.9% |
+| A (startup) | Claude | immediately before `tmux new-session` | 6.190 s | 45 s | 13.8% |
+| B (explicit `u`) | Codex | immediately before the `u` keystroke | 0.827 s | 10 s | 8.3% |
+| B (explicit `u`) | Claude | immediately before the `u` keystroke | 5.827 s | 45 s | 12.9% |
+
+Neither provider came close to its timeout: the largest share of any budget
+consumed was 13.8%.
 
 In both rounds the final state of both providers was fresh: no `refreshing…`,
 no `stale · `, and no unavailable or unsupported message (Requirement 5). Codex
@@ -3702,43 +3726,43 @@ The orphan's parent really did become pid 1, so the tree walk really did lose
 it while it was still running, and the whole-table identity scan really did
 still find it. That is the failure mode the method is built to survive.
 
-Across both rounds the census took **932 samples over 150.113 s** at a 0.15 s
-interval and recorded **29 distinct descendant identities**, of which seven were
+Across both rounds the census took **933 samples over 150.112 s** at a 0.15 s
+interval and recorded **28 distinct descendant identities**, of which seven were
 provider-related:
 
 | Round | Process | Parent | Own process group | Observed alive |
 | --- | --- | --- | --- | --- |
-| A | `/usr/bin/script` | Kanban | yes | 0.002 – 5.894 s |
-| A | `claude` 2.1.233 | `script` | yes, separate from `script` | 0.002 – 5.894 s |
-| A | `codex` 0.147.0 | Kanban | no, Kanban's group | 0.002 – 0.318 s |
-| B | `/usr/bin/script` | Kanban | yes | 8.151 – 13.726 s |
-| B | `claude` 2.1.233 | `script` | yes, separate from `script` | 8.151 – 13.726 s |
-| B | `codex` 0.147.0 | Kanban | no, Kanban's group | 8.151 – 8.468 s |
-| B | `claude` 2.1.233 helper | the probe's `claude` | shares its parent's group | 11.337 s, one sample |
+| A | `/usr/bin/script` | Kanban | yes | 0.002 – 5.762 s |
+| A | `claude` 2.1.233 | `script` | yes, separate from `script` | 0.002 – 5.762 s |
+| A | `codex` 0.147.0 | Kanban | no, Kanban's group | 0.002 – 0.320 s |
+| A | `claude` 2.1.233 helper | the probe's `claude` | shares its parent's group | 0.482 s, one sample |
+| B | `/usr/bin/script` | Kanban | yes | 8.160 – 13.764 s |
+| B | `claude` 2.1.233 | `script` | yes, separate from `script` | 8.160 – 13.764 s |
+| B | `codex` 0.147.0 | Kanban | no, Kanban's group | 8.160 – 8.793 s |
 
-The last row is the reason recursion is not optional. That helper is a
+The helper row is the reason recursion is not optional. That process is a
 **grandchild** of `script` and a great-grandchild of Kanban, it was alive for a
 single 0.15 s sample, and no depth-one enumeration would have seen it. The
-remaining twenty-two identities were Kanban's ordinary children and their
-descendants — `gh`, `git`, `bash`, `grep`, `security`, `ioreg`, and the ten-second
-drainer status poll's Python — none of which this requirement is about, though
-all were verified absent too.
+remaining twenty-one identities were Kanban's ordinary children and their
+descendants — `gh`, `git`, `bash`, `grep`, `node`, and the ten-second drainer
+status poll's Python — none of which this requirement is about, though all were
+verified absent too.
 
-With Kanban still running, every one of the 29 recorded identities was absent
+With Kanban still running, every one of the 28 recorded identities was absent
 from the process table, and an independent sweep for any live `codex`, `claude`,
 or `script` process in any process group the census had recorded returned zero
 hits:
 
 ```text
-recorded descendant identities: 29
+recorded descendant identities: 28
   of which codex/claude/script-related: 7
-    pid 34964 start 12668507161999 script  /usr/bin/script -> gone
-    pid 34981 start 12668507268082 2.1.233 ~/.local/share/claude/versions/2.1.233 -> gone
-    pid 34979 start 12668507250306 codex   ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
-    pid 35476 start 12668701453168 script  /usr/bin/script -> gone
-    pid 35477 start 12668701582304 2.1.233 ~/.local/share/claude/versions/2.1.233 -> gone
-    pid 35492 start 12668701600846 codex   ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
-    pid 35755 start 12668779842439 2.1.233 ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22378 start   12709355500730 script           /usr/bin/script -> gone
+    pid   22395 start   12709355594702 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22393 start   12709355578807 codex            ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
+    pid   22449 start   12709370325084 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22885 start   12709552160982 script           /usr/bin/script -> gone
+    pid   22886 start   12709552286148 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22901 start   12709552308456 codex            ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
 stray sweep over recorded process groups [18 groups]: 0 hit(s)
 VERIFY PASSED: every recorded descendant identity is absent from the process table
 ```
@@ -3778,12 +3802,22 @@ measured rounds above removed the nesting variables this session exports —
 environment matches an operator launching Kanban from a terminal rather than the
 solver's own.
 
-A third round was then run with all of them **inherited**, to record whether the
-nesting interferes. It does not: both providers reached fresh, Claude in
-5.485 s, and a separate census over that round found its `script` and `claude`
-identities absent afterwards with zero stray hits. No interference was observed
-in either direction, and the recorded pass does not depend on which of the two
-environments is used.
+A third round was then run with all of them **inherited**, clocked the same way
+as round A, to record whether the nesting interferes. It does not: both
+providers reached fresh, Codex in 0.547 s and Claude in 6.191 s, the latter
+within a millisecond of round A's figure for the same dispatch instant, and a
+separate census over that round found
+its `codex`, `script`, and `claude` identities absent afterwards with zero stray
+hits. No interference was observed in either direction, and the recorded pass
+does not depend on which of the two environments is used.
+
+One caveat on that round, disclosed rather than smoothed over: its **final**
+capture caught the pane mid-redraw, with a window's reset row present and its
+bar row not yet written. The window count from that frame is therefore not used
+as evidence here; rounds A and B, sampled identically, carry the window-shape
+evidence. This is the limit D-9 already names — `capture-pane` returns content,
+not repaints — and it affects a frame's completeness, not the fresh/stale
+classification, which the round reached and held.
 
 #### What this record omits
 
@@ -3809,50 +3843,56 @@ per invocation when stdin is a non-tty pipe.
 
 #### Reproducing this record
 
-The measured run is driven by three artifacts kept outside the checkout. The
-first strips the shim directories from `PATH` and, for the primary rounds, the
-solver's nesting variables:
+The measured run is driven by four artifacts kept outside the checkout. They are
+given here in dependency order — the three the orchestrator calls, then the
+orchestrator — so that following the section top to bottom creates each file
+before anything uses it. All four live in the same `$TMP` directory as the
+installed executable from Build provenance above, and the orchestrator locates
+its siblings from its own path rather than from an inherited variable.
+
+**1. The launcher.** It strips every `cmux-cli-shims` entry from `PATH` so the
+operator's own clients are what Kanban resolves, and — unless
+`REL2_KEEP_NESTING=1` — unsets the Claude Code nesting variables. It resolves
+the installed executable relative to its own location, so no variable has to
+survive into the environment tmux gives it:
 
 ```console
 cat > "$TMP/launch_kanban.sh" <<'LAUNCH'
 #!/bin/bash
+# REL-2 measured-run launcher. Builds the environment the operator's terminal
+# would have, then execs the sdist-installed Kanban.
+#
+#  * PATH has every cmux-cli-shims entry removed, so `codex` and `claude`
+#    resolve to the operator's own installed clients rather than to a session
+#    shim (Acceptance 1's "remove it for the run" option).
+#  * The Claude Code nesting variables this solver session exports are unset,
+#    because Kanban's Claude provider inherits its caller's environment and an
+#    operator launching Kanban from a terminal has none of them. Which
+#    variables were removed is recorded in the evidence.
+#  * XDG_CONFIG_HOME stays unset and HOME stays the operator's, so the config
+#    path Kanban resolves is the real default one under test.
 set -u
+
+REL="$(cd "$(dirname "$0")" && pwd)"
+
 export PATH="$(python3 -c "
 import os
 print(':'.join(e for e in os.environ['PATH'].split(':') if 'cmux-cli-shims' not in e))
 ")"
+
 if [ "${REL2_KEEP_NESTING:-0}" != "1" ]; then
   unset CLAUDECODE CLAUDE_PID CLAUDE_EFFORT
   unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
   unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID
 fi
-exec "$TMP/bin/kanban" --path "$1"
+
+exec "$REL/bin/kanban" --path "$1"
 LAUNCH
 chmod +x "$TMP/launch_kanban.sh"
 ```
 
-The rounds themselves are then:
-
-```console
-mv ~/.cache/kanban/usage.json "$TMP/usage.json.backup"   # cold cache for round A
-rm -rf ~/.cache/kanban/claude-probe
-tmux new-session -d -s rel2 -x 200 -y 50 "$TMP/launch_kanban.sh <checkout>"
-KPID="$(pgrep -P "$(tmux display-message -p -t rel2 '#{pane_pid}')" -f 'bin/kanban')"
-python3 "$TMP/census_tree.py" --watch --root "$KPID" --interval 0.15 \
-  --duration 150 --census "$TMP/census.json" --quiet &
-python3 "$TMP/observe_usage.py" --session rel2 --label A-startup \
-  --timeout 90 --interval 0.15 --out "$TMP/round-a.json"
-python3 "$TMP/observe_usage.py" --session rel2 --label B-explicit-u \
-  --send-key u --timeout 90 --interval 0.15 --out "$TMP/round-b.json"
-python3 "$TMP/census_tree.py" --verify --census "$TMP/census.json"   # before quitting
-tmux send-keys -t rel2 q
-```
-
-The usage cache is moved aside rather than deleted, and a successful run
-rewrites it; the Claude probe recreates its own scratch directory.
-
-The process census probe of Requirement 8 is recreated exactly by this
-here-document. Its `--self-test` must pass before any measurement:
+**2. The process census probe** of Requirement 8. Its `--self-test` must pass
+before any measurement:
 
 ```console
 cat > "$TMP/census_tree.py" <<'CENSUS'
@@ -4349,11 +4389,12 @@ CENSUS
 python3 "$TMP/census_tree.py" --self-test
 ```
 
-The sidebar observer that produced the elapsed times is recreated by this one.
-It is an ordinary `capture-pane` sampler: any sampler implementing the same
-classification rule — `refreshing…` means loading, a leading `stale · ` means
-the refresh failed over an existing snapshot, and windows with neither status
-line mean fresh — reproduces the same figures.
+**3. The sidebar observer** that produces the elapsed times. It is an ordinary
+`capture-pane` sampler: any sampler implementing the same classification rule —
+`refreshing…` means loading, a leading `stale · ` means the refresh failed over
+an existing snapshot, and windows with neither status line mean fresh —
+reproduces the same figures. It takes each round's dispatch reading before the
+dispatching action, never after:
 
 ```console
 cat > "$TMP/observe_usage.py" <<'OBSERVE'
@@ -4498,8 +4539,25 @@ def redact(parsed):
     }
 
 
-def observe(session, label, dispatch_at, timeout, interval, out_path):
-    """Poll until both providers leave Loading, or until ``timeout`` elapses."""
+def not_loaded_status(status):
+    """The pre-dispatch 'press <key> to refresh' text of Board.hs's NotLoaded."""
+    return bool(status) and status.startswith("press ") and status.endswith(" to refresh")
+
+
+def observe(session, label, dispatch_at, timeout, interval, out_path, assume_dispatched):
+    """Poll until both providers leave Loading, or until ``timeout`` elapses.
+
+    ``dispatch_at`` is a ``time.monotonic()`` reading taken at the round's real
+    dispatch instant -- immediately before the launch or the keystroke, never
+    after -- so every elapsed figure is measured from that instant. The clock is
+    system-wide, so a reading captured by another process is comparable here.
+
+    A provider is only credited with this round's outcome once this round's
+    Loading has been seen, so a state left over from an earlier round is never
+    mistaken for it. ``assume_dispatched`` relaxes that for the startup round,
+    where ``startAllRefreshes`` has provably already set both providers Loading
+    before the first frame; the NotLoaded text is still never terminal.
+    """
     timeline = []
     last = {}
     terminal_at = {}
@@ -4529,10 +4587,8 @@ def observe(session, label, dispatch_at, timeout, interval, out_path):
             if info["state"] == "Loading":
                 seen_loading[provider] = True
             elif provider not in terminal_at and info["state"] in ("Fresh", "Stale", "NoSnapshot"):
-                # Only count as terminal once this round's Loading has been seen,
-                # so a leftover state from before dispatch is never mistaken for
-                # this round's outcome.
-                if seen_loading.get(provider):
+                dispatched = seen_loading.get(provider) or assume_dispatched
+                if dispatched and not not_loaded_status(info["status"]):
                     terminal_at[provider] = round(now - dispatch_at, 3)
         if len(terminal_at) == len(PROVIDERS):
             break
@@ -4544,6 +4600,8 @@ def observe(session, label, dispatch_at, timeout, interval, out_path):
         "round": label,
         "timeout_s": timeout,
         "interval_s": interval,
+        "assume_dispatched": assume_dispatched,
+        "first_sample_after_dispatch_s": timeline[0]["t"] if timeline else None,
         "elapsed_to_terminal_s": terminal_at,
         "saw_loading": seen_loading,
         "timeline": timeline,
@@ -4555,6 +4613,7 @@ def observe(session, label, dispatch_at, timeout, interval, out_path):
         json.dump(payload, handle, indent=2, ensure_ascii=False)
 
     print(f"--- round {label} ---")
+    print(f"  first sample landed {payload['first_sample_after_dispatch_s']}s after dispatch")
     for provider in PROVIDERS:
         info = final[provider]
         elapsed = terminal_at.get(provider)
@@ -4580,12 +4639,45 @@ def main():
     parser.add_argument("--interval", type=float, default=0.15)
     parser.add_argument("--out", required=True)
     parser.add_argument("--send-key", help="key to send as this round's dispatch")
+    parser.add_argument(
+        "--dispatch-at",
+        type=float,
+        help="a time.monotonic() reading captured at this round's dispatch instant, "
+        "for a round dispatched by something other than --send-key (the startup "
+        "refresh, whose dispatch is the launch itself)",
+    )
+    parser.add_argument(
+        "--assume-dispatched",
+        action="store_true",
+        help="startup round only: startAllRefreshes has already set both providers "
+        "Loading before the first frame, so a terminal state does not have to wait "
+        "on observing Loading first",
+    )
     args = parser.parse_args()
 
+    if args.send_key and args.dispatch_at is not None:
+        raise SystemExit("--send-key and --dispatch-at are mutually exclusive")
+
     if args.send_key:
+        # The clock starts at the dispatch instant, so it is read immediately
+        # BEFORE the keystroke is injected; reading it afterwards would silently
+        # discount however long tmux took to deliver the key.
+        dispatch_at = time.monotonic()
         subprocess.run(["tmux", "send-keys", "-t", args.session, args.send_key], check=True)
-    dispatch_at = time.monotonic()
-    payload = observe(args.session, args.label, dispatch_at, args.timeout, args.interval, args.out)
+    elif args.dispatch_at is not None:
+        dispatch_at = args.dispatch_at
+    else:
+        dispatch_at = time.monotonic()
+
+    payload = observe(
+        args.session,
+        args.label,
+        dispatch_at,
+        args.timeout,
+        args.interval,
+        args.out,
+        args.assume_dispatched,
+    )
     reached = all(
         payload["final_raw"][provider]["state"] == "Fresh" for provider in PROVIDERS
     )
@@ -4596,6 +4688,126 @@ if __name__ == "__main__":
     sys.exit(main())
 OBSERVE
 ```
+
+**4. The orchestrator**, which runs both rounds, the census, and the absence
+check in order:
+
+```console
+cat > "$TMP/run_measurement.sh" <<'RUNNER'
+#!/bin/bash
+# REL-2 measured run. Round A observes the startup refresh against a cold usage
+# cache, so a rendered window can only have come from the live refresh; round B
+# observes a later explicit `u`. Each round's clock starts at its own dispatch
+# instant: round A's is read immediately before `tmux new-session` and handed to
+# the observer, round B's immediately before the keystroke. A recursive
+# descendant census runs across both, and its absence check runs after both
+# refreshes finish but before Kanban is quit.
+set -u
+
+REL="$(cd "$(dirname "$0")" && pwd)"
+CHECKOUT="$1"
+SESSION=rel2
+CENSUS="$REL/census.json"
+
+tmux kill-server 2>/dev/null
+sleep 1
+
+echo "=== cache precondition ==="
+if [ -f "$HOME/.cache/kanban/usage.json" ]; then
+  mv "$HOME/.cache/kanban/usage.json" "$REL/usage.json.backup"
+  echo "moved ~/.cache/kanban/usage.json aside -> cold usage cache, no prior snapshot"
+else
+  echo "no ~/.cache/kanban/usage.json present -> already cold"
+fi
+rm -rf "$HOME/.cache/kanban/claude-probe"
+echo "removed the Claude probe scratch directory so the run recreates it"
+
+echo "=== round A: startup refresh (cold cache) ==="
+# The dispatch instant for the startup round is the launch itself, so the clock
+# is read here -- before tmux is asked to create the session -- and passed to the
+# observer. Reading it after launch, or after the pid discovery below, would
+# discount exactly the interval this round is supposed to measure.
+LAUNCHED_AT="$(python3 -c 'import time; print(time.monotonic())')"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 "$REL/launch_kanban.sh $CHECKOUT"
+
+# The observer starts first and in the background, so sampling begins while the
+# pid is still being resolved; Codex turns fresh in well under a second and a
+# serialised start would miss its Loading frame entirely.
+python3 "$REL/observe_usage.py" --session "$SESSION" --label "A-startup" \
+  --dispatch-at "$LAUNCHED_AT" --assume-dispatched \
+  --timeout 90 --interval 0.15 --out "$REL/round-a.json" &
+OBSERVER_PID=$!
+
+# Resolve the Kanban pid from the pane's own process, not by name matching.
+KPID=""
+for _ in $(seq 1 100); do
+  PANE_PID="$(tmux display-message -p -t "$SESSION" '#{pane_pid}' 2>/dev/null)"
+  if [ -n "$PANE_PID" ]; then
+    KPID="$(pgrep -P "$PANE_PID" -f 'bin/kanban' | head -1)"
+    [ -n "$KPID" ] && break
+  fi
+  sleep 0.1
+done
+if [ -z "$KPID" ]; then
+  echo "FAILED to resolve the Kanban pid"; kill "$OBSERVER_PID" 2>/dev/null
+  tmux capture-pane -t "$SESSION" -p | tail -20; exit 1
+fi
+echo "kanban pid: $KPID (tmux pane pid $PANE_PID)"
+
+echo "=== census watcher (recursive descendants, pid+start identity) ==="
+python3 "$REL/census_tree.py" --watch --root "$KPID" --interval 0.15 --duration 150 \
+  --census "$CENSUS" --quiet > "$REL/census.log" 2>&1 &
+CENSUS_PID=$!
+
+wait "$OBSERVER_PID"
+ROUND_A=$?
+
+echo "=== round B: explicit u refresh ==="
+sleep 2
+python3 "$REL/observe_usage.py" --session "$SESSION" --label "B-explicit-u" \
+  --send-key u --timeout 90 --interval 0.15 --out "$REL/round-b.json"
+ROUND_B=$?
+
+echo "=== settle, then stop the census ==="
+sleep 5
+wait "$CENSUS_PID" 2>/dev/null || kill "$CENSUS_PID" 2>/dev/null
+for _ in $(seq 1 200); do [ -f "$CENSUS" ] && break; sleep 1; done
+cat "$REL/census.log"
+
+echo "=== requirement 8: absence check, Kanban still running ==="
+ps -p "$KPID" -o pid=,command= >/dev/null && echo "kanban pid $KPID still alive: yes"
+echo "--- Acceptance 3's immediate-children form, for comparison ---"
+ps -axo pid=,ppid=,command= | awk -v k="$KPID" '$2==k' || true
+echo "--- the census-based recursive form ---"
+python3 "$REL/census_tree.py" --verify --census "$CENSUS"
+VERIFY=$?
+
+echo "=== shutdown ==="
+tmux send-keys -t "$SESSION" q
+sleep 3
+if ps -p "$KPID" >/dev/null 2>&1; then echo "kanban still alive after q: UNCLEAN"; else echo "kanban exited after q: clean"; fi
+tmux kill-server 2>/dev/null
+
+echo "=== result codes ==="
+echo "round A (both Fresh): $ROUND_A   round B (both Fresh): $ROUND_B   census verify: $VERIFY"
+RUNNER
+chmod +x "$TMP/run_measurement.sh"
+"$TMP/run_measurement.sh" "$ROOT"
+```
+
+`$ROOT` is the checkout from Build provenance, and is what Kanban is pointed at
+with `--path`; any checkout of this repository works in its place.
+
+The usage cache is moved aside rather than deleted, and a successful run
+rewrites it; the Claude probe recreates its own scratch directory. The
+nesting-inherited round of the previous section is the same sequence with
+`REL2_KEEP_NESTING=1` exported and only the startup round observed.
+
+Every `console` block in this record was extracted from this document and run as
+published, in a clean directory, to confirm the section is executable top to
+bottom: the four artifacts are created in dependency order, the census
+self-test passes from the source printed above, and the three configuration
+probes emit exactly the three messages quoted earlier.
 
 ## Decisions
 
