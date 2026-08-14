@@ -172,14 +172,29 @@ the corresponding approved external action succeeds.
 
 ## 1. Select one entry
 
-Check first whether an earlier run left a publication unfinished. When the
-entry you would select already carries its `[#N]`, `[no-issue]`, or `[deferred]`
-marker but the document still differs from the remote publication branch, that
-earlier run's tracker mutation already succeeded: re-attempt only the unfinished
-publication step below, and never repeat the tracker mutation. That marker and
-an existing local publication commit are the only evidence used here; a durable
-journal or cross-system reconciliation is deliberately not part of this
-workflow.
+**Scan for an unfinished publication before choosing an entry.** Resolve the
+document path first, in the numbered steps below, then compare that document
+against the remote publication branch:
+
+```bash
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+```
+
+When that prints the document and the entries it already changed carry their
+`[#N]`, `[no-issue]`, or `[deferred]` markers, an earlier run applied and marked
+its disposition but failed to publish it: the tracker and the document are
+already correct and publication alone is outstanding. Re-attempt the publication
+step below against that existing edit, never repeat the tracker mutation, and
+select no new entry this run.
+
+**This scan is the one deliberate exception to the selection rule below, which
+never selects a terminal-marked entry.** The entry being resumed is already
+marked — that is what an applied disposition looks like — so normal selection
+would skip it forever and the failed publication would never be retried. That
+marker and an existing local publication commit are the only evidence used here;
+a durable journal or cross-system reconciliation is deliberately not part of
+this workflow.
 
 1. Resolve an explicit or conversation-linked path under `$DOCS_WT`, never
    relative to the working directory. If none was supplied, search
@@ -202,7 +217,7 @@ workflow.
    child entries from top to bottom and select the first non-terminal entry when
    its dependencies are terminal and, for `[deferred]`, its stated precondition
    is now verified. This ledger order is also issue creation order; do not let a
-   newly unblocked later item jump ahead of earlier critical-path work.
+   newly unblocked later item jump ahead of earlier critical-path work. The unfinished-publication scan above is the one deliberate exception to this rule: it re-attempts publication for an entry that is already terminally marked, and selects no new work.
 5. Treat a dependency linked as `[#N]` or deliberately closed as `[no-issue]`
    as terminal, but re-check that a no-issue dependency did not remove behavior
    the selected slice assumes. A deferred or unprocessed dependency is not

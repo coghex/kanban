@@ -228,6 +228,14 @@ CONTRACT_STATEMENTS = {
         "That reconciliation is gated on the verification, not merely sequenced "
         "after it"
     ),
+    "publication-resume-scan-precedes-selection": (
+        "The scan for that state runs before entry selection, and is exempt from "
+        "it"
+    ),
+    "publication-resume-through-selection-is-unreachable": (
+        "A resumption check reached only through normal selection is therefore "
+        "unreachable by construction"
+    ),
     "publication-isolation-is-verified-on-the-commit": (
         "That isolation is verified on the publication commit itself before it "
         "is pushed, rather than inferred from how the commit was constructed"
@@ -407,9 +415,25 @@ PUBLICATION_CLAUSES = {
         "commit id; and whether the remote publication branch contains that "
         "commit"
     ),
+    "scan-precedes-selection": (
+        "scan for an unfinished publication before choosing an entry"
+    ),
     "resumes-only-the-publication-step": (
-        "re-attempt only the unfinished publication step below, and never repeat "
-        "the tracker mutation"
+        "re-attempt the publication step below against that existing edit, never "
+        "repeat the tracker mutation, and select no new entry this run"
+    ),
+    "scan-is-exempt-from-selection": (
+        "this scan is the one deliberate exception to the selection rule below, "
+        "which never selects a terminal-marked entry"
+    ),
+    "selection-would-skip-it-forever": (
+        "normal selection would skip it forever and the failed publication would "
+        "never be retried"
+    ),
+    "selection-rule-names-the-exception": (
+        "the unfinished-publication scan above is the one deliberate exception to "
+        "this rule: it re-attempts publication for an entry that is already "
+        "terminally marked, and selects no new work"
     ),
     "resumption-evidence-is-bounded": (
         "that marker and an existing local publication commit are the only "
@@ -432,6 +456,9 @@ PUBLICATION_SHELL_BINDINGS = (
     '&& git -C "$DOCS_WT" fetch origin "$DOC_BRANCH" \\ '
     '&& git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"',
     'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    # The resumption scan: an eligible document differing from its publication
+    # branch is an unpublished mutation, whatever marker its entry carries.
+    'git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
     # Keyed by path as well as content, so two documents that hash alike cannot
     # share one scratch index and interleave into a two-path tree.
     'PUB_KEY="${DOC_RELATIVE_PATH//\\//-}"',

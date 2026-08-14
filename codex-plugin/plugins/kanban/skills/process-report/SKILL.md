@@ -183,14 +183,29 @@ Rules:
 
 ## 1. Locate the next finding
 
-Check first whether an earlier run left a publication unfinished. When the
-entry you would select already carries its `[#N]`, `[no-issue]`, or `[deferred]`
-marker but the document still differs from the remote publication branch, that
-earlier run's tracker mutation already succeeded: re-attempt only the unfinished
-publication step below, and never repeat the tracker mutation. That marker and
-an existing local publication commit are the only evidence used here; a durable
-journal or cross-system reconciliation is deliberately not part of this
-workflow.
+**Scan for an unfinished publication before choosing an entry.** Resolve the
+document path first, in the numbered steps below, then compare that document
+against the remote publication branch:
+
+```bash
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+```
+
+When that prints the document and the entries it already changed carry their
+`[#N]`, `[no-issue]`, or `[deferred]` markers, an earlier run applied and marked
+its disposition but failed to publish it: the tracker and the document are
+already correct and publication alone is outstanding. Re-attempt the publication
+step below against that existing edit, never repeat the tracker mutation, and
+select no new entry this run.
+
+**This scan is the one deliberate exception to the selection rule below, which
+never selects a terminal-marked entry.** The entry being resumed is already
+marked — that is what an applied disposition looks like — so normal selection
+would skip it forever and the failed publication would never be retried. That
+marker and an existing local publication commit are the only evidence used here;
+a durable journal or cross-system reconciliation is deliberately not part of
+this workflow.
 
 1. Resolve the user-supplied report path under `$DOCS_WT`, never relative to
    the working directory. Stop with a concise error if it does not exist or is
@@ -202,7 +217,7 @@ workflow.
    example, a report may use level-three `CH-N` headings rather than plain
    numbers.
 4. Choose exactly one finding, by this precedence. `[#N]` and `[no-issue]`
-   findings are never selected.
+   findings are never selected. The unfinished-publication scan above is the one deliberate exception to this rule: it re-attempts publication for an entry that is already terminally marked, and selects no new work.
 
    1. **A `[deferred]` finding whose precondition is now satisfied.** Take the
       first such finding, top to bottom. Confirm the precondition actually holds

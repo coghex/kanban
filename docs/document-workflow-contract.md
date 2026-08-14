@@ -525,6 +525,16 @@ publication step itself. A durable journal, cross-system reconciliation, or
 identity verification of a similarly titled artifact is deliberately not part of
 this contract.
 
+**The scan for that state runs before entry selection, and is exempt from it.**
+An applied disposition is exactly what a terminal marker records, so the entry
+whose publication failed is already marked — and §5's selection never selects a
+terminal-marked entry. A resumption check reached only through normal selection
+is therefore unreachable by construction: the run would pick up new work and
+leave the unpublished mutation behind every time. The scan looks for an eligible
+document that differs from its publication branch before any entry is chosen,
+and a run that finds one re-attempts that publication and selects nothing new,
+which is also why resuming does not spend the invocation's one artifact.
+
 ### 9.7 What publishing does not change
 
 Publication happens after each individually approved disposition and is never
