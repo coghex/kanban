@@ -274,6 +274,14 @@ PUBLICATION_CLAUSES = {
         "publication branch contains it"
     ),
     "never-publishes-by-hand": "never publish by hand instead",
+    "binds-content-to-the-tip": (
+        "always pass it: it is what binds this content to the document state it "
+        "was rendered from"
+    ),
+    "a-moved-tip-means-re-render": (
+        "a tip-moved result means re-reading the document and rendering the "
+        "disposition again rather than publishing what you have"
+    ),
     "the-helper-mints-the-scratch-path": (
         "never choose that path yourself"
     ),
@@ -287,7 +295,8 @@ PUBLICATION_CLAUSES = {
 PUBLICATION_INVOCATION = (
     'python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
     '--repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\ '
-    '--path "$DOC_RELATIVE_PATH" --content "$APPROVED"'
+    '--path "$DOC_RELATIVE_PATH" --content "$APPROVED" \\ '
+    '--expected-tip "$PREFLIGHT_TIP"'
 )
 
 # The scratch path is minted by the helper, never named by the asset. An asset

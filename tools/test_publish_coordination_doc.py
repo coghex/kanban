@@ -805,6 +805,77 @@ class PublishTests(unittest.TestCase):
                     [],
                 )
 
+    def test_content_rendered_against_an_older_tip_is_refused(self):
+        # Two runs both pass the preflight, both create a tracker item, and
+        # both render from the same document. The first publishes; the second's
+        # content is now a whole-file image of a document that no longer
+        # exists, and publishing it would drop the first's disposition while
+        # changing exactly the one path a correct publication changes.
+        first_tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )["publication_tip"]
+        second_tip = first_tip  # the second run looked at the same moment
+
+        self.fx.publish("# UI\n\n- one\n- first run\n")
+        self.assertIn("- first run", self.fx.remote_content())
+
+        blob = self.fx.dir / "second.md"
+        blob.write_text("# UI\n\n- one\n- second run\n", encoding="utf-8")
+        with self.assertRaises(publisher.PublishError) as caught:
+            publisher.publish(
+                repository="coghex/kanban", branch="master", root=self.fx.docs,
+                document="docs/ui-bugs.md", content=blob.read_bytes(),
+                message="docs: second", expected_tip=second_tip,
+            )
+        self.assertEqual(caught.exception.status, "tip-moved")
+        # The first run's disposition is still on the branch.
+        self.assertIn("- first run", self.fx.remote_content())
+        self.assertNotIn("- second run", self.fx.remote_content())
+
+    def test_a_current_tip_still_publishes(self):
+        tip = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )["publication_tip"]
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        result = publisher.publish(
+            repository="coghex/kanban", branch="master", root=self.fx.docs,
+            document="docs/ui-bugs.md", content=blob.read_bytes(),
+            message="docs: ok", expected_tip=tip,
+        )
+        self.assertEqual(result["status"], "published")
+
+    def test_restoration_refuses_an_occupied_target_when_link_is_unavailable(self):
+        # The fallback must still refuse rather than overwrite: a rename here
+        # would check and then clobber, which is the race this module declines
+        # to run anywhere else.
+        original = publisher.link_into_place
+        publisher.link_into_place = lambda s, d: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied")
+        )
+        self.addCleanup(setattr, publisher, "link_into_place", original)
+        aside = self.fx.docs / "captured.md"
+        aside.write_text("captured\n")
+        occupied = self.fx.docs / "occupied.md"
+        occupied.write_text("somebody else's newer file\n")
+        self.assertFalse(
+            publisher.put_back(aside, occupied, b"captured\n", 0o644)
+        )
+        self.assertEqual(occupied.read_text(), "somebody else's newer file\n")
+
+    def test_restoration_recreates_when_the_target_is_free(self):
+        original = publisher.link_into_place
+        publisher.link_into_place = lambda s, d: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied")
+        )
+        self.addCleanup(setattr, publisher, "link_into_place", original)
+        aside = self.fx.docs / "captured.md"
+        aside.write_text("captured\n")
+        free = self.fx.docs / "free.md"
+        self.assertTrue(publisher.put_back(aside, free, b"captured\n", 0o644))
+        self.assertEqual(free.read_text(), "captured\n")
+        self.assertEqual(free.stat().st_mode & 0o777, 0o644)
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

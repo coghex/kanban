@@ -348,10 +348,16 @@ multiple drafts.
 **First, before any tracker mutation, check for an outstanding publication.**
 
 ```bash
-python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
-  --path "$DOC_RELATIVE_PATH" --check-pending
+  --path "$DOC_RELATIVE_PATH" --check-pending)"
 ```
+
+Keep the `publication_tip` it reports. The document you are about to read and
+re-render is that tip's, and the content you produce is a whole-file image of
+it, so publication must be refused if the branch has moved on since — a second
+run doing the same thing would otherwise drop this one's disposition while
+changing exactly the one path a correct publication changes.
 
 A `"pending"` result means an earlier approved mutation of this document has
 not reached the branch. **Stop here.** Do not create or link a tracker item and
@@ -415,8 +421,14 @@ APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
   --new-content-file)"
 python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
-  --path "$DOC_RELATIVE_PATH" --content "$APPROVED"
+  --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
+  --expected-tip "$PREFLIGHT_TIP"
 ```
+
+`$PREFLIGHT_TIP` is the `publication_tip` the preflight reported. Always pass
+it: it is what binds this content to the document state it was rendered from,
+and a `tip-moved` result means re-reading the document and rendering the
+disposition again rather than publishing what you have.
 
 **Never choose that path yourself.** A fixed name collides between any two
 runs, and a name derived from the document collides between two runs of the

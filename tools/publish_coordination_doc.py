@@ -490,7 +490,7 @@ def link_into_place(scratch: Path, target: Path) -> None:
     os.link(scratch, target)
 
 
-def put_back(aside: Path, target: Path) -> bool:
+def put_back(aside: Path, target: Path, data: bytes, mode: int) -> bool:
     """Return the captured document to its path without overwriting anything.
 
     `link` refuses when the path is occupied, which is the point: by the time a
@@ -500,8 +500,10 @@ def put_back(aside: Path, target: Path) -> bool:
 
     It also never raises. This runs on the way out of a failure, and a
     restoration that throws would replace the real error with its own and leave
-    the document deleted; when `link` is unavailable for some reason other than
-    the path being occupied, a rename still puts the document back.
+    the document deleted. When `link` is unavailable for some reason other than
+    the path being taken, the document is recreated exclusively instead: that
+    still refuses an occupied path, where a rename would check and then
+    overwrite — the very race this module declines to run anywhere else.
     """
     try:
         link_into_place(aside, target)
@@ -511,12 +513,16 @@ def put_back(aside: Path, target: Path) -> bool:
     except OSError:
         pass
     try:
-        if not target.exists():
-            os.rename(aside, target)
-            return True
+        descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
     except OSError:
-        pass
-    return False
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        os.chmod(target, mode)
+        return True
+    except OSError:
+        return False
 
 
 def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
@@ -543,6 +549,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
     """
     target = root / document
     handle = scratch = aside = None
+    captured, captured_mode = b"", 0o644
     try:
         existing, _ = read_for_write(target)
         if git_blob_hash(existing) != baseline:
@@ -565,6 +572,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         # people and processes read.
         os.chmod(scratch, os.stat(target).st_mode & 0o7777)
 
+        captured_mode = os.stat(target).st_mode & 0o7777
         aside = Path(
             tempfile.mkdtemp(prefix=".kanban-publish-aside-", dir=str(target.parent))
         ) / target.name
@@ -577,7 +585,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         captured_blob = _preserve(root, captured)
         if captured_blob != baseline:
             preserved = captured_blob
-            restored = put_back(aside, target)
+            restored = put_back(aside, target, captured, captured_mode)
             raise PublishError(
                 "document-changed-before-write",
                 f"{document} was changed between its verification and the swap; "
@@ -629,7 +637,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             # because the failure that matters here is the one not enumerated.
             restored = True
             if not target.exists():
-                restored = put_back(aside, target)
+                restored = put_back(aside, target, captured, captured_mode)
             if restored:
                 aside.unlink(missing_ok=True)
                 aside.parent.rmdir()
@@ -825,14 +833,21 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     recorded = git(
         ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
     ).stdout.decode().strip()
-    if not recorded:
-        return {"status": "clear", "document": document, "pending_ref": pending}
     git(["fetch", "origin", branch], cwd=resolved, check=False)
+    observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
+    if not recorded:
+        return {
+            "status": "clear",
+            "document": document,
+            "pending_ref": pending,
+            "publication_tip": observed_tip,
+        }
     landed = is_ancestor(resolved, recorded, f"origin/{branch}")
     return {
         "status": "pending",
         "document": document,
         "pending_ref": pending,
+        "publication_tip": observed_tip,
         "pending_commit": recorded,
         "recorded_blob": blob_at(resolved, recorded, document),
         "already_landed": landed,
@@ -935,7 +950,8 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
 
 
 def publish(
-    *, repository: str, branch: str, root: Path, document: str, content: bytes, message: str
+    *, repository: str, branch: str, root: Path, document: str, content: bytes,
+    message: str, expected_tip: str | None = None,
 ) -> dict:
     """Publish one approved mutation, or report why it was not published.
 
@@ -951,6 +967,22 @@ def publish(
         owner = verify_owner(resolved, repository)
         git(["fetch", "origin", branch], cwd=resolved)
         tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
+        if expected_tip and expected_tip != tip:
+            # The caller rendered its content against `expected_tip` and then
+            # mutated its tracker. If the branch has moved since, that content
+            # is a whole-file image of a document that no longer exists, and
+            # publishing it would drop whatever landed in between — silently,
+            # because it changes exactly the one path a correct publication
+            # changes. The caller has to re-read and re-render.
+            raise PublishError(
+                "tip-moved",
+                f"{branch} advanced from {expected_tip[:12]} to {tip[:12]} after "
+                "this content was rendered; re-read the document and render the "
+                "disposition again",
+                expected_tip=expected_tip,
+                publication_tip=tip,
+                remote_contains_commit=False,
+            )
 
         lock = lock_ref(owner, document)
         pending = pending_ref(owner, document)
@@ -1135,6 +1167,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--path", required=True, help="repository-relative document")
     parser.add_argument("--content", type=Path, help="file holding the approved content")
     parser.add_argument("--message", default=None)
+    parser.add_argument(
+        "--expected-tip",
+        default=None,
+        help="the publication tip the content was rendered against",
+    )
     parser.add_argument("--clear-stale-lock", action="store_true")
     parser.add_argument(
         "--new-content-file",
@@ -1184,6 +1221,7 @@ def main(argv: list[str] | None = None) -> int:
                 content=content,
                 message=args.message
                 or f"docs: publish the approved mutation to {args.path}",
+                expected_tip=args.expected_tip,
             )
     except PublishError as error:
         # The envelope is guaranteed at this boundary, not only inside

@@ -498,7 +498,8 @@ object database before anything else can fail, and every way out of the swap —
 including failures the code did not anticipate — puts the document back before
 dropping that copy. A restoration never raises and never overwrites: it must
 not replace the error that caused it, and it must not become the write that
-destroys another. Where it cannot restore, the captured file is kept rather
+destroys another — including in its own fallbacks, which recreate the document
+exclusively rather than renaming over whatever is there. Where it cannot restore, the captured file is kept rather
 than removed. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
@@ -517,6 +518,15 @@ outstanding record at publication time is discovering it after a second issue
 already exists for a disposition the document will never receive. The check is
 read-only, takes no lock, and is the first step of applying a disposition
 rather than the last.
+
+**Approved content is bound to the document state it was rendered from.** That
+check cannot hold a lock across the user's approval, so two runs can pass it at
+the same moment, each create a tracker item, and each render a whole-file image
+of the same document. Whichever publishes second would then overwrite the
+first's disposition — invisibly, because it changes exactly the one path a
+correct publication changes. So the publication tip the run was rendered
+against travels with the content, and a branch that has moved since refuses the
+publication and asks for the disposition to be rendered again.
 
 ### 9.5 What "published" means, and the three-state failure report
 
