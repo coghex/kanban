@@ -184,9 +184,10 @@ git -C "$DOCS_WT" diff --name-only "$PUB_TIP" -- "$DOC_RELATIVE_PATH"
 
 That one comparison decides what this run may do at all:
 
-- **Empty.** The document equals the publication tip. Select normally; this
-  run's own edit is then the only difference, which is exactly what lets its
-  publication carry the approved mutation and nothing else.
+- **Empty.** The document equals the publication tip. Take the document lock
+  described below, then select normally; this run's own edit is then the only
+  difference, which is exactly what lets its publication carry the approved
+  mutation and nothing else.
 - **Prints the document, and the entries it already changed carry their `[#N]`,
   `[no-issue]`, or `[deferred]` markers.** An earlier run applied and marked its
   disposition but failed to publish it: the tracker and the document are already
@@ -201,6 +202,36 @@ That one comparison decides what this run may do at all:
   decide whether to proceed with a disposition that will not be published or to
   reconcile first. Never publish anyway, and never discard the other work to
   make publication possible.
+
+**Hold a document lock from before the edit until after the publication.** The
+scan's "clean" answer is only true until another run writes to the same file,
+and two runs share one docs worktree — the working tree is shared mutable state.
+Without serialization both can scan clean, apply different dispositions, and the
+first to hash the file publishes *both* in one commit: the one-path check still
+sees a single path, so nothing downstream catches it, and the one-artifact
+boundary is broken by a run that obeyed it.
+
+```bash
+PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
+PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"
+git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""
+```
+
+The empty third argument is what makes this exclusive: `update-ref` requires the
+ref to be absent, and creating it is atomic, so exactly one run wins. A failure
+means another run is mid-publication on this same document — do not edit it, do
+not publish, and say which document is locked. Release it once publication has
+succeeded or failed, on every path out:
+
+```bash
+git -C "$DOCS_WT" update-ref -d "$PUB_LOCK"
+```
+
+The lock holds a commit ID rather than being empty, so a lock a dead run left
+behind is inspectable with `git for-each-ref refs/kanban/` and cleared with the
+same `-d` once the user confirms no run is active. It is a ref in the docs
+worktree's own repository, so it never touches the tracked tree and no
+publication can carry it.
 
 **This scan is the one deliberate exception to the selection rule below, which
 never selects a terminal-marked entry.** The entry being resumed is already
@@ -533,7 +564,6 @@ moves and no other path can be swept in, then push it plainly:
 
 ```bash
 PUB_BLOB="$(git -C "$DOCS_WT" hash-object -w -- "$DOCS_WT/$DOC_RELATIVE_PATH")"
-PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
 PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_KEY-$PUB_BLOB")"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "$PUB_TIP"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
@@ -548,10 +578,19 @@ PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
         (sec) && /^## /{exit}
         (sec) && $1 == want && $2 == "|" && $3 == "coordination"{ok = 1; exit}
         END{exit !ok}' \
+  && [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \
+    = "$PUB_BLOB" ] \
   && [ "$(git -C "$DOCS_WT" diff --name-only "$PUB_TIP" "$PUB_COMMIT")" \
     = "$DOC_RELATIVE_PATH" ] \
   && git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
 ```
+
+The re-hash in that chain is the lock's backstop: `$PUB_BLOB` is the content
+this run approved and built its commit from, so a file that no longer hashes to
+it changed after the disposition was applied. Inside the lock that can only be
+something outside this protocol — a person editing the document, another tool —
+and publishing it would carry a change nobody approved. It costs one hash and
+turns "the lock should have prevented this" into a check.
 
 Nothing above the push leaves the object store: `hash-object`, `write-tree`, and
 `commit-tree` write unreferenced objects and move no branch, so building a

@@ -495,6 +495,18 @@ Nothing before the push leaves the object store — building a candidate commit
 writes unreferenced objects and moves no branch — so the push is the single
 external effect, and it is the one step every gate converges on.
 
+**The document is locked from before the edit until after the publication.** A
+"the document is clean" answer stays true only until another run writes to the
+same file, and runs sharing a docs worktree share one working tree. Unserialized,
+two of them can each observe a clean document, apply different approved
+dispositions, and have the first to read the file publish both in a single
+commit — one changed path, every gate satisfied, and the one-artifact boundary
+of §5 broken by a run that followed it. The lock is per document, acquired
+atomically, held across the whole scan-edit-publish sequence, and released on
+every exit path; a lock a dead run left behind is inspectable and clearable
+rather than a wedge. Verifying the published blob is still the one the run
+approved backs it up, catching any change made outside the protocol entirely.
+
 **A same-file difference is the case the one-path check cannot see, so it is
 excluded before the edit rather than after it.** The publication commit carries
 the document's whole blob, so a change the document already held is published

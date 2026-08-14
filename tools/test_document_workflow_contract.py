@@ -222,6 +222,10 @@ CONTRACT_STATEMENTS = {
     "publication-classification-is-parsed": (
         "The classification is parsed and gated on, not merely displayed"
     ),
+    "publication-document-is-locked": (
+        "The document is locked from before the edit until after the "
+        "publication"
+    ),
     "publication-same-file-difference-excluded-early": (
         "A same-file difference is the case the one-path check cannot see, so it "
         "is excluded before the edit rather than after it"
@@ -356,6 +360,26 @@ PUBLICATION_CLAUSES = {
     "the-gate-is-the-test-not-a-display": (
         "that pipeline is the eligibility test, not a display of §7 for a human "
         "to read"
+    ),
+    "lock-spans-edit-and-publication": (
+        "hold a document lock from before the edit until after the publication"
+    ),
+    "unserialized-runs-batch-dispositions": (
+        "the first to hash the file publishes both in one commit"
+    ),
+    "the-empty-old-value-is-what-excludes": (
+        "the empty third argument is what makes this exclusive"
+    ),
+    "lock-is-released-on-every-path": (
+        "release it once publication has succeeded or failed, on every path out"
+    ),
+    "a-stale-lock-is-clearable": (
+        "a lock a dead run left behind is inspectable with git for-each-ref "
+        "refs/kanban/ and cleared with the same -d"
+    ),
+    "blob-recheck-backs-up-the-lock": (
+        "a file that no longer hashes to it changed after the disposition was "
+        "applied"
     ),
     "clean-before-editing": (
         "the document must match the pinned tip before this run edits it"
@@ -541,6 +565,11 @@ PUBLICATION_SHELL_BINDINGS = (
     # The precondition that makes a same-file difference impossible to publish
     # accidentally: the document equals the pinned tip before the run edits it.
     'git -C "$DOCS_WT" diff --quiet "$PUB_TIP" -- "$DOC_RELATIVE_PATH"',
+    # Atomic per-document mutual exclusion: update-ref with an empty old
+    # value requires the ref to be absent, so exactly one run creates it.
+    'PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"',
+    'git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""',
+    'git -C "$DOCS_WT" update-ref -d "$PUB_LOCK"',
     # The pre-selection scan, against the same pin: a document differing from
     # the publication tip is either an earlier run's unpublished mutation or
     # work this run must not publish, and both are decided before selection.
@@ -553,6 +582,10 @@ PUBLICATION_SHELL_BINDINGS = (
     # The isolation guarantee, checked on the finished commit rather than
     # assumed from how it was built — and consumed as the push's own condition,
     # since a verification nothing reads would let a mixed tree through.
+    # The push gate in full: owner, the approved blob (the lock's backstop
+    # against a change made outside the protocol), and the one-path check.
+    '&& [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \\ '
+    '= "$PUB_BLOB" ] \\ '
     '&& [ "$(git -C "$DOCS_WT" diff --name-only "$PUB_TIP" "$PUB_COMMIT")" \\ '
     '= "$DOC_RELATIVE_PATH" ] \\ '
     '&& git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
