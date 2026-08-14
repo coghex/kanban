@@ -1279,6 +1279,62 @@ class PublishTests(unittest.TestCase):
             self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
         self.assertEqual(caught.exception.status, "document-staged")
 
+    def test_a_scratch_index_cleanup_failure_does_not_strand_the_document(self):
+        # This cleanup runs after the document has been replaced but before the
+        # candidate commit and its record exist, so a raise there would leave an
+        # approved local document with nothing to resume from.
+        original = publisher.os.unlink
+
+        def failing_unlink(path, *args, **kwargs):
+            if "kanban-publish-index" in str(path):
+                raise OSError(5, "I/O error")
+            return original(path, *args, **kwargs)
+
+        publisher.os.unlink = failing_unlink
+        self.addCleanup(setattr, publisher.os, "unlink", original)
+        result = self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(result["status"], "published")
+        self.assertIn("- two", self.fx.remote_content())
+
+    def test_a_preserve_failure_after_capture_still_reports_the_capture(self):
+        # Both fail at once: the content cannot be written to the object
+        # database *and* the document cannot be restored. The original failure
+        # must survive rather than be masked by the reporting itself.
+        original_preserve = publisher._preserve
+        original_link = publisher.link_into_place
+        original_open = publisher.os.open
+        # Targeted by content, not by call order: the approved content is
+        # preserved before the swap, so counting calls fails the wrong one.
+        captured_bytes = (self.fx.docs / "docs" / "ui-bugs.md").read_bytes()
+
+        def failing_preserve(root, data):
+            if data == captured_bytes:  # the capture's own preserve
+                raise publisher.PublishError("git-failed", "object database down")
+            return original_preserve(root, data)
+
+        def no_link(scratch, dest):
+            raise PermissionError(13, "denied")
+
+        def no_open(path, flags, *rest):
+            if flags & publisher.os.O_EXCL and str(path).endswith("docs/ui-bugs.md"):
+                raise PermissionError(13, "denied")
+            return original_open(path, flags, *rest)
+
+        publisher._preserve = failing_preserve
+        publisher.link_into_place = no_link
+        publisher.os.open = no_open
+        self.addCleanup(setattr, publisher, "_preserve", original_preserve)
+        self.addCleanup(setattr, publisher, "link_into_place", original_link)
+        self.addCleanup(setattr, publisher.os, "open", original_open)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        # The real failure, not an UnboundLocalError from the reporting.
+        self.assertEqual(caught.exception.status, "git-failed")
+        detail = caught.exception.detail
+        self.assertIn("captured_file", detail)
+        self.assertTrue(Path(detail["captured_file"]).is_file())
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

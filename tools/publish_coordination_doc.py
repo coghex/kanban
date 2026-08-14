@@ -596,7 +596,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
     """
     target = root / document
     handle = scratch = aside = None
-    captured, captured_mode = b"", 0o644
+    captured, captured_mode, captured_blob = b"", 0o644, None
     # Only a completed capture may be restored. Before it, `captured` is a
     # placeholder rather than the document, and putting *that* back would
     # invent a file rather than return one.
@@ -693,7 +693,7 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             # invariant on the way out rather than repeated at each raise,
             # because the failure that matters here is the one not enumerated.
             restored = True
-            if captured_ok and not target.exists():
+            if captured_ok and not _quietly(target.stat):
                 restored = put_back(aside, target, captured, captured_mode)
             elif not captured_ok:
                 # The rename never completed, so nothing was taken and there is
@@ -753,7 +753,11 @@ def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -
             ["git", "write-tree"], cwd=str(root), capture_output=True, env=env
         ).stdout.decode().strip()
     finally:
-        scratch.unlink(missing_ok=True)
+        # Best-effort, like every other cleanup here: this runs after the
+        # document has already been replaced but before the candidate commit
+        # and its record exist, so a raise would strand an approved local
+        # document with nothing to resume from.
+        _quietly(scratch.unlink, missing_ok=True)
     return git_out(["commit-tree", tree, "-p", tip, "-m", message], cwd=root)
 
 

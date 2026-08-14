@@ -570,8 +570,10 @@ states rather than collapsed into one — including the ones the module never
 modelled. A caller branches on the result, so a traceback where a result
 belongs leaves it with nothing to report and no way to learn what became of its
 document; and cleanup, which runs on the way out with a failure often already
-propagating, may never raise at all, since an exception from there would
-replace the real one and skip the lock release on its way past. The states:
+propagating, may never raise at all — nor may the reporting that accompanies
+it, whose own inputs must be defined on every path that can reach it, since an
+exception from either would replace the real error and skip the lock release on
+its way past. The states:
 
 - whether the document edit exists locally, and in which worktree and at which
   path;
