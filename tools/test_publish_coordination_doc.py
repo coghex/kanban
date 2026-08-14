@@ -766,6 +766,45 @@ class PublishTests(unittest.TestCase):
             self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(sorted(p.name for p in (self.fx.docs / "docs").iterdir()), before)
 
+    def test_no_failure_in_the_swap_can_lose_the_document(self):
+        # The invariant, driven at every step where the document has no home:
+        # whatever fails and however, the document survives intact, the remote
+        # is untouched, and the outcome is structured. Enumerated as a table
+        # because the failure that matters is the one nobody anticipated, and a
+        # table is cheap to extend when the next one is found.
+        for attr, error in (
+            ("rename_aside", OSError(5, "I/O error")),
+            ("link_into_place", PermissionError(13, "Permission denied")),
+            ("link_into_place", OSError(28, "No space left on device")),
+            ("read_for_write", OSError(5, "I/O error")),
+        ):
+            with self.subTest(step=attr, error=error.errno):
+                self._tmp.cleanup()
+                self._tmp = tempfile.TemporaryDirectory()
+                self.fx = Fixture(Path(self._tmp.name))
+                target = self.fx.docs / "docs" / "ui-bugs.md"
+                before = target.read_text()
+                original = getattr(publisher, attr)
+
+                def failing(*args, **kwargs):
+                    raise error
+
+                setattr(publisher, attr, failing)
+                try:
+                    with self.assertRaises(publisher.PublishError) as caught:
+                        self.fx.publish("# UI\n\n- one\n- two\n")
+                finally:
+                    setattr(publisher, attr, original)
+                self.assertEqual(caught.exception.status, "document-unwritable")
+                self.assertTrue(target.is_file())
+                self.assertEqual(target.read_text(), before)
+                self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+                self.assertEqual(
+                    [p.name for p in (self.fx.docs / "docs").iterdir()
+                     if "kanban-publish" in p.name],
+                    [],
+                )
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
