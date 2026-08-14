@@ -1090,6 +1090,7 @@ docs/issue_approval_queue_design.md | coordination | audit-report
 docs/issue_search_design.md | coordination | audit-report
 docs/linux_portability_design.md | coordination | audit-report
 docs/managed_paths_design.md | coordination | audit-report
+docs/media/README.md | pr-atomic | test-parsed;release-document
 docs/multi_repo_boards_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document

@@ -11,20 +11,7 @@ you did not ask for, and uses the GitHub CLI login you already have. Beyond the
 board, it can optionally show Codex and Claude usage, start work on an issue,
 run a review, and track those jobs without leaving the terminal.
 
-<!--
-PUB-3 media slot. Replace this comment with the board screenshot.
-
-Packaging constraint PUB-3 inherits: an image referenced by a
-repository-relative path must also reach the source distribution — declared in
-kanban.cabal's extra-source-files or extra-doc-files, and given a stated
-release decision in tools/test_source_distribution.py — or the packaged-link
-check in that module fails, because the packaged document would name a path the
-archive does not carry. D-6 of the public-release design currently expects
-media assets to be excluded from the archive while being referenced by relative
-path; that expectation has to be reconciled with this check before the image
-lands. Referencing an asset hosted outside the repository by absolute URL
-avoids the check entirely.
--->
+![The Kanban board filling a terminal: a usage sidebar showing Codex and Claude limits beside the Issues, Active, Reviewing, and Done columns, which hold issue and pull-request cards with labels, review state, and CI status, one card selected](docs/media/board-wide.png)
 
 ## Quickstart
 

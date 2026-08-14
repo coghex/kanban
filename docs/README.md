@@ -14,6 +14,8 @@
 - [Design and implementation notes](design.md) — detailed behavior and engineering decisions.
 - [Bug findings](bugs.md) — repository evidence collected for later triage,
   with the status of each entry.
+- [Media](media/README.md) — the tracked board screenshot, what it is derived
+  from, and how to regenerate and review it.
 
 ## Workflow contracts
 
