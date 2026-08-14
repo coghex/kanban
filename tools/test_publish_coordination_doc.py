@@ -16,7 +16,9 @@ root here, not an exotic case.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -368,6 +370,90 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(publisher.PublishError) as caught:
             self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(caught.exception.status, "landed-but-divergent")
+
+    def test_an_edit_injected_after_the_read_is_detected_and_preserved(self):
+        # The window the previous test did not reach: injected *after* the
+        # bytes are read, so the baseline comparison passes on cached content
+        # and only the last look before the replace can catch it.
+        original = publisher.read_for_write
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+        state = {"reads": 0}
+
+        def racing_read(path):
+            state["reads"] += 1
+            result = original(path)
+            if state["reads"] == 1:  # after the read, before the replace
+                target.write_text(target.read_text() + "- foreign\n")
+            return result
+
+        publisher.read_for_write = racing_read
+        self.addCleanup(setattr, publisher, "read_for_write", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        self.assertIn("- foreign", target.read_text())
+        self.assertIn(
+            "- foreign",
+            run(["git", "cat-file", "-p", caught.exception.detail["preserved_blob"]],
+                self.fx.docs),
+        )
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_unresolved_pending_record_blocks_a_fresh_publication(self):
+        # A rejected push followed by reverting the document: the record is the
+        # only pointer to that run's approved mutation, and publishing over it
+        # would drop it silently.
+        original = publisher.git
+
+        def failing_push(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["push", "origin"]:
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_push
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n")
+        finally:
+            publisher.git = original
+        pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+        recorded = run(["git", "rev-parse", pending], self.fx.docs)
+        (self.fx.docs / "docs" / "ui-bugs.md").write_text("# UI\n\n- one\n")  # reverted
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- different\n")
+        self.assertEqual(caught.exception.status, "pending-unresolved")
+        self.assertEqual(run(["git", "rev-parse", pending], self.fx.docs), recorded)
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_unwritable_document_is_a_structured_result(self):
+        original = publisher.read_for_write
+
+        def failing_read(path):
+            raise OSError(13, "Permission denied")
+
+        publisher.read_for_write = failing_read
+        self.addCleanup(setattr, publisher, "read_for_write", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-unwritable")
+        for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
+            self.assertIn(key, caught.exception.detail)
+
+    def test_unreadable_approved_content_is_a_structured_result(self):
+        missing = Path(self._tmp.name) / "gone.md"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--content", str(missing),
+            ])
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["status"], "content-unreadable")
+        # Guaranteed at the CLI boundary too, not only inside publish().
+        for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
+            self.assertIn(key, payload)
 
     # -- eligibility ---------------------------------------------------------
 

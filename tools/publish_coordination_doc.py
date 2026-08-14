@@ -434,29 +434,76 @@ def git_blob_hash(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
-    """Replace the document, refusing if it is no longer the baseline.
+def read_for_write(target: Path):
+    """The document's bytes and the stat they were read from, together.
 
-    The read, the comparison and the write are adjacent, with no subprocess
-    between them. When the content has changed it is written into the object
-    database before this returns, so an outside-protocol edit is recoverable
-    with `git cat-file -p <blob>` even though it was refused rather than
-    published — the guarantee is that such an edit survives, not that it is
-    published.
+    A seam as much as a helper: the window this module must close is between
+    reading the file and replacing it, and a test can only inject an edit into
+    that window if the read is something it can wrap.
+    """
+    if not target.is_file():
+        return b"", None
+    with open(target, "rb") as handle:
+        return handle.read(), os.fstat(handle.fileno())
+
+
+def _preserve(root: Path, data: bytes) -> str:
+    """Put `data` in the object database, so refusing to publish it does not
+    lose it. Recoverable afterwards with `git cat-file -p <blob>`."""
+    return git_out(
+        ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=data
+    )
+
+
+def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
+    """Replace the document, refusing if it is not — and does not stay — the
+    baseline.
+
+    There is no compare-and-swap for file content, so this closes the window
+    rather than wishing it away: the bytes are read and checked against the
+    baseline, then re-read and re-stat'd immediately before an atomic
+    `os.replace`. An edit landing at any point up to that last look is detected
+    and the run fails closed, and whatever was found is written to the object
+    database first, so an outside-protocol edit survives being refused. The
+    replace is atomic, so no reader sees a torn document.
     """
     target = root / document
-    existing = target.read_bytes() if target.is_file() else b""
-    if git_blob_hash(existing) != baseline:
-        preserved = git_out(
-            ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=existing
+    try:
+        existing, before = read_for_write(target)
+        if git_blob_hash(existing) != baseline:
+            raise PublishError(
+                "document-changed-before-write",
+                f"{document} changed after its baseline was verified; nothing was "
+                "written and nothing was published",
+                preserved_blob=_preserve(root, existing),
+            )
+
+        # The last look, as close to the replace as the process can put it.
+        again, after = read_for_write(target)
+        moved = (before is None) != (after is None) or (
+            before is not None
+            and after is not None
+            and (before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_ino, after.st_size, after.st_mtime_ns)
         )
+        if again != existing or moved:
+            raise PublishError(
+                "document-changed-before-write",
+                f"{document} changed between its verification and the write; "
+                "nothing was written and nothing was published",
+                preserved_blob=_preserve(root, again),
+            )
+
+        scratch = target.with_name(f".{target.name}.kanban-publish")
+        scratch.write_bytes(content)
+        os.replace(scratch, target)
+    except OSError as error:
+        # An unwritable document is an unpublished outcome like any other, not
+        # a traceback for the caller to interpret.
         raise PublishError(
-            "document-changed-before-write",
-            f"{document} changed after its baseline was verified; nothing was "
-            "written and nothing was published",
-            preserved_blob=preserved,
-        )
-    target.write_bytes(content)
+            "document-unwritable",
+            f"{document} could not be read or replaced: {error}",
+        ) from error
 
 
 def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -> str:
@@ -755,7 +802,27 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         return {"repository": owner, "publication_tip": tip} | already
 
     require_unstaged(root, document)
+
+    # A record that has not landed and is not being resumed is unresolved
+    # work, not debris. Publishing fresh would overwrite the ref and lose the
+    # only pointer to an earlier run's approved mutation — the state left
+    # behind when a rejected push is followed by reverting the document.
+    outstanding = git(
+        ["rev-parse", "--verify", "--quiet", pending], cwd=root, check=False
+    ).stdout.decode().strip()
+
     current = working_blob(root, document)
+    if current == baseline and outstanding:
+        raise PublishError(
+            "pending-unresolved",
+            f"an earlier publication of {document} is recorded and has not landed, "
+            "but the document no longer carries it; resolve that record before "
+            "publishing something else",
+            local_commit=outstanding,
+            remote_contains_commit=False,
+            pending_ref=pending,
+            recorded_blob=blob_at(root, outstanding, document),
+        )
     if current != baseline:
         return {"repository": owner, "publication_tip": tip} | _resume(
             root, branch, tip, document, pending, current
@@ -849,24 +916,40 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if args.content is None:
                 parser.error("--content is required unless --clear-stale-lock is given")
+            try:
+                content = args.content.read_bytes()
+            except OSError as error:
+                raise PublishError(
+                    "content-unreadable",
+                    f"the approved content at {args.content} could not be read: {error}",
+                ) from error
             outcome = publish(
                 repository=args.repo,
                 branch=args.branch,
                 root=args.root,
                 document=args.path,
-                content=args.content.read_bytes(),
+                content=content,
                 message=args.message
                 or f"docs: publish the approved mutation to {args.path}",
             )
     except PublishError as error:
-        print(
-            json.dumps(
-                {"status": error.status, "message": error.message, **error.detail},
-                indent=2,
-                sort_keys=True,
-                default=str,
-            )
-        )
+        # The envelope is guaranteed at this boundary, not only inside
+        # publish(): a failure raised before the sequence starts — unreadable
+        # content, an unusable write root — is still an unpublished outcome the
+        # caller must report all three states for.
+        payload = {
+            "document_edit": {
+                "exists": None,
+                "write_root": str(args.root),
+                "path": args.path,
+            },
+            "local_publication_commit": None,
+            "remote_branch": f"origin/{args.branch}" if args.branch else None,
+            "remote_contains_commit": None,
+        }
+        payload.update(error.detail)
+        payload.update({"status": error.status, "message": error.message})
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 1
     print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
     return 0

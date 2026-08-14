@@ -476,11 +476,15 @@ and records an unfinished publication so a later run resumes exactly it, or
 fails closed when the document or the branch has moved underneath it.
 
 **Nothing an outside process wrote is destroyed to make a publication
-possible.** Content the module declines to publish is written to the object
-database before it refuses, so an edit made outside this protocol is
-recoverable rather than lost, and a recorded publication that already reached
-the branch is not cleared while the write root has diverged from it — the
-divergence keeps the record that points at it.
+possible.** There is no compare-and-swap for file content, so the module closes
+that window rather than wishing it away: it checks the document, looks once
+more immediately before an atomic replace, and fails closed on any change it
+finds. Content it declines to publish is written to the object database first,
+so an edit made outside this protocol is recoverable rather than lost. A
+recorded publication that already reached the branch is not cleared while the
+write root has diverged from it, and a record that has not landed is not
+overwritten by a fresh publication — an unresolved record is outstanding work,
+and it is the only pointer to the mutation it names.
 
 ### 9.5 What "published" means, and the three-state failure report
 
