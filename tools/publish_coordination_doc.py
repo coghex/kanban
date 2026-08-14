@@ -54,6 +54,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 # §7 is Kanban's own statement about Kanban, so it can only ever authorize
@@ -187,6 +188,24 @@ def common_git_dir(root: Path) -> Path:
     return Path(
         git_out(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=root)
     )
+
+
+def new_content_file(root: Path, document: str) -> Path:
+    """A scratch path for this invocation's rendered content, minted here.
+
+    The caller must not choose it. A name derived from the document collides
+    between two runs of the same document, and a fixed name collides between
+    any two runs at all — either way one run reads the other's approved content
+    and publishes it under its own document's name. `mkstemp` in the common Git
+    directory is unique per invocation by construction, which is the property
+    no caller-side convention can promise.
+    """
+    directory = common_git_dir(root)
+    handle, path = tempfile.mkstemp(
+        prefix=f"kanban-approved-{_key('', document)}-", dir=str(directory)
+    )
+    os.close(handle)
+    return Path(path)
 
 
 def owner_token() -> str:
@@ -362,6 +381,38 @@ def working_blob(root: Path, document: str) -> str | None:
     return git_out(["hash-object", "--", str(target)], cwd=root)
 
 
+def staged_blob(root: Path, document: str) -> str | None:
+    """The document's index entry in the write root, or None when unindexed."""
+    proc = git(["rev-parse", "--verify", "--quiet", f":{document}"], cwd=root, check=False)
+    out = proc.stdout.decode().strip()
+    return out or None
+
+
+def head_blob(root: Path, document: str) -> str | None:
+    return blob_at(root, "HEAD", document)
+
+
+def require_unstaged(root: Path, document: str) -> None:
+    """Refuse a document with a staged change in the write root.
+
+    The end state this module promises is that the document path is left
+    unstaged, so the index entry must already match the write root's HEAD.
+    Hashing only the working file misses an index-only edit — `git apply
+    --cached` leaves the file itself untouched — and publishing over one would
+    both carry somebody's unapproved staged work forward and break the single
+    defined state reconciliation depends on.
+    """
+    staged, head = staged_blob(root, document), head_blob(root, document)
+    if staged != head:
+        raise PublishError(
+            "document-staged",
+            f"{document} has a staged change in the write root; publication needs "
+            "the document unstaged so its end state is defined",
+            staged_blob=staged,
+            head_blob=head,
+        )
+
+
 def is_ancestor(root: Path, commit: str, revision: str) -> bool:
     return (
         git(
@@ -524,6 +575,29 @@ def _resume(
     }
 
 
+def failure_states(root: Path, document: str, *, commit: str | None,
+                   branch: str, reachable: bool | None) -> dict:
+    """§9.5's three states, for every unpublished outcome.
+
+    A failure that happened before the write still answers all three — with
+    "the document is as it was" and "no publication commit exists" — because a
+    caller told to report three states cannot report them from a result that
+    omits two. Absent is a state, not a missing field.
+    """
+    target = root / document
+    return {
+        "document_edit": {
+            "exists": target.is_file(),
+            "write_root": str(root),
+            "path": document,
+            "blob": working_blob(root, document),
+        },
+        "local_publication_commit": commit,
+        "remote_branch": f"origin/{branch}",
+        "remote_contains_commit": reachable,
+    }
+
+
 def resolve_landed_pending(root: Path, branch: str, pending: str, document: str):
     """A recorded publication that already reached the branch, if there is one.
 
@@ -548,6 +622,10 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
         "remote_contains_commit": True,
         "document": document,
         "branch": branch,
+        # Every published result carries the summary, including a recovered
+        # one: the caller is told to check it against the disposition it
+        # applied, and a recovered run has the same reason to.
+        "changes": change_summary(root, f"{recorded}^", recorded, document),
         "document_edit": {"exists": True, "write_root": str(root), "path": document},
     }
 
@@ -565,102 +643,139 @@ def publish(
     pending = pending_ref(owner, document)
     acquire_lock(root, lock, tip)
     try:
-        require_eligible(root, tip, document)
-
-        baseline = blob_at(root, tip, document)
-        if baseline is None:
-            raise PublishError(
-                "not-eligible",
-                f"{document} is absent from the publication tip; a novel document "
-                "stays local until a pull request adds it and its classification",
+        try:
+            return _publish_locked(
+                root=root, owner=owner, branch=branch, tip=tip, document=document,
+                content=content, message=message, pending=pending,
             )
-
-        already = resolve_landed_pending(root, branch, pending, document)
-        if already is not None:
-            return {"repository": owner, "publication_tip": tip} | already
-
-        current = working_blob(root, document)
-        if current != baseline:
-            return {"repository": owner, "publication_tip": tip} | _resume(
-                root, branch, tip, document, pending, current
+        except PublishError as error:
+            # Every unpublished outcome reports all three states, whatever
+            # stage it failed at.
+            states = failure_states(
+                root,
+                document,
+                commit=error.detail.get("local_commit"),
+                branch=branch,
+                reachable=error.detail.get("remote_contains_commit"),
             )
-
-        approved_blob = git_out(
-            ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=content
-        )
-        if approved_blob == baseline:
-            raise PublishError(
-                "no-mutation",
-                f"the approved content for {document} is identical to the publication "
-                "tip; there is nothing to publish",
-            )
-
-        # Re-read immediately before writing. The window between the baseline
-        # check and the write is small but real, and an outside-protocol edit
-        # landing in it must survive rather than be overwritten by this write.
-        if working_blob(root, document) != baseline:
-            raise PublishError(
-                "document-changed-before-write",
-                f"{document} changed after its baseline was verified; nothing was "
-                "written and nothing was published",
-            )
-        (root / document).write_bytes(content)
-
-        commit = build_commit(root, tip, document, approved_blob, message)
-        touched = changed_paths(root, tip, commit)
-        if touched != [document]:
-            raise PublishError(
-                "not-isolated",
-                f"the publication commit changes {touched} rather than {document} alone",
-                changed_paths=touched,
-            )
-
-        landed, push_error = _push_and_verify(root, branch, commit, pending)
-        if not landed:
-            # The mutation stays in the write root as the approved content and
-            # the record identifies it exactly. No local branch moved, so
-            # nothing here can wedge the drainer's fast-forward.
-            raise PublishError(
-                "unpublished",
-                "the publication was not accepted by the remote branch",
-                push_stderr=push_error,
-                remote_contains_commit=False,
-                local_commit=commit,
-                pending_ref=pending,
-                document_edit={"exists": True, "write_root": str(root), "path": document},
-            )
-
-        git(["update-ref", "-d", pending], cwd=root, check=False)
-        new_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
-        return {
-            "status": "published",
-            "repository": owner,
-            "branch": branch,
-            "document": document,
-            "publication_tip": tip,
-            "commit": commit,
-            "published_blob": approved_blob,
-            "remote_contains_commit": True,
-            "branch_advanced_after_push": new_tip != commit,
-            "changes": change_summary(root, tip, commit, document),
-            "document_edit": {"exists": True, "write_root": str(root), "path": document},
-        }
+            error.detail = {**states, **error.detail}
+            raise
     finally:
         release_lock(root, lock)
+
+
+def _publish_locked(*, root, owner, branch, tip, document, content, message, pending):
+    """The sequence itself, run with the lock held. Split from publish() so
+    every failure leaving it passes through one place that attaches §9.5's
+    three states."""
+    require_eligible(root, tip, document)
+
+    baseline = blob_at(root, tip, document)
+    if baseline is None:
+        raise PublishError(
+            "not-eligible",
+            f"{document} is absent from the publication tip; a novel document "
+            "stays local until a pull request adds it and its classification",
+        )
+
+    already = resolve_landed_pending(root, branch, pending, document)
+    if already is not None:
+        return {"repository": owner, "publication_tip": tip} | already
+
+    require_unstaged(root, document)
+    current = working_blob(root, document)
+    if current != baseline:
+        return {"repository": owner, "publication_tip": tip} | _resume(
+            root, branch, tip, document, pending, current
+        )
+
+    approved_blob = git_out(
+        ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=content
+    )
+    if approved_blob == baseline:
+        raise PublishError(
+            "no-mutation",
+            f"the approved content for {document} is identical to the publication "
+            "tip; there is nothing to publish",
+        )
+
+    # Re-read immediately before writing. The window between the baseline
+    # check and the write is small but real, and an outside-protocol edit
+    # landing in it must survive rather than be overwritten by this write.
+    require_unstaged(root, document)
+    if working_blob(root, document) != baseline:
+        raise PublishError(
+            "document-changed-before-write",
+            f"{document} changed after its baseline was verified; nothing was "
+            "written and nothing was published",
+        )
+    (root / document).write_bytes(content)
+
+    commit = build_commit(root, tip, document, approved_blob, message)
+    touched = changed_paths(root, tip, commit)
+    if touched != [document]:
+        raise PublishError(
+            "not-isolated",
+            f"the publication commit changes {touched} rather than {document} alone",
+            changed_paths=touched,
+        )
+
+    landed, push_error = _push_and_verify(root, branch, commit, pending)
+    if not landed:
+        # The mutation stays in the write root as the approved content and
+        # the record identifies it exactly. No local branch moved, so
+        # nothing here can wedge the drainer's fast-forward.
+        raise PublishError(
+            "unpublished",
+            "the publication was not accepted by the remote branch",
+            push_stderr=push_error,
+            remote_contains_commit=False,
+            local_commit=commit,
+            pending_ref=pending,
+            document_edit={"exists": True, "write_root": str(root), "path": document},
+        )
+
+    git(["update-ref", "-d", pending], cwd=root, check=False)
+    new_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
+    return {
+        "status": "published",
+        "repository": owner,
+        "branch": branch,
+        "document": document,
+        "publication_tip": tip,
+        "commit": commit,
+        "published_blob": approved_blob,
+        "remote_contains_commit": True,
+        "branch_advanced_after_push": new_tip != commit,
+        "changes": change_summary(root, tip, commit, document),
+        "document_edit": {"exists": True, "write_root": str(root), "path": document},
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Publish one approved mutation.")
     parser.add_argument("--repo", required=True, help="the owning owner/name")
-    parser.add_argument("--branch", required=True, help="the publication branch")
+    parser.add_argument("--branch", help="the publication branch")
     parser.add_argument("--root", required=True, type=Path, help="the local write root")
     parser.add_argument("--path", required=True, help="repository-relative document")
     parser.add_argument("--content", type=Path, help="file holding the approved content")
     parser.add_argument("--message", default=None)
     parser.add_argument("--clear-stale-lock", action="store_true")
+    parser.add_argument(
+        "--new-content-file",
+        action="store_true",
+        help="mint and print a scratch path for this invocation's content",
+    )
     args = parser.parse_args(argv)
 
     try:
+        if args.new_content_file:
+            root = resolve_write_root(args.root)
+            verify_owner(root, args.repo)
+            print(new_content_file(root, args.path))
+            return 0
+        if not args.branch:
+            parser.error("--branch is required unless --new-content-file is given")
         if args.clear_stale_lock:
             root = resolve_write_root(args.root)
             owner = verify_owner(root, args.repo)

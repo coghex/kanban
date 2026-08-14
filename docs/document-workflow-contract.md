@@ -452,7 +452,13 @@ steps.
 asset composes the complete approved content and hands it over, and never edits
 or stages the document itself. That is what makes an edit somebody else makes
 beside the run unpublishable rather than merely unlikely: the published bytes
-come from what the caller passed, never from the working tree.
+come from what the caller passed, never from the working tree. The module also
+mints the scratch path that content is handed over in, because a path the
+callers name is shared state written before any lock is taken: two runs would
+overwrite one another's approved content, and one document would publish the
+other's. A document with a staged change is refused for the same reason — the
+end state the module promises is that the document path is left unstaged, and
+an index-only edit is invisible to a check that hashes the file alone.
 
 **The write root is ordinarily not the publication branch.** The assets write in
 the `docs-wip` linked worktree while publication targets the default branch, so

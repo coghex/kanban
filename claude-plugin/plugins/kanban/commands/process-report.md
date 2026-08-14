@@ -389,15 +389,23 @@ merely to reduce commit or push frequency.
 yourself.** `tools/publish_coordination_doc.py` is the only writer of the
 document, and that is what keeps an edit somebody else makes beside this run out
 of the published commit: the published bytes come from what you pass, never from
-the working tree. Write the rendered document to a scratch path outside the
-tracked tree, then invoke the helper:
+the working tree. Ask the helper for a scratch path, write the rendered
+document there, and hand it back:
 
 ```bash
-APPROVED="$(git -C "$DOCS_WT" rev-parse --path-format=absolute --git-common-dir)/kanban-approved-content"
+APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --new-content-file)"
 python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --content "$APPROVED"
 ```
+
+**Never choose that path yourself.** A fixed name collides between any two
+runs, and a name derived from the document collides between two runs of the
+same one; either way a run reads the other's approved content and publishes it
+under its own document's name. The helper mints a path unique to this
+invocation, which is the property no naming convention here can promise.
 
 Resolve the helper from the already-resolved `$DOC_ROOT` — the local checkout of
 the owning repository — and never from the session's own checkout, a personal

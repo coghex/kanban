@@ -201,6 +201,87 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertGreater(result["changes"]["removed"], 0)
 
+    # -- the result contract -------------------------------------------------
+
+    def test_a_minted_content_path_is_unique_per_invocation(self):
+        # Two runs must never share the scratch file: a fixed or
+        # document-derived name lets one run read the other's approved content
+        # and publish it under its own document's name.
+        seen = {
+            str(publisher.new_content_file(self.fx.docs, doc))
+            for doc in ("docs/ui-bugs.md", "docs/ui-bugs.md", "docs/drainer-bugs.md")
+        }
+        self.assertEqual(len(seen), 3)
+        for path in seen:
+            self.assertTrue(Path(path).is_file())
+            Path(path).unlink()
+
+    def test_every_published_result_carries_a_change_summary(self):
+        fresh = self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertIn("changes", fresh)
+        # ...including a recovered one, which the assets tell the caller to
+        # check against the disposition just as they do a fresh publication.
+        original = publisher.is_ancestor
+        publisher.is_ancestor = lambda root, commit, revision: False
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n- three\n")
+        finally:
+            publisher.is_ancestor = original
+        recovered = self.fx.publish("# UI\n\n- one\n- two\n- three\n")
+        self.assertEqual(recovered["resumed"], "already-landed")
+        self.assertIn("changes", recovered)
+        self.assertEqual(recovered["changes"]["added"], 1)
+
+    def test_a_pre_write_failure_still_reports_all_three_states(self):
+        # §9.5 is mandatory for every unpublished outcome, not only for the
+        # ones that got far enough to build a commit: a caller told to report
+        # three states cannot report them from a result that omits two.
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "not-eligible")
+        self.assertIn("document_edit", detail)
+        self.assertTrue(detail["document_edit"]["exists"])
+        self.assertIn("local_publication_commit", detail)
+        self.assertIsNone(detail["local_publication_commit"])
+        self.assertIn("remote_contains_commit", detail)
+        self.assertIsNone(detail["remote_contains_commit"])
+
+    def test_a_failed_push_reports_all_three_states(self):
+        original = publisher.build_commit
+
+        def advancing_build(root, tip, document, blob, message):
+            commit = original(root, tip, document, blob, message)
+            self.fx.advance_remote()
+            return commit
+
+        publisher.build_commit = advancing_build
+        self.addCleanup(setattr, publisher, "build_commit", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertTrue(detail["document_edit"]["exists"])
+        self.assertIsNotNone(detail["local_publication_commit"])
+        self.assertFalse(detail["remote_contains_commit"])
+
+    def test_an_index_only_edit_to_the_document_is_refused(self):
+        # `git apply --cached` leaves the working file untouched, so hashing it
+        # alone passes. Publishing over that would carry unapproved staged work
+        # forward and break the single unstaged end state.
+        blob = run(
+            ["git", "hash-object", "-w", "--stdin"], self.fx.docs,
+            input="# UI\n\n- staged only\n",
+        )
+        run(
+            ["git", "update-index", "--cacheinfo", f"100644,{blob},docs/ui-bugs.md"],
+            self.fx.docs,
+        )
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-staged")
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing(self):

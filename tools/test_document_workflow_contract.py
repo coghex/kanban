@@ -270,6 +270,13 @@ PUBLICATION_CLAUSES = {
         "publication branch contains it"
     ),
     "never-publishes-by-hand": "never publish by hand instead",
+    "the-helper-mints-the-scratch-path": (
+        "never choose that path yourself"
+    ),
+    "a-shared-scratch-path-crosses-runs": (
+        "a run reads the other's approved content and publishes it under its own "
+        "document's name"
+    ),
 }
 
 # The one command the assets carry. Anything more would be mechanism.
@@ -277,6 +284,15 @@ PUBLICATION_INVOCATION = (
     'python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
     '--repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\ '
     '--path "$DOC_RELATIVE_PATH" --content "$APPROVED"'
+)
+
+# The scratch path is minted by the helper, never named by the asset. An asset
+# that spells its own path reintroduces a cross-run collision the lock cannot
+# see, because the content is written before any lock is taken.
+PUBLICATION_SCRATCH_INVOCATION = (
+    'APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--new-content-file)"'
 )
 
 # The mechanism the assets must never carry again. Each of these is a step
@@ -1089,6 +1105,16 @@ class PublicationTests(unittest.TestCase):
                     normalized(self.asset_text(path)),
                     f"{path} must invoke the publication helper, resolved from the "
                     "owning repository's own write root",
+                )
+
+    def test_every_processing_asset_lets_the_helper_mint_the_scratch_path(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    PUBLICATION_SCRATCH_INVOCATION,
+                    normalized(self.asset_text(path)),
+                    f"{path} must ask the helper for its content path rather than "
+                    "naming one, which would collide across runs",
                 )
 
     def test_no_asset_carries_the_publication_mechanism(self):
