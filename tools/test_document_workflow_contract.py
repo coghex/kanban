@@ -259,6 +259,9 @@ CONTRACT_STATEMENTS = {
         "That reconciliation is gated on the verification, not merely sequenced "
         "after it"
     ),
+    "publication-marker-alone-is-insufficient": (
+        "A terminal marker alone is not sufficient evidence to resume"
+    ),
     "publication-resume-scan-precedes-selection": (
         "The scan for that state runs before entry selection, and is exempt from "
         "it"
@@ -532,16 +535,30 @@ PUBLICATION_CLAUSES = {
         "lets its publication carry the approved mutation and nothing else"
     ),
     "unrelated-work-blocks-this-run": (
-        "it carries work this run did not make, so publication is impossible "
-        "this run"
+        "the document carries something other than exactly that approved "
+        "mutation"
     ),
     "never-discard-to-publish": (
         "never publish anyway, and never discard the other work to make "
         "publication possible"
     ),
     "resumes-only-the-publication-step": (
-        "re-attempt the publication step below against that existing edit, never "
-        "repeat the tracker mutation, and select no new entry this run"
+        "re-attempt the publication step below against it, never repeat the "
+        "tracker mutation, and select no new entry this run"
+    ),
+    "resume-needs-an-exact-match": (
+        "only an exact match with a recorded pending publication may be resumed"
+    ),
+    "marker-alone-is-insufficient": (
+        "a terminal marker is not sufficient evidence on its own"
+    ),
+    "failure-records-what-it-approved": (
+        "an unpublished mutation records what it approved, so a later run can "
+        "identify it"
+    ),
+    "pending-record-is-cleared-on-success": (
+        "set to this run's publication commit on failure and deleted on "
+        "success"
     ),
     "scan-is-exempt-from-selection": (
         "this scan is the one deliberate exception to the selection rule below, "
@@ -592,6 +609,16 @@ PUBLICATION_SHELL_BINDINGS = (
     'PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"',
     'git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""',
     'git -C "$DOCS_WT" update-ref -d "$PUB_LOCK"',
+    # The pending-publication record: a failed run stores the commit whose
+    # tree holds the exact approved blob, and resumption demands a byte-for-
+    # byte match against it rather than trusting the terminal marker.
+    'PUB_PENDING="refs/kanban/pending-publication/$PUB_KEY"',
+    'git -C "$DOCS_WT" rev-parse --verify --quiet "$PUB_PENDING" \\ '
+    '&& [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \\ '
+    '= "$(git -C "$DOCS_WT" rev-parse "${PUB_PENDING}:${DOC_RELATIVE_PATH}")" ]',
+    '[ "$PUB_PUBLISHED" = yes ] && git -C "$DOCS_WT" update-ref -d "$PUB_PENDING"',
+    '[ "$PUB_PUBLISHED" = no ] \\ '
+    '&& git -C "$DOCS_WT" update-ref "$PUB_PENDING" "$PUB_COMMIT"',
     # The pre-selection scan, against the same pin: a document differing from
     # the publication tip is either an earlier run's unpublished mutation or
     # work this run must not publish, and both are decided before selection.

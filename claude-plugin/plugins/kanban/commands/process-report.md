@@ -187,6 +187,7 @@ git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
 PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"
 PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
 PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"
+PUB_PENDING="refs/kanban/pending-publication/$PUB_KEY"
 git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""
 git -C "$DOCS_WT" diff --name-only "$PUB_TIP" -- "$DOC_RELATIVE_PATH"
 ```
@@ -225,20 +226,31 @@ That comparison then decides what this run may do at all:
 - **Empty.** The document equals the publication tip. Select normally; this
   run's own edit is then the only difference, which is exactly what lets its
   publication carry the approved mutation and nothing else.
-- **Prints the document, and the entries it already changed carry their `[#N]`,
-  `[no-issue]`, or `[deferred]` markers.** An earlier run applied and marked its
-  disposition but failed to publish it: the tracker and the document are already
-  correct and publication alone is outstanding. Re-attempt the publication step
-  below against that existing edit, never repeat the tracker mutation, and
-  select no new entry this run.
-- **Prints the document otherwise.** It carries work this run did not make, so
-  **publication is impossible this run**: the publication commit is built from
-  the document's whole blob and would carry that work too — invisibly to the
-  one-path check, which sees a single changed path either way. Say so before
-  applying anything, name what the document already carries, release the lock,
-  and let the user decide whether to proceed with a disposition that will not be
-  published or to reconcile first. Never publish anyway, and never discard the
-  other work to make publication possible.
+- **Prints the document.** Something is already there, and only an exact match
+  with a recorded pending publication may be resumed:
+
+  ```bash
+  git -C "$DOCS_WT" rev-parse --verify --quiet "$PUB_PENDING" \
+    && [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \
+      = "$(git -C "$DOCS_WT" rev-parse "${PUB_PENDING}:${DOC_RELATIVE_PATH}")" ]
+  ```
+
+  When that succeeds, an earlier run applied and marked its disposition and
+  failed only at publication, and the document is byte-for-byte the content that
+  run approved. Re-attempt the publication step below against it, never repeat
+  the tracker mutation, and select no new entry this run.
+
+  When it fails — no pending record at all, or a document that no longer matches
+  the one recorded — the document carries something other than exactly that
+  approved mutation, so **publication is impossible this run**: the commit is
+  built from the whole blob and would carry the extra work too, invisibly to the
+  one-path check, which sees a single changed path either way. **A terminal
+  marker is not sufficient evidence on its own**, because it records that some
+  disposition was applied and says nothing about what has been written since;
+  only the recorded blob identifies the pending mutation. Say so before applying
+  anything, name what the document carries beyond the recorded mutation, release
+  the lock, and let the user decide whether to reconcile first. Never publish
+  anyway, and never discard the other work to make publication possible.
 
 **This scan is the one deliberate exception to the selection rule below, which
 never selects a terminal-marked entry.** The entry being resumed is already
@@ -626,6 +638,10 @@ git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
 git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \
   && PUB_PUBLISHED=yes
 
+[ "$PUB_PUBLISHED" = yes ] && git -C "$DOCS_WT" update-ref -d "$PUB_PENDING"
+[ "$PUB_PUBLISHED" = no ] \
+  && git -C "$DOCS_WT" update-ref "$PUB_PENDING" "$PUB_COMMIT"
+
 PUB_RECONCILED=no
 [ "$PUB_PUBLISHED" = yes ] \
   && [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \
@@ -636,6 +652,16 @@ PUB_RECONCILED=no
   && [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
   && git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"
 ```
+
+**An unpublished mutation records what it approved, so a later run can identify
+it.** `$PUB_PENDING` is set to this run's publication commit on failure and
+deleted on success, and the deletion is idempotent, so a run that never failed
+clears nothing. The commit is a durable statement of the exact content this run
+approved — a later run reads the blob back out of it with
+`git rev-parse "${PUB_PENDING}:${DOC_RELATIVE_PATH}"` and resumes only on an
+exact match. Without it, resumption would rest on the terminal marker alone,
+which cannot distinguish the approved mutation from anything written into the
+same file afterwards.
 
 **Ancestry alone is the verdict, and comparing the local file to the branch must
 play no part in it.** Someone else can advance `$DOC_BRANCH` with their own edit

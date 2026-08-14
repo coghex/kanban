@@ -603,9 +603,18 @@ rather than mistaking a behind copy for an unpublished one.
 A later run recognizes an already-applied tracker or document mutation and
 resumes the unfinished publication step without repeating the tracker mutation.
 The evidence is only what the document and the tracker already carry — a ledger
-entry already bearing its `[#N]`, `[no-issue]`, or `[deferred]` marker, or an
-existing local publication commit — and the response is only to re-attempt the
-publication step itself. A durable journal, cross-system reconciliation, or
+entry already bearing its `[#N]`, `[no-issue]`, or `[deferred]` marker, and the
+publication commit the failed run recorded — and the response is only to
+re-attempt the publication step itself.
+
+**A terminal marker alone is not sufficient evidence to resume.** It records
+that some disposition was applied; it says nothing about what has been written
+into the document since. A user who adds an unrelated hunk to a document whose
+publication failed leaves a file that still carries its marker, and a run
+resuming on the marker would publish that hunk along with the approved
+mutation — one changed path, every gate satisfied. So the failed run records the
+exact content it approved, and the resuming run requires the document to match
+it byte for byte; no record, or any difference, fails closed instead. A durable journal, cross-system reconciliation, or
 identity verification of a similarly titled artifact is deliberately not part of
 this contract.
 
