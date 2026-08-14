@@ -723,7 +723,9 @@ def _resume(
             pending_ref=pending,
             document_edit={"exists": True, "write_root": str(root), "path": document},
         )
-    git(["update-ref", "-d", pending], cwd=root, check=False)
+    clear_record_or_report_divergence(
+        root, document, pending, recorded_blob, branch, recorded
+    )
     return {
         "status": "published",
         "resumed": "retried",
@@ -759,6 +761,35 @@ def failure_states(root: Path, document: str, *, commit: str | None,
     }
 
 
+def clear_record_or_report_divergence(
+    root: Path, document: str, pending: str, published_blob: str, branch: str,
+    commit: str,
+) -> None:
+    """Drop the pending record, but only from a write root that still matches
+    what was published.
+
+    Reachability is settled by the time this runs, so the publication is a
+    fact. What is not settled is the write root: an outside process can change
+    or stage the document between the verification and this call. Clearing the
+    record then would leave that divergence with nothing pointing at it, which
+    is the guarantee §9 makes about a landed record — and it holds however the
+    publication got there, freshly or by resumption.
+    """
+    if working_blob(root, document) != published_blob or staged_blob(
+        root, document
+    ) != head_blob(root, document):
+        raise PublishError(
+            "landed-but-divergent",
+            f"{document} reached {branch}, but the write root has been changed or "
+            "staged since; the record is kept so the divergence is not lost",
+            remote_contains_commit=True,
+            local_commit=commit,
+            published_blob=published_blob,
+            pending_ref=pending,
+        )
+    git(["update-ref", "-d", pending], cwd=root, check=False)
+
+
 def resolve_landed_pending(root: Path, branch: str, pending: str, document: str):
     """A recorded publication that already reached the branch, if there is one.
 
@@ -775,25 +806,9 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
     if not recorded or not is_ancestor(root, recorded, f"origin/{branch}"):
         return None
     approved = blob_at(root, recorded, document)
-    if working_blob(root, document) != approved or staged_blob(
-        root, document
-    ) != head_blob(root, document):
-        # The publication did land — that is a fact about the remote, reported
-        # as one. What is refused is *clearing the record*, because the write
-        # root no longer holds what landed: something changed or staged the
-        # document afterwards, and dropping the record would leave that
-        # divergence with nothing pointing at it.
-        raise PublishError(
-            "landed-but-divergent",
-            f"the recorded publication for {document} reached {branch}, but the "
-            "document has been changed or staged since; the record is kept so the "
-            "divergence is not lost",
-            remote_contains_commit=True,
-            local_commit=recorded,
-            published_blob=approved,
-            pending_ref=pending,
-        )
-    git(["update-ref", "-d", pending], cwd=root, check=False)
+    clear_record_or_report_divergence(
+        root, document, pending, approved, branch, recorded
+    )
     return {
         "status": "published",
         "resumed": "already-landed",
@@ -955,7 +970,9 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
             document_edit={"exists": True, "write_root": str(root), "path": document},
         )
 
-    git(["update-ref", "-d", pending], cwd=root, check=False)
+    clear_record_or_report_divergence(
+        root, document, pending, approved_blob, branch, commit
+    )
     new_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
     return {
         "status": "published",

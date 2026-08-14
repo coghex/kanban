@@ -490,9 +490,11 @@ whichever step performs it. The document is absent for that instant; a reader
 seeing no file is the price of never destroying somebody else's write. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
-write root has diverged from it, and a record that has not landed is not
-overwritten by a fresh publication — an unresolved record is outstanding work,
-and it is the only pointer to the mutation it names.
+write root has diverged from it — checked at the moment of clearing rather than
+earlier, and identically however the publication got there, freshly or by
+resumption — and a record that has not landed is not overwritten by a fresh
+publication. An unresolved record is outstanding work, and it is the only
+pointer to the mutation it names.
 
 ### 9.5 What "published" means, and the three-state failure report
 

@@ -608,6 +608,59 @@ class PublishTests(unittest.TestCase):
         self.assertIsNotNone(detail["local_publication_commit"])
         self.assertIn("pending_ref", detail)
 
+    def test_divergence_after_a_fresh_publication_keeps_the_record(self):
+        # Reachability is settled, so the publication is a fact — but an
+        # outside process can change the document before the record is
+        # cleared, and dropping it then would leave that divergence with
+        # nothing pointing at it.
+        original = publisher.working_blob
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+        state = {"calls": 0}
+
+        def racing_blob(root, document):
+            state["calls"] += 1
+            if state["calls"] == 2:  # after the push, before the record clears
+                target.write_text(target.read_text() + "- landed after\n")
+            return original(root, document)
+
+        publisher.working_blob = racing_blob
+        self.addCleanup(setattr, publisher, "working_blob", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "landed-but-divergent")
+        # The publication is still reported as having reached the branch...
+        self.assertTrue(detail["remote_contains_commit"])
+        self.assertIn("- two", self.fx.remote_content())
+        # ...the outside edit survives, and the record still points at it.
+        self.assertIn("- landed after", target.read_text())
+        pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+        self.assertNotEqual(
+            run(["git", "rev-parse", "--verify", "--quiet", pending], self.fx.docs), ""
+        )
+
+    def test_staging_after_a_fresh_publication_keeps_the_record(self):
+        original = publisher.staged_blob
+        state = {"calls": 0}
+
+        def racing_staged(root, document):
+            # The two require_unstaged checks come first; the third call is the
+            # one made just before the record is cleared.
+            state["calls"] += 1
+            if state["calls"] >= 3:
+                return "0" * 40
+            return original(root, document)
+
+        publisher.staged_blob = racing_staged
+        self.addCleanup(setattr, publisher, "staged_blob", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "landed-but-divergent")
+        pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+        self.assertNotEqual(
+            run(["git", "rev-parse", "--verify", "--quiet", pending], self.fx.docs), ""
+        )
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing(self):
