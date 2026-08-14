@@ -60,6 +60,9 @@ TEST_PARSED_PATHS = {
     "docs/document-workflow-contract.md",
     # tools/test_drafting_workflow_contract.py parses its §2 asset table.
     "docs/drafting-workflow-contract.md",
+    # tools/test_board_screenshot.py reconciles the regeneration procedure's
+    # pinned font, geometry, and paths against the renderer's own constants.
+    "docs/media/README.md",
     # tools/test_claude_plugin.py reads every packaged command's frontmatter
     # and body.
     "claude-plugin/",

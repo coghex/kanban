@@ -52,6 +52,8 @@ extra-doc-files:
   docs/design.md
   docs/document-workflow-contract.md
   docs/drafting-workflow-contract.md
+  docs/media/README.md
+  docs/media/board-wide.png
   docs/pr-drainer.md
   docs/user-guide.md
   docs/workflow-setup.md
