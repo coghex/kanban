@@ -476,10 +476,12 @@ and records an unfinished publication so a later run resumes exactly it, or
 fails closed when the document or the branch has moved underneath it.
 
 **Nothing an outside process wrote is destroyed to make a publication
-possible.** There is no compare-and-swap for file content, so the module closes
-that window rather than wishing it away: it checks the document, looks once
-more immediately before an atomic replace, and fails closed on any change it
-finds. Content it declines to publish is written to the object database first,
+possible.** There is no compare-and-swap for file content, and a check followed
+by a write can always be raced, so the module does not rely on its check
+holding: it keeps a reference to the document as it was, swaps atomically, and
+judges the swap against that reference afterwards. An edit that landed in the
+gap is therefore either refused before the swap or put back after it, and the
+run fails closed either way. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
 write root has diverged from it, and a record that has not landed is not

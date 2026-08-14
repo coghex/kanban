@@ -455,6 +455,73 @@ class PublishTests(unittest.TestCase):
         for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
             self.assertIn(key, payload)
 
+    def test_an_edit_landing_at_the_swap_is_restored(self):
+        # The last gap: injected after every check, in the instant before the
+        # atomic replace. It cannot be prevented, so it is detected through the
+        # hard link and undone.
+        original = publisher.replace_document
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def racing_replace(scratch, dest):
+            # An in-place edit, which is what an editor writing the same inode
+            # does; the link the module holds sees it.
+            with open(dest, "r+") as handle:
+                handle.seek(0)
+                handle.write("# UI\n\n- foreign wins\n")
+                handle.truncate()
+            return original(scratch, dest)
+
+        publisher.replace_document = racing_replace
+        self.addCleanup(setattr, publisher, "replace_document", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        # Restored, recoverable, and nothing published.
+        self.assertIn("- foreign wins", target.read_text())
+        self.assertIn(
+            "- foreign wins",
+            run(["git", "cat-file", "-p", caught.exception.detail["preserved_blob"]],
+                self.fx.docs),
+        )
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_unrelated_file_matching_the_scratch_name_survives(self):
+        # A deterministic scratch name would truncate and delete this.
+        stray = self.fx.docs / "docs" / ".ui-bugs.md.kanban-publish"
+        stray.write_text("somebody else's untracked file\n")
+        self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertTrue(stray.exists())
+        self.assertEqual(stray.read_text(), "somebody else's untracked file\n")
+
+    def test_the_write_leaves_no_temporary_behind(self):
+        before = sorted(p.name for p in (self.fx.docs / "docs").iterdir())
+        self.fx.publish("# UI\n\n- one\n- two\n")
+        after = sorted(p.name for p in (self.fx.docs / "docs").iterdir())
+        self.assertEqual(before, after)
+
+    def test_a_failed_verification_still_names_the_candidate_commit(self):
+        # The push may have landed; a report that cannot name the commit is
+        # unrecoverable precisely when recovery matters.
+        original = publisher.git
+
+        def failing_fetch(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["fetch", "origin"] and getattr(failing_fetch, "armed", False):
+                raise publisher.PublishError("git-failed", "simulated fetch failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        def arming_push(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["push", "origin"]:
+                failing_fetch.armed = True
+            return failing_fetch(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = arming_push
+        self.addCleanup(setattr, publisher, "git", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertIsNotNone(detail["local_publication_commit"])
+        self.assertIn("pending_ref", detail)
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing(self):

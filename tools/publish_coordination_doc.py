@@ -455,21 +455,40 @@ def _preserve(root: Path, data: bytes) -> str:
     )
 
 
-def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
-    """Replace the document, refusing if it is not — and does not stay — the
-    baseline.
+def replace_document(scratch: Path, target: Path) -> None:
+    """The atomic swap, as a seam a test can inject into.
 
-    There is no compare-and-swap for file content, so this closes the window
-    rather than wishing it away: the bytes are read and checked against the
-    baseline, then re-read and re-stat'd immediately before an atomic
-    `os.replace`. An edit landing at any point up to that last look is detected
-    and the run fails closed, and whatever was found is written to the object
-    database first, so an outside-protocol edit survives being refused. The
-    replace is atomic, so no reader sees a torn document.
+    Everything the module can do about the instant between its last look and
+    this call is on the other side of it — so this is the boundary a race test
+    has to be able to reach.
+    """
+    os.replace(scratch, target)
+
+
+def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
+    """Replace the document, refusing — and undoing — if it is not the baseline.
+
+    A check followed by a write can always be raced: nothing stops another
+    process writing in the instant between them, and no POSIX primitive offers
+    compare-and-swap on file content. So this does not rely on the check
+    holding. It takes a hard link to the document's inode first, and that link
+    is what the swap is judged against afterwards:
+
+    - an in-place edit landing at any point before the swap is visible through
+      the link, because the link and the document are the same inode. The
+      content is preserved in the object database, the swap is undone by
+      putting that inode back, and the run fails closed;
+    - a writer that *replaces* the document instead changes its inode, which is
+      compared against the link's before the swap;
+
+    so an outside edit is either refused before the swap or restored after it,
+    and in both cases recoverable. The swap itself is atomic, so no reader sees
+    a torn document.
     """
     target = root / document
+    backup = handle = scratch = None
     try:
-        existing, before = read_for_write(target)
+        existing, _ = read_for_write(target)
         if git_blob_hash(existing) != baseline:
             raise PublishError(
                 "document-changed-before-write",
@@ -478,25 +497,41 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
                 preserved_blob=_preserve(root, existing),
             )
 
-        # The last look, as close to the replace as the process can put it.
-        again, after = read_for_write(target)
-        moved = (before is None) != (after is None) or (
-            before is not None
-            and after is not None
-            and (before.st_ino, before.st_size, before.st_mtime_ns)
-            != (after.st_ino, after.st_size, after.st_mtime_ns)
+        handle, scratch_name = tempfile.mkstemp(
+            prefix=f".{target.name}.kanban-publish-", dir=str(target.parent)
         )
-        if again != existing or moved:
+        scratch = Path(scratch_name)
+        with os.fdopen(handle, "wb") as stream:
+            handle = None
+            stream.write(content)
+
+        backup = Path(
+            tempfile.mkdtemp(prefix=".kanban-publish-backup-", dir=str(target.parent))
+        ) / target.name
+        os.link(target, backup)
+        if os.stat(target).st_ino != os.stat(backup).st_ino:
             raise PublishError(
                 "document-changed-before-write",
-                f"{document} changed between its verification and the write; "
-                "nothing was written and nothing was published",
-                preserved_blob=_preserve(root, again),
+                f"{document} was replaced by another writer before the swap; "
+                "nothing was published",
             )
 
-        scratch = target.with_name(f".{target.name}.kanban-publish")
-        scratch.write_bytes(content)
-        os.replace(scratch, target)
+        replace_document(scratch, target)
+        scratch = None
+
+        # The link still names the inode the document had. Anything written
+        # into it up to the swap is visible here, and undoable.
+        landed, _ = read_for_write(backup)
+        if git_blob_hash(landed) != baseline:
+            preserved = _preserve(root, landed)
+            os.replace(backup, target)
+            backup = None
+            raise PublishError(
+                "document-changed-before-write",
+                f"{document} was changed between its verification and the swap; "
+                "the change was restored and nothing was published",
+                preserved_blob=preserved,
+            )
     except OSError as error:
         # An unwritable document is an unpublished outcome like any other, not
         # a traceback for the caller to interpret.
@@ -504,6 +539,17 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             "document-unwritable",
             f"{document} could not be read or replaced: {error}",
         ) from error
+    finally:
+        if handle is not None:
+            os.close(handle)
+        # Only ever this invocation's own temporaries, each created
+        # exclusively: a deterministic name would collide with — and delete —
+        # an unrelated untracked file that happened to be called the same.
+        if scratch is not None:
+            scratch.unlink(missing_ok=True)
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+            backup.parent.rmdir()
 
 
 def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -> str:
@@ -853,7 +899,17 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
             changed_paths=touched,
         )
 
-    landed, push_error = _push_and_verify(root, branch, commit, pending)
+    try:
+        landed, push_error = _push_and_verify(root, branch, commit, pending)
+    except PublishError as error:
+        # The candidate exists and the record already names it, so a failure
+        # in the push or the verification that followed must say so — that is
+        # exactly the state a recovery needs, and the moment it is hardest to
+        # reconstruct afterwards.
+        error.detail.setdefault("local_commit", commit)
+        error.detail.setdefault("pending_ref", pending)
+        error.detail.setdefault("remote_contains_commit", None)
+        raise
     if not landed:
         # The mutation stays in the write root as the approved content and
         # the record identifies it exactly. No local branch moved, so
