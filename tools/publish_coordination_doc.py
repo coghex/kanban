@@ -150,13 +150,6 @@ def verify_owner(root: Path, declared: str) -> str:
             write_root_repository=actual,
             declared_repository=wanted,
         )
-    if actual != CANONICAL_REPOSITORY:
-        raise PublishError(
-            "not-eligible",
-            f"{actual} has no coordination lane; §7 classifies "
-            f"{CANONICAL_REPOSITORY} and nothing else",
-            repository=actual,
-        )
     return actual
 
 
@@ -337,26 +330,34 @@ def classify(rows: dict[str, str], document: str):
     return rows[matched[0]], matched
 
 
-def require_eligible(root: Path, tip: str, document: str) -> list[str]:
+def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, str]:
+    """Whether this document may publish directly, and why not when it may not.
+
+    A decision rather than a refusal: an ineligible document is an ordinary
+    outcome of a run whose disposition was still approved, and the approved
+    mutation still has to survive it.
+    """
+    if owner != CANONICAL_REPOSITORY:
+        return False, (
+            f"{owner} has no coordination lane; §7 classifies "
+            f"{CANONICAL_REPOSITORY} and nothing else"
+        )
     proc = git(["show", f"{tip}:{CLASSIFICATION_PATH}"], cwd=root, check=False)
     if proc.returncode != 0:
-        raise PublishError(
-            "not-eligible",
+        return False, (
             f"the publication tip carries no {CLASSIFICATION_PATH}, so it has no "
-            "coordination lane",
+            "coordination lane"
         )
     klass, matched = classify(
         parse_classification(proc.stdout.decode(errors="replace")), document
     )
     if klass != COORDINATION_CLASS:
-        raise PublishError(
-            "not-eligible",
-            f"{document} is not classified {COORDINATION_CLASS} by §7 of the "
-            "publication tip",
-            classification=klass,
-            matching_rows=matched,
+        return False, (
+            f"{document} is classified {klass or 'by no §7 row'} rather than "
+            f"{COORDINATION_CLASS}, so it is pr-atomic and lands with its "
+            f"implementation (matching rows: {matched or 'none'})"
         )
-    return matched
+    return True, ""
 
 
 # ------------------------------------------------------------------- state --
@@ -671,7 +672,8 @@ def _push_and_verify(
 
 
 def _resume(
-    root: Path, branch: str, tip: str, document: str, pending: str, current: str
+    root: Path, branch: str, tip: str, document: str, pending: str, current: str,
+    approved_blob: str,
 ) -> dict:
     """The document differs from the tip before this run wrote anything.
 
@@ -700,6 +702,22 @@ def _resume(
             "it carries work beyond the approved mutation",
             recorded_blob=recorded_blob,
             working_blob=current,
+        )
+    if recorded_blob != approved_blob:
+        # The caller is publishing a *different* disposition from the one the
+        # record names. Publishing the record instead would report success
+        # while the newly approved mutation never reached the document — and by
+        # now the caller has already mutated the tracker for it.
+        raise PublishError(
+            "pending-differs-from-approved",
+            f"an earlier unpublished mutation of {document} is recorded, and the "
+            "content supplied now is not it; resolve that record before publishing "
+            "a different disposition",
+            recorded_blob=recorded_blob,
+            approved_blob=approved_blob,
+            local_commit=recorded,
+            pending_ref=pending,
+            remote_contains_commit=False,
         )
     parent = git_out(["rev-parse", f"{recorded}^"], cwd=root)
     if parent != tip:
@@ -879,19 +897,47 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
     """The sequence itself, run with the lock held. Split from publish() so
     every failure leaving it passes through one place that attaches §9.5's
     three states."""
-    require_eligible(root, tip, document)
-
+    publishable, why_not = eligibility(root, owner, tip, document)
     baseline = blob_at(root, tip, document)
     if baseline is None:
-        raise PublishError(
-            "not-eligible",
+        publishable, why_not = False, (
             f"{document} is absent from the publication tip; a novel document "
-            "stays local until a pull request adds it and its classification",
+            "stays local until a pull request adds it and its classification"
         )
 
     already = resolve_landed_pending(root, branch, pending, document)
     if already is not None:
         return {"repository": owner, "publication_tip": tip} | already
+
+    if not publishable:
+        # The disposition was still approved, and by now the caller has very
+        # likely already mutated the tracker. Refusing to publish must not also
+        # discard the approved mutation: it goes into the object database
+        # unconditionally, and onto the document too whenever that can be done
+        # without clobbering anything.
+        preserved = _preserve(root, content)
+        applied = False
+        if baseline is not None and working_blob(root, document) == baseline:
+            require_unstaged(root, document)
+            verify_and_write(root, document, baseline, content)
+            applied = True
+        return {
+            "status": "not-published",
+            "reason": why_not,
+            "repository": owner,
+            "branch": branch,
+            "document": document,
+            "publication_tip": tip,
+            "approved_blob": preserved,
+            "document_written": applied,
+            "remote_contains_commit": False,
+            "local_publication_commit": None,
+            "document_edit": {
+                "exists": (root / document).is_file(),
+                "write_root": str(root),
+                "path": document,
+            },
+        }
 
     require_unstaged(root, document)
 
@@ -904,6 +950,7 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
     ).stdout.decode().strip()
 
     current = working_blob(root, document)
+    approved_blob = git_blob_hash(content)
     if current == baseline and outstanding:
         raise PublishError(
             "pending-unresolved",
@@ -917,12 +964,12 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         )
     if current != baseline:
         return {"repository": owner, "publication_tip": tip} | _resume(
-            root, branch, tip, document, pending, current
+            root, branch, tip, document, pending, current, approved_blob
         )
 
-    approved_blob = git_out(
-        ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=content
-    )
+    # The commit is built from this blob, so it must exist in the object
+    # database as well as be known by name.
+    assert _preserve(root, content) == approved_blob
     if approved_blob == baseline:
         raise PublishError(
             "no-mutation",

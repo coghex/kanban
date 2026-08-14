@@ -421,11 +421,25 @@ on the one structured result it returns:
   applied: because the whole document is handed over, an unintended rewrite of
   the rest of it changes the same single path a correct publication does, and
   the summary is what makes the difference visible.
+- **`"status": "not-published"`.** The document is not direct-publication
+  eligible — it is `pr-atomic`, matched no §7 row, or belongs to a repository
+  with no coordination lane. The approved mutation is not lost: the helper
+  reports `approved_blob`, recoverable with `git cat-file -p`, and
+  `document_written` says whether it also applied it to the document. Say which
+  it did and why publication was declined. This is the ordinary outcome for a
+  `pr-atomic` document, not a failure of this run.
 - **Any other status.** The document was not published. Report the three states
   the helper returns — whether the edit exists locally and in which worktree and
   path, whether a local publication commit exists and its ID, and whether the
   remote publication branch contains it — and say plainly which one applies.
   Leave the document as the helper left it.
+
+**A recorded publication is resolved before any new disposition.** When the
+helper reports `pending-unresolved` or `pending-differs-from-approved`, an
+earlier approved mutation of this document has not reached the branch. Do not
+apply a second disposition over it and do not create tracker items for one:
+resolve that record first, or the run you just approved will be reported
+published while its mutation is absent from the document.
 
 Publication ends this finding. Do not select another.
 

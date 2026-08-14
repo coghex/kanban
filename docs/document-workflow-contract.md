@@ -494,7 +494,10 @@ write root has diverged from it — checked at the moment of clearing rather tha
 earlier, and identically however the publication got there, freshly or by
 resumption — and a record that has not landed is not overwritten by a fresh
 publication. An unresolved record is outstanding work, and it is the only
-pointer to the mutation it names.
+pointer to the mutation it names — so a run that supplies a *different*
+approved mutation while one is outstanding is refused rather than served the
+recorded one, which would report success while the disposition just approved
+never reached the document.
 
 ### 9.5 What "published" means, and the three-state failure report
 

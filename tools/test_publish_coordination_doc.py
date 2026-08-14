@@ -239,16 +239,13 @@ class PublishTests(unittest.TestCase):
         # §9.5 is mandatory for every unpublished outcome, not only for the
         # ones that got far enough to build a commit: a caller told to report
         # three states cannot report them from a result that omits two.
-        with self.assertRaises(publisher.PublishError) as caught:
-            self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
-        detail = caught.exception.detail
-        self.assertEqual(caught.exception.status, "not-eligible")
-        self.assertIn("document_edit", detail)
-        self.assertTrue(detail["document_edit"]["exists"])
-        self.assertIn("local_publication_commit", detail)
-        self.assertIsNone(detail["local_publication_commit"])
-        self.assertIn("remote_contains_commit", detail)
-        self.assertIsNone(detail["remote_contains_commit"])
+        # An ineligible document returns rather than raises, and still
+        # answers all three states.
+        result = self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
+        self.assertEqual(result["status"], "not-published")
+        self.assertTrue(result["document_edit"]["exists"])
+        self.assertIsNone(result["local_publication_commit"])
+        self.assertFalse(result["remote_contains_commit"])
 
     def test_a_failed_push_reports_all_three_states(self):
         original = publisher.build_commit
@@ -663,16 +660,34 @@ class PublishTests(unittest.TestCase):
 
     # -- eligibility ---------------------------------------------------------
 
-    def test_a_pr_atomic_document_publishes_nothing(self):
-        with self.assertRaises(publisher.PublishError) as caught:
-            self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
-        self.assertEqual(caught.exception.status, "not-eligible")
+    def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
+        # Ineligible is an outcome, not a refusal to do anything: by now the
+        # caller has very likely already mutated the tracker, so the approved
+        # mutation has to survive being unpublishable.
+        result = self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
+        self.assertEqual(result["status"], "not-published")
+        self.assertIn("pr-atomic", result["reason"])
+        self.assertFalse(result["remote_contains_commit"])
+        self.assertEqual(self.fx.remote_content("docs/design.md"), "# Design")
+        # Applied locally and recoverable from the object database.
+        self.assertTrue(result["document_written"])
+        self.assertIn("changed", (self.fx.docs / "docs" / "design.md").read_text())
+        self.assertIn(
+            "changed",
+            run(["git", "cat-file", "-p", result["approved_blob"]], self.fx.docs),
+        )
 
     def test_an_unmatched_document_publishes_nothing(self):
         (self.fx.docs / "docs" / "novel.md").write_text("# Novel\n")
-        with self.assertRaises(publisher.PublishError) as caught:
-            self.fx.publish("# Novel\n\nmore\n", path="docs/novel.md")
-        self.assertEqual(caught.exception.status, "not-eligible")
+        result = self.fx.publish("# Novel\n\nmore\n", path="docs/novel.md")
+        self.assertEqual(result["status"], "not-published")
+        self.assertFalse(result["remote_contains_commit"])
+        # A novel document has no baseline on the tip, so it is not written
+        # over — but the approved content is still recoverable.
+        self.assertFalse(result["document_written"])
+        self.assertIn(
+            "more", run(["git", "cat-file", "-p", result["approved_blob"]], self.fx.docs)
+        )
 
     def test_a_directory_row_matches_by_component_not_prefix(self):
         rows = publisher.parse_classification(CLASSIFICATION)
@@ -692,17 +707,31 @@ class PublishTests(unittest.TestCase):
         run(["git", "rm", "-q", "docs/agent-workflow-contract.md"], self.fx.primary)
         run(["git", "commit", "-qm", "drop"], self.fx.primary)
         run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
-        with self.assertRaises(publisher.PublishError) as caught:
-            self.fx.publish("# UI\n\n- one\n- two\n")
-        self.assertEqual(caught.exception.status, "not-eligible")
+        result = self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(result["status"], "not-published")
+        self.assertIn("no coordination lane", result["reason"])
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
-    def test_another_owner_publishes_nothing_even_when_kanban_is_declared(self):
+    def test_a_declared_owner_that_is_not_the_write_roots_is_refused(self):
+        # A caller error rather than an outcome: the inputs disagree, so
+        # nothing here can be trusted and nothing is written.
         with tempfile.TemporaryDirectory() as other_dir:
             other = Fixture(Path(other_dir), origin_name="synarchy")
             with self.assertRaises(publisher.PublishError) as caught:
                 other.publish("# UI\n\n- one\n- two\n", repo="coghex/kanban")
             self.assertEqual(caught.exception.status, "owner-mismatch")
             self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+    def test_a_non_kanban_repository_keeps_its_mutation_but_publishes_nothing(self):
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            result = other.publish("# UI\n\n- one\n- two\n", repo="coghex/synarchy")
+            self.assertEqual(result["status"], "not-published")
+            self.assertIn("no coordination lane", result["reason"])
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+            # Its own document still receives the approved mutation.
+            self.assertTrue(result["document_written"])
+            self.assertIn("- two", (other.docs / "docs" / "ui-bugs.md").read_text())
 
     # -- isolation -----------------------------------------------------------
 
@@ -826,8 +855,7 @@ class PublishTests(unittest.TestCase):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertIsNone(publisher.read_lock_owner(self.fx.docs, lock))
-        with self.assertRaises(publisher.PublishError):
-            self.fx.publish("# Design\n", path="docs/design.md")
+        self.fx.publish("# Design\n\nchanged\n", path="docs/design.md")
         self.assertIsNone(
             publisher.read_lock_owner(
                 self.fx.docs, publisher.lock_ref("coghex/kanban", "docs/design.md")
@@ -910,6 +938,39 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["resumed"], "retried")
         self.assertIn("- two", self.fx.remote_content())
+
+    def test_a_second_disposition_cannot_publish_over_a_pending_one(self):
+        # The lifecycle hazard: a later invocation renders a *different*
+        # approved mutation. Publishing the recorded one instead would report
+        # success while the new disposition never reached the document — and
+        # the caller has already created its tracker item.
+        original = publisher.git
+
+        def failing_push(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["push", "origin"]:
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_push
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- first disposition\n")
+        finally:
+            publisher.git = original
+
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- SECOND disposition\n")
+        self.assertEqual(caught.exception.status, "pending-differs-from-approved")
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+        # The record still names the first, and neither is lost.
+        pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+        self.assertNotEqual(
+            run(["git", "rev-parse", "--verify", "--quiet", pending], self.fx.docs), ""
+        )
+        # Supplying the recorded mutation again still resumes it.
+        result = self.fx.publish("# UI\n\n- one\n- first disposition\n")
+        self.assertEqual(result["status"], "published")
+        self.assertIn("- first disposition", self.fx.remote_content())
 
     def test_a_foreign_edit_after_a_failed_publication_fails_closed(self):
         self._leave_pending()
