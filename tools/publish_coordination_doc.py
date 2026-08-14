@@ -221,7 +221,7 @@ def read_lock_owner(root: Path, ref: str) -> dict | None:
         return {"host": None, "pid": None, "raw": subject}
 
 
-def acquire_lock(root: Path, ref: str, tip: str) -> None:
+def acquire_lock(root: Path, ref: str, tip: str) -> str:
     """Atomic per-document mutual exclusion.
 
     `update-ref <ref> <new> ""` requires the ref to be absent, and creating it
@@ -240,10 +240,19 @@ def acquire_lock(root: Path, ref: str, tip: str) -> None:
             lock_ref=ref,
             lock_owner=read_lock_owner(root, ref) or {},
         )
+    return commit
 
 
-def release_lock(root: Path, ref: str) -> None:
-    git(["update-ref", "-d", ref], cwd=root, check=False)
+def release_lock(root: Path, ref: str, value: str | None = None) -> None:
+    """Drop the lock, and only ever *this* run's lock.
+
+    `update-ref -d <ref> <old>` deletes only while the ref still holds that
+    exact value. An unconditional delete would remove whatever lock happened to
+    be there — including one another run acquired after this one's had already
+    gone — and two publishers holding a lock each is the one thing it exists to
+    prevent.
+    """
+    git(["update-ref", "-d", ref] + ([value] if value else []), cwd=root, check=False)
 
 
 def process_is_live(pid: int) -> bool:
@@ -263,8 +272,11 @@ def clear_stale_lock(root: Path, ref: str) -> dict:
     cannot be checked from here, is refused: clearing either would produce two
     simultaneous publishers, which is the thing the lock exists to prevent.
     """
+    observed = git(
+        ["rev-parse", "--verify", "--quiet", ref], cwd=root, check=False
+    ).stdout.decode().strip()
     holder = read_lock_owner(root, ref)
-    if holder is None:
+    if holder is None or not observed:
         return {"status": "no-lock", "lock_ref": ref}
     host, pid = holder.get("host"), holder.get("pid")
     if host != socket.gethostname():
@@ -281,7 +293,17 @@ def clear_stale_lock(root: Path, ref: str) -> dict:
             lock_ref=ref,
             lock_owner=holder,
         )
-    release_lock(root, ref)
+    # Delete the exact ref this call inspected. Two clearers can agree the
+    # same owner is dead; without this, the slower one deletes whatever lock
+    # exists by then — which may be a live publisher's.
+    proc = git(["update-ref", "-d", ref, observed], cwd=root, check=False)
+    if proc.returncode != 0:
+        raise PublishError(
+            "lock-changed",
+            "the lock changed while it was being cleared; it was left alone",
+            lock_ref=ref,
+            observed=observed,
+        )
     return {"status": "cleared", "lock_ref": ref, "lock_owner": holder}
 
 
@@ -756,6 +778,42 @@ def _resume(
     }
 
 
+def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
+    """Whether an earlier approved mutation of this document is outstanding.
+
+    Callers mutate the tracker before they publish, so this has to be askable
+    *before* they do: learning about an unresolved record afterwards means a
+    second issue already exists for a disposition that cannot be applied. This
+    only reads — no lock, no write, no fetch of anything it does not need.
+    """
+    resolved = resolve_write_root(root)
+    owner = verify_owner(resolved, repository)
+    pending = pending_ref(owner, document)
+    recorded = git(
+        ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
+    ).stdout.decode().strip()
+    if not recorded:
+        return {"status": "clear", "document": document, "pending_ref": pending}
+    git(["fetch", "origin", branch], cwd=resolved, check=False)
+    landed = is_ancestor(resolved, recorded, f"origin/{branch}")
+    return {
+        "status": "pending",
+        "document": document,
+        "pending_ref": pending,
+        "pending_commit": recorded,
+        "recorded_blob": blob_at(resolved, recorded, document),
+        "already_landed": landed,
+        "resolution": (
+            "the recorded publication reached the branch; re-run publication with "
+            "the recorded content to reconcile and clear it"
+            if landed
+            else "re-run publication with the recorded content to retry it, or "
+            "clear the record deliberately; do not approve a different "
+            "disposition for this document first"
+        ),
+    }
+
+
 def failure_states(root: Path, document: str, *, commit: str | None,
                    branch: str, reachable: bool | None) -> dict:
     """§9.5's three states, for every unpublished outcome.
@@ -863,14 +921,14 @@ def publish(
 
         lock = lock_ref(owner, document)
         pending = pending_ref(owner, document)
-        acquire_lock(resolved, lock, tip)
+        held = acquire_lock(resolved, lock, tip)
         try:
             return _publish_locked(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
             )
         finally:
-            release_lock(resolved, lock)
+            release_lock(resolved, lock, held)
     except PublishError as error:
         try:
             states = failure_states(
@@ -1050,6 +1108,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="mint and print a scratch path for this invocation's content",
     )
+    parser.add_argument(
+        "--check-pending",
+        action="store_true",
+        help="report any outstanding publication for this document and stop",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1060,6 +1123,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.branch:
             parser.error("--branch is required unless --new-content-file is given")
+        if args.check_pending:
+            outcome = check_pending(
+                resolve_write_root(args.root), args.repo, args.branch, args.path
+            )
+            print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
+            return 0 if outcome["status"] == "clear" else 1
         if args.clear_stale_lock:
             root = resolve_write_root(args.root)
             owner = verify_owner(root, args.repo)

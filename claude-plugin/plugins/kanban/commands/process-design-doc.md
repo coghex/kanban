@@ -346,7 +346,24 @@ multiple drafts.
 
 ## 6. Apply one approved child disposition
 
-Only after explicit approval:
+**First, before any tracker mutation, check for an outstanding publication.**
+
+```bash
+python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
+  --path "$DOC_RELATIVE_PATH" --check-pending
+```
+
+A `"pending"` result means an earlier approved mutation of this document has
+not reached the branch. **Stop here.** Do not create or link a tracker item and
+do not apply this disposition: the helper will refuse to publish a different
+mutation while that record stands, and by then the new issue would already
+exist for a disposition the document never receives. Report what the record
+names and the resolution the helper suggests, and let the user decide. This
+check is read-only and takes no lock — it is asked here, before the first
+irreversible step, precisely because asking afterwards is too late.
+
+Only after explicit approval, and a `"clear"` preflight:
 
 - **New issue:** create the approved body with `gh issue create -R "$DOC_REPO" --body-file` and
   confirm its number and URL.

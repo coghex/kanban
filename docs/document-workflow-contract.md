@@ -467,7 +467,10 @@ tip's own blob for the path, and the module never checks out, resets, switches,
 or advances any branch or HEAD in the write root.
 
 **A publication is guaranteed, not hoped for.** The module holds a per-document
-lock across the whole sequence; refuses when the document does not match the
+lock across the whole sequence, releasing and clearing it only by the exact
+value it means to remove — two clearers can agree one owner is dead, and an
+unconditional delete would let the slower of them remove a live publisher's
+lock instead; it refuses when the document does not match the
 publication tip before it writes, checking that with the read and the write
 adjacent so no subprocess sits in the gap; refuses a commit that changes any
 path but the one; never force-pushes and never overwrites a concurrent advance;
@@ -498,6 +501,13 @@ pointer to the mutation it names — so a run that supplies a *different*
 approved mutation while one is outstanding is refused rather than served the
 recorded one, which would report success while the disposition just approved
 never reached the document.
+
+**That refusal is askable before the tracker is touched, and the assets ask.**
+A processing run mutates the tracker before it publishes, so discovering an
+outstanding record at publication time is discovering it after a second issue
+already exists for a disposition the document will never receive. The check is
+read-only, takes no lock, and is the first step of applying a disposition
+rather than the last.
 
 ### 9.5 What "published" means, and the three-state failure report
 

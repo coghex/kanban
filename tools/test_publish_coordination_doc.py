@@ -658,6 +658,83 @@ class PublishTests(unittest.TestCase):
             run(["git", "rev-parse", "--verify", "--quiet", pending], self.fx.docs), ""
         )
 
+    def test_the_preflight_reports_a_clear_document(self):
+        outcome = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )
+        self.assertEqual(outcome["status"], "clear")
+
+    def test_the_preflight_reports_an_outstanding_publication(self):
+        # Asked before the caller mutates its tracker, which is the whole
+        # point: learning this afterwards means a second issue already exists
+        # for a disposition the document will never receive.
+        original = publisher.git
+
+        def failing_push(args, *, cwd, check=True, input_bytes=None):
+            if args[:2] == ["push", "origin"]:
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_push
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n")
+        finally:
+            publisher.git = original
+        outcome = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )
+        self.assertEqual(outcome["status"], "pending")
+        self.assertFalse(outcome["already_landed"])
+        self.assertIn("retry", outcome["resolution"])
+
+    def test_the_preflight_distinguishes_an_already_landed_record(self):
+        original = publisher.is_ancestor
+        publisher.is_ancestor = lambda root, commit, revision: False
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n")
+        finally:
+            publisher.is_ancestor = original
+        outcome = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", "docs/ui-bugs.md"
+        )
+        self.assertEqual(outcome["status"], "pending")
+        self.assertTrue(outcome["already_landed"])
+
+    def test_clearing_a_lock_that_changed_underneath_is_refused(self):
+        # Two clearers can agree the same owner is dead. The slower one must
+        # not delete whatever lock exists by then, which may be a live
+        # publisher's.
+        lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        token = json.dumps(
+            {"host": publisher.socket.gethostname(), "pid": dead.pid},
+            sort_keys=True, separators=(",", ":"),
+        )
+        stale = run(["git", "commit-tree", f"{tip}^{{tree}}", "-m", token], self.fx.docs)
+        run(["git", "update-ref", lock, stale], self.fx.docs)
+
+        original = publisher.process_is_live
+
+        def racing_liveness(pid):
+            # Between the liveness check and the delete, the stale lock is
+            # cleared by someone else and a live publisher takes a new one.
+            run(["git", "update-ref", "-d", lock], self.fx.docs)
+            publisher.acquire_lock(self.fx.docs, lock, tip)
+            return original(pid)
+
+        publisher.process_is_live = racing_liveness
+        self.addCleanup(setattr, publisher, "process_is_live", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            publisher.clear_stale_lock(self.fx.docs, lock)
+        self.assertEqual(caught.exception.status, "lock-changed")
+        # The live publisher's lock survives.
+        self.assertIsNotNone(publisher.read_lock_owner(self.fx.docs, lock))
+        publisher.release_lock(self.fx.docs, lock)
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
