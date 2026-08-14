@@ -226,6 +226,12 @@ CONTRACT_STATEMENTS = {
         "The document is locked from before the edit until after the "
         "publication"
     ),
+    "publication-lock-precedes-validation": (
+        "It is acquired before the baseline is validated, not after"
+    ),
+    "publication-lock-cannot-exclude-outsiders": (
+        "What a lock cannot exclude is an edit made outside the protocol"
+    ),
     "publication-same-file-difference-excluded-early": (
         "A same-file difference is the case the one-path check cannot see, so it "
         "is excluded before the edit rather than after it"
@@ -362,13 +368,29 @@ PUBLICATION_CLAUSES = {
         "to read"
     ),
     "lock-spans-edit-and-publication": (
-        "hold a document lock from before the edit until after the publication"
+        "lock the document, then scan it against the publication tip, before "
+        "choosing an entry"
+    ),
+    "lock-precedes-validation": (
+        "the lock is acquired before the baseline is validated, not after"
+    ),
+    "validating-first-leaves-a-gap": (
+        "validating first and locking second leaves exactly that gap"
+    ),
+    "reconciliation-rechecks-the-blob": (
+        "the reconciliation is itself gated on the document still being the "
+        "approved blob"
+    ),
+    "skipped-reconciliation-preserves-the-edit": (
+        "the foreign edit is left exactly where it is, and the report says the "
+        "local copy was not reconciled and why"
     ),
     "unserialized-runs-batch-dispositions": (
-        "the first to hash the file publishes both in one commit"
+        "this run then hashes and publishes the foreign hunk together with its "
+        "own approved disposition"
     ),
     "the-empty-old-value-is-what-excludes": (
-        "the empty third argument is what makes this exclusive"
+        "the empty third argument is what makes acquisition exclusive"
     ),
     "lock-is-released-on-every-path": (
         "release it once publication has succeeded or failed, on every path out"
@@ -500,10 +522,10 @@ PUBLICATION_CLAUSES = {
         "commit"
     ),
     "scan-precedes-selection": (
-        "scan the document against the publication tip before choosing an entry"
+        "order matters here as much as the checks do"
     ),
     "scan-decides-what-the-run-may-do": (
-        "that one comparison decides what this run may do at all"
+        "that comparison then decides what this run may do at all"
     ),
     "clean-scan-permits-publication": (
         "this run's own edit is then the only difference, which is exactly what "
@@ -595,7 +617,10 @@ PUBLICATION_SHELL_BINDINGS = (
     'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \\ '
     '&& PUB_PUBLISHED=yes',
     '[ "$PUB_PUBLISHED" = yes ] \\ '
-    '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    '&& [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \\ '
+    '= "$PUB_BLOB" ] \\ '
+    '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
+    '&& PUB_RECONCILED=yes',
     'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "$PUB_TIP"',
     'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
     # Guarded by the branch test rather than run unconditionally: a docs-wip
@@ -604,7 +629,7 @@ PUBLICATION_SHELL_BINDINGS = (
     # is part of the same guarded chain because git refuses to fast-forward
     # over a locally modified file even when the file's content is exactly what
     # the fast-forward would install.
-    '[ "$PUB_PUBLISHED" = yes ] \\ '
+    '[ "$PUB_RECONCILED" = yes ] \\ '
     '&& [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \\ '
     '&& git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"',
 )

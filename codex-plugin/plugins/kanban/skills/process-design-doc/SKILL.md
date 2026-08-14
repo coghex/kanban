@@ -172,22 +172,53 @@ the corresponding approved external action succeeds.
 
 ## 1. Select one entry
 
-**Scan the document against the publication tip before choosing an entry.**
-Resolve the document path first, in the numbered steps below, then pin the tip
-and compare:
+**Lock the document, then scan it against the publication tip, before choosing
+an entry.** Order matters here as much as the checks do. Resolve the document
+path first, in the numbered steps below, then:
 
 ```bash
 git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
 PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"
+PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
+PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"
+git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""
 git -C "$DOCS_WT" diff --name-only "$PUB_TIP" -- "$DOC_RELATIVE_PATH"
 ```
 
-That one comparison decides what this run may do at all:
+**The lock is acquired before the baseline is validated, not after.** A "the
+document is clean" answer is a statement about one instant, and it is only
+still true later if nothing could have written in between. Validating first and
+locking second leaves exactly that gap: a person or another tool edits the
+document after the comparison and before the lock, and this run then hashes and
+publishes the foreign hunk together with its own approved disposition — the
+re-hash matches, because it was taken after the edit, and the one-path check
+matches, because both changes are in one file. Locking first makes the clean
+answer durable for as long as the run needs it.
 
-- **Empty.** The document equals the publication tip. Take the document lock
-  described below, then select normally; this run's own edit is then the only
-  difference, which is exactly what lets its publication carry the approved
-  mutation and nothing else.
+The empty third argument is what makes acquisition exclusive: `update-ref`
+requires the ref to be absent, and creating it is atomic, so exactly one run
+wins. A failure means another run is mid-publication on this same document — do
+not edit it, do not publish, and say which document is locked. Release it once
+publication has succeeded or failed, on every path out, including every path
+below that stops early:
+
+```bash
+git -C "$DOCS_WT" update-ref -d "$PUB_LOCK"
+```
+
+The lock holds a commit ID rather than being empty, so a lock a dead run left
+behind is inspectable with `git for-each-ref refs/kanban/` and cleared with the
+same `-d` once the user confirms no run is active. It is a ref in the docs
+worktree's own repository, so it never touches the tracked tree and no
+publication can carry it. What it cannot do is exclude an edit made outside this
+protocol entirely; that is what the re-hash before the push, and the one before
+the reconciliation, are for.
+
+That comparison then decides what this run may do at all:
+
+- **Empty.** The document equals the publication tip. Select normally; this
+  run's own edit is then the only difference, which is exactly what lets its
+  publication carry the approved mutation and nothing else.
 - **Prints the document, and the entries it already changed carry their `[#N]`,
   `[no-issue]`, or `[deferred]` markers.** An earlier run applied and marked its
   disposition but failed to publish it: the tracker and the document are already
@@ -198,40 +229,10 @@ That one comparison decides what this run may do at all:
   **publication is impossible this run**: the publication commit is built from
   the document's whole blob and would carry that work too — invisibly to the
   one-path check, which sees a single changed path either way. Say so before
-  applying anything, name what the document already carries, and let the user
-  decide whether to proceed with a disposition that will not be published or to
-  reconcile first. Never publish anyway, and never discard the other work to
-  make publication possible.
-
-**Hold a document lock from before the edit until after the publication.** The
-scan's "clean" answer is only true until another run writes to the same file,
-and two runs share one docs worktree — the working tree is shared mutable state.
-Without serialization both can scan clean, apply different dispositions, and the
-first to hash the file publishes *both* in one commit: the one-path check still
-sees a single path, so nothing downstream catches it, and the one-artifact
-boundary is broken by a run that obeyed it.
-
-```bash
-PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
-PUB_LOCK="refs/kanban/publish-lock/$PUB_KEY"
-git -C "$DOCS_WT" update-ref "$PUB_LOCK" "$PUB_TIP" ""
-```
-
-The empty third argument is what makes this exclusive: `update-ref` requires the
-ref to be absent, and creating it is atomic, so exactly one run wins. A failure
-means another run is mid-publication on this same document — do not edit it, do
-not publish, and say which document is locked. Release it once publication has
-succeeded or failed, on every path out:
-
-```bash
-git -C "$DOCS_WT" update-ref -d "$PUB_LOCK"
-```
-
-The lock holds a commit ID rather than being empty, so a lock a dead run left
-behind is inspectable with `git for-each-ref refs/kanban/` and cleared with the
-same `-d` once the user confirms no run is active. It is a ref in the docs
-worktree's own repository, so it never touches the tracked tree and no
-publication can carry it.
+  applying anything, name what the document already carries, release the lock,
+  and let the user decide whether to proceed with a disposition that will not be
+  published or to reconcile first. Never publish anyway, and never discard the
+  other work to make publication possible.
 
 **This scan is the one deliberate exception to the selection rule below, which
 never selects a terminal-marked entry.** The entry being resumed is already
@@ -627,9 +628,13 @@ git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
 git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \
   && PUB_PUBLISHED=yes
 
+PUB_RECONCILED=no
 [ "$PUB_PUBLISHED" = yes ] \
-  && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
-[ "$PUB_PUBLISHED" = yes ] \
+  && [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \
+    = "$PUB_BLOB" ] \
+  && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
+  && PUB_RECONCILED=yes
+[ "$PUB_RECONCILED" = yes ] \
   && [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
   && git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"
 ```
@@ -642,6 +647,17 @@ comparison into the verdict would report a successful publication as failed, and
 the next run's scan would then read the local copy as a pending mutation and
 republish it *over* the concurrent edit. That is why `PUB_PUBLISHED` is set by
 `merge-base --is-ancestor` and by nothing else.
+
+**The reconciliation is itself gated on the document still being the approved
+blob.** `checkout` overwrites the working copy and the index for that path, so
+running it unconditionally discards whatever the file holds — and after the push
+gate that can be an edit somebody made outside this protocol, which was never
+approved and never published. The lock deliberately cannot exclude those, so the
+reconciliation re-checks the hash and simply does not run when it fails: the
+publication is still reported as succeeded, the foreign edit is left exactly
+where it is, and the report says the local copy was not reconciled and why.
+`PUB_RECONCILED` also gates the fast-forward, so a skipped reconciliation cannot
+be followed by a branch move that assumes it happened.
 
 The reconciliation that follows is the other half of the same reasoning. It runs
 only when the publication is confirmed, and it moves the local document **to**

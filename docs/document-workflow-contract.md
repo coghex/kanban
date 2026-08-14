@@ -504,8 +504,20 @@ commit — one changed path, every gate satisfied, and the one-artifact boundary
 of §5 broken by a run that followed it. The lock is per document, acquired
 atomically, held across the whole scan-edit-publish sequence, and released on
 every exit path; a lock a dead run left behind is inspectable and clearable
-rather than a wedge. Verifying the published blob is still the one the run
-approved backs it up, catching any change made outside the protocol entirely.
+rather than a wedge.
+
+**It is acquired before the baseline is validated, not after.** A clean-document
+answer describes one instant and stays true only while nothing else can write.
+Validating first and locking second leaves precisely that gap, and a foreign
+edit landing in it is published together with the approved disposition — the
+later hash matches because it was taken afterwards, and the one-path check
+matches because both changes are in one file.
+
+**What a lock cannot exclude is an edit made outside the protocol**, so the two
+steps that would otherwise act on unexamined content re-check the hash first:
+the push, which would publish a change nobody approved, and the reconciliation,
+which would overwrite one. Neither proceeds unless the document is still exactly
+the blob the run approved.
 
 **A same-file difference is the case the one-path check cannot see, so it is
 excluded before the edit rather than after it.** The publication commit carries
@@ -570,6 +582,13 @@ copy with what that branch holds — which, after a rejected push, is the state
 without the approved mutation. Run ungated, the step that converges a successful
 publication is the step that destroys an unsuccessful one, and §9.4's
 recoverability guarantee would hold only when it was not needed.
+
+It runs only when the document is still the approved blob — `checkout` replaces
+the working copy and index for that path, so running it unconditionally would
+silently discard an outside-protocol edit that was never approved and never
+published. When the hash no longer matches, the publication is still reported as
+succeeded, the foreign edit is left untouched, and the report says the local
+copy was not reconciled and why.
 
 It also runs in one direction only: the local document moves **to** the branch,
 never the branch to the local document. What the branch holds at that point
