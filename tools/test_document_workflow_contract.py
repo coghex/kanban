@@ -206,13 +206,19 @@ CONTRACT_STATEMENTS = {
     "publication-needs-a-resolved-owner": (
         "must already be established before eligibility is even consulted"
     ),
-    "publication-consults-the-owners-own-table": (
-        "the §7 table a run consults is the one tracked inside the "
-        "already-validated $DOC_ROOT"
+    "publication-owner-must-be-kanban": (
+        "coghex/kanban is the only repository with a coordination lane through "
+        "these workflows"
     ),
-    "publication-untracked-contract-has-no-lane": (
-        "A $DOC_ROOT that does not track that contract has no coordination lane "
-        "at all"
+    "publication-classification-comes-from-the-tip": (
+        "§7 is therefore read out of the fetched publication tip"
+    ),
+    "publication-branchless-contract-has-no-lane": (
+        "A publication branch that carries no such contract at all has no "
+        "coordination lane"
+    ),
+    "publication-check-gates-the-push": (
+        "The check gates the push rather than merely preceding it"
     ),
     "publication-isolation-is-verified-on-the-commit": (
         "That isolation is verified on the publication commit itself before it "
@@ -271,32 +277,48 @@ PUBLICATION_CLAUSES = {
         "never batched or deferred merely to reduce commit or push frequency"
     ),
     "eligibility-is-section-7": (
-        "publish only when the resolved document's repository-relative path is "
-        "classified coordination by that file's §7"
+        "publish only when that file's §7 classifies the resolved document's "
+        "repository-relative path coordination"
     ),
     "a-path-alone-is-not-eligibility": (
-        "a repository-relative path is not by itself an eligibility signal, "
-        "because the same path exists in other repositories"
+        "a repository-relative path is not by itself an eligibility signal — the "
+        "same path exists in other repositories, and in other states of this one"
     ),
-    "consults-the-owners-own-table": (
-        "consult only the copy tracked inside the already-validated $doc_root, "
-        "never the §7 table of whatever checkout you happen to be reading code in"
+    "owner-must-be-kanban": (
+        "coghex/kanban is the only repository with a coordination lane through "
+        "this workflow"
     ),
-    "untracked-contract-has-no-lane": (
-        "a $doc_root that does not track that contract is a repository with no "
-        "coordination lane at all"
+    "a-fork-is-not-eligible": (
+        "a consuming repository is never published to here, and neither is a "
+        "fork, even when it tracks a contract of its own carrying a matching row"
+    ),
+    "classification-comes-from-the-tip": (
+        "read §7 out of the fetched publication tip, which is exactly the state "
+        "being published onto"
+    ),
+    "a-stale-checkout-is-not-the-authority": (
+        "a dirty, stale, or unmerged $doc_root can classify a path coordination "
+        "when the publication branch does not"
+    ),
+    "branchless-contract-is-ineligible": (
+        "a publication branch carrying no such contract at all"
     ),
     "isolation-is-verified-on-the-artifact": (
         "verify the isolation on the artifact rather than trusting the "
         "construction that produced it"
     ),
-    "scratch-index-is-per-blob": (
-        "the scratch index is named for the blob rather than fixed, so two runs "
-        "publishing different documents in one docs worktree cannot interleave"
+    "scratch-index-is-per-path-and-content": (
+        "the scratch index is named for the document's path as well as its "
+        "content, so no two concurrent publications in one docs worktree share it"
+    ),
+    "the-check-gates-the-push": (
+        "the push is gated on the one-path check, not merely preceded by it"
+    ),
+    "never-push-unconditionally": (
+        "never run the push as an unconditional next line"
     ),
     "pr-atomic-is-never-published": (
-        "a pr-atomic path, and a path no §7 row matches, is never published "
-        "directly"
+        "a pr-atomic path, and a path no §7 row matches are each ineligible"
     ),
     "unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
@@ -371,23 +393,25 @@ PUBLICATION_CLAUSES = {
 # a second path. Compared against normalized() because case is load-bearing in a
 # shell command.
 PUBLICATION_SHELL_BINDINGS = (
-    # Eligibility is read out of the resolved owner's own checkout. Without
-    # this, a document in any repository whose path happens to match a
-    # Kanban coordination row would reach the push.
-    'git -C "$DOC_ROOT" ls-files --error-unmatch -- docs/agent-workflow-contract.md',
+    # Only Kanban's own documents take this lane, and the classification is
+    # read from the branch being published to rather than from a checkout that
+    # may be dirty, stale, or unmerged relative to it.
+    '[ "$DOC_REPO" = "coghex/kanban" ]',
+    'git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"',
     'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
-    # Named for the blob, so two runs in one docs worktree cannot share the
-    # scratch index and interleave into a two-path tree.
-    'PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_BLOB")"',
+    # Keyed by path as well as content, so two documents that hash alike cannot
+    # share one scratch index and interleave into a two-path tree.
+    'PUB_KEY="${DOC_RELATIVE_PATH//\\//-}"',
+    'PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path '
+    '"kanban-publish-index-$PUB_KEY-$PUB_BLOB")"',
     # The isolation guarantee, checked on the finished commit rather than
-    # assumed from how it was built.
-    'git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT"',
+    # assumed from how it was built — and consumed as the push's own condition,
+    # since a verification nothing reads would let a mixed tree through.
+    '[ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \\ '
+    '= "$DOC_RELATIVE_PATH" ] \\ '
+    '&& git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
     'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"',
     'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
-    # Braced deliberately: zsh reads the unbraced `"$PUB_COMMIT:refs/..."` as a
-    # `:r` modifier and pushes a mangled refspec, and these assets run in
-    # whatever shell the session started in.
-    'git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
     'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH"',
     # Guarded by the branch test rather than run unconditionally: a docs-wip
     # worktree is on its own branch, and fast-forwarding it to the publication

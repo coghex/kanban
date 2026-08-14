@@ -391,25 +391,36 @@ merely to reduce commit or push frequency.
 
 **Eligibility.** Publishing at all requires the `$DOC_REPO`, `$DOC_BRANCH`, and
 `$DOC_ROOT` the ownership step resolved; an owner or publication branch that
-could not be verified fails closed and the document stays unpublished. A
-repository-relative path is not by itself an eligibility signal, because the
-same path exists in other repositories: §7 classifies the paths of the
-repository that tracks it and of no other, so consult only the copy tracked
-inside the already-validated `$DOC_ROOT`, never the §7 table of whatever
-checkout you happen to be reading code in.
+could not be verified fails closed and the document stays unpublished. Two
+further conditions are checked before anything is built or pushed, because a
+repository-relative path is not by itself an eligibility signal — the same path
+exists in other repositories, and in other states of this one:
+
+1. **The owner is Kanban itself.** §7 is Kanban's own statement about Kanban, so
+   `coghex/kanban` is the only repository with a `coordination` lane through
+   this workflow. A consuming repository is never published to here, and neither
+   is a fork, even when it tracks a contract of its own carrying a matching row;
+   those documents are somebody else's to publish.
+2. **The classification comes from the branch being published to.** The local
+   checkout is not the authority on it: a dirty, stale, or unmerged `$DOC_ROOT`
+   can classify a path `coordination` when the publication branch does not, and
+   the publication commit is built on that branch rather than on the checkout.
+   Read §7 out of the fetched publication tip, which is exactly the state being
+   published onto.
 
 ```bash
-git -C "$DOC_ROOT" ls-files --error-unmatch -- docs/agent-workflow-contract.md
+[ "$DOC_REPO" = "coghex/kanban" ]
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"
 ```
 
-A `$DOC_ROOT` that does not track that contract is a repository with no
-coordination lane at all: every document in it is `pr-atomic`, and this
-workflow publishes nothing there. Otherwise publish only when the resolved
-document's repository-relative path is classified `coordination` by that file's
-§7. A `pr-atomic` path, and a path no §7 row matches, is never published
-directly: `pr-atomic` is the fail-closed default for an unmatched path. When the
-document is not direct-publication eligible, leave the edit in place and
-recoverable, say plainly that it was not published and why, and stop there.
+Publish only when that file's §7 classifies the resolved document's
+repository-relative path `coordination`. An owner that is not `coghex/kanban`, a
+publication branch carrying no such contract at all, a `pr-atomic` path, and a
+path no §7 row matches are each ineligible: `pr-atomic` is the fail-closed
+default for an unmatched path. When the document is not direct-publication
+eligible, leave the edit in place and recoverable, say plainly that it was not
+published and why, and stop there.
 
 **Isolate the mutation first.** A publication carries the single approved
 mutation to the one eligible document and nothing else — no unrelated dirty
@@ -431,25 +442,29 @@ branch moves and no other path can be swept in, then push it plainly:
 
 ```bash
 PUB_BLOB="$(git -C "$DOCS_WT" hash-object -w -- "$DOCS_WT/$DOC_RELATIVE_PATH")"
-PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_BLOB")"
+PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
+PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_KEY-$PUB_BLOB")"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
   --cacheinfo "100644,$PUB_BLOB,$DOC_RELATIVE_PATH"
 PUB_TREE="$(GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" write-tree)"
 PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
   -p "origin/$DOC_BRANCH" -m "docs: <the approved mutation, one line>")"
-git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT"
-git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
+[ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \
+  = "$DOC_RELATIVE_PATH" ] \
+  && git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
 ```
 
-The scratch index is named for the blob rather than fixed, so two runs
-publishing different documents in one docs worktree cannot interleave
-`read-tree`, `update-index`, and `write-tree` through one shared file. The
-`diff --name-only` is what actually guarantees the result: it must print exactly
-`$DOC_RELATIVE_PATH` and nothing else, and any other output — a second path from
-a concurrent run, a stale index, anything unexpected — fails closed there,
-before the push. Verify the isolation on the artifact rather than trusting the
-construction that produced it.
+The scratch index is named for the document's path as well as its content, so
+no two concurrent publications in one docs worktree share it: two different
+documents differ by path even when their contents hash identically, and two runs
+that agree on both path and content would build the same tree anyway. That
+removes the interleaving; it does not license trusting it. **The push is gated
+on the one-path check, not merely preceded by it** — `diff --name-only` must
+print exactly `$DOC_RELATIVE_PATH`, and a second path from any source leaves the
+`&&` unsatisfied so nothing is pushed. Verify the isolation on the artifact
+rather than trusting the construction that produced it, and never run the push
+as an unconditional next line.
 
 Never force-push, never reset, and never overwrite a concurrent advance of
 `$DOC_BRANCH` or resolve a conflict by guessing. A non-fast-forward rejection, a

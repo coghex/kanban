@@ -415,16 +415,28 @@ A resolved owner is a prerequisite, not a parallel check. §8's `$DOC_REPO`,
 even consulted: a document whose owning repository or publication branch could
 not be verified fails closed and stays unpublished, exactly as §8.3 requires.
 
-That prerequisite is also what binds the table to a repository, and the binding
-is load-bearing rather than incidental. A repository-relative path is not by
-itself an eligibility signal, because the same path exists in other
-repositories: `docs/ui-bugs.md` names a `coordination` document here and names
-whatever a consuming repository decides it names. So the §7 table a run consults
-is the one tracked inside the already-validated `$DOC_ROOT`, never the copy in
-whichever checkout the session was reading code from. **A `$DOC_ROOT` that does
-not track that contract has no `coordination` lane at all** — every document in
-it is `pr-atomic` and nothing is published there — which is how §7 stays
-Kanban's own statement about Kanban while the assets themselves remain portable.
+A repository-relative path is not by itself an eligibility signal, because the
+same path exists in other repositories and in other states of this one:
+`docs/ui-bugs.md` names a `coordination` document here and names whatever a
+consuming repository decides it names. Two further conditions therefore hold
+before anything is built or pushed.
+
+**The owner must be Kanban itself.** §7 is Kanban's own statement about Kanban,
+so `coghex/kanban` is the only repository with a `coordination` lane through
+these workflows. A resolved `$DOC_REPO` that is anything else is ineligible, and
+that includes a fork and a consuming repository tracking a contract of its own
+with a matching row: those documents are somebody else's to publish. This is the
+same boundary §8.4 draws for routing, applied to the lane.
+
+**The classification must come from the branch being published to.** The local
+checkout is not the authority on it. A dirty, stale, or unmerged `$DOC_ROOT` can
+classify a path `coordination` while the publication branch does not, and since
+the publication commit is built on that branch rather than on the checkout, a
+run trusting the local copy could authorize a direct push the published state
+never sanctioned. §7 is therefore read out of the fetched publication tip —
+exactly the state being published onto. **A publication branch that carries no
+such contract at all has no `coordination` lane**, so nothing is published
+there.
 
 ### 9.3 What a publication may contain
 
@@ -437,10 +449,18 @@ from other changes, publication fails closed without discarding any work.
 That isolation is verified on the publication commit itself before it is
 pushed, rather than inferred from how the commit was constructed. Construction
 can be raced — two runs in one docs worktree share that worktree's Git
-directory, so any fixed scratch path they both write is a collision waiting to
-happen — and a check on the finished artifact holds regardless. The commit must
-change exactly the one eligible document against the remote publication branch;
-any second path fails closed before the push.
+directory, so any scratch path they both write is a collision waiting to happen,
+and naming it for the document alone still collides when two documents hash
+alike. Scratch state is therefore keyed by both the document's path and its
+content, and a check on the finished artifact holds regardless of whether that
+keying was sufficient.
+
+**The check gates the push rather than merely preceding it.** The commit must
+change exactly the one eligible document against the remote publication branch,
+and the push is conditional on that comparison, so a second path from any source
+leaves the publication unattempted. A verification whose result nothing consumes
+would let a mixed tree reach the branch anyway, which is the difference between
+a check and a gate.
 
 ### 9.4 How a publication is made
 
