@@ -528,6 +528,14 @@ correct publication changes. So the publication tip the run was rendered
 against travels with the content, and a branch that has moved since refuses the
 publication and asks for the disposition to be rendered again.
 
+**A binding that is absent is a failure, not a waived check.** Publication
+requires it, and an empty one is refused rather than treated as "no tip to
+compare" — otherwise a caller that never managed to extract it would publish
+with the guard silently switched off, which is indistinguishable from having no
+guard at all. The assets are held to extracting it for real rather than to
+mentioning the flag, because a binding that expanded to nothing is exactly the
+defect this rule exists to have caught.
+
 ### 9.5 What "published" means, and the three-state failure report
 
 A run may describe a document as published only when the module reports it, and

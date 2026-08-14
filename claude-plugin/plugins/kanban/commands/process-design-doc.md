@@ -352,7 +352,14 @@ multiple drafts.
 PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --check-pending)"
+PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \
+  'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])')"
+[ -n "$PREFLIGHT_TIP" ]
 ```
+
+`$PREFLIGHT_TIP` must be extracted, not assumed: publication refuses to run
+without it, and an empty one is a failure rather than a publication with the
+check quietly switched off.
 
 Keep the `publication_tip` it reports. The document you are about to read and
 re-render is that tip's, and the content you produce is a whole-file image of

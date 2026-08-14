@@ -20,6 +20,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import shlex
 import os
 import subprocess
 import tempfile
@@ -443,7 +444,7 @@ class PublishTests(unittest.TestCase):
             code = publisher.main([
                 "--repo", "coghex/kanban", "--branch", "master",
                 "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
-                "--content", str(missing),
+                "--content", str(missing), "--expected-tip", "irrelevant",
             ])
         self.assertEqual(code, 1)
         payload = json.loads(buffer.getvalue())
@@ -875,6 +876,73 @@ class PublishTests(unittest.TestCase):
         self.assertTrue(publisher.put_back(aside, free, b"captured\n", 0o644))
         self.assertEqual(free.read_text(), "captured\n")
         self.assertEqual(free.stat().st_mode & 0o777, 0o644)
+
+    def test_the_assets_preflight_shell_really_extracts_the_tip(self):
+        # Not "the flag appears in the text" — that is what let a binding that
+        # expanded to nothing survive a review round. This runs the assets' own
+        # preflight lines against a real repository and asserts the variable
+        # they define holds the tip the helper reported.
+        helper = REPO_ROOT / "tools" / "publish_coordination_doc.py"
+        script = "\n".join([
+            'set -e',
+            # The helper is resolved from the owning repository's checkout. The
+            # fixture's synthetic repository has no tools/ tree, so this points
+            # at the real one for resolution while the write root — what the
+            # helper actually reads and verifies — stays the fixture's.
+            f'DOC_ROOT={shlex.quote(str(REPO_ROOT))}',
+            f'DOCS_WT={shlex.quote(str(self.fx.docs))}',
+            'DOC_REPO=coghex/kanban',
+            'DOC_BRANCH=master',
+            'DOC_RELATIVE_PATH=docs/ui-bugs.md',
+            'PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\',
+            '  --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \\',
+            '  --path "$DOC_RELATIVE_PATH" --check-pending)"',
+            'PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \\',
+            '  \'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])\')"',
+            '[ -n "$PREFLIGHT_TIP" ]',
+            'printf %s "$PREFLIGHT_TIP"',
+        ])
+        for shell in ("/bin/bash", "/bin/zsh"):
+            with self.subTest(shell=shell):
+                proc = subprocess.run(
+                    [shell, "-c", script], capture_output=True, text=True
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(
+                    proc.stdout.strip(),
+                    run(["git", "rev-parse", "origin/master"], self.fx.docs),
+                )
+        self.assertTrue(helper.is_file())
+
+    def test_publishing_without_a_tip_binding_is_refused(self):
+        # The failure the empty expansion produced: an absent binding must be
+        # an error, never a publication with the check switched off.
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--content", str(blob),
+            ])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(buffer.getvalue())["status"], "expected-tip-required")
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_empty_tip_binding_is_refused(self):
+        blob = self.fx.dir / "approved.md"
+        blob.write_text("# UI\n\n- one\n- two\n", encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--content", str(blob), "--expected-tip", "",
+            ])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(buffer.getvalue())["status"], "expected-tip-required")
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
     # -- eligibility ---------------------------------------------------------
 

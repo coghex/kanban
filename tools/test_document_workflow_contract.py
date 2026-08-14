@@ -302,6 +302,15 @@ PUBLICATION_INVOCATION = (
 # The scratch path is minted by the helper, never named by the asset. An asset
 # that spells its own path reintroduces a cross-run collision the lock cannot
 # see, because the content is written before any lock is taken.
+# The binding has to be *extracted*, not merely mentioned: a `--expected-tip`
+# that expands to nothing disabled the guard entirely and survived a review
+# round, because the pin below only proved the flag was written down.
+# tools/test_publish_coordination_doc.py executes these lines for real.
+PUBLICATION_TIP_EXTRACTION = (
+    'PREFLIGHT_TIP="$(PREFLIGHT="$PREFLIGHT" python3 -c \\ '
+    '\'import json, os; print(json.loads(os.environ["PREFLIGHT"])["publication_tip"])\')"'
+)
+
 PUBLICATION_SCRATCH_INVOCATION = (
     'APPROVED="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
@@ -1129,6 +1138,19 @@ class PublicationTests(unittest.TestCase):
                     f"{path} must ask the helper for its content path rather than "
                     "naming one, which would collide across runs",
                 )
+
+    def test_every_processing_asset_extracts_the_tip_binding(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                body = normalized(self.asset_text(path))
+                self.assertIn(
+                    PUBLICATION_TIP_EXTRACTION,
+                    body,
+                    f"{path} must extract publication_tip from the preflight; a "
+                    "binding that expands to nothing publishes with the "
+                    "moved-tip check switched off",
+                )
+                self.assertIn('[ -n "$PREFLIGHT_TIP" ]', body, path)
 
     def test_no_asset_carries_the_publication_mechanism(self):
         # The regression this issue exists to prevent: the sequence creeping

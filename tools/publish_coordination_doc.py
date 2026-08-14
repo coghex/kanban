@@ -967,7 +967,7 @@ def publish(
         owner = verify_owner(resolved, repository)
         git(["fetch", "origin", branch], cwd=resolved)
         tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
-        if expected_tip and expected_tip != tip:
+        if expected_tip is not None and expected_tip != tip:
             # The caller rendered its content against `expected_tip` and then
             # mutated its tracker. If the branch has moved since, that content
             # is a whole-file image of a document that no longer exists, and
@@ -1206,6 +1206,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if args.content is None:
                 parser.error("--content is required unless --clear-stale-lock is given")
+            if not args.expected_tip:
+                # Not optional on this path, and emphatically not "absent means
+                # skip the check": a caller that fails to extract the tip would
+                # otherwise silently publish with the guard disabled, which is
+                # indistinguishable from having no guard at all.
+                raise PublishError(
+                    "expected-tip-required",
+                    "--expected-tip is required to publish; pass the "
+                    "publication_tip the preflight reported, so content rendered "
+                    "against a superseded document cannot be published",
+                )
             try:
                 content = args.content.read_bytes()
             except OSError as error:
