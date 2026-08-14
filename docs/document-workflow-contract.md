@@ -467,8 +467,12 @@ tip's own blob for the path, and the module never checks out, resets, switches,
 or advances any branch or HEAD in the write root.
 
 **A publication is guaranteed, not hoped for.** The module holds a per-document
-lock across the whole sequence, releasing and clearing it only by the exact
-value it means to remove — two clearers can agree one owner is dead, and an
+lock across the whole sequence — per document meaning exactly that, since a
+reference name two documents can share is a lock one of them takes from the
+other and a pending record either might resolve; because that name is a digest,
+the lock carries in its own payload the repository and document it holds, so a
+stale-lock sweep can still see what it is looking at. It releases and clears
+only by the exact value it means to remove — two clearers can agree one owner is dead, and an
 unconditional delete would let the slower of them remove a live publisher's
 lock instead. Every reference it removes follows that rule, the pending record
 as much as the lock, and every removal is checked rather than assumed: a record

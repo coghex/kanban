@@ -1194,6 +1194,56 @@ class PublishTests(unittest.TestCase):
             )
         )
 
+    def test_ambiguous_document_paths_get_independent_refs(self):
+        # `docs/a-b.md` and `docs/a/b.md` collided when the key was `/`
+        # replaced by `-`: they shared a lock and a pending record, so one
+        # failing to publish blocked the other and a record left by one could
+        # be resolved against the other.
+        pairs = [
+            ("docs/a-b.md", "docs/a/b.md"),
+            ("docs/x/y-z.md", "docs/x-y/z.md"),
+            ("docs/ui-bugs.md", "docs/ui/bugs.md"),
+        ]
+        for first, second in pairs:
+            with self.subTest(first=first, second=second):
+                self.assertNotEqual(
+                    publisher.lock_ref("coghex/kanban", first),
+                    publisher.lock_ref("coghex/kanban", second),
+                )
+                self.assertNotEqual(
+                    publisher.pending_ref("coghex/kanban", first),
+                    publisher.pending_ref("coghex/kanban", second),
+                )
+        # And the repository is part of the pair, not just the path.
+        self.assertNotEqual(
+            publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md"),
+            publisher.lock_ref("coghex/other", "docs/ui-bugs.md"),
+        )
+
+    def test_a_lock_on_one_document_does_not_block_another(self):
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        lock = publisher.lock_ref("coghex/kanban", "docs/a-b.md")
+        held = publisher.acquire_lock(
+            self.fx.docs, lock, tip, "coghex/kanban", "docs/a-b.md"
+        )
+        self.addCleanup(publisher.release_lock, self.fx.docs, lock, held)
+        # A different document publishes normally while that lock is held.
+        result = self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(result["status"], "published")
+
+    def test_a_held_lock_names_the_document_it_holds(self):
+        # The ref is a digest now, so the payload is where a stale-lock sweep
+        # learns what it is looking at.
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+        held = publisher.acquire_lock(
+            self.fx.docs, lock, tip, "coghex/kanban", "docs/ui-bugs.md"
+        )
+        self.addCleanup(publisher.release_lock, self.fx.docs, lock, held)
+        owner = publisher.read_lock_owner(self.fx.docs, lock)
+        self.assertEqual(owner["document"], "docs/ui-bugs.md")
+        self.assertEqual(owner["repository"], "coghex/kanban")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

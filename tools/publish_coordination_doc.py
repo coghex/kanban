@@ -157,7 +157,18 @@ def verify_owner(root: Path, declared: str) -> str:
 
 
 def _key(repository: str, document: str) -> str:
-    return f"{repository}/{document}".replace("/", "-")
+    """A ref-safe name for one (repository, document) pair, and a distinct one
+    for every pair.
+
+    Not `/` replaced by `-`: that maps `docs/a-b.md` and `docs/a/b.md` to the
+    same name, so two different documents would share a lock and a pending
+    record — one failing to publish would block the other, and a record left by
+    one could be resolved against the other. A digest of the pair collides for
+    no input, at the cost of being unreadable; the lock's own payload carries
+    the repository and document in clear for `git for-each-ref` to show, and a
+    pending record's commit names the document in its tree.
+    """
+    return hashlib.sha256(f"{repository}\0{document}".encode()).hexdigest()[:40]
 
 
 def lock_ref(repository: str, document: str) -> str:
@@ -202,9 +213,17 @@ def new_content_file(root: Path, document: str) -> Path:
     return Path(path)
 
 
-def owner_token() -> str:
+def owner_token(repository: str = "", document: str = "") -> str:
+    """This run's identity, plus what it holds. The ref name is a digest, so
+    the payload is where a human or a stale-lock sweep learns which document a
+    lock belongs to."""
     return json.dumps(
-        {"host": socket.gethostname(), "pid": os.getpid()},
+        {
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "repository": repository,
+            "document": document,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -221,7 +240,9 @@ def read_lock_owner(root: Path, ref: str) -> dict | None:
         return {"host": None, "pid": None, "raw": subject}
 
 
-def acquire_lock(root: Path, ref: str, tip: str) -> str:
+def acquire_lock(
+    root: Path, ref: str, tip: str, repository: str = "", document: str = ""
+) -> str:
     """Atomic per-document mutual exclusion.
 
     `update-ref <ref> <new> ""` requires the ref to be absent, and creating it
@@ -230,7 +251,8 @@ def acquire_lock(root: Path, ref: str, tip: str) -> str:
     lock be told from a live one.
     """
     commit = git_out(
-        ["commit-tree", f"{tip}^{{tree}}", "-m", owner_token()], cwd=root
+        ["commit-tree", f"{tip}^{{tree}}", "-m", owner_token(repository, document)],
+        cwd=root,
     )
     proc = git(["update-ref", ref, commit, ""], cwd=root, check=False)
     if proc.returncode != 0:
@@ -1068,7 +1090,7 @@ def publish(
 
         lock = lock_ref(owner, document)
         pending = pending_ref(owner, document)
-        held = acquire_lock(resolved, lock, tip)
+        held = acquire_lock(resolved, lock, tip, owner, document)
         try:
             outcome = _publish_locked(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
