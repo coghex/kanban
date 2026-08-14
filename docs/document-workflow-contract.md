@@ -474,7 +474,10 @@ lock instead. Every reference it removes follows that rule, the pending record
 as much as the lock, and every removal is checked rather than assumed: a record
 still standing stops the next run's preflight and a lock still standing blocks
 every later run, so a publication that could not remove either reports it
-instead of claiming plain success. A preflight that cannot refresh the remote
+instead of claiming plain success — and reports it on a failed publication as
+well, where the original failure keeps priority but the retained lock travels
+with it, since a run that was already going to be retried must not be blocked
+by a lock nobody was told about. A preflight that cannot refresh the remote
 fails rather than issuing a binding from a stale cached ref, which would read as
 current while licensing a publication against a document that had already
 moved. Every scratch path is minted rather than named, in the

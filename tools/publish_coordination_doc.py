@@ -1039,19 +1039,26 @@ def publish(
                 root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
             )
-        finally:
-            released = release_lock(resolved, lock, held)
-        if not released:
-            # A lock still standing blocks every later run for this document,
-            # so a publication that could not release its own says so rather
-            # than reporting plain success. Checked like every other reference
-            # this module removes.
+        except PublishError as error:
+            # A `finally` here would release and then re-raise, and the check
+            # below would never run — so a lock that outlived a *failed*
+            # publication would block every later run while the report named
+            # only the original failure. The failure keeps priority; the
+            # retained lock travels with it.
+            if not release_lock(resolved, lock, held):
+                error.detail.setdefault("lock_retained", True)
+                error.detail.setdefault("lock_ref", lock)
+            raise
+        if not release_lock(resolved, lock, held):
+            # And on the successful path it is the whole story: the document
+            # published, but every later run for it is now blocked.
             raise PublishError(
                 "lock-retained",
                 f"{document} was published, but its publication lock could not be "
                 "released; later runs will be blocked until it is cleared",
                 remote_contains_commit=outcome.get("remote_contains_commit"),
                 local_commit=outcome.get("commit"),
+                lock_retained=True,
                 lock_ref=lock,
             )
         return outcome

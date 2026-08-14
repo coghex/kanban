@@ -1055,6 +1055,36 @@ class PublishTests(unittest.TestCase):
         result = self.fx.publish("# UI\n\n- one\n- first\n")
         self.assertEqual(result["resumed"], "already-landed")
 
+    def test_a_failed_publication_reports_a_retained_lock_too(self):
+        # Both failures at once: the publication is refused *and* the lock
+        # cannot be released. The original failure keeps priority — it is what
+        # the caller asked about — but the retained lock travels with it,
+        # because every later run for this document is now blocked.
+        original = publisher.git
+
+        def failing(args, *, cwd, check=True, input_bytes=None):
+            if (
+                len(args) >= 3
+                and args[0] == "update-ref"
+                and args[1] == "-d"
+                and "publish-lock" in args[2]
+            ):
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            if args[:2] == ["push", "origin"]:
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing
+        self.addCleanup(setattr, publisher, "git", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        # The publication failure is what is reported...
+        self.assertEqual(caught.exception.status, "unpublished")
+        # ...and the retained lock is named alongside it.
+        self.assertTrue(caught.exception.detail["lock_retained"])
+        self.assertIn("publish-lock", caught.exception.detail["lock_ref"])
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
