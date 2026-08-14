@@ -455,12 +455,20 @@ alike. Scratch state is therefore keyed by both the document's path and its
 content, and a check on the finished artifact holds regardless of whether that
 keying was sufficient.
 
-**The check gates the push rather than merely preceding it.** The commit must
-change exactly the one eligible document against the remote publication branch,
-and the push is conditional on that comparison, so a second path from any source
-leaves the publication unattempted. A verification whose result nothing consumes
-would let a mixed tree reach the branch anyway, which is the difference between
-a check and a gate.
+**Every check in the publication sequence is a control-flow gate, never a
+standalone command whose result nothing consumes.** This is the general rule the
+isolation check is one instance of, and it is load-bearing because of what
+follows each check: the next step pushes, checks out, or fast-forwards. A
+predicate written as its own step fails silently into that next step, so the
+eligibility test gates the classification read, the isolation check gates the
+push, and the remote-ancestry check gates the convergence in §9.5. The commit
+must change exactly the one eligible document against the remote publication
+branch, and the push is conditional on that comparison as well as on the owner,
+so a second path from any source leaves the publication unattempted.
+
+Nothing before the push leaves the object store — building a candidate commit
+writes unreferenced objects and moves no branch — so the push is the single
+external effect, and it is the one step every gate converges on.
 
 ### 9.4 How a publication is made
 
@@ -498,6 +506,13 @@ divergent local-only copy, and the published mutation is not left queued for
 republication. Advancing the docs worktree's branch and reconciling the file
 against the published commit both satisfy this; what may not survive is a local
 copy a later run cannot tell apart from a still-pending mutation.
+
+**That reconciliation is gated on the verification, not merely sequenced after
+it.** Reconciling a document against the publication branch replaces the local
+copy with what that branch holds — which, after a rejected push, is the state
+without the approved mutation. Run ungated, the step that converges a successful
+publication is the step that destroys an unsuccessful one, and §9.4's
+recoverability guarantee would hold only when it was not needed.
 
 ### 9.6 Resuming an unfinished publication
 

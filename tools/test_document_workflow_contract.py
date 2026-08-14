@@ -217,8 +217,16 @@ CONTRACT_STATEMENTS = {
         "A publication branch that carries no such contract at all has no "
         "coordination lane"
     ),
-    "publication-check-gates-the-push": (
-        "The check gates the push rather than merely preceding it"
+    "publication-checks-are-gates": (
+        "Every check in the publication sequence is a control-flow gate, never a "
+        "standalone command whose result nothing consumes"
+    ),
+    "publication-nothing-escapes-before-the-push": (
+        "Nothing before the push leaves the object store"
+    ),
+    "publication-convergence-is-gated": (
+        "That reconciliation is gated on the verification, not merely sequenced "
+        "after it"
     ),
     "publication-isolation-is-verified-on-the-commit": (
         "That isolation is verified on the publication commit itself before it "
@@ -317,6 +325,30 @@ PUBLICATION_CLAUSES = {
     "never-push-unconditionally": (
         "never run the push as an unconditional next line"
     ),
+    "checks-are-control-flow-gates": (
+        "every check in this section is a control-flow gate, never a standalone "
+        "command whose result nothing consumes"
+    ),
+    "a-bare-predicate-falls-through": (
+        "a predicate written on its own line fails silently into the next line, "
+        "and the next line here pushes, checks out, or fast-forwards"
+    ),
+    "nothing-escapes-before-the-push": (
+        "nothing above the push leaves the object store"
+    ),
+    "verified-flag-is-the-verdict": (
+        "say the document is published only when it is yes, and treat every "
+        "other outcome as an unpublished failure"
+    ),
+    "convergence-is-gated-on-verification": (
+        "the convergence is gated on it, which is what keeps a failed "
+        "publication recoverable"
+    ),
+    "ungated-convergence-would-destroy-the-mutation": (
+        "the checkout on the next line would replace the working copy with "
+        "origin/$doc_branch — destroying the very mutation requirement 5 "
+        "requires preserving"
+    ),
     "pr-atomic-is-never-published": (
         "a pr-atomic path, and a path no §7 row matches are each ineligible"
     ),
@@ -396,8 +428,9 @@ PUBLICATION_SHELL_BINDINGS = (
     # Only Kanban's own documents take this lane, and the classification is
     # read from the branch being published to rather than from a checkout that
     # may be dirty, stale, or unmerged relative to it.
-    '[ "$DOC_REPO" = "coghex/kanban" ]',
-    'git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"',
+    '[ "$DOC_REPO" = "coghex/kanban" ] \\ '
+    '&& git -C "$DOCS_WT" fetch origin "$DOC_BRANCH" \\ '
+    '&& git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"',
     'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
     # Keyed by path as well as content, so two documents that hash alike cannot
     # share one scratch index and interleave into a two-path tree.
@@ -407,19 +440,26 @@ PUBLICATION_SHELL_BINDINGS = (
     # The isolation guarantee, checked on the finished commit rather than
     # assumed from how it was built — and consumed as the push's own condition,
     # since a verification nothing reads would let a mixed tree through.
-    '[ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \\ '
+    '[ "$DOC_REPO" = "coghex/kanban" ] \\ '
+    '&& [ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \\ '
     '= "$DOC_RELATIVE_PATH" ] \\ '
     '&& git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
+    # The verification is consumed rather than merely run: after a rejected
+    # push the ancestry check fails, and an ungated `checkout` on the next line
+    # would overwrite the uncommitted mutation with the branch that lacks it.
+    'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \\ '
+    '&& git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
+    '&& PUB_VERIFIED=yes',
     'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"',
     'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
-    'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH"',
     # Guarded by the branch test rather than run unconditionally: a docs-wip
     # worktree is on its own branch, and fast-forwarding it to the publication
     # branch would be a different operation entirely. The path-scoped checkout
     # is part of the same guarded chain because git refuses to fast-forward
     # over a locally modified file even when the file's content is exactly what
     # the fast-forward would install.
-    '[ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \\ '
+    '[ "$PUB_VERIFIED" = yes ] \\ '
+    '&& [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \\ '
     '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
     '&& git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"',
 )

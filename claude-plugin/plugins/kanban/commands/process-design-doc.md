@@ -414,10 +414,18 @@ exists in other repositories, and in other states of this one:
    published onto.
 
 ```bash
-[ "$DOC_REPO" = "coghex/kanban" ]
-git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
-git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"
+[ "$DOC_REPO" = "coghex/kanban" ] \
+  && git -C "$DOCS_WT" fetch origin "$DOC_BRANCH" \
+  && git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"
 ```
+
+**Every check in this section is a control-flow gate, never a standalone
+command whose result nothing consumes.** A predicate written on its own line
+fails silently into the next line, and the next line here pushes, checks out, or
+fast-forwards. So each one is chained: the owner test gates the classification
+read above, the isolation check gates the push below, and the remote-ancestry
+check gates the convergence after it. Run them as written rather than as a list
+of steps to work through in order.
 
 Publish only when that file's §7 classifies the resolved document's
 repository-relative path `coordination`. An owner that is not `coghex/kanban`, a
@@ -455,10 +463,18 @@ GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
 PUB_TREE="$(GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" write-tree)"
 PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
   -p "origin/$DOC_BRANCH" -m "docs: <the approved mutation, one line>")"
-[ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \
-  = "$DOC_RELATIVE_PATH" ] \
+[ "$DOC_REPO" = "coghex/kanban" ] \
+  && [ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \
+    = "$DOC_RELATIVE_PATH" ] \
   && git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
 ```
+
+Nothing above the push leaves the object store: `hash-object`, `write-tree`, and
+`commit-tree` write unreferenced objects and move no branch, so building a
+commit for an ineligible document changes nothing anywhere. The push is the
+single external effect, and it carries the owner test as well as the one-path
+test — an ineligible owner cannot reach it even if the eligibility gate above
+was somehow skipped.
 
 The scratch index is named for the document's path as well as its content, so
 no two concurrent publications in one docs worktree share it: two different
@@ -484,25 +500,38 @@ verifying that the intended publication commit is present on the remote
 publication branch:
 
 ```bash
+PUB_VERIFIED=no
 git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
-git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH"
-git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
-[ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
+git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \
+  && git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
+  && PUB_VERIFIED=yes
+
+[ "$PUB_VERIFIED" = yes ] \
+  && [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
   && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
   && git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"
 ```
 
-Those commands pin the post-success local state: a later run resolving the
-document under `$DOCS_WT` sees the published content rather than a divergent
-local-only copy, and the published mutation is not left queued for
+`PUB_VERIFIED` is the whole verdict: say the document is published only when it
+is `yes`, and treat every other outcome as an unpublished failure. **The
+convergence is gated on it, which is what keeps a failed publication
+recoverable.** After a rejected push the remote does not carry the edit, and the
+`checkout` on the next line would replace the working copy with
+`origin/$DOC_BRANCH` — destroying the very mutation requirement 5 requires
+preserving. Chained, that line is never reached.
+
+When it is reached, those commands pin the post-success local state: a later run
+resolving the document under `$DOCS_WT` sees the published content rather than a
+divergent local-only copy, and the published mutation is not left queued for
 republication. The fast-forward applies only when `$DOCS_WT` fell back to the
 checkout that sits on `$DOC_BRANCH`, where the published edit would otherwise
 keep reading as a pending local modification that also blocks the fast-forward
 itself; a `docs-wip` worktree is on its own branch, already matches the
-published content, and is left alone. The `checkout` there discards nothing —
-the preceding `diff --quiet` has already proved that content identical to it is
-on the remote branch — and it touches only `$DOC_RELATIVE_PATH`, so unrelated
-work in that checkout survives. Never force either one, and never `reset`.
+published content, and is left alone — the chain simply stops at the branch
+test, which is a normal success, not a failure. The `checkout` discards nothing:
+`PUB_VERIFIED=yes` has already proved that identical content is on the remote
+branch, and it touches only `$DOC_RELATIVE_PATH`, so unrelated work in that
+checkout survives. Never force either one, and never `reset`.
 
 **Report all three states on any failure**, rather than collapsing them: whether
 the document edit exists locally and in which worktree and at which path;
