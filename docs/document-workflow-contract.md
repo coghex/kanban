@@ -470,7 +470,13 @@ or advances any branch or HEAD in the write root.
 lock across the whole sequence, releasing and clearing it only by the exact
 value it means to remove — two clearers can agree one owner is dead, and an
 unconditional delete would let the slower of them remove a live publisher's
-lock instead; it refuses when the document does not match the
+lock instead. Every reference it removes follows that rule, the pending record
+as much as the lock, and every removal is checked rather than assumed: a record
+still standing stops the next run's preflight, so a publication that could not
+clear one reports it. Every scratch path is minted rather than named, in the
+shared Git directory as much as the working tree, because a predictable path is
+somebody else's file waiting to be rewritten and deleted. It refuses when the
+document does not match the
 publication tip before it writes, checking that with the read and the write
 adjacent so no subprocess sits in the gap; refuses a commit that changes any
 path but the one; never force-pushes and never overwrites a concurrent advance;

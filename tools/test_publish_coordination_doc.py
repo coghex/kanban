@@ -944,6 +944,54 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(json.loads(buffer.getvalue())["status"], "expected-tip-required")
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
+    def test_a_file_at_the_old_index_path_survives(self):
+        # The scratch index used to be named deterministically in the shared
+        # common Git directory, where `read-tree` would rewrite whatever was
+        # there and the cleanup would delete it.
+        common = Path(run(["git", "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"], self.fx.docs))
+        stray = common / "kanban-publish-index-docs-ui-bugs.md-deadbeef"
+        stray.write_text("somebody else's file\n")
+        self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertTrue(stray.exists())
+        self.assertEqual(stray.read_text(), "somebody else's file\n")
+
+    def test_the_publication_leaves_no_scratch_index_behind(self):
+        common = Path(run(["git", "rev-parse", "--path-format=absolute",
+                           "--git-common-dir"], self.fx.docs))
+        before = sorted(p.name for p in common.iterdir())
+        self.fx.publish("# UI\n\n- one\n- two\n")
+        leftovers = [
+            name for name in sorted(p.name for p in common.iterdir())
+            if name not in before and "kanban-publish-index" in name
+        ]
+        self.assertEqual(leftovers, [])
+
+    def test_a_record_that_cannot_be_cleared_is_reported(self):
+        # A retained record stops the next preflight and therefore every later
+        # disposition for this document, so a publication that could not clear
+        # it must say so rather than report plain success.
+        original = publisher.git
+
+        def failing_delete(args, *, cwd, check=True, input_bytes=None):
+            if (
+                len(args) >= 3
+                and args[0] == "update-ref"
+                and args[1] == "-d"
+                and "pending-publication" in args[2]
+            ):
+                return subprocess.CompletedProcess(args, 1, b"", b"simulated failure")
+            return original(args, cwd=cwd, check=check, input_bytes=input_bytes)
+
+        publisher.git = failing_delete
+        self.addCleanup(setattr, publisher, "git", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "record-retained")
+        # The publication itself did land, and is reported as having done so.
+        self.assertTrue(caught.exception.detail["remote_contains_commit"])
+        self.assertIn("- two", self.fx.remote_content())
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):

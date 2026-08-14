@@ -655,7 +655,15 @@ def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -
     not this module's to disturb — and a tree derived from `tip` cannot carry a
     second path.
     """
-    scratch = common_git_dir(root) / f"kanban-publish-index-{_key('', document)}-{blob}"
+    # Minted, never named. A predictable path in the shared common Git
+    # directory is somebody else's file waiting to happen — an interrupted
+    # run's, another tool's — and this both rewrites it via `read-tree` and
+    # deletes it afterwards. The same rule the working-tree temporaries follow.
+    handle, scratch_name = tempfile.mkstemp(
+        prefix="kanban-publish-index-", dir=str(common_git_dir(root))
+    )
+    os.close(handle)
+    scratch = Path(scratch_name)
     env = dict(os.environ, GIT_INDEX_FILE=str(scratch))
     try:
         for args in (
@@ -911,7 +919,21 @@ def clear_record_or_report_divergence(
             published_blob=published_blob,
             pending_ref=pending,
         )
-    git(["update-ref", "-d", pending], cwd=root, check=False)
+    proc = git(["update-ref", "-d", pending, commit], cwd=root, check=False)
+    if proc.returncode != 0:
+        # Bound to the recorded value, like every other ref this module
+        # removes. A record left behind stops the next preflight and therefore
+        # every later disposition for this document, so a publication that
+        # could not clear it says so rather than reporting plain success.
+        raise PublishError(
+            "record-retained",
+            f"{document} reached {branch}, but its pending record could not be "
+            "cleared; the next run's preflight will stop until it is resolved",
+            remote_contains_commit=True,
+            local_commit=commit,
+            published_blob=published_blob,
+            pending_ref=pending,
+        )
 
 
 def resolve_landed_pending(root: Path, branch: str, pending: str, document: str):
