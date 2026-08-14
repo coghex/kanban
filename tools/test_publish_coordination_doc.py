@@ -455,34 +455,70 @@ class PublishTests(unittest.TestCase):
         for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
             self.assertIn(key, payload)
 
-    def test_an_edit_landing_at_the_swap_is_restored(self):
-        # The last gap: injected after every check, in the instant before the
-        # atomic replace. It cannot be prevented, so it is detected through the
-        # hard link and undone.
-        original = publisher.replace_document
+    def test_an_in_place_edit_at_the_swap_is_put_back(self):
+        # Injected after every check, in the instant before the swap. It cannot
+        # be prevented, so the rename captures it intact and puts it back.
+        original = publisher.rename_aside
         target = self.fx.docs / "docs" / "ui-bugs.md"
 
-        def racing_replace(scratch, dest):
-            # An in-place edit, which is what an editor writing the same inode
-            # does; the link the module holds sees it.
-            with open(dest, "r+") as handle:
+        def racing_rename(src, dst):
+            with open(src, "r+") as handle:
                 handle.seek(0)
                 handle.write("# UI\n\n- foreign wins\n")
                 handle.truncate()
-            return original(scratch, dest)
+            return original(src, dst)
 
-        publisher.replace_document = racing_replace
-        self.addCleanup(setattr, publisher, "replace_document", original)
+        publisher.rename_aside = racing_rename
+        self.addCleanup(setattr, publisher, "rename_aside", original)
         with self.assertRaises(publisher.PublishError) as caught:
             self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(caught.exception.status, "document-changed-before-write")
-        # Restored, recoverable, and nothing published.
         self.assertIn("- foreign wins", target.read_text())
         self.assertIn(
             "- foreign wins",
             run(["git", "cat-file", "-p", caught.exception.detail["preserved_blob"]],
                 self.fx.docs),
         )
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_an_atomic_replacement_at_the_swap_is_not_clobbered(self):
+        # The other kind of writer: one that renames a new file over the
+        # document rather than editing it in place. A pre-swap inode check
+        # cannot see this land in the gap after it; capturing the path can.
+        original = publisher.rename_aside
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def replacing_rename(src, dst):
+            other = src.with_name("foreign-replacement")
+            other.write_text("# UI\n\n- replaced wholesale\n")
+            os.replace(other, src)  # an atomic replacement of the document
+            return original(src, dst)
+
+        publisher.rename_aside = replacing_rename
+        self.addCleanup(setattr, publisher, "rename_aside", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        self.assertIn("- replaced wholesale", target.read_text())
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_a_file_recreated_during_the_swap_is_left_alone(self):
+        # The remaining gap: the document is briefly absent between the capture
+        # and the link. A writer creating a file there wins, because `link`
+        # refuses rather than overwrites.
+        original = publisher.link_into_place
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def racing_link(scratch, dest):
+            dest.write_text("# UI\n\n- created in the gap\n")
+            return original(scratch, dest)
+
+        publisher.link_into_place = racing_link
+        self.addCleanup(setattr, publisher, "link_into_place", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        self.assertIn("- created in the gap", target.read_text())
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
     def test_an_unrelated_file_matching_the_scratch_name_survives(self):

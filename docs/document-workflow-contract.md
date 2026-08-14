@@ -477,11 +477,15 @@ fails closed when the document or the branch has moved underneath it.
 
 **Nothing an outside process wrote is destroyed to make a publication
 possible.** There is no compare-and-swap for file content, and a check followed
-by a write can always be raced, so the module does not rely on its check
-holding: it keeps a reference to the document as it was, swaps atomically, and
-judges the swap against that reference afterwards. An edit that landed in the
-gap is therefore either refused before the swap or put back after it, and the
-run fails closed either way. Content it declines to publish is written to the object database first,
+by a write can always be raced, so the module does not check and then write. It
+captures: the document is moved aside atomically, so whatever occupied that
+path — an in-place edit, a wholesale replacement — is carried out of the way
+intact rather than clobbered, and is examined only afterwards. Anything that is
+not the baseline is preserved in the object database, put back, and the run
+fails closed. The new content is then put in place with a primitive that
+refuses rather than overwrites, so a file created while the path was briefly
+empty wins and is left alone. The document is absent for that instant; a reader
+seeing no file is the price of never destroying somebody else's write. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
 write root has diverged from it, and a record that has not landed is not

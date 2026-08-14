@@ -455,38 +455,42 @@ def _preserve(root: Path, data: bytes) -> str:
     )
 
 
-def replace_document(scratch: Path, target: Path) -> None:
-    """The atomic swap, as a seam a test can inject into.
+def rename_aside(target: Path, aside: Path) -> None:
+    """Move the document out of the way, atomically. A seam a test can reach."""
+    os.rename(target, aside)
 
-    Everything the module can do about the instant between its last look and
-    this call is on the other side of it — so this is the boundary a race test
-    has to be able to reach.
-    """
-    os.replace(scratch, target)
+
+def link_into_place(scratch: Path, target: Path) -> None:
+    """Put the new content at the document's path, failing if anything is
+    already there. `link` is the one filesystem primitive here that refuses
+    rather than overwrites, which is what makes the gap detectable."""
+    os.link(scratch, target)
 
 
 def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
-    """Replace the document, refusing — and undoing — if it is not the baseline.
+    """Replace the document, refusing if it is not the baseline — and never
+    overwriting whatever is actually there.
 
-    A check followed by a write can always be raced: nothing stops another
-    process writing in the instant between them, and no POSIX primitive offers
-    compare-and-swap on file content. So this does not rely on the check
-    holding. It takes a hard link to the document's inode first, and that link
-    is what the swap is judged against afterwards:
+    A check followed by a write can always be raced, and POSIX offers no
+    compare-and-swap on file content, so this does not check and then write.
+    It *captures* instead:
 
-    - an in-place edit landing at any point before the swap is visible through
-      the link, because the link and the document are the same inode. The
-      content is preserved in the object database, the swap is undone by
-      putting that inode back, and the run fails closed;
-    - a writer that *replaces* the document instead changes its inode, which is
-      compared against the link's before the swap;
+    - `rename` moves whatever occupies the path out of the way atomically, so
+      nothing can be clobbered by this module — an in-place edit and a wholesale
+      replacement are both carried out of the way intact, and whichever it is
+      gets hashed;
+    - if that is not the baseline it is preserved in the object database, moved
+      back, and the run fails closed;
+    - `link` then puts the new content in place and *fails* if anything was
+      created in the gap, in which case what was created stays and the captured
+      document is moved back.
 
-    so an outside edit is either refused before the swap or restored after it,
-    and in both cases recoverable. The swap itself is atomic, so no reader sees
-    a torn document.
+    The document is briefly absent between those two steps: a reader in that
+    instant sees no file rather than a torn or wrong one, which is the cost of
+    never destroying somebody else's write.
     """
     target = root / document
-    backup = handle = scratch = None
+    handle = scratch = aside = None
     try:
         existing, _ = read_for_write(target)
         if git_blob_hash(existing) != baseline:
@@ -504,41 +508,45 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         with os.fdopen(handle, "wb") as stream:
             handle = None
             stream.write(content)
-        # mkstemp creates 0600. Replacing the document with it would silently
-        # narrow the permissions of a file other people and processes read, so
-        # the swap carries the mode the document already had.
+        # mkstemp creates 0600, and the swap replaces the file, so the mode
+        # travels with it rather than silently narrowing a document other
+        # people and processes read.
         os.chmod(scratch, os.stat(target).st_mode & 0o7777)
 
-        backup = Path(
-            tempfile.mkdtemp(prefix=".kanban-publish-backup-", dir=str(target.parent))
+        aside = Path(
+            tempfile.mkdtemp(prefix=".kanban-publish-aside-", dir=str(target.parent))
         ) / target.name
-        os.link(target, backup)
-        if os.stat(target).st_ino != os.stat(backup).st_ino:
-            raise PublishError(
-                "document-changed-before-write",
-                f"{document} was replaced by another writer before the swap; "
-                "nothing was published",
-            )
+        rename_aside(target, aside)
 
-        replace_document(scratch, target)
-        scratch = None
-
-        # The link still names the inode the document had. Anything written
-        # into it up to the swap is visible here, and undoable.
-        landed, _ = read_for_write(backup)
-        if git_blob_hash(landed) != baseline:
-            preserved = _preserve(root, landed)
-            os.replace(backup, target)
-            backup = None
+        captured, _ = read_for_write(aside)
+        if git_blob_hash(captured) != baseline:
+            preserved = _preserve(root, captured)
+            os.rename(aside, target)
+            aside = None
             raise PublishError(
                 "document-changed-before-write",
                 f"{document} was changed between its verification and the swap; "
-                "the change was restored and nothing was published",
+                "the change was put back and nothing was published",
                 preserved_blob=preserved,
             )
+
+        try:
+            link_into_place(scratch, target)
+        except FileExistsError:
+            # Somebody created the document in the gap. Their file is the most
+            # recent write and stays exactly as it is — moving the captured
+            # copy back over it would destroy the write this whole design
+            # exists to protect. What was captured is the baseline, which the
+            # publication branch already carries, and it is preserved anyway so
+            # the report can name both.
+            preserved = _preserve(root, captured)
+            raise PublishError(
+                "document-changed-before-write",
+                f"{document} was recreated by another writer during the swap; "
+                "that file was left in place and nothing was published",
+                preserved_blob=preserved,
+            ) from None
     except OSError as error:
-        # An unwritable document is an unpublished outcome like any other, not
-        # a traceback for the caller to interpret.
         raise PublishError(
             "document-unwritable",
             f"{document} could not be read or replaced: {error}",
@@ -546,14 +554,12 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
     finally:
         if handle is not None:
             os.close(handle)
-        # Only ever this invocation's own temporaries, each created
-        # exclusively: a deterministic name would collide with — and delete —
-        # an unrelated untracked file that happened to be called the same.
+        # Only this invocation's own temporaries, each created exclusively.
         if scratch is not None:
             scratch.unlink(missing_ok=True)
-        if backup is not None:
-            backup.unlink(missing_ok=True)
-            backup.parent.rmdir()
+        if aside is not None:
+            aside.unlink(missing_ok=True)
+            aside.parent.rmdir()
 
 
 def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -> str:
