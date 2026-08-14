@@ -48,6 +48,7 @@ file it writes is the document itself, and it never stages it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -422,6 +423,42 @@ def is_ancestor(root: Path, commit: str, revision: str) -> bool:
     )
 
 
+def git_blob_hash(data: bytes) -> str:
+    """A blob's object name, computed here rather than by a subprocess.
+
+    The check that the document is still the baseline and the write that
+    replaces it must be as close together as the process can make them: a
+    `git hash-object` between them is a fork, an exec and a pipe during which
+    an outside edit can land and be destroyed unseen.
+    """
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
+    """Replace the document, refusing if it is no longer the baseline.
+
+    The read, the comparison and the write are adjacent, with no subprocess
+    between them. When the content has changed it is written into the object
+    database before this returns, so an outside-protocol edit is recoverable
+    with `git cat-file -p <blob>` even though it was refused rather than
+    published — the guarantee is that such an edit survives, not that it is
+    published.
+    """
+    target = root / document
+    existing = target.read_bytes() if target.is_file() else b""
+    if git_blob_hash(existing) != baseline:
+        preserved = git_out(
+            ["hash-object", "-w", "-t", "blob", "--stdin"], cwd=root, input_bytes=existing
+        )
+        raise PublishError(
+            "document-changed-before-write",
+            f"{document} changed after its baseline was verified; nothing was "
+            "written and nothing was published",
+            preserved_blob=preserved,
+        )
+    target.write_bytes(content)
+
+
 def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -> str:
     """A commit on `tip` whose tree is `tip`'s with exactly one blob replaced.
 
@@ -613,6 +650,25 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
     ).stdout.decode().strip()
     if not recorded or not is_ancestor(root, recorded, f"origin/{branch}"):
         return None
+    approved = blob_at(root, recorded, document)
+    if working_blob(root, document) != approved or staged_blob(
+        root, document
+    ) != head_blob(root, document):
+        # The publication did land — that is a fact about the remote, reported
+        # as one. What is refused is *clearing the record*, because the write
+        # root no longer holds what landed: something changed or staged the
+        # document afterwards, and dropping the record would leave that
+        # divergence with nothing pointing at it.
+        raise PublishError(
+            "landed-but-divergent",
+            f"the recorded publication for {document} reached {branch}, but the "
+            "document has been changed or staged since; the record is kept so the "
+            "divergence is not lost",
+            remote_contains_commit=True,
+            local_commit=recorded,
+            published_blob=approved,
+            pending_ref=pending,
+        )
     git(["update-ref", "-d", pending], cwd=root, check=False)
     return {
         "status": "published",
@@ -633,35 +689,51 @@ def resolve_landed_pending(root: Path, branch: str, pending: str, document: str)
 def publish(
     *, repository: str, branch: str, root: Path, document: str, content: bytes, message: str
 ) -> dict:
-    root = resolve_write_root(root)
-    owner = verify_owner(root, repository)
+    """Publish one approved mutation, or report why it was not published.
 
-    git(["fetch", "origin", branch], cwd=root)
-    tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
-
-    lock = lock_ref(owner, document)
-    pending = pending_ref(owner, document)
-    acquire_lock(root, lock, tip)
+    Every failure leaves through the one handler below, including the ones
+    raised before the lock is taken — an owner mismatch, an unreachable remote,
+    a lock another run holds. A caller told to report three states cannot
+    report them from a result that carries none, and "the run never got far
+    enough to write anything" is an answer to all three rather than an excuse
+    for omitting them.
+    """
     try:
+        resolved = resolve_write_root(root)
+        owner = verify_owner(resolved, repository)
+        git(["fetch", "origin", branch], cwd=resolved)
+        tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
+
+        lock = lock_ref(owner, document)
+        pending = pending_ref(owner, document)
+        acquire_lock(resolved, lock, tip)
         try:
             return _publish_locked(
-                root=root, owner=owner, branch=branch, tip=tip, document=document,
+                root=resolved, owner=owner, branch=branch, tip=tip, document=document,
                 content=content, message=message, pending=pending,
             )
-        except PublishError as error:
-            # Every unpublished outcome reports all three states, whatever
-            # stage it failed at.
+        finally:
+            release_lock(resolved, lock)
+    except PublishError as error:
+        try:
             states = failure_states(
-                root,
+                Path(git_out(["rev-parse", "--show-toplevel"], cwd=root)),
                 document,
                 commit=error.detail.get("local_commit"),
                 branch=branch,
                 reachable=error.detail.get("remote_contains_commit"),
             )
-            error.detail = {**states, **error.detail}
-            raise
-    finally:
-        release_lock(root, lock)
+        except Exception:
+            # A write root too broken to inspect still answers all three, as
+            # unknowns rather than as absent fields.
+            states = {
+                "document_edit": {"exists": None, "write_root": str(root), "path": document},
+                "local_publication_commit": error.detail.get("local_commit"),
+                "remote_branch": f"origin/{branch}",
+                "remote_contains_commit": error.detail.get("remote_contains_commit"),
+            }
+        error.detail = {**states, **error.detail}
+        raise
 
 
 def _publish_locked(*, root, owner, branch, tip, document, content, message, pending):
@@ -703,13 +775,7 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
     # check and the write is small but real, and an outside-protocol edit
     # landing in it must survive rather than be overwritten by this write.
     require_unstaged(root, document)
-    if working_blob(root, document) != baseline:
-        raise PublishError(
-            "document-changed-before-write",
-            f"{document} changed after its baseline was verified; nothing was "
-            "written and nothing was published",
-        )
-    (root / document).write_bytes(content)
+    verify_and_write(root, document, baseline, content)
 
     commit = build_commit(root, tip, document, approved_blob, message)
     touched = changed_paths(root, tip, commit)

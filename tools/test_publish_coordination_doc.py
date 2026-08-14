@@ -282,6 +282,93 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, "document-staged")
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
+    def test_a_pre_lock_failure_still_reports_all_three_states(self):
+        # Owner verification, the fetch and lock contention all happen before
+        # the sequence starts; a caller branching on any non-published result
+        # must still be able to report §9.5's three states.
+        lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        publisher.acquire_lock(self.fx.docs, lock, tip)
+        self.addCleanup(publisher.release_lock, self.fx.docs, lock)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "locked")
+        self.assertIn("document_edit", detail)
+        self.assertIn("local_publication_commit", detail)
+        self.assertIn("remote_contains_commit", detail)
+
+    def test_an_owner_mismatch_reports_all_three_states(self):
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Fixture(Path(other_dir), origin_name="synarchy")
+            with self.assertRaises(publisher.PublishError) as caught:
+                other.publish("# UI\n\n- one\n- two\n", repo="coghex/kanban")
+            for key in ("document_edit", "local_publication_commit", "remote_contains_commit"):
+                self.assertIn(key, caught.exception.detail)
+
+    def test_an_edit_landing_after_the_final_check_is_preserved(self):
+        # Injected between the last verification and the write — the window the
+        # in-process read closes. Whatever was there is written to the object
+        # database before the run refuses, so it is recoverable rather than
+        # destroyed.
+        original = publisher.verify_and_write
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+
+        def racing_write(root, document, baseline, content):
+            target.write_text(target.read_text() + "- foreign\n")
+            return original(root, document, baseline, content)
+
+        publisher.verify_and_write = racing_write
+        self.addCleanup(setattr, publisher, "verify_and_write", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-changed-before-write")
+        self.assertIn("- foreign", target.read_text())
+        preserved = caught.exception.detail["preserved_blob"]
+        self.assertIn(
+            "- foreign", run(["git", "cat-file", "-p", preserved], self.fx.docs)
+        )
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_a_landed_record_is_not_cleared_over_a_divergent_document(self):
+        original = publisher.is_ancestor
+        publisher.is_ancestor = lambda root, commit, revision: False
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n")
+        finally:
+            publisher.is_ancestor = original
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+        target.write_text(target.read_text() + "- user work\n")
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "landed-but-divergent")
+        # The publication is still reported as having reached the branch, the
+        # record survives, and the user's work is untouched.
+        self.assertTrue(caught.exception.detail["remote_contains_commit"])
+        self.assertIn("- user work", target.read_text())
+        pending = publisher.pending_ref("coghex/kanban", "docs/ui-bugs.md")
+        self.assertNotEqual(
+            run(["git", "rev-parse", "--verify", "--quiet", pending], self.fx.docs), ""
+        )
+
+    def test_a_landed_record_is_not_cleared_over_a_staged_document(self):
+        original = publisher.is_ancestor
+        publisher.is_ancestor = lambda root, commit, revision: False
+        try:
+            with self.assertRaises(publisher.PublishError):
+                self.fx.publish("# UI\n\n- one\n- two\n")
+        finally:
+            publisher.is_ancestor = original
+        blob = run(["git", "hash-object", "-w", "--stdin"], self.fx.docs, input="staged\n")
+        run(
+            ["git", "update-index", "--cacheinfo", f"100644,{blob},docs/ui-bugs.md"],
+            self.fx.docs,
+        )
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "landed-but-divergent")
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing(self):

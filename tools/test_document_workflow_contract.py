@@ -225,6 +225,10 @@ CONTRACT_STATEMENTS = {
         "the module reports it only when the intended commit is reachable from "
         "the remote publication branch"
     ),
+    "publication-preserves-outside-work": (
+        "Nothing an outside process wrote is destroyed to make a publication "
+        "possible"
+    ),
     "publication-failure-has-three-states": (
         "reported with all three states rather than collapsed into one"
     ),

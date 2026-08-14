@@ -468,11 +468,19 @@ or advances any branch or HEAD in the write root.
 
 **A publication is guaranteed, not hoped for.** The module holds a per-document
 lock across the whole sequence; refuses when the document does not match the
-publication tip before it writes; refuses a commit that changes any path but the
-one; never force-pushes and never overwrites a concurrent advance; treats
-reachability from the remote branch as the sole definition of published; and
-records an unfinished publication so a later run resumes exactly it, or fails
-closed when the document or the branch has moved underneath it.
+publication tip before it writes, checking that with the read and the write
+adjacent so no subprocess sits in the gap; refuses a commit that changes any
+path but the one; never force-pushes and never overwrites a concurrent advance;
+treats reachability from the remote branch as the sole definition of published;
+and records an unfinished publication so a later run resumes exactly it, or
+fails closed when the document or the branch has moved underneath it.
+
+**Nothing an outside process wrote is destroyed to make a publication
+possible.** Content the module declines to publish is written to the object
+database before it refuses, so an edit made outside this protocol is
+recoverable rather than lost, and a recorded publication that already reached
+the branch is not cleared while the write root has diverged from it — the
+divergence keeps the record that points at it.
 
 ### 9.5 What "published" means, and the three-state failure report
 
