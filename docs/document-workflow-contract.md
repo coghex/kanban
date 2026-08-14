@@ -438,6 +438,20 @@ exactly the state being published onto. **A publication branch that carries no
 such contract at all has no `coordination` lane**, so nothing is published
 there.
 
+**One pinned tip answers every question.** Eligibility, isolation, and the
+commit's own parent are three questions about one state of the publication
+branch, so the branch is fetched once, its tip pinned, and that pin used for all
+of them. Re-resolving the branch between them reopens exactly the window each
+check exists to close: a classification read from one tip and a commit built on
+another can publish a document the state it was built on never classified.
+
+**The classification is parsed and gated on, not merely displayed.** Printing §7
+for a human to read leaves the lane unenforced, and the isolation check cannot
+substitute for it — a `pr-atomic` document changes exactly one path too. The
+eligibility step therefore succeeds only when the pinned tip's own §7 carries a
+`coordination` row for exactly the resolved path, and the push re-tests it
+against the same pin.
+
 ### 9.3 What a publication may contain
 
 A publication carries the single approved mutation to the one eligible document
@@ -470,6 +484,17 @@ Nothing before the push leaves the object store — building a candidate commit
 writes unreferenced objects and moves no branch — so the push is the single
 external effect, and it is the one step every gate converges on.
 
+**A same-file difference is the case the one-path check cannot see, so it is
+excluded before the edit rather than after it.** The publication commit carries
+the document's whole blob, so a change the document already held is published
+beside the approved one while the commit still touches exactly one path. The
+guarantee therefore rests on a precondition: the document must equal the
+publication tip before the run applies its disposition, which makes the
+resulting difference provably that disposition and nothing else. A document that
+already differs is either an earlier run's unpublished mutation, which §9.6
+resumes, or work this run did not make — and in that case publication fails
+closed before anything is built, without discarding the other work.
+
 ### 9.4 How a publication is made
 
 Publication is a normal fast-forward update of the remote publication branch and
@@ -493,6 +518,15 @@ A run may describe a document as published only after verifying that the
 intended publication commit is present on the remote publication branch. A push
 that appeared to succeed is not that verification.
 
+**Reachability of that commit is the whole verdict, and whether the local file
+still equals the branch may form no part of it.** Those are different questions.
+Another run can advance the publication branch with its own edit to the same
+document between the push and the check: the commit still landed, and the local
+copy is now merely behind. Folding the file comparison into the verdict reports
+that success as a failure, and the next run's scan then reads the behind copy as
+a pending mutation and republishes it over the concurrent edit — turning a
+correct publication into a silent revert of somebody else's.
+
 A failure report distinguishes all three states rather than collapsing them:
 
 - whether the document edit exists locally, and in which worktree and at which
@@ -513,6 +547,14 @@ copy with what that branch holds — which, after a rejected push, is the state
 without the approved mutation. Run ungated, the step that converges a successful
 publication is the step that destroys an unsuccessful one, and §9.4's
 recoverability guarantee would hold only when it was not needed.
+
+It also runs in one direction only: the local document moves **to** the branch,
+never the branch to the local document. What the branch holds at that point
+already contains this run's landed mutation, plus any concurrent edit on top of
+it, so taking the branch's content loses nothing and replays nothing stale. That
+is what restores the precondition the next run depends on — document equals
+publication tip — and therefore what makes a later scan read "nothing pending"
+rather than mistaking a behind copy for an unpublished one.
 
 ### 9.6 Resuming an unfinished publication
 

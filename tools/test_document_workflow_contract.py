@@ -213,6 +213,24 @@ CONTRACT_STATEMENTS = {
     "publication-classification-comes-from-the-tip": (
         "§7 is therefore read out of the fetched publication tip"
     ),
+    "publication-one-pinned-tip": (
+        "One pinned tip answers every question"
+    ),
+    "publication-classification-is-parsed": (
+        "The classification is parsed and gated on, not merely displayed"
+    ),
+    "publication-same-file-difference-excluded-early": (
+        "A same-file difference is the case the one-path check cannot see, so it "
+        "is excluded before the edit rather than after it"
+    ),
+    "publication-reachability-is-the-verdict": (
+        "Reachability of that commit is the whole verdict, and whether the local "
+        "file still equals the branch may form no part of it"
+    ),
+    "publication-reconciliation-is-one-directional": (
+        "the local document moves to the branch, never the branch to the local "
+        "document"
+    ),
     "publication-branchless-contract-has-no-lane": (
         "A publication branch that carries no such contract at all has no "
         "coordination lane"
@@ -293,8 +311,8 @@ PUBLICATION_CLAUSES = {
         "never batched or deferred merely to reduce commit or push frequency"
     ),
     "eligibility-is-section-7": (
-        "publish only when that file's §7 classifies the resolved document's "
-        "repository-relative path coordination"
+        "it exits zero only when the pinned tip's own §7 carries a "
+        "coordination row for exactly this path"
     ),
     "a-path-alone-is-not-eligibility": (
         "a repository-relative path is not by itself an eligibility signal — the "
@@ -309,8 +327,40 @@ PUBLICATION_CLAUSES = {
         "fork, even when it tracks a contract of its own carrying a matching row"
     ),
     "classification-comes-from-the-tip": (
-        "read §7 out of the fetched publication tip, which is exactly the state "
-        "being published onto"
+        "§7 is read out of $pub_tip — the exact state being published onto"
+    ),
+    "the-tip-is-pinned-once": (
+        "fetch once and pin the tip"
+    ),
+    "everything-names-the-pin": (
+        "everything below names $pub_tip, never origin/$doc_branch, until the "
+        "verification step deliberately refetches"
+    ),
+    "the-gate-is-the-test-not-a-display": (
+        "that pipeline is the eligibility test, not a display of §7 for a human "
+        "to read"
+    ),
+    "clean-before-editing": (
+        "the document must match the pinned tip before this run edits it"
+    ),
+    "same-file-difference-is-invisible": (
+        "because that difference sits in the same file, the one-path check below "
+        "cannot see it"
+    ),
+    "unrelated-same-file-work-blocks-publication": (
+        "publication is impossible for this run"
+    ),
+    "ancestry-alone-is-the-verdict": (
+        "ancestry alone is the verdict, and comparing the local file to the "
+        "branch must play no part in it"
+    ),
+    "concurrent-advance-is-not-a-failure": (
+        "folding that comparison into the verdict would report a successful "
+        "publication as failed"
+    ),
+    "reconciliation-moves-local-to-the-branch": (
+        "it moves the local document to the branch rather than the other way "
+        "round"
     ),
     "a-stale-checkout-is-not-the-authority": (
         "a dirty, stale, or unmerged $doc_root can classify a path coordination "
@@ -345,20 +395,14 @@ PUBLICATION_CLAUSES = {
         "nothing above the push leaves the object store"
     ),
     "verified-flag-is-the-verdict": (
-        "say the document is published only when it is yes, and treat every "
-        "other outcome as an unpublished failure"
+        "say the document is published only when pub_published is yes, and "
+        "treat every other outcome as an unpublished failure"
     ),
-    "convergence-is-gated-on-verification": (
-        "the convergence is gated on it, which is what keeps a failed "
-        "publication recoverable"
-    ),
-    "ungated-convergence-would-destroy-the-mutation": (
-        "the checkout on the next line would replace the working copy with "
-        "origin/$doc_branch — destroying the very mutation requirement 5 "
-        "requires preserving"
+    "reconciliation-is-gated-on-verification": (
+        "it runs only when the publication is confirmed"
     ),
     "pr-atomic-is-never-published": (
-        "a pr-atomic path, and a path no §7 row matches are each ineligible"
+        "a pr-atomic path, and a path no §7 row matches all leave it nonzero"
     ),
     "unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
@@ -397,17 +441,16 @@ PUBLICATION_CLAUSES = {
         "checkout the pr drainer fast-forwards"
     ),
     "verified-on-the-remote": (
-        "say the document is published only after verifying that the intended "
-        "publication commit is present on the remote publication branch"
+        "the publication landed if and only if the intended commit is "
+        "reachable from the remote publication branch"
     ),
     "post-success-local-state": (
-        "a later run resolving the document under $docs_wt sees the published "
-        "content rather than a divergent local-only copy, and the published "
-        "mutation is not left queued for republication"
+        "it also restores the invariant the next run depends on — the document "
+        "equals the publication tip"
     ),
     "convergence-is-scoped-to-the-fallback": (
         "the fast-forward applies only when $docs_wt fell back to the checkout "
-        "that sits on $doc_branch"
+        "sitting on $doc_branch"
     ),
     "failure-has-three-states": (
         "whether the document edit exists locally and in which worktree and at "
@@ -416,7 +459,22 @@ PUBLICATION_CLAUSES = {
         "commit"
     ),
     "scan-precedes-selection": (
-        "scan for an unfinished publication before choosing an entry"
+        "scan the document against the publication tip before choosing an entry"
+    ),
+    "scan-decides-what-the-run-may-do": (
+        "that one comparison decides what this run may do at all"
+    ),
+    "clean-scan-permits-publication": (
+        "this run's own edit is then the only difference, which is exactly what "
+        "lets its publication carry the approved mutation and nothing else"
+    ),
+    "unrelated-work-blocks-this-run": (
+        "it carries work this run did not make, so publication is impossible "
+        "this run"
+    ),
+    "never-discard-to-publish": (
+        "never publish anyway, and never discard the other work to make "
+        "publication possible"
     ),
     "resumes-only-the-publication-step": (
         "re-attempt the publication step below against that existing edit, never "
@@ -452,13 +510,24 @@ PUBLICATION_SHELL_BINDINGS = (
     # Only Kanban's own documents take this lane, and the classification is
     # read from the branch being published to rather than from a checkout that
     # may be dirty, stale, or unmerged relative to it.
+    # The tip is pinned once and every later question names the pin.
+    'PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"',
+    # The classification is parsed out of that pin and gates the owner test,
+    # rather than being printed for a human to read.
     '[ "$DOC_REPO" = "coghex/kanban" ] \\ '
-    '&& git -C "$DOCS_WT" fetch origin "$DOC_BRANCH" \\ '
-    '&& git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"',
-    'git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
-    # The resumption scan: an eligible document differing from its publication
-    # branch is an unpublished mutation, whatever marker its entry carries.
-    'git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    '&& git -C "$DOCS_WT" show "${PUB_TIP}:docs/agent-workflow-contract.md" \\ '
+    '| awk -v want="$DOC_RELATIVE_PATH" \' '
+    '/^## 7\\. Document publication classification$/{sec = 1; next} '
+    '(sec) && /^## /{exit} '
+    '(sec) && $1 == want && $2 == "|" && $3 == "coordination"{ok = 1; exit} '
+    'END{exit !ok}\'',
+    # The precondition that makes a same-file difference impossible to publish
+    # accidentally: the document equals the pinned tip before the run edits it.
+    'git -C "$DOCS_WT" diff --quiet "$PUB_TIP" -- "$DOC_RELATIVE_PATH"',
+    # The pre-selection scan, against the same pin: a document differing from
+    # the publication tip is either an earlier run's unpublished mutation or
+    # work this run must not publish, and both are decided before selection.
+    'git -C "$DOCS_WT" diff --name-only "$PUB_TIP" -- "$DOC_RELATIVE_PATH"',
     # Keyed by path as well as content, so two documents that hash alike cannot
     # share one scratch index and interleave into a two-path tree.
     'PUB_KEY="${DOC_RELATIVE_PATH//\\//-}"',
@@ -467,17 +536,17 @@ PUBLICATION_SHELL_BINDINGS = (
     # The isolation guarantee, checked on the finished commit rather than
     # assumed from how it was built — and consumed as the push's own condition,
     # since a verification nothing reads would let a mixed tree through.
-    '[ "$DOC_REPO" = "coghex/kanban" ] \\ '
-    '&& [ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \\ '
+    '&& [ "$(git -C "$DOCS_WT" diff --name-only "$PUB_TIP" "$PUB_COMMIT")" \\ '
     '= "$DOC_RELATIVE_PATH" ] \\ '
     '&& git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"',
-    # The verification is consumed rather than merely run: after a rejected
-    # push the ancestry check fails, and an ungated `checkout` on the next line
-    # would overwrite the uncommitted mutation with the branch that lacks it.
+    # Reachability alone decides published/unpublished. Adding the local-file
+    # comparison here would report a concurrent same-file advance as a failed
+    # publication, and the next scan would republish over it.
     'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \\ '
-    '&& git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
-    '&& PUB_VERIFIED=yes',
-    'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"',
+    '&& PUB_PUBLISHED=yes',
+    '[ "$PUB_PUBLISHED" = yes ] \\ '
+    '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"',
+    'GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "$PUB_TIP"',
     'git -C "$DOCS_WT" commit-tree "$PUB_TREE"',
     # Guarded by the branch test rather than run unconditionally: a docs-wip
     # worktree is on its own branch, and fast-forwarding it to the publication
@@ -485,9 +554,8 @@ PUBLICATION_SHELL_BINDINGS = (
     # is part of the same guarded chain because git refuses to fast-forward
     # over a locally modified file even when the file's content is exactly what
     # the fast-forward would install.
-    '[ "$PUB_VERIFIED" = yes ] \\ '
+    '[ "$PUB_PUBLISHED" = yes ] \\ '
     '&& [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \\ '
-    '&& git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \\ '
     '&& git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"',
 )
 

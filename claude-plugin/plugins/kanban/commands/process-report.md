@@ -178,21 +178,35 @@ Rules:
 
 ## 1. Locate the next finding
 
-**Scan for an unfinished publication before choosing an entry.** Resolve the
-document path first, in the numbered steps below, then compare that document
-against the remote publication branch:
+**Scan the document against the publication tip before choosing an entry.**
+Resolve the document path first, in the numbered steps below, then pin the tip
+and compare:
 
 ```bash
 git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
-git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"
+git -C "$DOCS_WT" diff --name-only "$PUB_TIP" -- "$DOC_RELATIVE_PATH"
 ```
 
-When that prints the document and the entries it already changed carry their
-`[#N]`, `[no-issue]`, or `[deferred]` markers, an earlier run applied and marked
-its disposition but failed to publish it: the tracker and the document are
-already correct and publication alone is outstanding. Re-attempt the publication
-step below against that existing edit, never repeat the tracker mutation, and
-select no new entry this run.
+That one comparison decides what this run may do at all:
+
+- **Empty.** The document equals the publication tip. Select normally; this
+  run's own edit is then the only difference, which is exactly what lets its
+  publication carry the approved mutation and nothing else.
+- **Prints the document, and the entries it already changed carry their `[#N]`,
+  `[no-issue]`, or `[deferred]` markers.** An earlier run applied and marked its
+  disposition but failed to publish it: the tracker and the document are already
+  correct and publication alone is outstanding. Re-attempt the publication step
+  below against that existing edit, never repeat the tracker mutation, and
+  select no new entry this run.
+- **Prints the document otherwise.** It carries work this run did not make, so
+  **publication is impossible this run**: the publication commit is built from
+  the document's whole blob and would carry that work too — invisibly to the
+  one-path check, which sees a single changed path either way. Say so before
+  applying anything, name what the document already carries, and let the user
+  decide whether to proceed with a disposition that will not be published or to
+  reconcile first. Never publish anyway, and never discard the other work to
+  make publication possible.
 
 **This scan is the one deliberate exception to the selection rule below, which
 never selects a terminal-marked entry.** The entry being resumed is already
@@ -406,12 +420,27 @@ from that checkout. Publication is one more step of the disposition that was
 already approved; it carries no second one, and it is never batched or deferred
 merely to reduce commit or push frequency.
 
+**Pin the publication tip once.** Every question below — is this document
+eligible, is the mutation isolated, did the publication land — has to be
+answered against one state of the publication branch. Fetching again between the
+answers reopens the very window each check exists to close, so fetch once and
+pin the tip:
+
+```bash
+git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
+PUB_TIP="$(git -C "$DOCS_WT" rev-parse "origin/$DOC_BRANCH")"
+```
+
+Everything below names `$PUB_TIP`, never `origin/$DOC_BRANCH`, until the
+verification step deliberately refetches to learn whether the push landed. A
+check answered against one tip and acted on against another is not a check.
+
 **Eligibility.** Publishing at all requires the `$DOC_REPO`, `$DOC_BRANCH`, and
 `$DOC_ROOT` the ownership step resolved; an owner or publication branch that
 could not be verified fails closed and the document stays unpublished. Two
-further conditions are checked before anything is built or pushed, because a
-repository-relative path is not by itself an eligibility signal — the same path
-exists in other repositories, and in other states of this one:
+further conditions hold, because a repository-relative path is not by itself an
+eligibility signal — the same path exists in other repositories, and in other
+states of this one:
 
 1. **The owner is Kanban itself.** §7 is Kanban's own statement about Kanban, so
    `coghex/kanban` is the only repository with a `coordination` lane through
@@ -422,61 +451,96 @@ exists in other repositories, and in other states of this one:
    checkout is not the authority on it: a dirty, stale, or unmerged `$DOC_ROOT`
    can classify a path `coordination` when the publication branch does not, and
    the publication commit is built on that branch rather than on the checkout.
-   Read §7 out of the fetched publication tip, which is exactly the state being
-   published onto.
+   §7 is read out of `$PUB_TIP` — the exact state being published onto.
 
 ```bash
 [ "$DOC_REPO" = "coghex/kanban" ] \
-  && git -C "$DOCS_WT" fetch origin "$DOC_BRANCH" \
-  && git -C "$DOCS_WT" show "origin/$DOC_BRANCH:docs/agent-workflow-contract.md"
+  && git -C "$DOCS_WT" show "${PUB_TIP}:docs/agent-workflow-contract.md" \
+    | awk -v want="$DOC_RELATIVE_PATH" '
+        /^## 7\. Document publication classification$/{sec = 1; next}
+        (sec) && /^## /{exit}
+        (sec) && $1 == want && $2 == "|" && $3 == "coordination"{ok = 1; exit}
+        END{exit !ok}'
 ```
+
+That pipeline **is** the eligibility test, not a display of §7 for a human to
+read. It exits zero only when the pinned tip's own §7 carries a `coordination`
+row for exactly this path, and it is anchored to the §7 heading so no other
+table in that document can satisfy it. An owner that is not `coghex/kanban`, a
+publication branch carrying no such contract at all, a `pr-atomic` path, and a
+path no §7 row matches all leave it nonzero: `pr-atomic` is the fail-closed
+default for an unmatched path. When the document is not direct-publication
+eligible, leave the edit in place and recoverable, say plainly that it was not
+published and why, and stop there.
 
 **Every check in this section is a control-flow gate, never a standalone
 command whose result nothing consumes.** A predicate written on its own line
 fails silently into the next line, and the next line here pushes, checks out, or
 fast-forwards. So each one is chained: the owner test gates the classification
-read above, the isolation check gates the push below, and the remote-ancestry
-check gates the convergence after it. Run them as written rather than as a list
-of steps to work through in order.
+read above, both gate the push below, and the remote-ancestry check gates the
+reconciliation after it. Run them as written rather than as a list of steps to
+work through in order.
 
-Publish only when that file's §7 classifies the resolved document's
-repository-relative path `coordination`. An owner that is not `coghex/kanban`, a
-publication branch carrying no such contract at all, a `pr-atomic` path, and a
-path no §7 row matches are each ineligible: `pr-atomic` is the fail-closed
-default for an unmatched path. When the document is not direct-publication
-eligible, leave the edit in place and recoverable, say plainly that it was not
-published and why, and stop there.
+**A publication carries the single approved mutation to the one eligible
+document and nothing else** — no unrelated dirty paths, no earlier `docs-wip`
+commits, no unrelated changes already present in the same document, and no
+second disposition. If the approved mutation cannot be isolated from other
+changes, publication fails closed: publish nothing, discard nothing, and report
+what else the document carries. Two separate mechanisms enforce that, because
+they catch failures neither can see alone — the precondition below excludes a
+difference already present in the same file, and the one-path check on the built
+commit excludes a second path.
 
-**Isolate the mutation first.** A publication carries the single approved
-mutation to the one eligible document and nothing else — no unrelated dirty
-paths, no earlier `docs-wip` commits, no unrelated changes already present in
-the same document, and no second disposition. Read the whole difference first:
+**The document must match the pinned tip before this run edits it.** This is
+what makes the published commit provably the approved mutation and nothing else,
+and it is checked in step 1 before the disposition is applied — not here, where
+it would be too late:
 
 ```bash
-git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
-git -C "$DOCS_WT" diff "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+git -C "$DOCS_WT" diff --quiet "$PUB_TIP" -- "$DOC_RELATIVE_PATH"
 ```
 
-If the approved mutation cannot be isolated from other changes, publication
-fails closed: publish nothing, discard nothing, and report what else the
-document carries.
+The publication commit is built from the document's whole blob, so any
+difference the document already carried is published along with the approved
+one — and because that difference sits in the same file, the one-path check
+below cannot see it. Three outcomes:
+
+- **Clean.** The document equals the pinned tip. Apply the disposition; the only
+  difference afterwards is this run's approved mutation, so publishing the blob
+  publishes exactly that.
+- **Differs, and the entries it changed already carry their `[#N]`,
+  `[no-issue]`, or `[deferred]` markers.** An earlier run applied and marked its
+  disposition but failed to publish it. Resume that publication, as step 1
+  describes, and select no new entry.
+- **Differs otherwise.** The document carries work this run did not make.
+  **Publication is impossible for this run** and fails closed: build no commit
+  and push nothing. Say so before applying anything, name what the document
+  already carries, and let the user decide whether to proceed with an
+  unpublished disposition or reconcile first. Never publish anyway, and never
+  discard the other work to make publication possible.
 
 **Publish with a fast-forward and nothing else.** Build the publication commit
-from the fetched remote tip with exactly that one blob replaced, so no local
-branch moves and no other path can be swept in, then push it plainly:
+from the pinned tip with exactly that one blob replaced, so no local branch
+moves and no other path can be swept in, then push it plainly:
 
 ```bash
 PUB_BLOB="$(git -C "$DOCS_WT" hash-object -w -- "$DOCS_WT/$DOC_RELATIVE_PATH")"
 PUB_KEY="${DOC_RELATIVE_PATH//\//-}"
 PUB_INDEX="$(git -C "$DOCS_WT" rev-parse --git-path "kanban-publish-index-$PUB_KEY-$PUB_BLOB")"
-GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "origin/$DOC_BRANCH"
+GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" read-tree "$PUB_TIP"
 GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" update-index --add \
   --cacheinfo "100644,$PUB_BLOB,$DOC_RELATIVE_PATH"
 PUB_TREE="$(GIT_INDEX_FILE="$PUB_INDEX" git -C "$DOCS_WT" write-tree)"
 PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
-  -p "origin/$DOC_BRANCH" -m "docs: <the approved mutation, one line>")"
+  -p "$PUB_TIP" -m "docs: <the approved mutation, one line>")"
 [ "$DOC_REPO" = "coghex/kanban" ] \
-  && [ "$(git -C "$DOCS_WT" diff --name-only "origin/$DOC_BRANCH" "$PUB_COMMIT")" \
+  && git -C "$DOCS_WT" show "${PUB_TIP}:docs/agent-workflow-contract.md" \
+    | awk -v want="$DOC_RELATIVE_PATH" '
+        /^## 7\. Document publication classification$/{sec = 1; next}
+        (sec) && /^## /{exit}
+        (sec) && $1 == want && $2 == "|" && $3 == "coordination"{ok = 1; exit}
+        END{exit !ok}' \
+  && [ "$(git -C "$DOCS_WT" diff --name-only "$PUB_TIP" "$PUB_COMMIT")" \
     = "$DOC_RELATIVE_PATH" ] \
   && git -C "$DOCS_WT" push origin "${PUB_COMMIT}:refs/heads/${DOC_BRANCH}"
 ```
@@ -484,8 +548,9 @@ PUB_COMMIT="$(git -C "$DOCS_WT" commit-tree "$PUB_TREE" \
 Nothing above the push leaves the object store: `hash-object`, `write-tree`, and
 `commit-tree` write unreferenced objects and move no branch, so building a
 commit for an ineligible document changes nothing anywhere. The push is the
-single external effect, and it carries the owner test as well as the one-path
-test — an ineligible owner cannot reach it even if the eligibility gate above
+single external effect, and it re-tests the owner **and** the classification
+against the same pinned tip the commit was built from, so neither an ineligible
+owner nor a `pr-atomic` document can reach it even if the eligibility gate above
 was somehow skipped.
 
 The scratch index is named for the document's path as well as its content, so
@@ -507,49 +572,51 @@ on the local default branch of a checkout the PR drainer fast-forwards; the
 commands above cannot produce one, because `commit-tree` moves no branch and a
 rejected push leaves the mutation exactly where it already was.
 
-**Verify before calling it published.** Say the document is published only after
-verifying that the intended publication commit is present on the remote
-publication branch:
+**Verify before calling it published.** The publication landed if and only if
+the intended commit is reachable from the remote publication branch:
 
 ```bash
-PUB_VERIFIED=no
+PUB_PUBLISHED=no
 git -C "$DOCS_WT" fetch origin "$DOC_BRANCH"
 git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_COMMIT" "origin/$DOC_BRANCH" \
-  && git -C "$DOCS_WT" diff --quiet "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
-  && PUB_VERIFIED=yes
+  && PUB_PUBLISHED=yes
 
-[ "$PUB_VERIFIED" = yes ] \
+[ "$PUB_PUBLISHED" = yes ] \
+  && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH"
+[ "$PUB_PUBLISHED" = yes ] \
   && [ "$(git -C "$DOCS_WT" rev-parse --abbrev-ref HEAD)" = "$DOC_BRANCH" ] \
-  && git -C "$DOCS_WT" checkout "origin/$DOC_BRANCH" -- "$DOC_RELATIVE_PATH" \
   && git -C "$DOCS_WT" merge --ff-only "origin/$DOC_BRANCH"
 ```
 
-`PUB_VERIFIED` is the whole verdict: say the document is published only when it
-is `yes`, and treat every other outcome as an unpublished failure. **The
-convergence is gated on it, which is what keeps a failed publication
-recoverable.** After a rejected push the remote does not carry the edit, and the
-`checkout` on the next line would replace the working copy with
-`origin/$DOC_BRANCH` — destroying the very mutation requirement 5 requires
-preserving. Chained, that line is never reached.
+**Ancestry alone is the verdict, and comparing the local file to the branch must
+play no part in it.** Someone else can advance `$DOC_BRANCH` with their own edit
+to this same document between the push and the check. The commit still landed —
+it is an ancestor — but the local copy no longer equals the branch. Folding that
+comparison into the verdict would report a successful publication as failed, and
+the next run's scan would then read the local copy as a pending mutation and
+republish it *over* the concurrent edit. That is why `PUB_PUBLISHED` is set by
+`merge-base --is-ancestor` and by nothing else.
 
-When it is reached, those commands pin the post-success local state: a later run
-resolving the document under `$DOCS_WT` sees the published content rather than a
-divergent local-only copy, and the published mutation is not left queued for
-republication. The fast-forward applies only when `$DOCS_WT` fell back to the
-checkout that sits on `$DOC_BRANCH`, where the published edit would otherwise
-keep reading as a pending local modification that also blocks the fast-forward
-itself; a `docs-wip` worktree is on its own branch, already matches the
-published content, and is left alone — the chain simply stops at the branch
-test, which is a normal success, not a failure. The `checkout` discards nothing:
-`PUB_VERIFIED=yes` has already proved that identical content is on the remote
-branch, and it touches only `$DOC_RELATIVE_PATH`, so unrelated work in that
-checkout survives. Never force either one, and never `reset`.
+The reconciliation that follows is the other half of the same reasoning. It runs
+only when the publication is confirmed, and it moves the local document **to**
+the branch rather than the other way round: `checkout` takes whatever
+`$DOC_BRANCH` now holds, which already contains this run's landed mutation and
+any concurrent edit on top of it. Nothing is lost and nothing stale is replayed.
+It also restores the invariant the next run depends on — the document equals the
+publication tip — so a later scan correctly reads "nothing pending". The
+path-scoped `checkout` touches only `$DOC_RELATIVE_PATH`, so unrelated work in
+that checkout survives, and the fast-forward applies only when `$DOCS_WT` fell
+back to the checkout sitting on `$DOC_BRANCH`, where the published edit would
+otherwise keep the branch behind its remote; a `docs-wip` worktree is on its own
+branch and the chain simply stops at the branch test, which is a normal success,
+not a failure. Never force either one, and never `reset`.
 
-**Report all three states on any failure**, rather than collapsing them: whether
-the document edit exists locally and in which worktree and at which path;
-whether a local publication commit exists and, if so, its commit ID; and whether
-the remote publication branch contains that commit. Name where the mutation was
-retained.
+Say the document is published only when `PUB_PUBLISHED` is `yes`, and treat
+every other outcome as an unpublished failure. **Report all three states on any
+failure**, rather than collapsing them: whether the document edit exists locally
+and in which worktree and at which path; whether a local publication commit
+exists and, if so, its commit ID; and whether the remote publication branch
+contains that commit. Name where the mutation was retained.
 
 Report, in this order: the disposition and its tracker link if any; the report
 line as it now reads; whether the mutation was published, with the commit ID
