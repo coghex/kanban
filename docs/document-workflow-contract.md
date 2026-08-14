@@ -490,7 +490,16 @@ refuses rather than overwrites, so a file created while the path was briefly
 empty wins and is left alone — and putting a captured document *back* follows
 the same rule, because a recovery that overwrites is still a write destroyed,
 whichever step performs it. The document is absent for that instant; a reader
-seeing no file is the price of never destroying somebody else's write. Content it declines to publish is written to the object database first,
+seeing no file is the price of never destroying somebody else's write.
+
+**Nothing the module does can leave the document deleted.** For the length of
+that instant the captured copy is the only one, so its content reaches the
+object database before anything else can fail, and every way out of the swap —
+including failures the code did not anticipate — puts the document back before
+dropping that copy. A restoration never raises and never overwrites: it must
+not replace the error that caused it, and it must not become the write that
+destroys another. Where it cannot restore, the captured file is kept rather
+than removed. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
 write root has diverged from it — checked at the moment of clearing rather than

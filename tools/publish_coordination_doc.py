@@ -497,12 +497,26 @@ def put_back(aside: Path, target: Path) -> bool:
     recovery runs, another writer may already have created a file there, and
     that file is newer than what is being put back. Restoring must never be the
     step that destroys a write — the same rule the swap itself follows.
+
+    It also never raises. This runs on the way out of a failure, and a
+    restoration that throws would replace the real error with its own and leave
+    the document deleted; when `link` is unavailable for some reason other than
+    the path being occupied, a rename still puts the document back.
     """
     try:
         link_into_place(aside, target)
+        return True
     except FileExistsError:
         return False
-    return True
+    except OSError:
+        pass
+    try:
+        if not target.exists():
+            os.rename(aside, target)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -> None:
@@ -557,8 +571,12 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         rename_aside(target, aside)
 
         captured, _ = read_for_write(aside)
-        if git_blob_hash(captured) != baseline:
-            preserved = _preserve(root, captured)
+        # Unconditionally, and before anything else can fail: from here the
+        # document exists only as this temporary, so its content belongs
+        # somewhere durable whatever happens next.
+        captured_blob = _preserve(root, captured)
+        if captured_blob != baseline:
+            preserved = captured_blob
             restored = put_back(aside, target)
             raise PublishError(
                 "document-changed-before-write",
@@ -602,8 +620,23 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         if scratch is not None:
             scratch.unlink(missing_ok=True)
         if aside is not None:
-            aside.unlink(missing_ok=True)
-            aside.parent.rmdir()
+            # Between the rename and the link the document does not exist, and
+            # `aside` holds the only copy of it. *Any* failure in that gap —
+            # not just the one this code anticipated — must therefore put it
+            # back before the temporary is dropped, or a failed publication
+            # deletes the cursor it was trying to publish. Checked as an
+            # invariant on the way out rather than repeated at each raise,
+            # because the failure that matters here is the one not enumerated.
+            restored = True
+            if not target.exists():
+                restored = put_back(aside, target)
+            if restored:
+                aside.unlink(missing_ok=True)
+                aside.parent.rmdir()
+            # If it could not be put back, the temporary stays: the content is
+            # in the object database either way, but deleting the only file
+            # copy on the way out of a failure would be the worst thing this
+            # module could do.
 
 
 def build_commit(root: Path, tip: str, document: str, blob: str, message: str) -> str:

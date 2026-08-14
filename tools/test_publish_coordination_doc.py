@@ -735,6 +735,37 @@ class PublishTests(unittest.TestCase):
         self.assertIsNotNone(publisher.read_lock_owner(self.fx.docs, lock))
         publisher.release_lock(self.fx.docs, lock)
 
+    def test_an_io_failure_during_the_swap_does_not_delete_the_document(self):
+        # Between the rename and the link the document does not exist and the
+        # captured copy is the only one. An unanticipated failure there must
+        # not leave the cursor deleted.
+        original = publisher.link_into_place
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+        before = target.read_text()
+
+        def failing_link(scratch, dest):
+            raise PermissionError(13, "Permission denied")
+
+        publisher.link_into_place = failing_link
+        self.addCleanup(setattr, publisher, "link_into_place", original)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(caught.exception.status, "document-unwritable")
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_text(), before)
+        self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
+
+    def test_a_failure_during_the_swap_leaves_no_temporaries(self):
+        original = publisher.link_into_place
+        publisher.link_into_place = lambda scratch, dest: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied")
+        )
+        self.addCleanup(setattr, publisher, "link_into_place", original)
+        before = sorted(p.name for p in (self.fx.docs / "docs").iterdir())
+        with self.assertRaises(publisher.PublishError):
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(sorted(p.name for p in (self.fx.docs / "docs").iterdir()), before)
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
