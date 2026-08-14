@@ -10,21 +10,34 @@ refreshed in the background.
 
 Design state: `ready for issue processing`
 
+`EPIC`, `FILT-4`, and `FILT-3` were processed into tracker items during an
+earlier ready period. Processing `FILT-1` exposed unresolved ordering and
+tracker-structure choices and a slice-size question, which returned the document
+to `exploring`; `Q-10` through `Q-14` were resolved by D-19 through D-23,
+`FILT-1` split into a data slice and the new `FILT-5` presentation slice, and
+the user signed the design ready again on 2026-08-14. The three linked slices
+are unaffected by those decisions.
+
+Tracker note for the next processing run: epic #298's child checklist still
+lists four children and predates `FILT-5`, so it needs one reconciling edit
+before `FILT-1` is drafted.
+
 Status legend: `[ ]` unprocessed · `[#N]` linked to issue N · `[no-issue]`
 reviewed and deliberately not tracked separately · `[deferred]` blocked on a
 concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add composable board filters and complete issue/PR history
-- [ ] FILT-4. Coordinate GitHub refresh ownership and rate pressure
-- [ ] FILT-3. Make the open board complete, live-only, and atomically refreshable
-- [ ] FILT-1. Load and cache complete issue/PR history in the background
+- [x] EPIC. Add composable board filters and complete issue/PR history — [#298]
+- [x] FILT-4. Coordinate GitHub refresh ownership and rate pressure — [#301]
+- [x] FILT-3. Make the open board complete, live-only, and atomically refreshable — [#305]
+- [x] FILT-1. Load and cache complete issue/PR history in the background — [#316]
+- [x] FILT-5. Render completed history read-only behind default-hidden criteria — [#319]
 - [ ] FILT-2. Add the live filter panel and compose it with column search
 
-`FILT-3` and later `FILT-4` were added after the first two stable slice IDs had
-been recorded. Their numbers are intentionally out of sequence while ledger
-position preserves the actual dependency order.
+`FILT-3`, then `FILT-4`, then `FILT-5` were added after the first two stable
+slice IDs had been recorded. Their numbers are intentionally out of sequence
+while ledger position preserves the actual dependency order.
 
 ## Epic contract
 
@@ -40,7 +53,12 @@ position preserves the actual dependency order.
   cached fallback; the panel contains the settled lifecycle, workflow,
   item-kind, and structure
   checkboxes with predictive facet counts and non-blocking history status;
-  defaults show every open card and hide completed cards; selecting
+  defaults show every open card and hide completed cards, leaving the rendered
+  board identical to the one that preceded completed history; completed cards
+  take their settled places without disturbing design.md §12's ordering or
+  promoting themselves into its attention tiers, and a completed tracker keeps
+  its group while its default-hidden header leaves any open child
+  `Standalone`; selecting
   Closed during a completed-history generation replaces all cards with an
   honest centered loading state that can be dismissed immediately by
   unchecking Closed; criteria survive panel dismissal, overlays, refreshes, and
@@ -163,6 +181,32 @@ position preserves the actual dependency order.
   should supply large deterministic fixtures and ensure REL-1 is eventually
   exercised with completed history loaded, rather than creating a duplicate
   generic performance issue.
+- **Newest-updated history ordering contradicts a tested sorting contract.**
+  design.md §12 "Sorting with trackers" states that inside a tracker group
+  "implementation order is authoritative after the revised-issue tier, even if a
+  later child has a problem", and that standalone cards sort problems first,
+  then approved, then oldest. `sortColumnEntries` implements exactly that
+  hierarchy — revised groups, revised standalone, ordinary groups, ordinary
+  standalone — with `trackedChildKey` deferring to `implementationSortKey`
+  (`src/Kanban/Workflow.hs:153-198`), and tests pin it
+  (`test/Spec/Board/Workflow.hs:203,342`,
+  `test/Spec/Board/Tracker.hs:230,257-267`). This arc's "newest-updated ordering
+  within their historical subset" therefore has no settled relationship to that
+  hierarchy. The conflict is immediate rather than theoretical: epic #261 is an
+  open tracker whose three children — #262, #263, and #264 — are all closed
+  issues, so its group holds only historical children the moment completed
+  history loads (verified 2026-08-13).
+- **Tracker recognition has no lifecycle input.** `trackerFromIssue` classifies
+  on the configured tracker label plus the parsed checklist or native
+  sub-issues alone (`src/Kanban/Tracker.hs:41-51`), and `deriveBoard` maps it
+  over every issue in the snapshot (`src/Kanban/Workflow.hs:38`). Once closed
+  issues join that list, this repository's three closed epics — #159, #122, and
+  #79 — become tracker group headers with no decision behind it. Nothing in the
+  arc says whether a closed tracker is a header, whether a surviving open child
+  joins its group, or what a lifecycle-mixed group does under the default
+  Closed-off criteria, where the header itself would be hidden. All three of
+  those epics currently have only closed children, so no live case exists today,
+  but an epic closed ahead of a child, or a reopened child, reaches it.
 
 ## Desired experience
 
@@ -289,19 +333,29 @@ number/title within those entries.
   both OPEN variants and maps the visible Closed checkbox to closed issues plus
   CLOSED/MERGED PRs. Lifecycle is part of stable card data, cache schema,
   details, badges, filter predicates, and action guards.
-- **Historical presentation (D-12, D-15).** Closed issues render in Issues,
-  regardless of former assignees, with a `CLOSED` badge and newest-updated
-  ordering within their historical subset. Their details and URLs remain
-  available, while review/solve/autosolve actions fail with a clear read-only
-  notice. Closed/merged PRs render in Done with distinct `CLOSED`/`MERGED`
-  badges and newest-updated ordering; details and URLs remain readable, while
-  review, rereview, merge, direct-merge, and worker mutations refuse them.
-  Default Closed-off criteria reproduce the live four-column workflow.
-- **State ownership.** App state holds `FilterCriteria` independently from
-  panel visibility and checkbox focus. Criteria initialize to defaults at
+- **Historical presentation (D-12, D-15, D-19, D-20, D-22).** Closed issues
+  render in Issues, regardless of former assignees, with a `CLOSED` badge.
+  Closed/merged PRs render in Done with distinct `CLOSED`/`MERGED` badges.
+  Details and URLs remain readable for both, while review, solve, autosolve,
+  rereview, merge, direct-merge, and worker mutations refuse them with a
+  read-only-history notice. Ordering follows design.md §12 unchanged inside a
+  tracker group: implementation order stays authoritative for every tracked
+  child whatever its lifecycle. Newest-updated ordering applies only to
+  standalone completed cards, which form a block after every open standalone
+  card, and to the relative order of wholly completed groups. A completed card
+  is attention-neutral — it never promotes itself or its group — but keeps the
+  status color and border its labels and checks earned. A completed tracker is
+  still a tracker: it keeps its header and groups its children, and when the
+  current criteria hide that header a surviving open child falls back to
+  `Standalone`, which is what the board renders today. Default Closed-off
+  criteria therefore reproduce the live four-column workflow exactly.
+- **State ownership (D-23).** App state holds `FilterCriteria` independently
+  from panel visibility and checkbox focus. Criteria initialize to defaults at
   every process start, survive every in-process refresh/overlay/dismissal, and
   are never serialized. An edit is a pure transition followed by
-  visible-entry/selection reconciliation.
+  visible-entry/selection reconciliation. The criteria state and the pipeline
+  that honors it arrive with `FILT-5`, one slice ahead of any way to edit them,
+  so history lands hidden rather than unconditionally visible.
 - **Grouped checkbox semantics (D-6).** The settled inventory is
   `State [Open, Closed]`; `Kind [Issues, Pull requests]`; `Workflow [Changes,
   Problems, Approved, Other]`; and `Structure [Epic groups, Standalone]`.
@@ -510,6 +564,68 @@ false zero. With Closed off, the footer non-blockingly reports completed
 history as loading, paused, current, stale, or failed. FILT-2 owns this behavior
 without another child issue.
 
+### D-19. Completed cards keep §12's ordering inside tracker groups
+
+User signoff 2026-08-13, resolving `Q-10`. Implementation order remains
+authoritative for every tracked child regardless of lifecycle, exactly as
+design.md §12 states and `trackedChildKey` implements. Newest-updated ordering
+applies only to standalone completed cards and to the relative order of groups
+that are wholly completed. This amends the ordering wording in D-12 and D-15;
+their placement, badge, and read-only-history substance is unchanged. Rejected:
+newest-updated inside a mixed group, which would run two different orders inside
+one group; and an ungrouped historical block, which would discard the epic
+context D-12 requires.
+
+### D-20. A closed tracker is still a tracker, with a Standalone fallback
+
+User signoff 2026-08-13, resolving `Q-11`. A completed tracker keeps its group
+header, carries the `CLOSED` badge, and groups its children. When the current
+criteria hide that header — the default, since Closed is off — a surviving open
+child falls back to `Standalone`, which is exactly what the board renders today,
+so D-3's requirement that the default reproduce the live board continues to
+hold. Board structure therefore depends on the visible lifecycle set rather than
+on the raw dataset. Rejected: treating a closed tracker as an ordinary card,
+which would leave every completed epic ungrouped; and stating the same outcome
+purely as a filter-pipeline rule, which would move the work out of this arc's
+data slices and into `FILT-2`.
+
+### D-21. `FILT-1` splits into a data slice and a presentation slice
+
+User signoff 2026-08-13, resolving `Q-12`. `FILT-1` keeps the data half:
+lifecycle types, uncapped completed pagination, completed generation, progress
+and failure state, the versioned completed-history cache, full old-item update
+detection, and open/completed identity reconciliation. A new `FILT-5` takes the
+presentation half: historical placement under D-19 and D-20, `CLOSED`/`MERGED`
+badges, and the read-only refusal of every settled mutating action. `FILT-5`
+depends on `FILT-1`, and `FILT-2` depends on both. No existing slice ID is
+renumbered. Rejected: one slice, whose roughly sixteen-module reach and six
+design.md sections make a single reviewable PR implausible; and splitting only
+the action guards, which would leave completed history rendering as actionable
+for one merge.
+
+### D-22. Completed cards are attention-neutral but keep their status treatment
+
+User signoff 2026-08-13, resolving `Q-13`. A completed card never promotes
+itself or its group into design.md §12's attention tiers. Standalone completed
+cards form a newest-updated block after every open standalone card, and a wholly
+completed group sorts after open groups. The card keeps the status color and
+border its labels and checks earned, so a closed issue that was blocked still
+reads as blocked. Rejected: dropping the status treatment as well, which would
+discard how an item ended; and keeping full attention weight, which would bury
+live work under history whenever Closed is on.
+
+### D-23. `FILT-5` lands the filter criteria state with its D-3 defaults
+
+User signoff 2026-08-13, resolving `Q-14`. `FILT-5` introduces `FilterCriteria`
+as application state initialized to the D-3 defaults — every value checked
+except Closed — and the visible-entry pipeline honors it, even though nothing
+can edit it until `FILT-2`. The board therefore looks exactly as it does today
+when `FILT-5` merges, and `FILT-2` adds only the panel, its keyboard and mouse
+handling, facet counts, active-filter indication, and the completed-loading
+blocker. Rejected: rendering nothing, which would leave `FILT-5` with no
+observable outcome of its own; and rendering all history unconditionally, which
+would be a visible regression until `FILT-2` landed.
+
 ## Open questions
 
 ### Q-1. Is the filter global, and how should filter/search focus compose?
@@ -550,6 +666,111 @@ Resolved by D-17.
 
 Resolved by D-18.
 
+### Q-10. Where do completed cards sort, given design.md §12's existing hierarchy?
+
+Resolved by D-19. The arc said completed cards take "newest-updated ordering
+within their historical subset"; §12 says implementation order is authoritative
+inside a tracker group and that standalone cards sort problems, then approved,
+then oldest, after the revised-issue tier. Both cannot govern a closed child of
+an open epic, and epic #261's group is entirely such children today. Known
+options:
+
+- **Grouped, historical children newest-updated after the open ones.** Epic
+  context survives and "historical subset" keeps its literal meaning, at the
+  cost of one group using two different orders internally.
+- **Grouped, §12 unchanged inside every group.** Implementation order governs
+  all tracked children regardless of lifecycle; newest-updated then applies only
+  to standalone historical cards and to the relative order of wholly historical
+  groups. Smallest disturbance to a tested contract; "newest-updated" no longer
+  describes tracked history.
+- **Ungrouped historical block.** Every completed card leaves its group and
+  forms a newest-updated block below the open cards in its column. Simplest
+  ordering rule, but it drops the epic context D-12 requires.
+
+D-19 did not settle whether a completed card participates in the attention tiers
+at all; that is `Q-13`.
+
+### Q-11. Is a closed tracker issue still a tracker?
+
+Resolved by D-20. `trackerFromIssue` has no lifecycle input, so completed
+trackers would have become group headers by default rather than by decision.
+Options considered:
+
+- **Still a tracker.** A closed epic keeps its header, carries the `CLOSED`
+  badge, and groups its children. This needs a companion rule for the default
+  Closed-off view, where the header is hidden: either a surviving open child
+  falls back to `Standalone`, or the hidden header is retained as visible
+  context. Note that today an open child of a closed epic renders as
+  `Standalone` only because closed issues are never loaded, so this option
+  changes the default board that D-3 requires to reproduce the live board unless
+  the fallback is chosen.
+- **Not a tracker.** A closed tracker renders as an ordinary historical issue
+  card with a `CLOSED` badge, and its children keep whatever grouping open
+  trackers give them. Keeps the default board identical and needs one lifecycle
+  guard, but a completed epic reads as a plain card and its completed children
+  are ungrouped.
+- **A tracker only where the current criteria make it visible.** Grouping is
+  computed over the visible lifecycle set, so Closed-off behaves exactly as
+  today and Closed-on groups completed epics with completed children. Most
+  faithful to both defaults, but it makes board structure depend on filter
+  criteria, which is a larger change and lands in `FILT-2` rather than `FILT-1`.
+
+### Q-12. Should `FILT-1` be split?
+
+Resolved by D-21. Its scope spanned data acquisition and presentation together,
+unlike every other slice in this arc. Mapped to modules it reaches
+`Domain`, `GitHub/Fetch`,
+`GitHub/Decode`, `Cache`, `UI/Types`, `UI/Refresh`, `UI/Reconcile`, `Workflow`,
+`Tracker`, and `UI/Board`, plus the read-only guard surface in `UI/Events`,
+`UI/Solve`, `UI/Review`, `UI/PullRequest`, `UI/AutoSolve`, and `UI/Worker`,
+with design.md §8, §11, §12, §13, §16, and §17 to update — §8's "Done is a
+ready-to-finalize queue, not a history column" being a contract this work
+rewrites. Known options: keep it as one slice; or keep `FILT-1` as the data half
+(lifecycle types, uncapped completed pagination, generation and failure state,
+the completed cache, identity reconciliation) and add a new `FILT-5` for the
+presentation half (historical placement, ordering, badges, read-only action
+guards) depending on it, with `FILT-2` then depending on both.
+
+### Q-13. Do completed cards carry attention weight?
+
+Resolved by D-22. design.md §12 promotes `reviewed:revised` cards and the groups
+holding them, orders tracker groups by their strongest visible attention state,
+and sorts standalone cards problems first, then approved, then oldest. D-19
+settled ordering inside a group but not whether a completed card's own labels
+still drive those tiers. This repository closes issues with `reviewed:approve`
+and `reviewed:changes` still attached, so completed work would otherwise promote
+itself — and its whole group — above live work the moment history loads. Known
+options:
+
+- **Attention-neutral in sorting and styling.** A completed card never promotes
+  itself or a group and renders with a plain completed treatment. Standalone
+  completed cards form a newest-updated block after every open standalone card,
+  and a wholly completed group sorts after open groups.
+- **Attention-neutral in sorting, styled as it was.** Same ordering rule, but
+  the card keeps the status colors and border it earned, so a closed issue that
+  was blocked still reads as blocked.
+- **Fully attention-bearing.** Labels keep their tiers regardless of lifecycle,
+  so a completed problem sorts ahead of clean live work.
+
+### Q-14. What does `FILT-5` render before `FILT-2` exists?
+
+Resolved by D-23. D-3 hides completed cards by default, but the criteria that
+express that default arrive with the panel in `FILT-2`. The split in D-21 leaves
+at least one merge where placement exists and nothing can set criteria. Known
+options:
+
+- **`FILT-5` lands the criteria state with its D-3 defaults.** Nothing can edit
+  them yet, so the board looks exactly as it does today, and `FILT-2` adds only
+  the panel, the editing, the facet counts, and the blocker. Every intermediate
+  merge stays shippable and the placement work is proven end to end.
+- **`FILT-5` renders all completed history unconditionally.** Every closed issue
+  and pull request appears on the board until `FILT-2` lands, which is a visible
+  regression for however long that is.
+- **`FILT-5` renders nothing.** Placement, ordering, badges, and guards land as
+  pure, tested code that only `FILT-2` activates, matching how `FILT-4`'s
+  history job kind is exercised. Smallest risk, but the slice has no observable
+  outcome of its own.
+
 ## Verification strategy
 
 - GraphQL and pagination tests cover uncapped OPEN issue/PR traversal and
@@ -570,6 +791,16 @@ Resolved by D-18.
 - Pure filter tests cover every category, strongest-state precedence,
   OR-within/AND-across truth tables, zero-selection groups, lifecycle/kind
   combinations, defaults, epic repair, and filter-then-search ordering.
+- Ordering tests prove design.md §12's implementation order still governs every
+  tracked child once completed children join a group, that standalone completed
+  cards form a newest-updated block after open standalone cards, that a wholly
+  completed group sorts after open groups, and that a completed card carrying
+  `reviewed:revised`, a blocking label, or an approval promotes neither itself
+  nor its group while keeping its status treatment.
+- Tracker-structure tests cover a completed tracker keeping its header and
+  children, and an open child of a completed tracker falling back to
+  `Standalone` under default criteria, so the default board is byte-identical to
+  the one that preceded completed history.
 - Transition tests cover panel visibility versus criteria, reset, focus
   transfer, both refresh generations, blocker entry/exit, Closed uncheck during
   loading, first-open failure/retry, fallback/error paths, and stable selection
@@ -639,25 +870,51 @@ Resolved by D-18.
 
 ### FILT-1. Load and cache complete issue/PR history in the background
 
-- **Outcome:** every completed issue and PR is available from a separate
-  complete-generation cache plus a full background reconciliation on launch
-  and `u`, without delaying ordinary open-only board use.
-- **Scope:** issue/PR lifecycle, uncapped CLOSED issue and CLOSED/MERGED PR
-  pagination, per-page deadline/cleanup, completed generation/progress/failure
-  state, versioned per-repository complete-history cache, full old-item update
-  detection, open/completed identity reconciliation, historical placement,
-  badges/action guards, and provider/domain/cache/workflow tests.
+- **Outcome:** every completed issue and PR is loaded, reconciled, and cached as
+  a complete generation on launch and `u`, without delaying ordinary open-only
+  board use and without changing what the board renders.
+- **Scope:** issue/PR lifecycle types decoded from GitHub, uncapped CLOSED issue
+  and CLOSED/MERGED PR pagination, per-page deadline/cleanup, completed
+  generation/progress/failure state, versioned per-repository complete-history
+  cache, full old-item update detection, open/completed identity reconciliation,
+  documentation, and provider/domain/cache tests.
 - **Phase:** 3
 - **Depends on:** FILT-4, FILT-3
-- **Ordering:** third; supplies complete history and freshness to the panel
-- **Relevant decisions:** D-3, D-4, D-7, D-8, D-9, D-10, D-11, D-12,
-  D-14, D-15, D-17
+- **Ordering:** third; critical path. Supplies complete history and freshness to
+  the presentation slice
+- **Relevant decisions:** D-3, D-4, D-7, D-8, D-9, D-10, D-11, D-14, D-17, D-21
 - **Acceptance signals:** fake histories exceeding 100 in both item kinds reach
   true final pages; an old completed edit is found after restart and `u`; no
   partial generation overwrites a complete cache; open use does not wait for
-  history; state/badge/action semantics match the settled lifecycle.
-- **Out of scope:** visible checkbox panel; text search implementation;
-  persistent filter choices.
+  history; the rendered board is unchanged by this slice.
+- **Out of scope:** historical placement, badges, and action guards, which are
+  `FILT-5`; the checkbox panel and text-search composition, which are `FILT-2`.
+- **Open questions:** None.
+
+### FILT-5. Render completed history read-only behind default-hidden criteria
+
+- **Outcome:** completed issues and pull requests take their settled places,
+  badges, and read-only action behavior, while the default criteria keep the
+  board looking exactly as it does today.
+- **Scope:** `FilterCriteria` state initialized to the D-3 defaults and honored
+  by the visible-entry pipeline, historical placement in Issues and Done under
+  D-19, D-20, and D-22, `CLOSED`/`MERGED` badges, the `Standalone` fallback for
+  an open child of a hidden completed tracker, read-only refusal of every
+  settled mutating action, documentation, and pure/workflow/golden tests.
+- **Phase:** 4
+- **Depends on:** FILT-1
+- **Ordering:** fourth; critical path
+- **Relevant decisions:** D-3, D-4, D-11, D-12, D-15, D-19, D-20, D-21, D-22,
+  D-23
+- **Acceptance signals:** under default criteria the rendered board matches the
+  pre-slice board, including an open child of a completed tracker rendering as
+  `Standalone`; with Closed forced on in a test, completed issues appear in
+  Issues and completed PRs in Done with correct badges, §12 group ordering, and
+  no attention promotion; every settled mutating action refuses a historical
+  card without launching a process.
+- **Out of scope:** the visible panel, focus, facet counts, active-filter
+  indication, and the completed-loading blocker, which are `FILT-2`; history
+  acquisition and caching, which are `FILT-1`.
 - **Open questions:** None.
 
 ### FILT-2. Add the live filter panel and compose it with column search
@@ -665,14 +922,15 @@ Resolved by D-18.
 - **Outcome:** `f` opens the checkbox panel; criteria filter every column live,
   persist until exit, and compose safely with SRCH-1's query/input box and the
   completed-generation blocker.
-- **Scope:** filter state/transitions, settled checkbox inventory, panel and
-  responsive layout, keyboard/mouse focus, active-filter indication, unified
-  visible-entry pipeline, blocker, selection/count/no-result behavior,
+- **Scope:** filter transitions and editing over `FILT-5`'s criteria state,
+  settled checkbox inventory, panel and responsive layout, keyboard/mouse focus,
+  active-filter indication, facet counts, the completed-loading blocker,
+  filter-then-search composition, selection/count/no-result behavior,
   docs/help/footer, and pure/event/golden tests.
-- **Phase:** 4
-- **Depends on:** FILT-4, FILT-3, FILT-1, SRCH-1
-- **Ordering:** fourth; integrates the two data generations with search/UI
-- **Relevant decisions:** D-1 through D-18
+- **Phase:** 5
+- **Depends on:** FILT-4, FILT-3, FILT-1, FILT-5, SRCH-1
+- **Ordering:** fifth; integrates the two data generations with search/UI
+- **Relevant decisions:** D-1 through D-23
 - **Acceptance signals:** defaults show the complete live open board; Open-off
   plus Closed-on yields all completed issues and PRs after a complete load;
   Closed-on during load shows no cards and unchecking it immediately restores
