@@ -96,3 +96,32 @@ claude_seconds = 45
 # github_seconds = 30
 # codex_seconds = 10
 # claude_seconds = 45
+
+# Kanban's own repository, and the one live table in this file. The paths below
+# are exactly the `coordination` rows of docs/agent-workflow-contract.md
+# section 7 -- the findings, code-health, and design documents whose content no
+# runtime, installer, or test reads -- so the drainer may merge past an advance
+# that only touches them instead of requesting a branch update that cannot
+# change the result. tools/test_document_classification.py reconciles this list
+# against those rows, so the two cannot drift; it also asserts that none of them
+# is a document a test parses, which is what the warning above the global
+# default asks of every entry. That global default stays empty: this
+# classification describes this repository and is never inferred for another.
+[repositories."coghex/kanban".workflow]
+coordination_paths = [
+  "docs/card_filter_design.md",
+  "docs/claude_document_workflows_design.md",
+  "docs/code-health-report.md",
+  "docs/document_workflow_findings.md",
+  "docs/drainer-bugs.md",
+  "docs/issue_approval_queue_design.md",
+  "docs/issue_search_design.md",
+  "docs/linux_portability_design.md",
+  "docs/managed_paths_design.md",
+  "docs/multi_repo_boards_design.md",
+  "docs/pipeline-hardening.md",
+  "docs/public_release_design.md",
+  "docs/ui-bugs.md",
+  "docs/usage_awareness_design.md",
+  "docs/workflow_audit_findings.md",
+]

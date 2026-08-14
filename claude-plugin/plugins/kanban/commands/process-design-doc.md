@@ -367,14 +367,63 @@ Then update exactly the selected ledger line in the design document:
 - `[deferred]`: leave the box unchecked, append the concrete precondition, and
   add a visible deferred note under the delivery heading.
 
-Use one `Edit` call, preserve all unrelated design content, and remove a
-stale deferred note when the item later advances. Verify the selected key,
+Compose the complete updated design document as text, preserving all unrelated
+design content and removing a stale deferred note when the item later advances;
+do not write it to the file and do not stage it, since the publication step below
+hands that text to the helper, which is the only writer of the document. Verify the selected key,
 ledger checkbox/marker, unchecked count, epic checklist, and tracker metadata.
 
 If issue creation succeeds but epic or document synchronization fails, do not
 create anything else. Record the confirmed issue number in the design document
 with a concise processing note when possible, report the partial state, and
 reconcile it before the next item.
+
+## 7. Publish the approved mutation
+
+Publish the approved mutation in this same run. The document is a durable
+cursor, and a cursor that only ever exists in one checkout is resumable only
+from that checkout. Publication is one more step of the disposition that was
+already approved; it carries no second one, and it is never batched or deferred
+merely to reduce commit or push frequency.
+
+**Render the complete approved document and hand it over — do not write it
+yourself.** `tools/publish_coordination_doc.py` is the only writer of the
+document, and that is what keeps an edit somebody else makes beside this run out
+of the published commit: the published bytes come from what you pass, never from
+the working tree. Write the rendered document to a scratch path outside the
+tracked tree, then invoke the helper:
+
+```bash
+APPROVED="$(git -C "$DOCS_WT" rev-parse --path-format=absolute --git-common-dir)/kanban-approved-content"
+python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
+  --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
+  --path "$DOC_RELATIVE_PATH" --content "$APPROVED"
+```
+
+Resolve the helper from the already-resolved `$DOC_ROOT` — the local checkout of
+the owning repository — and never from the session's own checkout, a personal
+path, or an inline fallback. These plugins install into repositories that do not
+track it, so a helper that cannot be resolved there fails closed: report that
+publication was not attempted and why, and never publish by hand instead.
+
+The helper owns the entire mechanism — eligibility against §7 as the publication
+branch itself carries it, the per-document lock, the baseline, isolation, the
+push, verification by reachability, and the resumption of an unfinished earlier
+publication. Do not reimplement, precede, or compensate for any part of it. Act
+on the one structured result it returns:
+
+- **`"status": "published"`.** Say so, and quote the commit it reports together
+  with its changed-line summary. Check that summary against the disposition you
+  applied: because the whole document is handed over, an unintended rewrite of
+  the rest of it changes the same single path a correct publication does, and
+  the summary is what makes the difference visible.
+- **Any other status.** The document was not published. Report the three states
+  the helper returns — whether the edit exists locally and in which worktree and
+  path, whether a local publication commit exists and its ID, and whether the
+  remote publication branch contains it — and say plainly which one applies.
+  Leave the document as the helper left it.
+
+Publication ends this entry. Do not select another.
 
 Report the disposition and tracker URL, the ledger line as it now reads, and
 the remaining unchecked count. Stop after this one entry. Advance only on a
@@ -388,5 +437,5 @@ later explicit invocation of `/process-design-doc`.
 - Revisions do not imply approval. Re-present the complete artifact and exact
   side effects, then stop again.
 - Do not create or edit tracker items, labels, or comments before approval.
-- Do not commit, push, open a PR, or modify implementation code unless
-  separately requested.
+- Beyond the publication step in section 7, do not commit, push, open a PR, or
+  modify implementation code unless separately requested.

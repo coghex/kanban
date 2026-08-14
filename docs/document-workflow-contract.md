@@ -269,7 +269,22 @@ parses §2 and fails if:
   the check that keeps the ten tracker operations in `/process-report`,
   `$process-report`, `/process-design-doc`, and `$process-design-doc` from
   reverting to the unscoped form that binds them to the shell's current
-  directory.
+  directory;
+- a processing asset loses its §9 publication step, or stops resolving
+  `tools/publish_coordination_doc.py` from the owning repository's own write
+  root;
+- a processing asset carries any part of the publication sequence itself rather
+  than invoking that module, or writes the document instead of handing over its
+  approved content;
+- a drafting asset stops stating that a novel document remains local until it is
+  separately classified and published;
+- this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
+  boundary, or its rule that publication is reported only on reachability.
+
+The mechanism's own behavior is not this module's subject:
+`tools/test_publish_coordination_doc.py` executes it against temporary
+repositories, and `tools/test_document_classification.py` owns §7's rows and the
+`coghex/kanban` `workflow.coordination_paths` example that mirrors them.
 
 Discovery, frontmatter, and no-personal-path coverage for these assets lives
 with the rest of each plugin's structural coverage in
@@ -352,3 +367,128 @@ resolving the owner.
 That §7 table is Kanban's own: it describes this repository and nothing else,
 so it can identify Kanban as an owner and can never identify a consuming
 repository's. A consuming repository resolves its documents through tier (a).
+
+## 9. Publishing an approved coordination mutation
+
+§8 answers *where* a document belongs. This section answers what happens to an
+approved mutation once it has been applied there. These workflows present their
+Markdown files as durable cursors a fresh session can resume, but a cursor that
+only ever exists in one checkout is resumable only from that checkout. So a
+document whose resolved path takes the `coordination` lane is published in the
+same run that mutates it, rather than left for a later manual commit.
+
+### 9.1 Which assets publish, and which do not
+
+- The four **processing** assets — `/process-report`, `$process-report`,
+  `/process-design-doc`, and `$process-design-doc` — publish the approved
+  document mutation during the same invocation that applies it, whenever the
+  document is eligible under §9.2. These are the assets that publish, and no
+  other asset does.
+- The three **drafting** assets — `/design-epic`, `$design-epic`, and
+  `$draft-report` — publish nothing at all. A document one of them newly
+  creates is local and unpublished. Its first publication requires a separate
+  pull request that adds both the document and its `coordination`
+  classification; only after that pull request lands may a later processing run
+  publish direct-to-`master` mutations to it. Automating that enrollment pull
+  request is outside this contract.
+
+The split follows from §7 rather than from convenience: the classifier's subject
+inventory is `git ls-files '*.md'`, so a document a drafting asset just created
+is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
+moment at which a novel document is directly publishable.
+
+### 9.2 Eligibility, and the fail-closed default
+
+[agent-workflow-contract.md §7](agent-workflow-contract.md#7-document-publication-classification)
+is the authoritative classification, and eligibility means exactly one thing:
+the resolved document's repository-relative path is classified `coordination`
+there. **A `pr-atomic` path, and a path no row matches, is never published
+directly** — `pr-atomic` is the fail-closed default for an unmatched path, so an
+unrecognized document is left unpublished rather than guessed into the direct
+lane.
+
+§8's ownership resolution is a prerequisite, not a parallel check: a document
+whose owning repository or publication branch could not be verified fails closed
+and stays unpublished. §7 is Kanban's own statement about Kanban, so
+`coghex/kanban` is the only repository with a `coordination` lane here; a
+consuming repository that installed these plugins has none, and neither does a
+fork.
+
+### 9.3 What a publication may contain
+
+A publication carries the single approved mutation to the one eligible document
+and nothing else. It must not carry unrelated dirty paths, earlier `docs-wip`
+commits, unrelated changes already present in the same document, or a second
+disposition or document mutation. Publication happens after each individually
+approved disposition and is never batched or deferred merely to reduce commit or
+push frequency, so §5's one-artifact boundary is untouched: an approved
+publication is the same artifact's last step, never a licence to sweep in a
+second.
+
+### 9.4 The mechanism lives in one tested module
+
+`tools/publish_coordination_doc.py` is the whole mechanism, and the declared
+assets invoke it rather than restating it. That division is deliberate and is
+the subject of issue #315: the mechanism was first written as shell inside the
+four processing assets, where twelve review rounds found twenty defects — lost
+updates, checks that gated nothing, a variable used before it was assigned — and
+nothing in the tree could execute the sequence to find them. Two properties
+follow from it being a module:
+
+- the sequence is one process holding one lock, rather than a chain a reader can
+  reorder or half-apply; and
+- every safety property below is a test in
+  `tools/test_publish_coordination_doc.py` that performs a real publication
+  against a temporary repository, so a regression fails `build-test` rather than
+  waiting for a reviewer to notice.
+
+The assets keep the policy this document states — eligibility is required,
+approval precedes publication, one artifact per invocation, and what to report
+on each outcome — and hold no part of the sequence. This contract states the
+same division: what follows is the module's contract, not a transcript of its
+steps.
+
+**The caller renders the approved document; the module writes it.** A processing
+asset composes the complete approved content and hands it over, and never edits
+or stages the document itself. That is what makes an edit somebody else makes
+beside the run unpublishable rather than merely unlikely: the published bytes
+come from what the caller passed, never from the working tree.
+
+**The write root is ordinarily not the publication branch.** The assets write in
+the `docs-wip` linked worktree while publication targets the default branch, so
+eligibility, the baseline, and resumption are all decided against the publication
+tip's own blob for the path, and the module never checks out, resets, switches,
+or advances any branch or HEAD in the write root.
+
+**A publication is guaranteed, not hoped for.** The module holds a per-document
+lock across the whole sequence; refuses when the document does not match the
+publication tip before it writes; refuses a commit that changes any path but the
+one; never force-pushes and never overwrites a concurrent advance; treats
+reachability from the remote branch as the sole definition of published; and
+records an unfinished publication so a later run resumes exactly it, or fails
+closed when the document or the branch has moved underneath it.
+
+### 9.5 What "published" means, and the three-state failure report
+
+A run may describe a document as published only when the module reports it, and
+the module reports it only when the intended commit is reachable from the remote
+publication branch. A push that appeared to succeed is not that verification.
+
+Every other outcome is an unpublished failure, reported with all three states
+rather than collapsed into one:
+
+- whether the document edit exists locally, and in which worktree and at which
+  path;
+- whether a local publication commit exists and, if so, its commit ID; and
+- whether the remote publication branch contains that commit.
+
+A failed publication leaves the mutation recoverable and never diverges the
+checkout's default branch from its remote — the PR drainer fast-forwards that
+branch after every merge, and an unpushed local commit on it would wedge every
+later pass.
+
+Because the caller hands over the whole document, a successful publication also
+reports what it changed: an unintended rewrite of the rest of the document
+changes the same single path a correct publication does, so the changed-line
+summary, not the changed-path check, is what makes it visible to the run that
+caused it.

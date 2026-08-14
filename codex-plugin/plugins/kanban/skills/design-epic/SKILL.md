@@ -318,6 +318,23 @@ If readiness fails, leave the document in `exploring`, record the gaps as open
 questions or proposals, and report the smallest set of decisions still needed.
 Do not call an unfinished design ready merely so processing can begin.
 
+## Publication
+
+A document this workflow newly creates is local and unpublished, and this
+workflow never publishes one. It is not yet tracked, so no row of
+`docs/agent-workflow-contract.md` §7 matches its path, and an unmatched path is
+`pr-atomic` by the fail-closed default — there is no moment at which a novel
+document is directly publishable. Its first publication requires a separate pull
+request that adds both the document and its `coordination` classification. Only
+after that pull request lands may a later processing run publish
+direct-to-`master` mutations to it. Creating that enrollment pull request is not
+this workflow's job either; say plainly that the document is local so the user
+can decide.
+
+An existing document this workflow resumes is unaffected by the above: whether
+its edits publish is the processing workflows' question, answered against the
+same §7 rows.
+
 ## Boundaries and handoff
 
 - Modify only the design document. Do not change implementation code, create or
