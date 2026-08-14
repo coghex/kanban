@@ -288,8 +288,8 @@ class PublishTests(unittest.TestCase):
         # must still be able to report §9.5's three states.
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        publisher.acquire_lock(self.fx.docs, lock, tip)
-        self.addCleanup(publisher.release_lock, self.fx.docs, lock)
+        held = publisher.acquire_lock(self.fx.docs, lock, tip)
+        self.addCleanup(publisher.release_lock, self.fx.docs, lock, held)
         with self.assertRaises(publisher.PublishError) as caught:
             self.fx.publish("# UI\n\n- one\n- two\n")
         detail = caught.exception.detail
@@ -724,7 +724,7 @@ class PublishTests(unittest.TestCase):
             # Between the liveness check and the delete, the stale lock is
             # cleared by someone else and a live publisher takes a new one.
             run(["git", "update-ref", "-d", lock], self.fx.docs)
-            publisher.acquire_lock(self.fx.docs, lock, tip)
+            held = publisher.acquire_lock(self.fx.docs, lock, tip)
             return original(pid)
 
         publisher.process_is_live = racing_liveness
@@ -734,7 +734,9 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, "lock-changed")
         # The live publisher's lock survives.
         self.assertIsNotNone(publisher.read_lock_owner(self.fx.docs, lock))
-        publisher.release_lock(self.fx.docs, lock)
+        publisher.release_lock(
+            self.fx.docs, lock, run(["git", "rev-parse", lock], self.fx.docs)
+        )
 
     def test_an_io_failure_during_the_swap_does_not_delete_the_document(self):
         # Between the rename and the link the document does not exist and the
@@ -1085,6 +1087,49 @@ class PublishTests(unittest.TestCase):
         self.assertIn("publish-lock", caught.exception.detail["lock_ref"])
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
 
+    def test_releasing_a_lock_without_its_value_is_refused(self):
+        # The unbound delete the signature now makes unrepresentable: it would
+        # remove whatever lock is there, not this run's.
+        lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
+        tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
+        held = publisher.acquire_lock(self.fx.docs, lock, tip)
+        with self.assertRaises(publisher.PublishError) as caught:
+            publisher.release_lock(self.fx.docs, lock, "")
+        self.assertEqual(caught.exception.status, "lock-release-unbound")
+        self.assertIsNotNone(publisher.read_lock_owner(self.fx.docs, lock))
+        publisher.release_lock(self.fx.docs, lock, held)
+
+    def test_an_unrestorable_capture_names_where_it_was_kept(self):
+        # A file kept somewhere nobody is told about is only marginally better
+        # than one deleted.
+        original_link = publisher.link_into_place
+        original_open = publisher.os.open
+
+        def no_link(scratch, dest):
+            raise PermissionError(13, "denied")
+
+        def no_open(path, flags, *rest):
+            # Only the restoration's exclusive create of the document itself.
+            # Failing every O_EXCL open would break `mkstemp` and the run would
+            # never reach the swap.
+            if flags & publisher.os.O_EXCL and str(path).endswith("docs/ui-bugs.md"):
+                raise PermissionError(13, "denied")
+            return original_open(path, flags, *rest)
+
+        publisher.link_into_place = no_link
+        publisher.os.open = no_open
+        self.addCleanup(setattr, publisher, "link_into_place", original_link)
+        self.addCleanup(setattr, publisher.os, "open", original_open)
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.fx.publish("# UI\n\n- one\n- two\n")
+        detail = caught.exception.detail
+        self.assertIn("captured_file", detail)
+        self.assertTrue(Path(detail["captured_file"]).is_file())
+        self.assertIn(
+            "- one",
+            run(["git", "cat-file", "-p", detail["captured_blob"]], self.fx.docs),
+        )
+
     # -- eligibility ---------------------------------------------------------
 
     def test_a_pr_atomic_document_publishes_nothing_but_keeps_the_mutation(self):
@@ -1256,12 +1301,12 @@ class PublishTests(unittest.TestCase):
     def test_a_second_run_cannot_publish_while_the_lock_is_held(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        publisher.acquire_lock(self.fx.docs, lock, tip)
+        held = publisher.acquire_lock(self.fx.docs, lock, tip)
         with self.assertRaises(publisher.PublishError) as caught:
             self.fx.publish("# UI\n\n- one\n- two\n")
         self.assertEqual(caught.exception.status, "locked")
         self.assertEqual(self.fx.remote_content(), "# UI\n\n- one")
-        publisher.release_lock(self.fx.docs, lock)
+        publisher.release_lock(self.fx.docs, lock, held)
 
     def test_two_worktrees_of_one_repository_serialize(self):
         # The lock lives in the common Git directory, so a second worktree of
@@ -1272,11 +1317,11 @@ class PublishTests(unittest.TestCase):
         run(["git", "worktree", "add", "-q", "-b", "second", str(second), "master"], self.fx.primary)
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        publisher.acquire_lock(self.fx.docs, lock, tip)
+        held = publisher.acquire_lock(self.fx.docs, lock, tip)
         with self.assertRaises(publisher.PublishError) as caught:
-            publisher.acquire_lock(second, lock, tip)
+            held = publisher.acquire_lock(second, lock, tip)
         self.assertEqual(caught.exception.status, "locked")
-        publisher.release_lock(self.fx.docs, lock)
+        publisher.release_lock(self.fx.docs, lock, held)
 
     def test_the_lock_is_released_on_success_and_on_failure(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
@@ -1292,11 +1337,11 @@ class PublishTests(unittest.TestCase):
     def test_clearing_a_lock_is_refused_while_its_owner_lives(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
         tip = run(["git", "rev-parse", "origin/master"], self.fx.docs)
-        publisher.acquire_lock(self.fx.docs, lock, tip)  # owned by this process
+        held = publisher.acquire_lock(self.fx.docs, lock, tip)  # owned by this process
         with self.assertRaises(publisher.PublishError) as caught:
             publisher.clear_stale_lock(self.fx.docs, lock)
         self.assertEqual(caught.exception.status, "lock-owner-live")
-        publisher.release_lock(self.fx.docs, lock)
+        publisher.release_lock(self.fx.docs, lock, held)
 
     def test_clearing_a_foreign_lock_is_refused(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")
@@ -1308,7 +1353,7 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(publisher.PublishError) as caught:
             publisher.clear_stale_lock(self.fx.docs, lock)
         self.assertEqual(caught.exception.status, "lock-foreign-owner")
-        publisher.release_lock(self.fx.docs, lock)
+        publisher.release_lock(self.fx.docs, lock, commit)
 
     def test_a_dead_owners_lock_clears(self):
         lock = publisher.lock_ref("coghex/kanban", "docs/ui-bugs.md")

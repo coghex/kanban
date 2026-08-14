@@ -243,7 +243,7 @@ def acquire_lock(root: Path, ref: str, tip: str) -> str:
     return commit
 
 
-def release_lock(root: Path, ref: str, value: str | None = None) -> bool:
+def release_lock(root: Path, ref: str, value: str) -> bool:
     """Drop the lock, and only ever *this* run's lock.
 
     `update-ref -d <ref> <old>` deletes only while the ref still holds that
@@ -252,9 +252,15 @@ def release_lock(root: Path, ref: str, value: str | None = None) -> bool:
     gone — and two publishers holding a lock each is the one thing it exists to
     prevent.
     """
-    proc = git(
-        ["update-ref", "-d", ref] + ([value] if value else []), cwd=root, check=False
-    )
+    if not value:
+        # Required, not defaulted: an unbound delete removes whatever lock is
+        # there, which is precisely the defect this signature exists to make
+        # unrepresentable.
+        raise PublishError(
+            "lock-release-unbound",
+            f"releasing {ref} requires the value this run acquired",
+        )
+    proc = git(["update-ref", "-d", ref, value], cwd=root, check=False)
     return proc.returncode == 0
 
 
@@ -644,6 +650,14 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
             if restored:
                 aside.unlink(missing_ok=True)
                 aside.parent.rmdir()
+            else:
+                # Kept — but a file kept somewhere nobody is told about is only
+                # marginally better than one deleted, so the path travels with
+                # the failure that is already on its way out.
+                in_flight = sys.exc_info()[1]
+                if isinstance(in_flight, PublishError):
+                    in_flight.detail.setdefault("captured_file", str(aside))
+                    in_flight.detail.setdefault("captured_blob", captured_blob)
             # If it could not be put back, the temporary stays: the content is
             # in the object database either way, but deleting the only file
             # copy on the way out of a failure would be the worst thing this
@@ -1159,8 +1173,17 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         )
 
     # The commit is built from this blob, so it must exist in the object
-    # database as well as be known by name.
-    assert _preserve(root, content) == approved_blob
+    # database as well as be known by name. Not an assert: `python3 -O` would
+    # strip it, leaving the object unwritten and `commit-tree` to fail on a
+    # missing blob — and an AssertionError would escape the result contract
+    # every other failure here honours.
+    written = _preserve(root, content)
+    if written != approved_blob:
+        raise PublishError(
+            "content-hash-mismatch",
+            f"the approved content hashed to {approved_blob} but the object "
+            f"database stored {written}",
+        )
     if approved_blob == baseline:
         raise PublishError(
             "no-mutation",

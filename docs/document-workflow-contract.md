@@ -513,7 +513,8 @@ dropping that copy. A restoration never raises and never overwrites: it must
 not replace the error that caused it, and it must not become the write that
 destroys another — including in its own fallbacks, which recreate the document
 exclusively rather than renaming over whatever is there. Where it cannot restore, the captured file is kept rather
-than removed. Content it declines to publish is written to the object database first,
+than removed, and its path travels with the failure: a file kept somewhere
+nobody is told about is only marginally better than one deleted. Content it declines to publish is written to the object database first,
 so an edit made outside this protocol is recoverable rather than lost. A
 recorded publication that already reached the branch is not cleared while the
 write root has diverged from it — checked at the moment of clearing rather than
