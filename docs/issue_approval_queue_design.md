@@ -14,8 +14,8 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Add a persistent canonical issue approval service
-- [ ] IAQ-1. Add an ordered barrier-aware queue mode to the canonical backend
+- [x] EPIC. Add a persistent canonical issue approval service — [#318]
+- [x] IAQ-1. Add an ordered barrier-aware queue mode to the canonical backend — [#320]
 - [ ] IAQ-2. Build the persistent issue approval controller and runtime
 - [ ] IAQ-3. Install per-repository issue approval LaunchAgents
 - [ ] IAQ-4. Expose issue approval service status and control to Kanban
