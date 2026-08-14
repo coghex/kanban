@@ -504,6 +504,10 @@ def verify_and_write(root: Path, document: str, baseline: str, content: bytes) -
         with os.fdopen(handle, "wb") as stream:
             handle = None
             stream.write(content)
+        # mkstemp creates 0600. Replacing the document with it would silently
+        # narrow the permissions of a file other people and processes read, so
+        # the swap carries the mode the document already had.
+        os.chmod(scratch, os.stat(target).st_mode & 0o7777)
 
         backup = Path(
             tempfile.mkdtemp(prefix=".kanban-publish-backup-", dir=str(target.parent))

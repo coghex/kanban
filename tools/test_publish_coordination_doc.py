@@ -493,6 +493,16 @@ class PublishTests(unittest.TestCase):
         self.assertTrue(stray.exists())
         self.assertEqual(stray.read_text(), "somebody else's untracked file\n")
 
+    def test_the_published_document_keeps_its_permissions(self):
+        # The swap replaces the file, so the mode travels with it: `mkstemp`
+        # creates 0600, and publishing must not silently narrow a document
+        # other people and processes read.
+        target = self.fx.docs / "docs" / "ui-bugs.md"
+        target.chmod(0o644)
+        before = target.stat().st_mode & 0o7777
+        self.fx.publish("# UI\n\n- one\n- two\n")
+        self.assertEqual(target.stat().st_mode & 0o7777, before)
+
     def test_the_write_leaves_no_temporary_behind(self):
         before = sorted(p.name for p in (self.fx.docs / "docs").iterdir())
         self.fx.publish("# UI\n\n- one\n- two\n")
