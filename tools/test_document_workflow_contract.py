@@ -259,6 +259,9 @@ CONTRACT_STATEMENTS = {
         "That reconciliation is gated on the verification, not merely sequenced "
         "after it"
     ),
+    "publication-matching-content-is-not-enough": (
+        "Matching content still does not authorize a retry"
+    ),
     "publication-marker-alone-is-insufficient": (
         "A terminal marker alone is not sufficient evidence to resume"
     ),
@@ -546,6 +549,18 @@ PUBLICATION_CLAUSES = {
         "re-attempt the publication step below against it, never repeat the "
         "tracker mutation, and select no new entry this run"
     ),
+    "pending-state-decides-the-retry": (
+        "matching content is still not enough to retry, because the recorded "
+        "commit was built on the tip of its own run"
+    ),
+    "a-landed-pending-commit-publishes-nothing": (
+        "the earlier push reached the branch after all and only the report was "
+        "lost. publish nothing"
+    ),
+    "a-stale-pending-commit-fails-closed": (
+        "rebuilding that recorded blob on the newer tip would push the "
+        "pre-advance content as a one-path change"
+    ),
     "resume-needs-an-exact-match": (
         "only an exact match with a recorded pending publication may be resumed"
     ),
@@ -613,6 +628,13 @@ PUBLICATION_SHELL_BINDINGS = (
     # tree holds the exact approved blob, and resumption demands a byte-for-
     # byte match against it rather than trusting the terminal marker.
     'PUB_PENDING="refs/kanban/pending-publication/$PUB_KEY"',
+    # Content identity is necessary but not sufficient: the recorded commit
+    # must also still be parented on the pinned tip, or already landed.
+    'git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_PENDING" "origin/$DOC_BRANCH" \\ '
+    '&& PUB_PENDING_STATE=landed',
+    '[ "$PUB_PENDING_STATE" = stale ] \\ '
+    '&& [ "$(git -C "$DOCS_WT" rev-parse "${PUB_PENDING}^")" = "$PUB_TIP" ] \\ '
+    '&& PUB_PENDING_STATE=retryable',
     'git -C "$DOCS_WT" rev-parse --verify --quiet "$PUB_PENDING" \\ '
     '&& [ "$(git -C "$DOCS_WT" hash-object -- "$DOCS_WT/$DOC_RELATIVE_PATH")" \\ '
     '= "$(git -C "$DOCS_WT" rev-parse "${PUB_PENDING}:${DOC_RELATIVE_PATH}")" ]',

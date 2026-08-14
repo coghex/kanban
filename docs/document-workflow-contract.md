@@ -614,7 +614,18 @@ publication failed leaves a file that still carries its marker, and a run
 resuming on the marker would publish that hunk along with the approved
 mutation — one changed path, every gate satisfied. So the failed run records the
 exact content it approved, and the resuming run requires the document to match
-it byte for byte; no record, or any difference, fails closed instead. A durable journal, cross-system reconciliation, or
+it byte for byte; no record, or any difference, fails closed instead.
+
+**Matching content still does not authorize a retry.** The recorded commit was
+built on the tip its own run pinned, so the resuming run asks where it now
+stands: already reachable from the branch, in which case the earlier push landed
+and only the report was lost — reconcile and clear the record, publishing
+nothing; still parented on the pinned tip, in which case it may be retried; or
+neither, meaning the branch advanced underneath it. That last case fails closed,
+because rebuilding the recorded content on the newer tip would push pre-advance
+content as a one-path change and silently replace the other writer's edit — the
+same lost update the pre-edit pin prevents on a first attempt, arriving by way
+of the resumption path instead. A durable journal, cross-system reconciliation, or
 identity verification of a similarly titled artifact is deliberately not part of
 this contract.
 

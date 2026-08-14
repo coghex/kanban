@@ -242,8 +242,32 @@ That comparison then decides what this run may do at all:
 
   When that succeeds, an earlier run applied and marked its disposition and
   failed only at publication, and the document is byte-for-byte the content that
-  run approved. Re-attempt the publication step below against it, never repeat
-  the tracker mutation, and select no new entry this run.
+  run approved. Matching content is still not enough to retry, because the
+  recorded commit was built on the tip of its own run — ask where it now stands
+  relative to the branch:
+
+  ```bash
+  PUB_PENDING_STATE=stale
+  git -C "$DOCS_WT" merge-base --is-ancestor "$PUB_PENDING" "origin/$DOC_BRANCH" \
+    && PUB_PENDING_STATE=landed
+  [ "$PUB_PENDING_STATE" = stale ] \
+    && [ "$(git -C "$DOCS_WT" rev-parse "${PUB_PENDING}^")" = "$PUB_TIP" ] \
+    && PUB_PENDING_STATE=retryable
+  ```
+
+  - `landed` — the earlier push reached the branch after all and only the report
+    was lost. Publish nothing. Reconcile the document to the branch, clear
+    `$PUB_PENDING`, report it as published, and select no new entry.
+  - `retryable` — the branch has not moved since that commit was built, so its
+    parent is still the pinned tip. Re-attempt the publication step below
+    against it, never repeat the tracker mutation, and select no new entry this
+    run.
+  - `stale` — the branch advanced under the pending commit. **Publication is
+    impossible this run:** rebuilding that recorded blob on the newer tip would
+    push the pre-advance content as a one-path change and silently replace
+    whatever the other writer put there — the same lost update that keeping the
+    pre-edit pin prevents on the first attempt. Say so, name the advance, leave
+    both the document and the record alone, and let the user reconcile.
 
   When it fails — no pending record at all, or a document that no longer matches
   the one recorded — the document carries something other than exactly that
