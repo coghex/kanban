@@ -466,7 +466,7 @@ TRANSACTION_CLAUSES = {
     "an-identity-names-its-own-repository": (
         "the url is parsed as a canonical github url in $doc_repo, an edit names "
         "its approved target, and a literal marker names the artifact the "
-        "disposition links"
+        "disposition links, which the plan states as marker_target"
     ),
     "an-identity-must-agree-with-itself": (
         "an identity is the one its own kind of mutation actually has, and it "

@@ -473,7 +473,10 @@ an edit to an existing artifact records that artifact's identity and the
 verified post-edit fingerprint. Every one of those is bound to what was
 approved rather than merely well-shaped: the URL is parsed as a canonical GitHub
 URL in `$DOC_REPO`, an edit names its approved target, and a literal marker
-names the artifact the disposition links. The document carries only `[#N]`, so
+names the artifact the disposition links, which the plan states as
+`marker_target`: a linked child issue often has no approved comment, so its one
+tracker mutation is the umbrella epic's checklist edit and there is no step from
+which the link could be inferred. The document carries only `[#N]`, so
 an identity free to name another repository's issue, another epic, or another
 number would let a transaction clear against an artifact this run never
 touched. Nothing but a created issue or epic contributes a token

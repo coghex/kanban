@@ -146,6 +146,7 @@ def record_json(*, step_overrides=None, **overrides):
         "entry_key": "DW-3",
         "disposition": "new-issue",
         "marker": None,
+        "marker_target": None,
         "publication_tip": PREPARED_TIP,
         "state": "intent-only",
         "steps": [step],
@@ -184,6 +185,7 @@ def comment_plan(**overrides):
     body = plan(
         disposition="existing-issue",
         marker="[#288]",
+        marker_target="coghex/kanban#288",
         steps=[
             {
                 "kind": "issue-comment",
@@ -479,6 +481,7 @@ class TrackerTransactionTests(unittest.TestCase):
             plan(
                 disposition="existing-issue",
                 marker="[#288]",
+                marker_target="coghex/kanban#288",
                 steps=[
                     {
                         "kind": "issue-comment",
@@ -921,14 +924,89 @@ class TrackerTransactionTests(unittest.TestCase):
                 self.assertIn(expected, caught.exception.message)
         self.assertEqual(self.fx.read()[0]["steps"][1]["state"], "intent")
 
+    def linked_child_plan(self, **overrides):
+        """An existing child issue with no approved comment: its one tracker
+        mutation is the umbrella epic's checklist, which targets the epic rather
+        than the child. `process-design-doc` treats the comment as optional and
+        the checklist change as not, so this is an ordinary disposition."""
+        body = plan(
+            disposition="existing-issue",
+            marker="[#288]",
+            marker_target="coghex/kanban#288",
+            steps=[
+                {
+                    "kind": "epic-checklist-edit",
+                    "target": "coghex/kanban#300",
+                    "payload_fingerprint": "sha256:checklist",
+                    "postcondition": "the epic checklist links the existing child",
+                }
+            ],
+        )
+        body.update(overrides)
+        return body
+
+    def test_a_linked_child_with_no_comment_is_an_ordinary_disposition(self):
+        outcome = self.fx.acquire(self.linked_child_plan())
+        self.assertEqual(outcome["status"], "acquired")
+        self.assertEqual(outcome["marker"], "[#288]")
+        self.fx.begin(0)
+        self.fx.confirm(0, edit_identity())
+        self.fx.publish_document(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#288]",
+            )
+        )
+        self.assertEqual(self.fx.resolve()["status"], "resolved")
+
+    def test_a_linked_marker_must_name_its_own_marker_target(self):
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(self.linked_child_plan(marker="[#999]"))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("does not name its marker_target", caught.exception.message)
+
+    def test_a_linked_marker_needs_a_marker_target_at_all(self):
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(self.linked_child_plan(marker_target=""))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("names no marker_target", caught.exception.message)
+
+    def test_a_marker_target_in_another_repository_is_refused(self):
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(self.linked_child_plan(marker_target="other/repo#288"))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("is not in coghex/kanban", caught.exception.message)
+
+    def test_a_comment_must_be_on_the_issue_being_linked(self):
+        # The round-8 hole, kept closed by the target rather than by inferring
+        # the link from the step: a comment posted somewhere other than the
+        # artifact the entry will name is a different mutation.
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(comment_plan(marker_target="coghex/kanban#288",
+                                         steps=[dict(comment_plan()["steps"][0],
+                                                     target="coghex/kanban#999")]))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("pointing somewhere other than", caught.exception.message)
+
+    def test_an_adoption_records_the_edit_it_applies(self):
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(self.linked_child_plan(disposition="epic-adopt"))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("records the adoption edit", caught.exception.message)
+
+    def test_a_marker_target_without_a_marker_is_refused(self):
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(plan(marker_target="coghex/kanban#288"))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("without a marker", caught.exception.message)
+
     def test_a_literal_marker_must_name_the_artifact_it_links(self):
         # The comment confirms against #288 while the ledger entry the record
         # would clear against is #999 — two different artifacts, one record.
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.acquire(comment_plan(marker="[#999]"))
         self.assertEqual(caught.exception.status, "plan-invalid")
-        self.assertIn("names no issue-comment step's approved target",
-                      caught.exception.message)
+        self.assertIn("does not name its marker_target", caught.exception.message)
         self.assertEqual(self.fx.check()["status"], "clear")
 
     def test_a_creating_disposition_may_not_supply_a_literal_marker(self):

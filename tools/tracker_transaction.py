@@ -122,7 +122,8 @@ STEP_PLAN_FIELDS = ("kind", "target", "payload_fingerprint", "postcondition")
 # below indexes these directly, so this is the boundary at which a document that
 # merely parses as JSON stops being mistaken for a record.
 RECORD_FIELDS = (
-    "repository", "document", "entry_key", "disposition", "state", "steps",
+    "repository", "document", "entry_key", "disposition", "marker_target",
+    "state", "steps",
 )
 RECORD_STEP_FIELDS = (
     "kind", "target", "payload_fingerprint", "postcondition", "state", "identity",
@@ -158,10 +159,15 @@ GITHUB_ARTIFACT_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Which step's approved target a literal marker must name. A disposition that
-# creates its artifact takes the marker from that creation instead, so a literal
-# one belongs only to the two that link an artifact somebody else made.
-MARKER_SOURCE_KIND = {
+# The dispositions that link an artifact somebody else already made, and so
+# supply a literal marker plus the `marker_target` naming what it links. The
+# other two create their artifact and take the marker from that creation.
+LINKING_DISPOSITIONS = ("existing-issue", "epic-adopt")
+
+# Where a linking disposition's own step must point, when it has one. An
+# adoption edits the very epic it links; a comment, when there is one, goes on
+# the issue being linked and nowhere else.
+LINKED_STEP_KIND = {
     "existing-issue": "issue-comment",
     "epic-adopt": "epic-adopt-edit",
 }
@@ -377,23 +383,51 @@ def record_fault(
             "it has no single source for the marker the published entry must "
             "carry"
         )
+    linked = record.get("marker_target")
     if marker:
-        linking = MARKER_SOURCE_KIND.get(record["disposition"])
-        if linking is None:
+        if record["disposition"] not in LINKING_DISPOSITIONS:
             return (
                 f"a {record['disposition']} disposition takes its marker from the "
                 "artifact it creates, not from a literal one"
             )
-        wanted = artifact_number(marker)
-        if not any(
-            step["kind"] == linking and artifact_number(step["target"]) == wanted
-            for step in steps
-        ):
+        # The artifact the entry will link is stated by the plan rather than
+        # inferred from a step, because a linked child's only tracker mutation
+        # is often the umbrella-epic checklist edit — which targets the epic,
+        # not the child. Inferring it from the steps made that ordinary
+        # disposition unprocessable.
+        if not isinstance(linked, str) or not linked.strip():
             return (
-                f"its marker {marker} names no {linking} step's approved target, "
-                "so the entry it would clear against is not the artifact this "
-                "disposition links"
+                f"its marker {marker} names no marker_target, so nothing says "
+                "which artifact the published entry links"
             )
+        wanted = artifact_number(marker)
+        if artifact_number(linked) != wanted:
+            return f"its marker {marker} does not name its marker_target {linked!r}"
+        if "/" in linked and not linked.lower().startswith(
+            f"{record['repository'].lower()}#"
+        ):
+            return f"its marker_target {linked!r} is not in {record['repository']}"
+        # A comment or an adoption edit belongs to the artifact being linked. A
+        # step of that kind pointing somewhere else is a different mutation from
+        # the one the entry will claim.
+        own_kind = LINKED_STEP_KIND[record["disposition"]]
+        astray = [
+            position
+            for position, step in enumerate(steps)
+            if step["kind"] == own_kind
+            and artifact_number(step["target"]) != wanted
+        ]
+        if astray:
+            return (
+                f"step(s) {astray} are {own_kind} steps pointing somewhere other "
+                f"than the {linked!r} this disposition links"
+            )
+        if record["disposition"] == "epic-adopt" and not any(
+            step["kind"] == own_kind for step in steps
+        ):
+            return "an epic-adopt disposition records the adoption edit it applies"
+    elif linked is not None:
+        return "it names a marker_target without a marker for it to bind"
     return None
 
 
@@ -797,6 +831,7 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
     disposition = _text(plan.get("disposition"))
     publication_tip = _text(publication_tip)
     marker = _text(plan.get("marker"))
+    marker_target = _text(plan.get("marker_target"))
     if "publication_tip" in plan:
         raise TransactionError(
             "plan-invalid",
@@ -876,6 +911,7 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
         "entry_key": entry_key,
         "disposition": disposition,
         "marker": marker or None,
+        "marker_target": marker_target or None,
         "publication_tip": publication_tip,
         "state": STATE_INTENT_ONLY,
         "acquired_by": {"host": socket.gethostname(), "pid": os.getpid()},

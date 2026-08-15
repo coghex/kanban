@@ -706,7 +706,10 @@ approved target in the owning repository;
 an edit to an existing artifact records that artifact's identity — the
 approved target, not merely some artifact — and the verified post-edit
 fingerprint. A literal marker, which only a disposition that links an artifact
-somebody else made may supply, names that artifact too. Those agreements are checked rather than
+somebody else made may supply, is bound to that artifact by the plan naming it
+outright rather than by inferring it from a step — a linked child issue's only
+tracker mutation is often the umbrella epic's checklist edit, which targets the
+epic, so there is no step to infer it from. Those agreements are checked rather than
 assumed: clearing verifies the document's token, so an identity free to record
 one artifact beside another artifact's token would let a record clear against a
 document naming something the tracker never got. Nothing but a created issue or
