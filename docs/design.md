@@ -4826,19 +4826,30 @@ three independent checks, and no mutating binding was pressed.
 | 6 | Five continuous idle minutes, observed as content churn | **pass** |
 | 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
 
-The observation spanned **623.7 s (10 min 24 s)**, of which step 6's untouched
-window was **420.0 s (7 min)** — both above the ten-minute total and
+The observation spanned **624.8 s (10 min 25 s)**, of which step 6's untouched
+window was **420.1 s (7 min)** — both above the ten-minute total and
 five-minute idle floors the issue sets.
 
 #### Build provenance
 
+Two commits matter here and they are deliberately not the same one. The measured
+archive was built from a **clean** tree, which by construction cannot already
+contain this record; the suites were then run on the tree that **does** contain
+it, because `test/Spec/UI/Keys.hs` validates the tracked `docs/design.md`.
+
 | Item | Value |
 | --- | --- |
-| Commit (`git rev-parse HEAD`) | `02796721058454c4bc678de9d1f50100a8f91da7` |
+| Commit the archive was built from | `02796721058454c4bc678de9d1f50100a8f91da7` |
 | Working tree at that commit | `git status --porcelain=v1 --untracked-files=all` returned empty, so the archive input is exactly that commit |
 | Archive | `kanban-1.0.0.0.tar.gz` |
 | Installed `--version` | `kanban 1.0.0.0` |
 | Install directory | a temporary directory; neither `~/.local/bin` nor `~/.cabal/bin` was used or written |
+| Tree the suites ran on | that same commit **plus this record**, i.e. the working tree this pull request commits |
+
+Nothing in this slice changes implementation code, so the record added between
+those two points cannot affect the executable that was measured: the archive
+built from `0279672` is the binary every number below came from, and the suites
+prove the document this pull request adds is the one they validated.
 
 ```console
 ROOT="$(git rev-parse --show-toplevel)"
@@ -4902,9 +4913,13 @@ queries status, and the record shows that querying is all that happened.
 
 #### Step 1 — launch and settle
 
-The startup refresh settled **0.66 s** after the driver's first sample, with the
+The startup refresh settled **0.99 s** after the driver's first sample, with the
 footer reading `board: updated now` and all four column headers present. The
-board loaded from the live repository rather than a fixture.
+board loaded from the live repository rather than a fixture, so its column
+occupancy is whatever the repository held at the time: `ISSUES` 8, `ACTIVE` 1,
+`REVIEWING` 1, `DONE` 0. Anyone rerunning this will see different contents, and
+the step outcomes below are written to depend on structure rather than on which
+particular cards were present.
 
 #### Step 2 — navigation
 
@@ -4915,24 +4930,24 @@ four columns and back. The selection marker's path was:
 | --- | --- | --- |
 | start | `ISSUES` | `#282` |
 | `l` | `ACTIVE` | `#268` |
+| `l` | `REVIEWING` | `#268` |
 | `l` | none observable | none observable |
-| `l` | none observable | none observable |
-| `h` | none observable | none observable |
+| `h` | `REVIEWING` | `#268` |
 | `h` | `ACTIVE` | `#268` |
 | `h` | `ISSUES` | `#282` |
 
-The three unobservable rows are the first thing this record must be honest
-about, and they are a limitation of the observation method, not a defect. Focus
-is drawn only as the `▌` marker on a selected card, and the `REVIEWING` and
-`DONE` columns held no cards during the run, so a focused empty column renders
-nothing that distinguishes it. This was checked rather than assumed: captures
-taken with focus on `REVIEWING` and on `DONE` are **byte-identical, including
-the escape sequences** that `capture-pane -e` returns, so no attribute change
-distinguishes them either. The traversal is evidenced instead by the marker's
-symmetric return path — three `l` presses moved focus two columns past the last
-card-bearing column, and three `h` presses brought it back through `ACTIVE` to
-`ISSUES`, which is only consistent with the focus index having moved across all
-four.
+The one unobservable row is the thing this record must be honest about, and it
+is a limitation of the observation method rather than a defect. Focus is drawn
+only as the `▌` marker on a selected card, and `DONE` held no cards during the
+run, so a focused empty column renders nothing that distinguishes it — the
+marker simply disappears on the third `l` and reappears in `REVIEWING` on the
+first `h`. That this is genuinely unobservable rather than merely missed was
+checked rather than assumed: with two columns empty, captures taken with focus
+on each are **byte-identical, including the escape sequences** that
+`capture-pane -e` returns, so no attribute change distinguishes them either.
+The traversal is evidenced instead by the marker's symmetric return path, which
+is only consistent with the focus index having moved across all four columns and
+back.
 
 `G` moved the selection to the column's last item, the standalone card `#321`,
 and `g` returned it to the first, the epic `#282`. `Enter` on `#321` opened its
@@ -4987,32 +5002,33 @@ Both refreshes then settled back to `board: updated now`.
 
 #### Step 6 — five continuous idle minutes
 
-The application was left untouched for **420.0 s**, sampled **1664 times** at a
+The application was left untouched for **420.1 s**, sampled **1661 times** at a
 **0.23 s** cadence. The cadence is deliberately non-commensurate with the
 spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
 event processing, so its live period is near one second without being exactly
 one, and a 1 Hz sample would return a near-identical glyph every time and make a
 running animation look frozen.
 
-Seven of the 1664 frames differed from their predecessor. Every one is
+Seven of the 1661 frames differed from their predecessor. Every one is
 accounted for by a change in underlying state:
 
 | At | Rows changed | What changed | Underlying state |
 | --- | --- | --- | --- |
-| 5.5 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
-| 65.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
-| 125.9 s | 1 | `updated 1m ago` → `2m ago` | as above |
-| 186.6 s | 1 | `updated 2m ago` → `3m ago` | as above |
-| 247.5 s | 1 | `updated 3m ago` → `4m ago` | as above |
-| 308.5 s | 1 | `updated 4m ago` → `5m ago` | as above |
-| 369.3 s | 1 | `updated 5m ago` → `6m ago` | as above |
+| 5.3 s | 5 | the sidebar's Claude window rows updated, its `refreshing…` line cleared, and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 64.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
+| 124.9 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 185.7 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 246.5 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 307.4 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 368.0 s | 1 | `updated 5m ago` → `6m ago` | as above |
 
 **Observable content churn: none.** D-9 defines churn as the screen changing
 when no underlying state changed, and no such frame occurred: six changes are
 the relative-age footer ticking over one minute at a time, and the seventh is a
-provider refresh dispatched before the idle window began finishing inside it. No
-frame changed for any other reason, and no line outside rows 10, 47, and 48 ever
-changed.
+provider refresh dispatched before the idle window began finishing inside it.
+That first change is the only one that touched the board area at all, and every
+row it touched belongs to the usage sidebar or the notice line. After it, no
+line outside the footer's two rows changed for the remaining 415 s.
 
 As D-9 requires this to be said plainly: **true flicker is not measured at
 1.0.** `capture-pane` returns content, not repaints, so a redraw that rewrites
@@ -5049,11 +5065,12 @@ than merely overwritten.
 
 Per Requirement 8, named rather than omitted:
 
-- **The `REVIEWING` and `DONE` columns held no cards.** They were navigated
-  through, but with no card to mark, focus on them is not observable in
-  `capture-pane` output at all — verified byte-identical including escapes, as
-  described under step 2. Card-level actions in those columns were therefore not
-  exercised.
+- **The `DONE` column held no cards.** It was navigated through, but with no
+  card to mark, focus on it is not observable in `capture-pane` output at all —
+  verified byte-identical including escapes, as described under step 2.
+  Card-level actions in `DONE` were therefore not exercised, which also means
+  the `m` merge binding had nothing to act on; that binding is forbidden by this
+  script regardless.
 - **The `PROCESSES` and `NEEDS ATTENTION` overlays had no content**, because no
   agent session was running and the drainer had no open incidents. Both still
   opened and closed correctly with their empty-state text, which is what D-6
@@ -5065,19 +5082,30 @@ applicable item provided the record says what could not be exercised.
 #### Conclusion
 
 **The script passes.** All seven steps completed, the observation spanned
-10 min 24 s including 7 continuous idle minutes, no interaction failed or hung,
+10 min 25 s including 7 continuous idle minutes, no interaction failed or hung,
 refresh responsiveness was demonstrated rather than asserted, the safety
 invariant was verified by identical before/after drainer queries and by a key
 log containing no mutating binding, and shutdown was clean by three independent
 checks. Nothing here blocks REL-4.
 
-One earlier run was discarded rather than reinterpreted. It completed all seven
-steps and passed each of them, but its total span was 534.1 s — under the
-ten-minute floor the issue sets — because the interactive steps finished far
-faster than budgeted. The run was repeated with a longer refresh separation and
-a longer idle window instead of the floor being reasoned away, and the run
-recorded here is that second one. No threshold, step, or method was altered to
-obtain a pass.
+Two earlier runs were discarded rather than reinterpreted, and neither was
+discarded for its result — both passed all seven steps:
+
+1. The first spanned only 534.1 s, under the ten-minute floor, because the
+   interactive steps finished far faster than budgeted. It was repeated with a
+   longer refresh separation and a longer idle window rather than the floor
+   being reasoned away.
+2. The second, at 623.7 s, was driven by a version of the driver that reset
+   tmux on the **default** socket. That is unsafe to publish: an operator
+   reproducing this record would lose whatever unrelated tmux sessions they had
+   running. The driver was confined to its own socket and the exercise repeated,
+   so the source published below is the one that produced the numbers recorded
+   above rather than a corrected variant of it.
+
+No threshold, step, or method was altered to obtain a pass. The board's column
+occupancy did change between those runs and this one — a pull request entered
+`REVIEWING` — which is why only `DONE` is empty above; that is live-fixture
+drift, not a change to the script.
 
 #### Reproducing this record
 
@@ -5111,7 +5139,13 @@ chmod +x "$TMP/session.sh"
 ```
 
 The second is the driver, which sends the keys, classifies each frame, times the
-idle window, and refuses every mutating binding:
+idle window, and refuses every mutating binding. It confines **every** tmux call
+to a private socket, `tmux -L rel3-smoke`, so running it cannot disturb whatever
+tmux sessions the operator already has: the driver needs to start from a clean
+server, and on the default socket that reset would tear down unrelated work,
+whereas on its own socket the worst it can reach is the server it created. This
+was verified rather than assumed — an unrelated session on the default socket
+survives the driver's teardown untouched.
 
 ```console
 cat > "$TMP/smoke_script.py" <<'SMOKE'
@@ -5142,6 +5176,13 @@ import sys
 import time
 
 SESSION = "rel3"
+
+# Every tmux call goes to a PRIVATE server on its own socket. The driver has to
+# be able to start from a clean slate, but doing that on the default socket
+# would tear down whatever unrelated tmux work the operator has running; with a
+# dedicated socket the worst it can reach is its own server.
+SOCKET = "rel3-smoke"
+
 FORBIDDEN = {"r", "S", "A", "m", "x", "d"}
 PANEL_RE = re.compile(r"━ ([A-Z][A-Z ]*[A-Z]) ━")
 DETAILS_RE = re.compile(r"┏ #(\d+)")
@@ -5158,7 +5199,10 @@ def log(message):
 
 
 def tmux(*args, text=True):
-    return subprocess.run(["tmux", *args], capture_output=True, text=text, check=False)
+    """Run one tmux command against this driver's private socket."""
+    return subprocess.run(
+        ["tmux", "-L", SOCKET, *args], capture_output=True, text=text, check=False
+    )
 
 
 def capture(escapes=False):
@@ -5579,7 +5623,7 @@ def main():
     time.sleep(6)
     alive = subprocess.run(["ps", "-p", kanban_pid], capture_output=True).returncode == 0
     has_session = subprocess.run(
-        ["tmux", "has-session", "-t", SESSION], capture_output=True
+        ["tmux", "-L", SOCKET, "has-session", "-t", SESSION], capture_output=True
     ).returncode == 0
     results["shutdown"] = {
         "kanban_pid_alive": alive,
@@ -5622,8 +5666,9 @@ tmux has-session -t rel3 2>/dev/null && echo "STILL RUNNING (fail)" || echo "ses
 
 #### Suites
 
-Both suites pass at the recorded commit with this record in place, run from the
-implementation checkout rather than the unpacked archive:
+Both suites pass on the tree that carries this record — that is, commit
+`0279672` plus this subsection, not `0279672` itself, which predates it — and
+were run from the implementation checkout rather than the unpacked archive:
 
 ```console
 cabal test all --test-show-details=direct
