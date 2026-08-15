@@ -138,6 +138,7 @@ library
     Kanban.GitHub.Fetch
     Kanban.GitHub.Group
     Kanban.GitHub.Guard
+    Kanban.GitHub.History
     Kanban.GitHub.Message
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
@@ -217,6 +218,7 @@ test-suite kanban-test
     Spec.Drainer.DirectMerge
     Spec.GitHub.BoardRefresh
     Spec.GitHub.Decoding
+    Spec.GitHub.History
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RefreshCoordinator
     Spec.Repository.Identity
@@ -235,6 +237,7 @@ test-suite kanban-test
     Spec.Support.Render
     Spec.UI.AutoSolve
     Spec.UI.Cards
+    Spec.UI.CompletedHistory
     Spec.UI.Golden
     Spec.UI.Incidents
     Spec.UI.Keys

@@ -38,7 +38,7 @@ import Kanban.Card (displayWidth)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
-import Kanban.GitHub (RefreshCoordinator)
+import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
 import Kanban.UI.Board (openDataLoadingHeading, openDataUnavailableHeading)
@@ -570,7 +570,8 @@ renderCase frameCase = do
   -- carries one and drawing never touches it.
   channel <- newBChan 1
   refreshCoordinator <- inertRefreshCoordinator
-  let state = frameCase.frameCaseState (restingState channel refreshCoordinator)
+  historyTraversal <- newHistoryTraversal
+  let state = frameCase.frameCaseState (restingState channel refreshCoordinator historyTraversal)
   pure (renderFrameCells (themeFor state.appOptions) (frameCase.frameCaseWidth, frameCase.frameCaseHeight) (drawApplication state))
 
 withOptions :: (Options -> Options) -> AppState -> AppState
@@ -578,8 +579,8 @@ withOptions change state = state {appOptions = change state.appOptions}
 
 -- | The state every case starts from: the fixture board, the fixture usage
 -- snapshots, and a resting value for everything else that can reach a frame.
-restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> AppState
-restingState channel refreshCoordinator =
+restingState :: BChan AppEvent -> RefreshCoordinator BoardRefreshOutcome -> HistoryTraversal -> AppState
+restingState channel refreshCoordinator historyTraversal =
   AppState
     { appRepository = Repository "/fixture/kanban" "coghex" "kanban",
       appBoard = fixtureBoard,
@@ -600,6 +601,12 @@ restingState channel refreshCoordinator =
       appBoardFreshness = Fresh goldenFetchedAt,
       appLastSuccessfulFetch = Just goldenFetchedAt,
       appOpenGeneration = 0,
+      appOpenSnapshot = Nothing,
+      appHistoryTraversal = historyTraversal,
+      appCompletedHistory = Nothing,
+      appCompletedGeneration = 0,
+      appCompletedProgress = emptyCompletedProgress,
+      appCompletedFailure = Nothing,
       appDrainerController = Left "no drainer controller in the fixture",
       appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
       -- No controller, so no observation stands: the same unanswered source

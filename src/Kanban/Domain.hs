@@ -12,14 +12,18 @@ module Kanban.Domain
     CheckState (..),
     CheckSummary (..),
     ColumnEntry (..),
+    CompletedHistory (..),
+    CompletedProgress (..),
     DataGap (..),
     Freshness (..),
     Issue (..),
+    IssueState (..),
     ItemId (..),
     Label (..),
     MergeState (..),
     NativeSubIssues (..),
     PullRequest (..),
+    PullRequestState (..),
     RepoSnapshot (..),
     Repository (..),
     ReviewDecision (..),
@@ -37,12 +41,15 @@ module Kanban.Domain
     UsageWindow (..),
     WorkflowConfig (..),
     defaultWorkflowConfig,
+    emptyCompletedProgress,
+    historyWithoutOpen,
     itemCreatedAt,
     itemId,
     itemLabelOverflow,
     itemLabels,
     itemTitle,
     itemUpdatedAt,
+    openWithoutHistory,
   )
 where
 
@@ -161,11 +168,30 @@ data NativeSubIssues
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | Where an issue is in its lifecycle, as GitHub reports it.
+--
+-- It is decoded from the item rather than inferred from the traversal that
+-- returned it. The two traversals ask for disjoint states, so inference would
+-- look right for as long as nothing else ever produced an item — and then be
+-- silently wrong for the cached generation, whose items arrive from a file
+-- with no traversal behind them at all.
+data IssueState = IssueOpen | IssueClosed
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | A pull request's lifecycle. Merged is a state of its own rather than a
+-- flavour of closed, because §8 puts a merged pull request in Done and the
+-- drainer's whole purpose is to move requests between those two endings.
+data PullRequestState = PullRequestOpen | PullRequestClosed | PullRequestMerged
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 data Issue = Issue
   { issueNumber :: Int,
     issueTitle :: Text,
     issueBody :: Text,
     issueUrl :: Text,
+    issueState :: IssueState,
     issueLabels :: [Label],
     issueAssignees :: [Assignee],
     issueCreatedAt :: UTCTime,
@@ -235,6 +261,7 @@ data PullRequest = PullRequest
     pullRequestTitle :: Text,
     pullRequestBody :: Text,
     pullRequestUrl :: Text,
+    pullRequestState :: PullRequestState,
     pullRequestLabels :: [Label],
     pullRequestAuthor :: Text,
     pullRequestDraft :: Bool,
@@ -341,6 +368,76 @@ data RepoSnapshot = RepoSnapshot
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | One complete completed generation: every closed issue and every closed or
+-- merged pull request the repository had, with neither connection left
+-- unfollowed (§13).
+--
+-- Only a whole generation is ever represented here. A partial page set, a
+-- cancelled traversal, and a failed page produce no value of this type at all,
+-- which is what keeps \"the history is loaded\" from ever meaning \"some of it
+-- is\".
+data CompletedHistory = CompletedHistory
+  { historyIssues :: [Issue],
+    historyPullRequests :: [PullRequest],
+    historyFetchedAt :: UTCTime
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | How far a completed generation has got, counted separately for the two
+-- kinds because they paginate independently and one routinely finishes several
+-- pages before the other.
+--
+-- The totals are GitHub's own @totalCount@ for each completed connection, and
+-- are 'Nothing' until a page has reported one. That is deliberately not zero: a
+-- traversal that has fetched nothing yet knows nothing about the size of the
+-- history, and a zero would render as a finished empty one.
+data CompletedProgress = CompletedProgress
+  { completedIssuesLoaded :: Int,
+    completedIssuesTotal :: Maybe Int,
+    completedPullRequestsLoaded :: Int,
+    completedPullRequestsTotal :: Maybe Int
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | What a completed generation reports before its first page answers.
+emptyCompletedProgress :: CompletedProgress
+emptyCompletedProgress = CompletedProgress 0 Nothing 0 Nothing
+
+-- | Drops from a completed history every item the open generation lists.
+--
+-- Applied when an open generation publishes, which makes it the newer of the
+-- two: an item GitHub has just reported open cannot also be history, so a
+-- reopened item leaves the completed set here rather than appearing twice.
+historyWithoutOpen :: RepoSnapshot -> CompletedHistory -> CompletedHistory
+historyWithoutOpen snapshot history =
+  history
+    { historyIssues = filter (not . (`Set.member` openIssues) . (.issueNumber)) history.historyIssues,
+      historyPullRequests =
+        filter (not . (`Set.member` openPullRequests) . (.pullRequestNumber)) history.historyPullRequests
+    }
+  where
+    openIssues = Set.fromList (map (.issueNumber) snapshot.snapshotIssues)
+    openPullRequests = Set.fromList (map (.pullRequestNumber) snapshot.snapshotPullRequests)
+
+-- | Drops from an open snapshot every item the completed generation lists.
+--
+-- The mirror of 'historyWithoutOpen', applied when a completed generation
+-- publishes second. An open card the newer generation has proved closed is
+-- stale, and leaving it would put one item in both sets — which no ordering,
+-- badge, or count could then describe honestly.
+openWithoutHistory :: CompletedHistory -> RepoSnapshot -> RepoSnapshot
+openWithoutHistory history snapshot =
+  snapshot
+    { snapshotIssues = filter (not . (`Set.member` closedIssues) . (.issueNumber)) snapshot.snapshotIssues,
+      snapshotPullRequests =
+        filter (not . (`Set.member` settledPullRequests) . (.pullRequestNumber)) snapshot.snapshotPullRequests
+    }
+  where
+    closedIssues = Set.fromList (map (.issueNumber) history.historyIssues)
+    settledPullRequests = Set.fromList (map (.pullRequestNumber) history.historyPullRequests)
 
 data UsageProvider = Codex | Claude
   deriving stock (Eq, Ord, Show, Generic)

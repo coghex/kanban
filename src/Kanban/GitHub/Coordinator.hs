@@ -72,7 +72,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.GitHub.Fetch (RateObserver)
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, holdBackUnrecordedGroup, newGhFetchGuard)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), historyRateVerdict, foregroundRateReserve)
 import System.Timeout (timeout)
 
@@ -675,6 +675,9 @@ runOpenJob coordinator generation deadline = do
   now <- getCurrentTime
   let remaining = fmap (remainingMicros now) deadline
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runOpenRefresh guard (rateObserverFor coordinator) remaining)
+  -- Read while this job still holds the owner, so no later job can be started
+  -- before the refusal it may have earned is on the repository's record lock.
+  holdBackUnrecordedGroup guard
   finished <- getCurrentTime
   -- A job that produced nothing was either cancelled or gave up: its deadline
   -- expired, or its body failed outright. Cancellation is the coordinator's
@@ -713,10 +716,20 @@ publishReserved coordinator generation produce =
   (produce >>= coordinator.coordinatorPublish generation)
     `finally` putMVar coordinator.coordinatorPublishLock ()
 
+-- | Runs one page of background history.
+--
+-- It publishes nothing — a page reports through the runner's own channel — but
+-- it accounts for its @gh@ exactly as a foreground job does. A background page
+-- spawns the same process under the same durable record, so a page that ends
+-- holding back a group nothing durable accounts for has to refuse every later
+-- job just as a foreground one does: without that, the next open refresh would
+-- find an absent record, reclaim nothing, and spawn straight past a group only
+-- the finished page's guard ever knew about.
 runHistoryJob :: RefreshCoordinator outcome -> IO ()
 runHistoryJob coordinator = do
   guard <- newGhFetchGuard coordinator.coordinatorRecordLock
   result <- onJobThread coordinator guard (coordinator.coordinatorRunner.runHistoryPage guard (rateObserverFor coordinator))
+  holdBackUnrecordedGroup guard
   finished <- getCurrentTime
   modifyMVar_ coordinator.coordinatorState (pure . settleHistoryJob finished result)
 

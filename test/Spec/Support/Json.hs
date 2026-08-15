@@ -9,7 +9,10 @@ module Spec.Support.Json
     githubPageWithErrors,
     graphqlErrorsOnly,
     issueNodeJson,
+    issueNodeJsonInState,
     pullRequestNodeJson,
+    pullRequestNodeJsonInState,
+    completedPageJson,
     emptyLabelsJson,
     emptyAssigneesJson,
     emptyClosingIssuesJson,
@@ -31,6 +34,8 @@ module Spec.Support.Json
     versionThreeCacheFile,
     versionFourCacheFile,
     versionFiveCacheFile,
+    emptySnapshotCacheFile,
+    malformedCompletedCacheFile,
     undecodableCacheFile,
     githubIndependentPage,
     graphqlPageWithRateLimit,
@@ -94,7 +99,7 @@ githubResponse =
       "      \"issues\": {",
       "        \"nodes\": [{",
       "          \"number\": 41, \"title\": \"Blocked issue\", \"body\": \"Details\",",
-      "          \"url\": \"https://example.test/issues/41\",",
+      "          \"url\": \"https://example.test/issues/41\", \"state\": \"OPEN\",",
       "          \"labels\": {\"totalCount\": 3, \"nodes\": [{\"name\": \"blocked\", \"color\": \"d73a4a\"}]},",
       "          \"assignees\": {\"totalCount\": 2, \"nodes\": [{\"login\": \"worker\"}]},",
       "          " <> emptySubIssuesJson <> ",",
@@ -105,7 +110,7 @@ githubResponse =
       "      \"pullRequests\": {",
       "        \"nodes\": [{",
       "          \"number\": 9, \"title\": \"Fix it\", \"body\": \"PR details\",",
-      "          \"url\": \"https://example.test/pull/9\", \"labels\": {\"totalCount\": 0, \"nodes\": []},",
+      "          \"url\": \"https://example.test/pull/9\", \"state\": \"OPEN\", \"labels\": {\"totalCount\": 0, \"nodes\": []},",
       "          \"author\": {\"login\": \"author\"}, \"isDraft\": false,",
       "          \"baseRefName\": \"master\", \"headRefName\": \"fix\",",
       "          \"closingIssuesReferences\": {\"totalCount\": 4, \"nodes\": [{\"number\": 41}]},",
@@ -131,7 +136,7 @@ githubRerunResponse =
     [ "{\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
       "\"pullRequests\":{\"nodes\":[{",
-      "\"number\":858,\"title\":\"Ready after rerun\",\"body\":\"Closes #844\",\"url\":\"https://example.test/pull/858\",",
+      "\"number\":858,\"title\":\"Ready after rerun\",\"body\":\"Closes #844\",\"url\":\"https://example.test/pull/858\",\"state\":\"OPEN\",",
       "\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"reviewed:approve\",\"color\":\"0e8a16\"}]},",
       "\"author\":{\"login\":\"author\"},\"isDraft\":false,\"baseRefName\":\"master\",\"headRefName\":\"fix\",",
       "\"closingIssuesReferences\":{\"totalCount\":1,\"nodes\":[{\"number\":844}]},",
@@ -178,7 +183,7 @@ githubChecksResponse totalCount nodes =
     [ "{\"data\":{\"repository\":{\"nameWithOwner\":\"" <> fixtureRepositoryIdentity <> "\",",
       "\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}},",
       "\"pullRequests\":{\"nodes\":[{",
-      "\"number\":860,\"title\":\"Mixed checks\",\"body\":\"Closes #36\",\"url\":\"https://example.test/pull/860\",",
+      "\"number\":860,\"title\":\"Mixed checks\",\"body\":\"Closes #36\",\"url\":\"https://example.test/pull/860\",\"state\":\"OPEN\",",
       "\"labels\":{\"totalCount\":0,\"nodes\":[]},",
       "\"author\":{\"login\":\"author\"},\"isDraft\":false,\"baseRefName\":\"master\",\"headRefName\":\"fix\",",
       "\"closingIssuesReferences\":{\"totalCount\":1,\"nodes\":[{\"number\":36}]},",
@@ -214,6 +219,35 @@ githubIndependentPage issues pullRequests =
   where
     connectionJson name (nodes, nextCursor) =
       ",\"" <> name <> "\":{\"nodes\":[" <> intercalate "," nodes <> "]," <> pageInfoJson nextCursor <> "}"
+    pageInfoJson Nothing = "\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}"
+    pageInfoJson (Just cursor) = "\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"" <> cursor <> "\"}"
+
+-- | A page of the completed traversal.
+--
+-- Each connection is either absent -- which is what @\@include(if: false)@
+-- produces once that connection has reached its final page -- or present with
+-- GitHub's own @totalCount@, its nodes, and its own next cursor. The total is
+-- the part no open page ever carries, and is the whole of §15's progress
+-- denominator.
+completedPageJson :: Maybe (Int, [String], Maybe String) -> Maybe (Int, [String], Maybe String) -> String
+completedPageJson issues pullRequests =
+  "{\"data\":{\"repository\":{\"nameWithOwner\":\""
+    <> fixtureRepositoryIdentity
+    <> "\""
+    <> maybe "" (connectionJson "issues") issues
+    <> maybe "" (connectionJson "pullRequests") pullRequests
+    <> "}}}"
+  where
+    connectionJson name (total, nodes, nextCursor) =
+      ",\""
+        <> name
+        <> "\":{\"totalCount\":"
+        <> show total
+        <> ",\"nodes\":["
+        <> intercalate "," nodes
+        <> "],"
+        <> pageInfoJson nextCursor
+        <> "}"
     pageInfoJson Nothing = "\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}"
     pageInfoJson (Just cursor) = "\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"" <> cursor <> "\"}"
 
@@ -262,14 +296,20 @@ errorObjectJson message =
 -- | One issue node whose nested connections are supplied verbatim, so a test
 -- can null one out or leave it off the node entirely.
 issueNodeJson :: Int -> [String] -> String
-issueNodeJson number connections =
+issueNodeJson = issueNodeJsonInState "OPEN" Nothing
+
+-- | The same node in a named lifecycle state, and optionally with a title of
+-- its own so two runs over the same number can differ by an edit.
+issueNodeJsonInState :: String -> Maybe String -> Int -> [String] -> String
+issueNodeJsonInState state title number connections =
   "{"
     <> intercalate
       ","
       ( [ "\"number\":" <> show number,
-          "\"title\":\"Issue " <> show number <> "\"",
+          "\"title\":\"" <> maybe ("Issue " <> show number) id title <> "\"",
           "\"body\":\"B\"",
-          "\"url\":\"https://example.test/issues/" <> show number <> "\""
+          "\"url\":\"https://example.test/issues/" <> show number <> "\"",
+          "\"state\":\"" <> state <> "\""
         ]
           <> connections
           <> ["\"createdAt\":\"2026-01-01T00:00:00Z\"", "\"updatedAt\":\"2026-01-02T00:00:00Z\""]
@@ -279,14 +319,18 @@ issueNodeJson number connections =
 -- | The pull-request counterpart: every scalar the decoder requires, with the
 -- connections and rollup left to the caller.
 pullRequestNodeJson :: Int -> [String] -> String
-pullRequestNodeJson number extras =
+pullRequestNodeJson = pullRequestNodeJsonInState "OPEN" Nothing
+
+pullRequestNodeJsonInState :: String -> Maybe String -> Int -> [String] -> String
+pullRequestNodeJsonInState state title number extras =
   "{"
     <> intercalate
       ","
       ( [ "\"number\":" <> show number,
-          "\"title\":\"PR " <> show number <> "\"",
+          "\"title\":\"" <> maybe ("PR " <> show number) id title <> "\"",
           "\"body\":\"B\"",
           "\"url\":\"https://example.test/pull/" <> show number <> "\"",
+          "\"state\":\"" <> state <> "\"",
           "\"author\":{\"login\":\"author\"}",
           "\"isDraft\":false",
           "\"baseRefName\":\"master\"",
@@ -498,6 +542,43 @@ versionFiveCacheFile version =
         <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\",\"snapshotPullRequests\":[],"
         <> "\"snapshotIssuesTruncated\":true,\"snapshotPullRequestsTruncated\":true,"
         <> "\"snapshotIssues\":[{"
+        <> "\"issueAssigneeOverflow\":0,\"issueAssignees\":[],\"issueBody\":\"B\","
+        <> "\"issueCreatedAt\":\"2026-01-01T00:00:00Z\",\"issueDataGaps\":[],"
+        <> "\"issueLabelOverflow\":0,\"issueLabels\":[],\"issueNumber\":36,"
+        <> "\"issueSubIssues\":{\"tag\":\"SubIssuesNotRequested\"},"
+        <> "\"issueTitle\":\"T\",\"issueUpdatedAt\":\"2026-01-01T00:00:00Z\","
+        <> "\"issueUrl\":\"u\"}]}}"
+    )
+
+-- | The current envelope around an empty snapshot.
+--
+-- It exists so a test about the envelope's own fields cannot be answered by an
+-- item decode: every other snapshot fixture here is deliberately shaped like
+-- some earlier release's items, and would fail under the current schema before
+-- the repository key was ever compared.
+emptySnapshotCacheFile :: Int -> ByteString.ByteString
+emptySnapshotCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"snapshot\":{"
+        <> "\"snapshotFetchedAt\":\"2026-01-01T00:00:00Z\","
+        <> "\"snapshotIssues\":[],\"snapshotPullRequests\":[]}}"
+    )
+
+-- | A completed-history cache file whose envelope is current and whose payload
+-- is one an earlier lifecycle-less build would have written: an issue with no
+-- @issueState@. It stands for a malformed payload under a version this build
+-- does claim to understand, which §16 keeps warning about rather than
+-- silencing as version skew.
+malformedCompletedCacheFile :: Int -> ByteString.ByteString
+malformedCompletedCacheFile version =
+  ByteString.pack
+    ( "{\"schemaVersion\":"
+        <> show version
+        <> ",\"repositoryKey\":\"coghex/kanban\",\"history\":{"
+        <> "\"historyFetchedAt\":\"2026-01-01T00:00:00Z\",\"historyPullRequests\":[],"
+        <> "\"historyIssues\":[{"
         <> "\"issueAssigneeOverflow\":0,\"issueAssignees\":[],\"issueBody\":\"B\","
         <> "\"issueCreatedAt\":\"2026-01-01T00:00:00Z\",\"issueDataGaps\":[],"
         <> "\"issueLabelOverflow\":0,\"issueLabels\":[],\"issueNumber\":36,"

@@ -33,6 +33,7 @@ import Spec.Support.Expect (isInvalidCache, isInvalidUsageCache)
 import Spec.Support.Json
   ( undecodableCacheFile,
     versionFiveCacheFile,
+    emptySnapshotCacheFile,
     versionFourCacheFile,
     versionThreeCacheFile,
     versionTwoCacheFile
@@ -117,7 +118,7 @@ spec = do
           let theirs = Repository "/tmp/other" "coghex" "other"
           theirsPath <- repositoryCachePath theirs
           createDirectoryIfMissing True (takeDirectory theirsPath)
-          ByteString.writeFile theirsPath (versionFiveCacheFile repositoryCacheSchemaVersion)
+          ByteString.writeFile theirsPath (emptySnapshotCacheFile repositoryCacheSchemaVersion)
           loadRepositoryCache theirs `shouldReturn` CacheInvalid "cache ignored: repository identity mismatch"
 
   describe "usage snapshot cache" $ do

@@ -2,13 +2,17 @@
 module Spec.Support.Board
   ( forcedCleanupRun,
     inertRefreshCoordinator,
+    termIgnoringGh,
+    withForcedCleanup,
     withFakeGh,
     captureBoardRefresh,
     heldOffMessage,
+    openOnlyRefreshRunner,
     readMarkerPid
   )
 where
 
+import Brick.BChan (newBChan)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
@@ -23,8 +27,10 @@ import Kanban.GitHub
     RefreshCoordinator,
     RefreshRunner (..),
     newGhRecordLock,
+    newHistoryTraversal,
     newRefreshCoordinator
   )
+import Kanban.UI.Refresh (boardRefreshRunner)
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.UI.Refresh (runBoardRefreshWith)
@@ -48,20 +54,36 @@ import Test.Hspec
 -- answers both halves of the question: what the guard claimed, and whether
 -- the descendant actually died.
 forcedCleanupRun :: FilePath -> Int -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
-forcedCleanupRun temporaryRoot githubSeconds psFailures = do
+forcedCleanupRun temporaryRoot githubSeconds psFailures =
+  withForcedCleanup temporaryRoot psFailures termIgnoringGh (fst <$> captureBoardRefresh temporaryRoot githubSeconds)
+
+-- | The @gh@ the forced-cleanup fixture drives: it ignores TERM and leaves a
+-- TERM-ignoring descendant in a group of its own, so nothing about its death
+-- can be assumed from having signalled it.
+termIgnoringGh :: [ByteString.ByteString]
+termIgnoringGh =
+  [ "trap '' TERM",
+    "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+    "while :; do sleep 1; done"
+  ]
+
+-- | Runs @action@ with both of those facilities broken, and reports anything of
+-- this fixture's still alive once the real @ps@ is back.
+--
+-- It is a seam of its own because the environment is what the last-resort path
+-- needs, and more than one kind of job now has to be driven into it: the same
+-- unrecordable cleanup a foreground refresh can suffer is reachable from a
+-- background history page, and what it must leave behind is the same either
+-- way.
+withForcedCleanup :: FilePath -> Maybe Int -> [ByteString.ByteString] -> IO result -> IO (result, [ProcessIdentity])
+withForcedCleanup temporaryRoot psFailures ghBody action = do
   let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
       binaryRoot = temporaryRoot </> "bin"
       psCounter = temporaryRoot </> "ps.count"
   ByteString.writeFile unwritableCacheRoot "not a directory"
   outcome <-
     withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
-      withFakeGh
-        temporaryRoot
-        [ "trap '' TERM",
-          "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
-          "while :; do sleep 1; done"
-        ]
-        $ do
+      withFakeGh temporaryRoot ghBody $ do
           createDirectoryIfMissing True binaryRoot
           ByteString.writeFile
             (binaryRoot </> "ps")
@@ -75,7 +97,7 @@ forcedCleanupRun temporaryRoot githubSeconds psFailures = do
                 ]
             )
           setFileMode (binaryRoot </> "ps") 0o700
-          fst <$> captureBoardRefresh temporaryRoot githubSeconds
+          action
   -- Asked with the real ps, now that the fake is off PATH again.
   snapshot <- readProcessSnapshot
   case snapshot of
@@ -103,6 +125,19 @@ inertRefreshCoordinator = do
     (const (pure ()))
   where
     inertOutcome = BoardRefreshCompleted (Left (ProviderError RequestFailed "no refresh runner is wired up in this test"))
+
+-- | The board's own runner, for a coordinator that is only ever asked for
+-- open work.
+--
+-- The traversal and channel it is given are its own and nothing drains them,
+-- which is safe for exactly the reason it is worth stating: a history page
+-- reports through that channel and is only ever run by a job somebody asked
+-- for, so a coordinator that never requests one writes nothing to it.
+openOnlyRefreshRunner :: ResolvedConfig -> Repository -> IO (RefreshRunner BoardRefreshOutcome)
+openOnlyRefreshRunner config repository = do
+  traversal <- newHistoryTraversal
+  channel <- newBChan 16
+  pure (boardRefreshRunner config repository traversal channel)
 
 -- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
 -- it instead of the real thing.

@@ -12,6 +12,7 @@
 -- autosolve modules underneath them.
 module Kanban.UI
   ( drawApplication,
+    initialCompletedHistory,
     loadStartupCaches,
     runDashboard,
     startupBoard,
@@ -32,7 +33,9 @@ import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime, getCurrentTimeZone )
 import qualified Graphics.Vty as Vty
 import Kanban.Cache
-  ( UsageCacheLoad (..),
+  ( CompletedCacheLoad (..),
+    UsageCacheLoad (..),
+    loadCompletedCache,
     loadUsageCache
     )
 import Kanban.CLI (Options (..))
@@ -46,6 +49,7 @@ import Kanban.Drainer
     discoverDrainerController,
     queryDrainerStatus
     )
+import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Review
   ( stopReviewClient
@@ -72,19 +76,21 @@ runDashboard :: Options -> ResolvedConfig -> Repository -> IO ()
 runDashboard options config repository = do
   now <- getCurrentTime
   timeZone <- getCurrentTimeZone
-  usageCacheLoad <- loadStartupCaches options config
+  (usageCacheLoad, completedCacheLoad) <- loadStartupCaches options config repository
   drainerController <- discoverDrainerController repository
   (initialSettings, settingsNotice) <- loadSettings
   logRoot <- transcriptRoot repository
   eventChannel <- newBChan 256
+  historyTraversal <- newHistoryTraversal
   -- One coordinator per repository for the dashboard's lifetime, started
   -- before any refresh can be asked for. Every board-refresh entry point --
   -- startup, `u`, and the refreshes a finished review, solve, or
   -- pull-request action requires -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
-  refreshCoordinator <- newBoardRefreshCoordinator config repository eventChannel
+  refreshCoordinator <- newBoardRefreshCoordinator config repository historyTraversal eventChannel
   let (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
+      (initialHistory, historyNotice) = initialCompletedHistory completedCacheLoad
   let initialState =
         AppState
           { appRepository = repository,
@@ -104,14 +110,30 @@ runDashboard options config repository = do
             appProcessSelection = ProcessSelection Nothing 0,
             appIncidentSelection = IncidentSelection Nothing 0,
             appOverlay = Nothing,
-            appNotice = Just (startupNotice <> maybe "" (" · " <>) usageNotice <> maybe "" (" · " <>) settingsNotice),
+            appNotice =
+              Just
+                ( startupNotice
+                    <> maybe "" (" · " <>) usageNotice
+                    <> maybe "" (" · " <>) historyNotice
+                    <> maybe "" (" · " <>) settingsNotice
+                ),
             -- Nothing has been fetched and nothing was restored, which is
             -- exactly what §7's loading panel stands for. 'startApplication'
             -- moves this to 'Loading' the moment the startup refresh is
             -- requested; the panel is the same either way.
             appBoardFreshness = NotLoaded,
+            appOpenSnapshot = Nothing,
             appLastSuccessfulFetch = Nothing,
             appOpenGeneration = 0,
+            appHistoryTraversal = historyTraversal,
+            -- A cached generation seeds the history without waiting for
+            -- GitHub. It is complete by construction — nothing partial is ever
+            -- written — so it is the history until the first live generation
+            -- of this process replaces it.
+            appCompletedHistory = initialHistory,
+            appCompletedGeneration = 0,
+            appCompletedProgress = emptyCompletedProgress,
+            appCompletedFailure = Nothing,
             appDrainerController = drainerController,
             appDrainerStatus =
               case drainerController of
@@ -155,17 +177,23 @@ runDashboard options config repository = do
   Vty.shutdown finalVty
 
 -- | The whole of what the dashboard reads from the durable caches before it
--- draws anything: the usage cache, and nothing else.
+-- draws anything: the usage cache and the completed history, and nothing else.
 --
 -- It is a seam rather than two inline lines because "startup consults no
--- repository snapshot" is a property worth asserting rather than reading off
--- 'runDashboard'. A repository cache an earlier release left behind is not
--- loaded, not decoded, not rewritten, and not removed — it is simply never
--- opened (§13).
-loadStartupCaches :: Options -> ResolvedConfig -> IO UsageCacheLoad
-loadStartupCaches options config
-  | cacheEnabled options config = loadUsageCache
-  | otherwise = pure UsageCacheAbsent
+-- /open/ snapshot" is a property worth asserting rather than reading off
+-- 'runDashboard'. Completed history is the one thing that may be restored from
+-- disk (§13, §16): every open card on screen was fetched by the process
+-- showing it, and a snapshot an earlier release left behind is not loaded, not
+-- decoded, not rewritten, and not removed — the version gate turns it away
+-- without opening its payload.
+--
+-- @--no-cache@ and @cache = false@ suppress both reads together, which is what
+-- makes them suppress the completed cache's write too: nothing seeded means
+-- nothing to compare, and the write is guarded by the same predicate.
+loadStartupCaches :: Options -> ResolvedConfig -> Repository -> IO (UsageCacheLoad, CompletedCacheLoad)
+loadStartupCaches options config repository
+  | cacheEnabled options config = (,) <$> loadUsageCache <*> loadCompletedCache repository
+  | otherwise = pure (UsageCacheAbsent, CompletedCacheAbsent)
 
 -- | The board the dashboard starts with: no issues, no pull requests, nothing
 -- restored. §7's loading panel is drawn over it until the first complete
@@ -178,6 +206,18 @@ startupBoard workflowConfig now = deriveBoard workflowConfig (RepoSnapshot [] []
 -- that is true: open data is being fetched, and @u@ asks again.
 startupNotice :: Text
 startupNotice = "Loading open GitHub data · press " <> actionKeyText RefreshAll <> " to update"
+
+-- | What a stored completed generation seeds the dashboard with, and what it
+-- has to say for itself.
+--
+-- Only the invalid case speaks. An absent cache is the ordinary first run and
+-- says nothing; a loaded one is history the user cannot yet see, since nothing
+-- renders from it until FILT-5.
+initialCompletedHistory :: CompletedCacheLoad -> (Maybe CompletedHistory, Maybe Text)
+initialCompletedHistory cacheLoad = case cacheLoad of
+  CompletedCacheAbsent -> (Nothing, Nothing)
+  CompletedCacheLoaded history -> (Just history, Nothing)
+  CompletedCacheInvalid warning -> (Nothing, Just warning)
 
 initialUsageState :: UsageCacheLoad -> (Map UsageProvider UsageSnapshot, Map UsageProvider Freshness, Maybe Text)
 initialUsageState cacheLoad = case cacheLoad of

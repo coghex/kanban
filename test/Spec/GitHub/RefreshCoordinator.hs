@@ -67,12 +67,11 @@ import Kanban.UI.Events (QuitDecision (..), quitDecision, stoppingGitHubWorkNoti
 import Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
     boardRefreshDispatch,
-    boardRefreshRunner,
     historyPausedNotice,
     releaseQueuedBoardRefresh
   )
 import Kanban.UI.Types (BoardRefreshOutcome (..))
-import Spec.Support.Board (readMarkerPid, withFakeGh)
+import Spec.Support.Board (openOnlyRefreshRunner, readMarkerPid, withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention)
 import Spec.Support.Fixtures (epoch, testResolvedConfig)
@@ -803,6 +802,7 @@ spec = do
         samples <- newIORef []
         recordLock <- newGhRecordLock
         guard <- newGhFetchGuard recordLock
+        runner <- openOnlyRefreshRunner (uncachedConfig 30) repository
         result <-
           withFakeGh
             temporaryRoot
@@ -810,7 +810,7 @@ spec = do
                 <> graphqlPageWithRateLimit "{\"cost\":3,\"remaining\":4997,\"resetAt\":\"2026-01-01T01:00:00Z\"}"
                 <> "'"
             ]
-            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
+            ( runner.runOpenRefresh
                 guard
                 (\sample -> atomicModifyIORef' samples (\seen -> (sample : seen, ())))
                 (Just (30 * 1000000))
@@ -824,11 +824,12 @@ spec = do
         samples <- newIORef []
         recordLock <- newGhRecordLock
         guard <- newGhFetchGuard recordLock
+        runner <- openOnlyRefreshRunner (uncachedConfig 30) repository
         result <-
           withFakeGh
             temporaryRoot
             ["printf '%s' '" <> emptyGraphqlPage <> "'"]
-            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
+            ( runner.runOpenRefresh
                 guard
                 (\sample -> atomicModifyIORef' samples (\seen -> (sample : seen, ())))
                 (Just (30 * 1000000))
@@ -845,11 +846,12 @@ spec = do
         let repository = Repository temporaryRoot "coghex" "kanban"
         recordLock <- newGhRecordLock
         guard <- newGhFetchGuard recordLock
+        runner <- openOnlyRefreshRunner (uncachedConfig 30) repository
         result <-
           withFakeGh
             temporaryRoot
             ["printf '%s' '" <> rateLimitedGraphqlResponse <> "'"]
-            ( (boardRefreshRunner (uncachedConfig 30) repository).runOpenRefresh
+            ( runner.runOpenRefresh
                 guard
                 (const (pure ()))
                 (Just (30 * 1000000))
@@ -869,11 +871,12 @@ spec = do
         let repository = Repository temporaryRoot "coghex" "kanban"
         recordLock <- newGhRecordLock
         guard <- newGhFetchGuard recordLock
+        runner <- openOnlyRefreshRunner (cachedConfig 30) repository
         result <-
           withFakeGh
             temporaryRoot
             ["printf '%s' '" <> emptyGraphqlPage <> "'"]
-            ( (boardRefreshRunner (cachedConfig 30) repository).runOpenRefresh
+            ( runner.runOpenRefresh
                 guard
                 (const (pure ()))
                 Nothing
@@ -889,10 +892,11 @@ spec = do
             leaderMarker = temporaryRoot </.> "gh.pid"
         published <- newIORef (0 :: Int)
         recordLock <- newGhRecordLock
+        runner <- openOnlyRefreshRunner (cachedConfig 30) repository
         coordinator <-
           newRefreshCoordinator
             recordLock
-            (boardRefreshRunner (cachedConfig 30) repository)
+            runner
             (\_ _ -> atomicModifyIORef' published (\seen -> (seen + 1, ())))
             (const (pure ()))
         verdict <-
@@ -918,10 +922,11 @@ spec = do
         outcomes <- newIORef []
         settled <- newEmptyMVar
         recordLock <- newGhRecordLock
+        runner <- openOnlyRefreshRunner (uncachedConfig 1) repository
         coordinator <-
           newRefreshCoordinator
             recordLock
-            (boardRefreshRunner (uncachedConfig 1) repository)
+            runner
             (\_ outcome -> atomicModifyIORef' outcomes (\seen -> (outcome : seen, ())) >> putMVar settled ())
             (const (pure ()))
         withFakeGh
@@ -971,7 +976,8 @@ spec = do
 startBoardCoordinator :: Repository -> (BoardRefreshOutcome -> IO ()) -> IO (RefreshCoordinator BoardRefreshOutcome)
 startBoardCoordinator repository publish = do
   recordLock <- newGhRecordLock
-  newRefreshCoordinator recordLock (boardRefreshRunner (uncachedConfig 30) repository) (const publish) (const (pure ()))
+  runner <- openOnlyRefreshRunner (uncachedConfig 30) repository
+  newRefreshCoordinator recordLock runner (const publish) (const (pure ()))
 
 -- | The same, with the last-good cache in play, for the cases that are about
 -- what does and does not reach it.

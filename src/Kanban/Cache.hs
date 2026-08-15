@@ -3,9 +3,12 @@
 
 module Kanban.Cache
   ( CacheLoad (..),
+    CompletedCacheLoad (..),
     GhGroupRecordLoad (..),
     UsageCacheLoad (..),
+    completedCacheSchemaVersion,
     ghGroupRecordPath,
+    loadCompletedCache,
     loadGhGroupRecord,
     loadRepositoryCache,
     loadUsageCache,
@@ -13,6 +16,7 @@ module Kanban.Cache
     repositoryCachePath,
     repositoryCacheSchemaVersion,
     usageCachePath,
+    writeCompletedCache,
     writeGhGroupRecord,
     writeUsageCache,
   )
@@ -39,7 +43,7 @@ import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import Kanban.Domain (RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot)
+import Kanban.Domain (CompletedHistory, RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (OwnedProcessGroup)
 import System.Directory
@@ -59,6 +63,18 @@ data CacheLoad
   | CacheInvalid Text
   deriving stock (Eq, Show)
 
+-- | How reading the completed-history cache turned out.
+--
+-- The three cases are §16's, and are kept distinct for the reason §16 gives:
+-- a file another release wrote is /absent/ and silent, because after an upgrade
+-- or a downgrade it is expected; a file this build claims to understand and
+-- cannot read is /invalid/ and says so. Neither ever supplies data.
+data CompletedCacheLoad
+  = CompletedCacheAbsent
+  | CompletedCacheLoaded CompletedHistory
+  | CompletedCacheInvalid Text
+  deriving stock (Eq, Show)
+
 data UsageCacheLoad
   = UsageCacheAbsent
   | UsageCacheLoaded (Map UsageProvider UsageSnapshot)
@@ -72,6 +88,30 @@ data CacheEnvelope = CacheEnvelope
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | The completed generation as it is written to the repository cache path.
+--
+-- Written by hand rather than derived because it shares its two envelope keys
+-- with 'CacheEnvelope' — the same file has held both — and the field names a
+-- generic instance would produce cannot collide in one module.
+data CompletedCacheEnvelope = CompletedCacheEnvelope
+  { completedSchemaVersion :: Int,
+    completedRepositoryKey :: Text,
+    completedHistory :: CompletedHistory
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON CompletedCacheEnvelope where
+  parseJSON = withObject "completed history cache" $ \cache ->
+    CompletedCacheEnvelope <$> cache .: "schemaVersion" <*> cache .: "repositoryKey" <*> cache .: "history"
+
+instance ToJSON CompletedCacheEnvelope where
+  toJSON envelope =
+    object
+      [ "schemaVersion" .= envelope.completedSchemaVersion,
+        "repositoryKey" .= envelope.completedRepositoryKey,
+        "history" .= envelope.completedHistory
+      ]
 
 data UsageCacheEnvelope = UsageCacheEnvelope
   { usageSchemaVersion :: Int,
@@ -133,8 +173,22 @@ instance ToJSON UsageCacheEnvelope where
 -- earlier release left behind read as absent by the gate below, rather than
 -- being decoded, rewritten, or deleted -- the file is simply never consulted
 -- again and stays exactly as it was found.
-repositoryCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
+--
+-- 'repositoryCacheSchemaVersion' therefore stays at 6 rather than tracking the
+-- newest thing the file may hold: it is not a description of the file, it is
+-- the open snapshot reader's gate, and its whole job is to answer "absent" for
+-- every version that is not the one open snapshots were last written under.
+-- A version 7 file is one of those, which is exactly right -- it holds no open
+-- snapshot to read.
+--
+-- Version 7 is the completed generation, and the first thing to be written to
+-- the repository cache path since version 5. It is a new version of that path
+-- rather than a new file because the two payloads are alternatives, not
+-- companions: only one of them is ever the current meaning of the path, and a
+-- single version gate is what keeps a reader of either from decoding the other.
+repositoryCacheSchemaVersion, completedCacheSchemaVersion, usageCacheSchemaVersion, ghGroupRecordSchemaVersion :: Int
 repositoryCacheSchemaVersion = 6
+completedCacheSchemaVersion = 7
 usageCacheSchemaVersion = 1
 ghGroupRecordSchemaVersion = 1
 
@@ -226,6 +280,51 @@ loadDecodedCache repository value = case parse (withObject "cache" (.: "schemaVe
         Success envelope
           | envelope.repositoryKey /= repositoryIdentity repository -> CacheInvalid "cache ignored: repository identity mismatch"
           | otherwise -> CacheLoaded envelope.snapshot
+
+-- | Reads the completed generation an earlier run of this build left behind.
+--
+-- It shares the repository cache path with the open snapshot an earlier
+-- /release/ wrote there, and is told apart from it by the version alone. A
+-- file under any other version — including the version 6 gate above, and every
+-- version that predates it — is absent here for the same reason a version 7
+-- file is absent to 'loadRepositoryCache': neither reader may decode the
+-- other's payload, and §16 makes an unrecognised version silent rather than
+-- corrupt.
+loadCompletedCache :: Repository -> IO CompletedCacheLoad
+loadCompletedCache repository = do
+  path <- repositoryCachePath repository
+  exists <- doesFileExist path
+  if not exists
+    then pure CompletedCacheAbsent
+    else do
+      result <- try @IOException (eitherDecodeFileStrict' path :: IO (Either String Value))
+      pure $ case result of
+        Left exception -> CompletedCacheInvalid ("completed history cache ignored: " <> Text.pack (show exception))
+        Right (Left message) -> CompletedCacheInvalid ("completed history cache ignored: " <> Text.pack message)
+        Right (Right value) -> loadDecodedCompletedCache repository value
+
+-- | The same version-before-payload gate as 'loadDecodedCache', for the same
+-- reason and with the same three outcomes.
+loadDecodedCompletedCache :: Repository -> Value -> CompletedCacheLoad
+loadDecodedCompletedCache repository value = case parse (withObject "completed history cache" (.: "schemaVersion")) value :: Result Int of
+  Error message -> CompletedCacheInvalid ("completed history cache ignored: " <> Text.pack message)
+  Success version
+    | version /= completedCacheSchemaVersion -> CompletedCacheAbsent
+    | otherwise -> case fromJSON value :: Result CompletedCacheEnvelope of
+        Error message -> CompletedCacheInvalid ("completed history cache ignored: " <> Text.pack message)
+        Success envelope
+          | envelope.completedRepositoryKey /= repositoryIdentity repository -> CompletedCacheInvalid "completed history cache ignored: repository identity mismatch"
+          | otherwise -> CompletedCacheLoaded envelope.completedHistory
+
+-- | Replaces the stored completed generation with a whole one.
+--
+-- Only a complete generation ever reaches this, and the replacement is the
+-- atomic rename every other cache writer here uses, so an interrupted or
+-- failed generation leaves whatever was already stored exactly as it was.
+writeCompletedCache :: Repository -> CompletedHistory -> IO (Either Text ())
+writeCompletedCache repository history = do
+  path <- repositoryCachePath repository
+  writeCacheFile path (CompletedCacheEnvelope completedCacheSchemaVersion (repositoryIdentity repository) history)
 
 loadUsageCache :: IO UsageCacheLoad
 loadUsageCache = do

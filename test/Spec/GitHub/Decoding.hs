@@ -12,12 +12,15 @@ import Kanban.Domain
 import Kanban.GitHub
   ( FetchState (..),
     GhFailurePhase (..),
+    HistoryFetchState (..),
     advanceState,
     classifyFailure,
     compactError,
     decodeGitHubItems,
     ghFailureKind,
     graphqlArguments,
+    historyGraphqlArguments,
+    initialHistoryFetchState,
     paginationDecision,
     snapshotWarnings
   )
@@ -43,8 +46,10 @@ import Spec.Support.Json
     githubResponse,
     graphqlErrorsOnly,
     issueNodeJson,
+    issueNodeJsonInState,
     namelessCheckRunJson,
     pullRequestNodeJson,
+    pullRequestNodeJsonInState,
     queuedCheckRunJson,
     rollupJson,
     statusContextJson,
@@ -88,6 +93,43 @@ spec = do
           warnings `shouldSatisfy` any (Data.Text.isInfixOf "+N markers")
           warnings `shouldSatisfy` all (not . Data.Text.isInfixOf "board is truncated")
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- Requirement 3. Five states, decoded off the item itself, so nothing
+    -- about an item's lifecycle depends on which traversal delivered it: the
+    -- same decoder answers for a live page and for a generation restored from
+    -- the cache, which has no traversal behind it at all.
+    it "decodes every issue and pull-request lifecycle state GitHub reports" $
+      for_
+        [ ("OPEN", IssueOpen),
+          ("CLOSED", IssueClosed)
+        ]
+        ( \(reported, expected) ->
+            case decodeGitHubItems (LazyByteString.pack (githubPageWith [issueNodeJsonInState reported Nothing 41 completeIssueFields] [])) of
+              Left message -> expectationFailure message
+              Right ([issue], _) -> issue.issueState `shouldBe` expected
+              Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+        )
+        >> for_
+          [ ("OPEN", PullRequestOpen),
+            ("CLOSED", PullRequestClosed),
+            ("MERGED", PullRequestMerged)
+          ]
+          ( \(reported, expected) ->
+              case decodeGitHubItems (LazyByteString.pack (githubPageWith [] [pullRequestNodeJsonInState reported Nothing 9 completePullRequestFields])) of
+                Left message -> expectationFailure message
+                Right (_, [pullRequest]) -> pullRequest.pullRequestState `shouldBe` expected
+                Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+          )
+
+    -- Both enumerations are closed, and there is no honest fallback: an
+    -- unrecognised state would still have to be placed somewhere, and placing
+    -- a settled item among the open ones is exactly what the field exists to
+    -- prevent.
+    it "fails the page rather than guessing an unrecognised lifecycle state" $ do
+      decodeGitHubItems (LazyByteString.pack (githubPageWith [issueNodeJsonInState "ARCHIVED" Nothing 41 completeIssueFields] []))
+        `shouldSatisfy` isLeft
+      decodeGitHubItems (LazyByteString.pack (githubPageWith [] [pullRequestNodeJsonInState "DRAFTED" Nothing 9 completePullRequestFields]))
+        `shouldSatisfy` isLeft
 
     it "deduplicates rerun checks and treats mergeable policy blocks as protected" $ do
       case decodeGitHubItems (LazyByteString.pack githubRerunResponse) of
@@ -679,6 +721,12 @@ spec = do
             }
         firstPageState = pagedState {issueCursor = Nothing, pullRequestCursor = Nothing}
         pagedArguments = graphqlArguments numericRepository pagedState
+        pagedHistoryState =
+          initialHistoryFetchState
+            { historyIssueCursor = Just "42",
+              historyPullRequestCursor = Just "true"
+            }
+        pagedHistoryArguments = historyGraphqlArguments numericRepository pagedHistoryState
 
     it "passes every GraphQL String variable raw" $ do
       flagForVariable "owner" pagedArguments `shouldBe` Just "-f"
@@ -698,6 +746,28 @@ spec = do
       pagedArguments `shouldContain` ["-f", "name=2048"]
       pagedArguments `shouldContain` ["-f", "issueCursor=42"]
       pagedArguments `shouldContain` ["-f", "pullRequestCursor=true"]
+
+    -- The completed traversal shares this builder, so a coercible cursor is
+    -- as safe there as here -- and the only thing it varies is the query.
+    it "builds the completed vector by the same rules, differing only in the query" $ do
+      pagedHistoryArguments `shouldContain` ["-f", "issueCursor=42"]
+      pagedHistoryArguments `shouldContain` ["-f", "pullRequestCursor=true"]
+      flagForVariable "issuePageSize" pagedHistoryArguments `shouldBe` Just "-F"
+      flagForVariable "query" pagedHistoryArguments `shouldBe` Just "-f"
+      filter (/= "query") (map (takeWhile (/= '=')) pagedHistoryArguments)
+        `shouldBe` filter (/= "query") (map (takeWhile (/= '=')) pagedArguments)
+
+    -- And it is the query that carries the whole of the difference: the states
+    -- each connection is filtered by, and the completed scope's own totals.
+    it "asks each scope for its own lifecycle states" $ do
+      queryArgument pagedArguments `shouldSatisfy` isInfixOf "states: OPEN"
+      queryArgument pagedArguments `shouldSatisfy` (not . isInfixOf "CLOSED")
+      queryArgument pagedHistoryArguments `shouldSatisfy` isInfixOf "states: [CLOSED]"
+      queryArgument pagedHistoryArguments `shouldSatisfy` isInfixOf "states: [CLOSED, MERGED]"
+      -- Both scopes read the lifecycle off the item, so neither can infer it
+      -- from the traversal that returned it.
+      queryArgument pagedArguments `shouldSatisfy` isInfixOf "number title body url state"
+      queryArgument pagedHistoryArguments `shouldSatisfy` isInfixOf "number title body url state"
 
     it "omits absent cursors so the first request starts at the first page" $ do
       let firstPageArguments = graphqlArguments numericRepository firstPageState
@@ -751,3 +821,18 @@ spec = do
     it "never blames the installation for a does-not-exist error raised after the child exists" $
       ghFailureKind GhRunning (mkIOError doesNotExistErrorType "hGetContents" Nothing (Just "gh"))
         `shouldBe` RequestFailed
+
+-- | Every nested field a node decode requires, so a lifecycle example fails
+-- only over the lifecycle it is about.
+completeIssueFields :: [String]
+completeIssueFields = [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]
+
+completePullRequestFields :: [String]
+completePullRequestFields = [emptyLabelsJson, emptyClosingIssuesJson]
+
+-- | The @query=@ argument's own text, which is where the two scopes actually
+-- differ.
+queryArgument :: [String] -> String
+queryArgument arguments = case filter ("query=" `isPrefixOf`) arguments of
+  [query] -> drop (length ("query=" :: String)) query
+  other -> error ("expected exactly one query argument, got " <> show (length other))
