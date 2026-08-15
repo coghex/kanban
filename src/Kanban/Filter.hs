@@ -53,6 +53,7 @@ import Kanban.Workflow
     isApproved,
     isProblem,
     itemCompleted,
+    pruneOffBoardChildren,
   )
 
 -- | Whether a card is live work or settled history. The visible @Closed@
@@ -199,6 +200,13 @@ visibleBoardFor config criteria openBoard openSnapshot history =
 -- collapses to a 'TrackerHeader', so the epic is still represented rather than
 -- vanishing behind its own filtered-out group.
 --
+-- A surviving tracker is repaired as well as retained. Its header draws a
+-- progress count over the children it holds, and a child the criteria hid is
+-- exactly as unreachable as one that never made the dataset — so it leaves
+-- 'trackerChildren' and folds into checklist progress through the same
+-- 'pruneOffBoardChildren' 'deriveBoard' already applies, rather than leaving
+-- the header counting rows nothing is drawing.
+--
 -- Criteria admitting every card return the board untouched. That is the
 -- default, and returning the same value rather than an equal one keeps every
 -- row index the caller may already hold pointing at the same entry.
@@ -231,10 +239,11 @@ filterColumn config criteria = keep
             number = tracker.trackerIssue.issueNumber
             (group, after) = span ((== Just number) . primaryTrackerOf) remaining
             children = filter admits group
+            repaired = pruneOffBoardChildren (survivingChildNumbers children) tracker
             kept
               | not (admitsTracker tracker) = map demote children
-              | not (null children) = children
-              | otherwise = [TrackerHeader tracker]
+              | not (null children) = map (reseatTracker repaired) children
+              | otherwise = [TrackerHeader repaired]
          in kept <> keep after
     admits entry =
       entryStructureFacet entry `Set.member` criteria.filterStructure
@@ -252,3 +261,27 @@ filterColumn config criteria = keep
     primaryTrackerOf (Tracked context _) = Just context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
     primaryTrackerOf (TrackerHeader tracker) = Just tracker.trackerIssue.issueNumber
     primaryTrackerOf (Standalone _) = Nothing
+
+-- | The children a group kept, named the way its tracker names them: by the
+-- child issue number the membership carries, which is what a linked pull
+-- request is grouped under too.
+survivingChildNumbers :: [ColumnEntry] -> Set Int
+survivingChildNumbers entries =
+  Set.fromList
+    [ context.trackingPrimary.membershipChild.trackerChildIssueNumber
+      | Tracked context _ <- entries
+    ]
+
+-- | Puts the repaired tracker back on a surviving child, so the header the
+-- group draws and the reference the card prints both come from the tracker
+-- the criteria actually left standing.
+--
+-- Only the primary membership is reseated: it is the one a group is keyed and
+-- drawn by, while an additional membership names a tracker whose own group is
+-- filtered on its own terms elsewhere in the board.
+reseatTracker :: Tracker -> ColumnEntry -> ColumnEntry
+reseatTracker tracker (Tracked context item) =
+  Tracked
+    context {trackingPrimary = context.trackingPrimary {membershipTracker = tracker}}
+    item
+reseatTracker _ entry = entry

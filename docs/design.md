@@ -1113,7 +1113,10 @@ Defaults:
 
 - An issue carrying the `epic` label is a tracker, whether it is open or
   closed. A completed tracker is still a tracker: it keeps its group header,
-  carries the `CLOSED` badge, and groups its children.
+  carries the `CLOSED` badge on that header line — between the title and the
+  progress count, whether the group is populated or empty — and groups its
+  children. A header is built from the tracker rather than from a card, so it
+  never passes through the card metadata row the badge otherwise leads.
 - Additional configurable tracker labels may be added, such as `tracker`.
 - A title beginning with `Epic:` or `[epic]` is a fallback hint when the issue
   has no labels; an explicitly labelled issue uses labels as the source of

@@ -32,9 +32,11 @@ import Kanban.Filter
     itemWorkflowFacet,
     visibleBoardFor,
   )
+import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.AutoSolve (boardPullRequestNumbers)
+import Kanban.UI.Board (trackerHeaderText)
 import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate)
-import Kanban.UI.Filter (readOnlyHistoryRefusal, refreshVisibleBoard)
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Search (entriesFor, selectableRows)
 import Kanban.UI.Selection (selectedEntry)
@@ -141,6 +143,23 @@ admittedSpec = describe "criteria admitting completed history" $ do
     map summarize (entriesForBoard board Issues) `shouldBe` [("tracked", 811)]
     trackerNumbers (entriesForBoard board Issues) `shouldBe` [Just 810]
 
+  -- Requirement 8's badge. A header is built from the tracker rather than from
+  -- a card, so it never passes through the metadata row the badge otherwise
+  -- leads; it has to reach the header line itself, populated group or not.
+  it "carries CLOSED on a completed epic's own header line" $ do
+    let settledTracker = trackerFor (closed (epicIssue 810 [811]))
+        liveTracker = trackerFor (epicIssue 870 [871])
+    trackerHeaderText False True settledTracker
+      `shouldBe` "▾ #810  Issue 810  CLOSED  0/1 complete"
+    trackerHeaderText False False settledTracker
+      `shouldBe` "▸ #810  Issue 810  CLOSED  0/1 complete"
+    -- ASCII mode changes the disclosure glyph and nothing about the badge.
+    trackerHeaderText True True settledTracker
+      `shouldBe` "v #810  Issue 810  CLOSED  0/1 complete"
+    -- A live epic's header is exactly what it always was.
+    trackerHeaderText False True liveTracker
+      `shouldBe` "▾ #870  Issue 870  0/1 complete"
+
   -- The other half of requirement 8, which is what makes requirement 3 true
   -- for this shape: hide the header and the child is the Standalone card the
   -- board renders today.
@@ -160,6 +179,31 @@ admittedSpec = describe "criteria admitting completed history" $ do
     -- regroups it.
     map summarize (entriesForBoard hidden Issues) `shouldBe` [("header", 810)]
     map summarize (entriesForBoard shown Issues) `shouldBe` [("tracked", 811)]
+
+  -- A header counts the children it holds, so a child the criteria hid must
+  -- leave the tracker rather than stay a permanently unreachable pending
+  -- entry the header keeps counting (§12).
+  it "folds a child the criteria hid into its tracker's checklist progress" $ do
+    let snapshot = RepoSnapshot [approvedEpic 870 [871, 872], baseIssue 871 [], baseIssue 872 []] [] epoch
+        -- Only #871 is approved, so an Approved-only workflow facet keeps the
+        -- epic and that child while hiding #872.
+        approvedChild = (baseIssue 871 []) {issueLabels = [Label "reviewed:approve" "0e8a16"]}
+        narrowed = snapshot {snapshotIssues = [approvedEpic 870 [871, 872], approvedChild, baseIssue 872 []]}
+        unfiltered = visibleFrom everyLifecycle narrowed Nothing
+        filtered =
+          visibleFrom everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved} narrowed Nothing
+    numbersIn unfiltered Issues `shouldBe` [871, 872]
+    map trackerProgress (entriesForBoard unfiltered Issues) `shouldBe` [Just (0, 2), Just (0, 2)]
+    -- #872 is gone, and the header no longer counts a row nothing draws.
+    numbersIn filtered Issues `shouldBe` [871]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (1, 2)]
+
+  it "folds every child into progress when the criteria leave a tracker alone" $ do
+    let snapshot = RepoSnapshot [approvedEpic 870 [871], baseIssue 871 []] [] epoch
+        filtered =
+          visibleFrom everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved} snapshot Nothing
+    map summarize (entriesForBoard filtered Issues) `shouldBe` [("header", 870)]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (1, 1)]
 
   -- Values are ORed inside a facet and the facets ANDed, so an empty facet is
   -- a real empty result rather than an implicit reset.
@@ -312,6 +356,26 @@ refusalSpec = describe "read-only history refusals" $ do
     plain <- testAppState openBoard
     readOnlyHistoryRefusal plain (IssueItem (baseIssue 940 [])) `shouldBe` Nothing
 
+  -- A session overlay left open across a refresh is the other stale case: it
+  -- goes on accepting input for work that has since settled, and its answer
+  -- would resume a worker against history. The guard is on the shared session
+  -- table, so no overlay kind can skip it.
+  it "refuses to resume any session overlay whose work has settled" $ do
+    settled <- settledState
+    sequence_
+      [ (label, readOnlyHistoryRefusalFor settled subject) `shouldBe` (label, Just notice)
+        | (label, subject, notice) <-
+            [ ("solve" :: String, IssueId 940, expectedNotice (IssueItem (closedIssue 940))),
+              ("review", IssueId 941, expectedNotice (IssueItem (closedIssue 941))),
+              ("pull request", PullRequestId 951, expectedNotice (PullRequestItem (mergedPullRequest 951)))
+            ]
+      ]
+    -- Live work still resumes.
+    sequence_
+      [ readOnlyHistoryRefusalFor settled subject `shouldBe` Nothing
+        | subject <- [IssueId 800, IssueId 801, PullRequestId 820, PullRequestId 830]
+      ]
+
   -- The merge chain, refused at the launch decision itself rather than only
   -- at the key press: it outranks the wrong-kind, in-flight and
   -- drainer-state answers this same function would otherwise give.
@@ -443,6 +507,28 @@ epicIssue number children =
 -- then closes.
 orderedEpic :: Issue
 orderedEpic = epicIssue 860 [861, 862, 863]
+
+-- | An epic the approval predicate admits, so a workflow facet can keep it
+-- while hiding one of its children.
+approvedEpic :: Int -> [Int] -> Issue
+approvedEpic number children =
+  (epicIssue number children)
+    { issueLabels = [Label "epic" "5319e7", Label "reviewed:approve" "0e8a16"]
+    }
+
+-- | The tracker one epic issue yields, for the header line it draws.
+trackerFor :: Issue -> Tracker
+trackerFor issue = case trackerFromIssue workflow issue of
+  Just tracker -> tracker
+  Nothing -> error ("fixture issue #" <> show issue.issueNumber <> " is not a tracker")
+
+-- | The completed/total an entry's own tracker reports, if it has one.
+trackerProgress :: ColumnEntry -> Maybe (Int, Int)
+trackerProgress (Tracked tracking _) = Just (progress tracking.trackingPrimary.membershipTracker)
+  where
+    progress tracker = (tracker.trackerCompleted, tracker.trackerTotal)
+trackerProgress (TrackerHeader tracker) = Just (tracker.trackerCompleted, tracker.trackerTotal)
+trackerProgress (Standalone _) = Nothing
 
 closed :: Issue -> Issue
 closed issue = issue {issueState = IssueClosed}

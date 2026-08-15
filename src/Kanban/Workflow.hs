@@ -10,6 +10,7 @@ module Kanban.Workflow
     itemCompleted,
     itemLifecycleBadge,
     orderCardLabels,
+    pruneOffBoardChildren,
     pullRequestStatus,
     readOnlyHistoryNotice,
     rereviewLabel,
@@ -173,6 +174,11 @@ issueColumn issue
 -- there; adding it again here would drift the displayed progress above the
 -- number GitHub reported. Both sources still lose their non-visible children
 -- from 'trackerChildren', so neither renders a card it cannot reach.
+--
+-- Exported because the filter criteria reach the same situation by a second
+-- door: a child the criteria hide is as unreachable as one that never made
+-- the dataset, and its group's header must say so the same way rather than
+-- keeping a count of rows nothing is drawing (§12).
 pruneOffBoardChildren :: Set.Set Int -> Tracker -> Tracker
 pruneOffBoardChildren visibleChildNumbers tracker =
   tracker

@@ -9,9 +9,11 @@
 module Kanban.UI.Filter
   ( refreshVisibleBoard,
     readOnlyHistoryRefusal,
+    readOnlyHistoryRefusalFor,
   )
 where
 
+import Data.List (find)
 import Data.Text (Text)
 import Kanban.Domain
 import Kanban.Filter (visibleBoardFor)
@@ -43,16 +45,25 @@ refreshVisibleBoard state =
 readOnlyHistoryRefusal :: AppState -> BoardItem -> Maybe Text
 readOnlyHistoryRefusal state item
   | itemCompleted item = Just (readOnlyHistoryNotice item)
-  | Just settled <- settledInHistory = Just (readOnlyHistoryNotice settled)
-  | otherwise = Nothing
-  where
-    settledInHistory = do
-      history <- state.appCompletedHistory
-      case item of
-        IssueItem issue ->
-          IssueItem <$> lookupBy (.issueNumber) issue.issueNumber history.historyIssues
-        PullRequestItem pullRequest ->
-          PullRequestItem <$> lookupBy (.pullRequestNumber) pullRequest.pullRequestNumber history.historyPullRequests
-    lookupBy number target = safeHead . filter ((== target) . number)
-    safeHead [] = Nothing
-    safeHead (value : _) = Just value
+  | otherwise = readOnlyHistoryRefusalFor state (itemId item)
+
+-- | The same refusal for work named only by its number.
+--
+-- A session, a worker, and an overlay's resumable turn are all keyed by the
+-- issue or pull-request number rather than by a card, so a launch boundary
+-- reached from one of them has nothing but the number to ask with. The answer
+-- comes from the newest completed generation either way, which is what makes
+-- this the same question 'readOnlyHistoryRefusal' asks.
+readOnlyHistoryRefusalFor :: AppState -> ItemId -> Maybe Text
+readOnlyHistoryRefusalFor state target = readOnlyHistoryNotice <$> settledItem state target
+
+-- | The item the completed generation holds under this identity, if it holds
+-- one at all.
+settledItem :: AppState -> ItemId -> Maybe BoardItem
+settledItem state target = do
+  history <- state.appCompletedHistory
+  case target of
+    IssueId number ->
+      IssueItem <$> find ((== number) . (.issueNumber)) history.historyIssues
+    PullRequestId number ->
+      PullRequestItem <$> find ((== number) . (.pullRequestNumber)) history.historyPullRequests

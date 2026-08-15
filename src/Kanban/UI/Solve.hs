@@ -48,7 +48,7 @@ import Kanban.Worker
     launchSolveWorker,
     pendingTerminationDiagnosticPrefix
     )
-import Kanban.UI.Filter (readOnlyHistoryRefusal)
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -155,8 +155,22 @@ startFreshIssueSolve issue workflow brand = do
   presentTranscriptTail
   launchSolveInvocation issue.issueNumber workflow brand Nothing ResumeAnswer ""
 
+-- | The one place a solve worker is spawned, from a fresh start, a resumed
+-- answer, or an automated revision alike.
+--
+-- The read-only-history refusal is re-asked here as well as at each of those
+-- entry points, because this is the boundary a process actually crosses: an
+-- entry point decided minutes ago against work a refresh has since settled
+-- must not reach it.
 launchSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchSolveInvocation issueNumber workflow brand existingSession provenance input = do
+  refusal <- flip readOnlyHistoryRefusalFor (IssueId issueNumber) <$> get
+  case refusal of
+    Just notice -> setNotice notice
+    Nothing -> launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input
+
+launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel

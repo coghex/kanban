@@ -15,6 +15,7 @@ module Kanban.UI.Board
     reviewPhaseGlyphFor,
     solvePhaseGlyph,
     solvePhaseGlyphFor,
+    trackerHeaderText,
   )
 where
 
@@ -56,7 +57,7 @@ import Kanban.Drainer
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
-import Kanban.Workflow (entryItem, isApproved, isProblem, orderCardLabels )
+import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, footerHint, scopeBindings)
 import Kanban.UI.SessionCore
@@ -509,22 +510,35 @@ drawTrackerHeader state column row tracker expanded =
       | selected = withAttr selectedAttr (txt (if state.appOptions.optionAscii then ">" else "▌"))
       | otherwise = txt " "
     headerAttribute = trackerHeaderAttribute tracker
+    headerText = trackerHeaderText state.appOptions.optionAscii expanded tracker
+
+-- | The one line an epic's header draws, whether it heads a populated group or
+-- stands alone as a 'TrackerHeader'.
+--
+-- A pure projection rather than part of the drawing, because it is where §11's
+-- lifecycle badge reaches a header at all: a header is built from the tracker
+-- rather than from a card, so it never passes through the card metadata row the
+-- badge otherwise leads.
+trackerHeaderText :: Bool -> Bool -> Tracker -> Text
+trackerHeaderText useAscii expanded tracker =
+  disclosure
+    <> " #"
+    <> showText tracker.trackerIssue.issueNumber
+    <> "  "
+    <> sanitizeText tracker.trackerIssue.issueTitle
+    <> lifecycleBadge
+    <> "  "
+    <> showText tracker.trackerCompleted
+    <> "/"
+    <> showText tracker.trackerTotal
+    <> " complete"
+    <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
+  where
     disclosure
-      | state.appOptions.optionAscii = if expanded then "v" else ">"
+      | useAscii = if expanded then "v" else ">"
       | expanded = "▾"
       | otherwise = "▸"
-    headerText =
-      disclosure
-        <> " #"
-        <> showText tracker.trackerIssue.issueNumber
-        <> "  "
-        <> sanitizeText tracker.trackerIssue.issueTitle
-        <> "  "
-        <> showText tracker.trackerCompleted
-        <> "/"
-        <> showText tracker.trackerTotal
-        <> " complete"
-        <> if null tracker.trackerDiagnostics then "" else "  · !" <> showText (length tracker.trackerDiagnostics)
+    lifecycleBadge = maybe "" ("  " <>) (itemLifecycleBadge (IssueItem tracker.trackerIssue))
 
 -- | The tracker-context rows. They wrap rather than truncate, so a long
 -- implementation key or tracker reference stays fully visible and the frame

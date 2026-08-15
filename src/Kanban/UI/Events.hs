@@ -869,14 +869,16 @@ solveInputHooks :: SessionInputHooks
 solveInputHooks =
   noSessionInputHooks
     { sessionHookSubmit = submitSolveInput,
-      sessionHookInterrupt = interruptSolveSession
+      sessionHookInterrupt = interruptSolveSession,
+      sessionHookSubject = IssueId
     }
 
 pullRequestInputHooks :: SessionInputHooks
 pullRequestInputHooks =
   noSessionInputHooks
     { sessionHookSubmit = submitPullRequestInput,
-      sessionHookInterrupt = interruptPullRequestSession
+      sessionHookInterrupt = interruptPullRequestSession,
+      sessionHookSubject = PullRequestId
     }
 
 reviewInputHooks :: SessionInputHooks
@@ -884,7 +886,8 @@ reviewInputHooks =
   SessionInputHooks
     { sessionHookSubmit = submitReviewInput,
       sessionHookInterrupt = cancelReviewSession,
-      sessionHookChoice = chooseReviewOption
+      sessionHookChoice = chooseReviewOption,
+      sessionHookSubject = IssueId
     }
 
 -- | What a left click on a board card does. A click that only selects leaves a
