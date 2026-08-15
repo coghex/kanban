@@ -123,6 +123,7 @@ RELEASE_DOCUMENTS = (
 EXCLUDED_TRACKED_PATHS = (
     ".drain-prs.json",
     ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
     ".github/workflows/review-gate.yml",
     ".gitignore",
     "docs/card_filter_design.md",
