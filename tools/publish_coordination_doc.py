@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -75,6 +76,14 @@ CLASSIFICATION_ROW_RE = re.compile(
 
 LOCK_NAMESPACE = "refs/kanban/publish-lock"
 PENDING_NAMESPACE = "refs/kanban/pending-publication"
+
+# What this module applied to a document it declined to publish. A `not-published`
+# outcome is the end of the line for a `pr-atomic` or unmatched document, so the
+# working tree is the only evidence its disposition was ever applied — and a
+# working tree is equally what a hand edit produces. This reference is the
+# difference: it names the exact content *this module* wrote, so a later
+# consumer can tell the two apart instead of trusting the file.
+APPLIED_NAMESPACE = "refs/kanban/applied-locally"
 
 
 class PublishError(Exception):
@@ -179,6 +188,10 @@ def lock_ref(repository: str, document: str) -> str:
 
 def pending_ref(repository: str, document: str) -> str:
     return f"{PENDING_NAMESPACE}/{_key(repository, document)}"
+
+
+def applied_ref(repository: str, document: str) -> str:
+    return f"{APPLIED_NAMESPACE}/{_key(repository, document)}"
 
 
 def common_git_dir(root: Path) -> Path:
@@ -910,13 +923,55 @@ def _resume(
     }
 
 
+def tracker_transaction_module():
+    """tools/tracker_transaction.py, loaded from beside this file.
+
+    A plain `import` would need `tools/` on `sys.path`, which it is when this
+    module runs as a script and is not when a test loads it by path. The
+    dependency is one-way by construction — that module never loads this one —
+    so two independently invocable command-line tools do not become mutually
+    dependent, at the cost of each keeping its own copy of four small identity
+    helpers. tools/test_tracker_transaction.py pins the pair that matters, the
+    (repository, document) key, so the copies cannot drift apart unseen.
+    """
+    source = Path(__file__).resolve().parent / "tracker_transaction.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_kanban_tracker_transaction", source
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {source}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        # Fail closed rather than reporting a clear preflight: an outstanding
+        # tracker transaction that cannot be read is exactly the state in which
+        # proceeding repeats a mutation GitHub has already accepted.
+        raise PublishError(
+            "tracker-transaction-unavailable",
+            f"the tracker transaction module at {source} could not be loaded "
+            f"({error}); the preflight cannot report whether one is outstanding",
+        ) from error
+    return module
+
+
 def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
-    """Whether an earlier approved mutation of this document is outstanding.
+    """Whether an earlier approved mutation of this document is outstanding —
+    its publication, its tracker mutations, or both.
 
     Callers mutate the tracker before they publish, so this has to be askable
     *before* they do: learning about an unresolved record afterwards means a
-    second issue already exists for a disposition that cannot be applied. This
-    only reads — no lock, no write, no fetch of anything it does not need.
+    second issue already exists for a disposition that cannot be applied. Issue
+    #327 added the other half of the same question, because a run can equally
+    have created the issue and then died before recording anything — so one
+    preflight answers for both records rather than leaving the newer one to a
+    check the assets might not make. This only reads — no lock, no write, no
+    fetch of anything it does not need.
+
+    `status` stays exactly `clear` or `pending`, and `publication_tip` stays
+    where it was: the assets branch on those, and a preflight that reported a
+    third state or moved the binding would be a silent caller-contract change.
+    `pending_kinds` says which record is outstanding when one is.
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
@@ -924,37 +979,68 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     recorded = git(
         ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
     ).stdout.decode().strip()
-    # Not check=False: the tip this returns becomes the caller's binding, and a
-    # binding minted from a stale cached ref is worse than no preflight at all
-    # — it reads as current and licenses a publication against a document that
-    # has already moved.
-    git(["fetch", "origin", branch], cwd=resolved)
-    observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
-    if not recorded:
-        return {
-            "status": "clear",
+    module = tracker_transaction_module()
+    try:
+        tracker = module.check(resolved, repository, document)
+    except Exception as error:  # noqa: BLE001 - the preflight must stay structured
+        # The whole point of this call is to tell a caller whether it may mutate
+        # the tracker, so a failure inside it has to arrive as a tracker answer
+        # rather than as an exception that leaves the boundary reporting a
+        # document failure and an internal error. `observed_report` never
+        # raises, and reports an unreadable record as unreadable rather than as
+        # absent — which is what keeps this fail-closed instead of merely
+        # structured.
+        tracker = {
+            "status": "outstanding",
+            "message": getattr(error, "message", str(error)),
+        } | module.observed_report(resolved, module.transaction_ref(owner, document))
+    kinds = []
+    if recorded:
+        kinds.append("publication")
+    if tracker["status"] != "clear":
+        kinds.append("tracker-transaction")
+    try:
+        # Not check=False: the tip this returns becomes the caller's binding,
+        # and a binding minted from a stale cached ref is worse than no
+        # preflight at all — it reads as current and licenses a publication
+        # against a document that has already moved.
+        git(["fetch", "origin", branch], cwd=resolved)
+        observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
+        outcome = {
+            "status": "pending" if kinds else "clear",
             "document": document,
             "pending_ref": pending,
             "publication_tip": observed_tip,
+            "pending_kinds": kinds,
+            "tracker_transaction": tracker,
         }
-    landed = is_ancestor(resolved, recorded, f"origin/{branch}")
-    return {
-        "status": "pending",
-        "document": document,
-        "pending_ref": pending,
-        "publication_tip": observed_tip,
-        "pending_commit": recorded,
-        "recorded_blob": blob_at(resolved, recorded, document),
-        "already_landed": landed,
-        "resolution": (
-            "the recorded publication reached the branch; re-run publication with "
-            "the recorded content to reconcile and clear it"
-            if landed
-            else "re-run publication with the recorded content to retry it, or "
-            "clear the record deliberately; do not approve a different "
-            "disposition for this document first"
-        ),
-    }
+        if not recorded:
+            return outcome
+        landed = is_ancestor(resolved, recorded, f"origin/{branch}")
+        return outcome | {
+            "pending_commit": recorded,
+            "recorded_blob": blob_at(resolved, recorded, document),
+            "already_landed": landed,
+            "resolution": (
+                "the recorded publication reached the branch; re-run publication "
+                "with the recorded content to reconcile and clear it"
+                if landed
+                else "re-run publication with the recorded content to retry it, or "
+                "clear the record deliberately; do not approve a different "
+                "disposition for this document first"
+            ),
+        }
+    except Exception as error:  # noqa: BLE001 - the report survives the failure
+        # An unreachable remote, a branch that no longer exists, a broken object
+        # database. Whatever it is, the records were already read and they are
+        # what the run has to report: failing here without them tells a caller
+        # holding an outstanding transaction nothing about it, at the one moment
+        # it most needs to know it may not mutate anything.
+        if not isinstance(error, PublishError):
+            error = PublishError("internal-error", f"{type(error).__name__}: {error}")
+        error.detail.setdefault("pending_kinds", kinds)
+        error.detail.setdefault("tracker_transaction", tracker)
+        raise error
 
 
 def failure_states(root: Path, document: str, *, commit: str | None,
@@ -1214,8 +1300,18 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         if baseline is not None and working_blob(root, document) == baseline:
             verify_and_write(root, document, baseline, content)
             applied = True
+            # Recorded only once the write succeeded, and pointing at the exact
+            # content: this is what lets a consumer of an unpublishable
+            # document's cursor distinguish "the module applied the approved
+            # disposition" from "somebody edited the file".
+            git(
+                ["update-ref", applied_ref(owner, document), preserved],
+                cwd=root,
+                check=False,
+            )
         return {
             "status": "not-published",
+            "applied_ref": applied_ref(owner, document) if applied else None,
             "reason": why_not,
             "repository": owner,
             "branch": branch,

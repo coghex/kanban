@@ -279,7 +279,24 @@ parses §2 and fails if:
 - a drafting asset stops stating that a novel document remains local until it is
   separately classified and published;
 - this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
-  boundary, or its rule that publication is reported only on reachability.
+  boundary, or its rule that publication is reported only on reachability;
+- a processing asset drops the §9.6 tracker-transaction clause for any one of
+  its tracker-mutating branches — `EPIC` label creation, epic creation, epic
+  adoption edit, child issue creation, child issue linking, an approved
+  comment, or an umbrella-epic checklist edit — since a single record-step
+  phrase somewhere in a file proves nothing about the branch that skipped it;
+- a processing asset carries any part of the transaction mechanism itself
+  rather than invoking `tools/tracker_transaction.py`, or a drafting asset
+  invokes it at all;
+- either `process-design-doc` variant reintroduces the instruction to write
+  partial-failure recovery information into the document, which contradicts the
+  publication module being that document's only writer;
+- this document drops §9.6's create-only acquisition, its repository-wide
+  visibility, its state machine, its per-step checkpoints, its rule that
+  clearing is bound to the published entry rather than to reachability, its
+  manual ambiguity reconciliation, its no-transaction rule for dispositions that
+  mutate nothing, or its fail-closed rule; or §9.5 stops requiring tracker state
+  beside its three document states.
 
 The mechanism's own behavior is not this module's subject:
 `tools/test_publish_coordination_doc.py` executes it against temporary
@@ -383,7 +400,14 @@ same run that mutates it, rather than left for a later manual commit.
   `/process-design-doc`, and `$process-design-doc` — publish the approved
   document mutation during the same invocation that applies it, whenever the
   document is eligible under §9.2. These are the assets that publish, and no
-  other asset does.
+  other asset does. **Every tracker-mutating branch of those four publishes
+  this way, the design pair's `EPIC` path included**: that path renders the
+  complete approved document and hands it to
+  `tools/publish_coordination_doc.py` in the same run, and never writes or
+  stages the document itself. A path that edited the document directly would
+  contradict §9.4's rule that the module is the document's only writer, and the
+  document it left behind would be refused as no longer matching the
+  publication tip.
 - The three **drafting** assets — `/design-epic`, `$design-epic`, and
   `$draft-report` — publish nothing at all. A document one of them newly
   creates is local and unpublished. Its first publication requires a separate
@@ -584,6 +608,15 @@ its way past. The states:
 - whether a local publication commit exists and, if so, its commit ID; and
 - whether the remote publication branch contains that commit.
 
+**Tracker state is reported beside those three, never instead of them.** A
+document state says what became of the cursor; it says nothing about the issues,
+labels, comments, and epic edits the run had already made by then, and those are
+the part nobody can undo. So every unpublished outcome of a run that acquired a
+transaction under §9.6 also reports whether acquisition succeeded, the
+transaction state, each planned tracker step and whether it is planned,
+ambiguous, or confirmed, every confirmed tracker identity, and the one recovery
+action that is permitted next.
+
 A failed publication leaves the mutation recoverable and never diverges the
 checkout's default branch from its remote — the PR drainer fast-forwards that
 branch after every merge, and an unpushed local commit on it would wedge every
@@ -594,3 +627,195 @@ reports what it changed: an unintended rewrite of the rest of the document
 changes the same single path a correct publication does, so the changed-line
 summary, not the changed-path check, is what makes it visible to the run that
 caused it.
+
+### 9.6 The tracker transaction
+
+§9.5 makes the document half of a disposition recoverable. This section is the
+other half, and it is the subject of issue #327. A processing run mutates the
+tracker before it publishes, so a run that dies in between leaves an unchanged
+document, a clear publication preflight, and one or more tracker mutations that
+already happened. The next invocation reads that as unprocessed work and does
+them again — and unlike a document edit, an issue already filed cannot be taken
+back.
+
+**Every approved tracker mutation is a checkpointed step, and a disposition is
+not one operation.** A design `EPIC` disposition can create a label, then create
+an epic or edit an adopted one; a child disposition can create or link an issue,
+post an approved comment, and edit the umbrella epic's checklist. These return
+different things — a label name, an issue number and URL, a comment ID and URL,
+a target issue plus a verified post-edit fingerprint — so what a step records is
+the identity appropriate to its own kind of mutation, never an assumed issue
+number.
+
+**A disposition that mutates no tracker acquires no transaction.** `[no-issue]`
+and `[deferred]` mutate nothing; neither does an `Existing issue` linked through
+`process-report` with no approved comment, which is a document change and not a
+tracker one; and neither does `process-report`'s `Epic` disposition: that arc is handed to the design pair, and its epic is created
+later inside the design document's own transaction. Acquiring a record for one
+of these would leave it outstanding across a separate human-led workflow and
+block every other entry in the document.
+
+**Acquisition is atomic and create-only.** The transaction is acquired before
+the first tracker mutation of an approved disposition, and acquisition fails
+when a record already exists. The read-only preflight cannot hold anything
+across the user's approval, so two runs can both observe it clear; what makes
+that safe is that only one of them can create the record, and the loser stops
+rather than mutating GitHub beside the winner.
+
+**The record is repository-shared, not worktree-local.** `$DOCS_WT` may differ
+between invocations, so the record lives where every linked worktree of the
+clone sees it, exactly as the pending-publication record of §9.4 does. It is
+shared across linked worktrees of one clone rather than across two independent
+clones, which is what the guarantee is worth and all it claims.
+
+**The record is what a fresh invocation resumes from.** It carries the owning
+repository, the document path, the selected finding, delivery-slice, or `EPIC`
+key, the approved disposition kind, the publication tip the disposition was
+prepared against, an ordered plan of every approved tracker-side step, and for
+each step its exact approved target, payload fingerprint, and observable
+postcondition. A session with no conversation history has that and nothing else,
+so a field it could omit is a field a resumption could not check.
+
+**The states are durable and explicit.** `intent-only` — the record and its
+ordered plan exist and no step is confirmed. `tracker-pending` — at least one
+step is confirmed and later planned steps remain. `mutation-confirmed` — every
+approved step is confirmed. `publication-pending` — the disposition and its
+identities are ready or already handed to publication, which is not yet
+verified. `resolved` — the recorded disposition and its exact identities are
+verified on the publication branch, and the record is cleared. Each step is
+`planned`, `intent`, or `confirmed`: it enters `intent` before its external
+mutation begins and records its exact confirmed identity and postcondition
+before the next step starts.
+
+**Only the run that performed a mutation may confirm it.** Beginning a step and
+confirming it are separate invocations — the mutation happens between them — so
+nothing about the process can tell the run that just created an issue from a
+fresh session looking at an interrupted one. Beginning a step therefore returns
+a token once, to that caller alone, which is not readable from the record;
+confirming requires it back. A resuming session has no conversation history and
+so cannot produce one, which keeps the ordinary confirmation cheap while forcing
+adoption of an interrupted step onto the reconciliation path below, where an
+exact artifact must be approved and matched. Losing the token costs a
+reconciliation, which is the safe direction to fail.
+
+**A confirmed identity is the one its own kind of mutation has, and it must
+agree with itself.** A created issue or epic records its number, its canonical GitHub
+URL naming that number *in the owning repository*, and the `[#N]` token the
+entry will carry; a label records its name
+and the metadata it was created with, both checked against the exact approved
+values the plan carries, since a name in prose is nothing a confirmation can be
+held to; a comment records its comment ID and a URL naming that comment on the
+approved target in the owning repository;
+an edit to an existing artifact records that artifact's identity — the
+approved target, not merely some artifact — and the verified post-edit
+fingerprint. A literal marker, which only a disposition that links an artifact
+somebody else made may supply, is bound to that artifact by the plan naming it
+outright rather than by inferring it from a step — a linked child issue's only
+tracker mutation is often the umbrella epic's checklist edit, which targets the
+epic, so there is no step to infer it from. Those agreements are checked rather than
+assumed: clearing verifies the document's token, so an identity free to record
+one artifact beside another artifact's token would let a record clear against a
+document naming something the tracker never got. Nothing but a created issue or
+epic contributes a token the document must name.
+
+**Every transition is a compare-and-swap, and confirmations are never erased.**
+A failed or interrupted transition leaves the earlier durable value exactly as
+it was, and no transition may drop or rewrite a confirmed step's identity or
+otherwise authorize repeating a mutation GitHub has already accepted.
+
+**The preflight's report survives the preflight's own failure.** The records are
+read before the remote is contacted, and they are what the run has to report: an
+unreachable remote that failed without them would tell a caller holding an
+outstanding transaction nothing about it, at the one moment it most needs to
+know it may not mutate anything.
+
+**The pre-mutation preflight reports both records.** The read-only check of §9.4
+answers for the outstanding publication and the outstanding tracker transaction
+together, and a run stops before its first irreversible action when either
+exists, reporting the document, the selected key, the disposition, the
+transaction state, the completed steps, the ambiguous step if there is one, and
+the steps that remain. It keeps the caller contract it already had: the same
+`clear` and `pending` status vocabulary, and the same publication-tip binding
+the assets extract from it.
+
+**A resuming run re-presents and re-approves; it does not replay.** Confirmed
+steps are verified and never repeated. Remaining steps resume in their recorded
+order, and each one's exact target and payload is presented again and stopped on
+for explicit approval before it executes — §5's approval stop has no exception
+for a run that found its work in a record rather than in a conversation, and the
+recorded payload fingerprint bounds what may be approved rather than substituting
+for the approval. A `mutation-confirmed` or `publication-pending` record offers
+only the completion of that disposition's document mutation and publication. A
+missing, mismatched, or conflicting recorded artifact stops the run instead of
+adopting a similarly titled one. And the recorded publication tip is preparation
+evidence and mismatch reporting only: a resuming run re-runs the read-only
+preflight, re-renders the recorded disposition and recorded identities against
+the tip that reports, and binds to that one — passing the recorded tip would be
+refused as moved on any branch that had advanced, which on a busy default branch
+is every branch.
+
+**An interrupted mutation is ambiguous, and ambiguity is never resolved
+automatically.** A step that began and was never confirmed may have landed or
+not, and server-side idempotency is out of scope, so nothing may retry, adopt a
+candidate, advance, publish, or clear on its own. After read-only verification,
+explicit user approval may bind that step to one exact artifact whose
+repository, target, immutable identity or URL, approved payload, and observable
+postcondition match what was recorded; or may authorize a retry, but only where
+authoritative read-only evidence shows the exact intended postcondition is
+absent. A missing identity, a payload mismatch, a conflicting state, or more
+than one plausible candidate leaves the record unresolved and stops the run. A
+similarly titled artifact is never sufficient evidence.
+
+**Clearing is bound to the published entry, not to reachability.** A record
+resolves only once the recorded entry key's own **terminal index entry** on the
+publication branch carries the recorded disposition and every exact tracker
+identity that disposition requires the document to name. A commit reaching the
+branch proves a commit landed, not that it carried this disposition. The entry
+is the one §4 defines, and it is looked for only in the document's own
+at-a-glance index — the design pair's `## Processing status` ledger, the report
+pair's `## Status` checklist — because that index is the status source of truth
+and a checked task anywhere else is not the cursor: a checklist inside a
+finding's body, an example in a fenced block, a nested list beneath the real
+entry. Within it the entry is a top-level task-list line marked exactly `- [x]` whose
+own key is the recorded one — parsed from the line rather than found in it, so
+`DW-3` and `DW-30` are different entries. That is what distinguishes the three
+states a search for the key and the number cannot tell apart: an entry still `- [ ]`, which the interrupted run never
+marked; an incidental mention in prose, a `Related` pointer, or a code fence;
+and a terminal entry carrying `[no-issue]` or `[deferred]` beside the link,
+which is a different disposition from the one the record holds. Every
+transaction's disposition is a linked one, since the two that mutate no tracker
+acquire no transaction. Where the module reports `not-published` with
+the approved content applied locally — the ordinary outcome for a `pr-atomic`,
+unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
+verification runs against the applied local document, which is the only evidence
+there is and a legitimate terminal state for such a document. That the document
+is one of those is *derived* rather than taken from the caller, and derivation
+takes two things: the same classification the publication module itself applies,
+and that module's own record of what it applied. Classification says only that
+it *would* decline to publish; a document somebody edited by hand looks
+identical from there. So the module records the exact content it wrote whenever
+it applies a disposition to a document it declined to publish, and a local
+resolution verifies the document against that record. A document it never wrote,
+or one changed since, resolves nothing. Otherwise: a document that does
+have a coordination lane belongs on the branch, and clearing it from a locally
+edited cursor would leave the next preflight clear while the entry never landed.
+Where the module reports `not-published` without having written the document, the record stays
+outstanding and the run reports it. Explicitly approved abandonment may clear an
+`intent-only` or `tracker-pending` record without publication, but only against
+authoritative read-only evidence that none of its unconfirmed mutations landed,
+and the run reports every mutation that was already confirmed. Otherwise the
+record stays until the document is reconciled and published.
+
+**The mechanism is one tested module, and the assets hold none of it.**
+`tools/tracker_transaction.py` owns acquisition, every transition, and the
+resolution check, for the same reason `tools/publish_coordination_doc.py` owns
+the publication sequence: a sequence written as shell inside a Markdown asset is
+a chain a reader can reorder or half-apply, and nothing in the tree can execute
+it to find the next defect. `tools/test_tracker_transaction.py` drives it
+against temporary Git repositories. The assets keep the policy this section
+states — when to acquire, what needs approval, what to report — and invoke the
+module.
+
+**It fails closed.** A record that cannot be created, read, or updated stops the
+run before its first irreversible action. There is no path on which an
+unreadable transaction reads as no transaction.
