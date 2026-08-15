@@ -300,13 +300,13 @@ class Fixture:
         finally:
             blob.unlink(missing_ok=True)
 
-    def plant_unreadable_record(self, document="docs/ui-bugs.md"):
+    def plant_unreadable_record(self, document="docs/ui-bugs.md", content="not json"):
         """Leave the reference standing over content no version of this module
         can interpret — the shape a partially written or hand-edited record
         takes."""
         blob = run(
             ["git", "hash-object", "-w", "-t", "blob", "--stdin"],
-            self.docs, input="not json",
+            self.docs, input=content,
         )
         tree = run(
             ["git", "mktree"], self.docs, input=f"100644 blob {blob}\trecord.json\n"
@@ -973,6 +973,85 @@ class TrackerTransactionTests(unittest.TestCase):
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.read()
         self.assertEqual(caught.exception.status, "record-unreadable")
+
+    def test_valid_json_that_is_not_a_record_is_unreadable(self):
+        # Parsing is not the same as being a record. A half-written or
+        # hand-edited document that still parses would otherwise reach the
+        # readers, which index these fields directly, and fail there as a
+        # KeyError — escaping the structured refusal entirely.
+        malformed = (
+            ('{"version": 1}', "missing"),
+            (json.dumps({"version": 1, "repository": "coghex/kanban",
+                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
+                         "disposition": "new-issue", "state": "intent-only",
+                         "steps": []}), "non-empty list"),
+            (json.dumps({"version": 1, "repository": "coghex/kanban",
+                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
+                         "disposition": "new-issue", "state": "intent-only",
+                         "steps": [{"kind": "issue-create"}]}), "is missing"),
+            (json.dumps({"version": 1, "repository": "coghex/kanban",
+                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
+                         "disposition": "new-issue", "state": "wat",
+                         "steps": [{}]}), "not a known transaction state"),
+            (json.dumps({"version": 1, "repository": "coghex/kanban",
+                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
+                         "disposition": "new-issue", "state": "tracker-pending",
+                         "steps": [{"kind": "issue-create", "target": "t",
+                                    "payload_fingerprint": "f",
+                                    "postcondition": "p", "state": "confirmed",
+                                    "identity": None}]}), "records no identity"),
+        )
+        for content, expected in malformed:
+            with self.subTest(content=content[:48]):
+                self.fx.plant_unreadable_record(content=content)
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.read()
+                self.assertEqual(caught.exception.status, "record-unreadable")
+                self.assertIn(expected, caught.exception.message)
+                # And it reaches the preflight as an answer, not an exception.
+                outcome = self.fx.check()
+                self.assertEqual(outcome["status"], "outstanding")
+                self.assertFalse(outcome["record_readable"])
+
+    def test_a_malformed_record_reaches_both_command_lines_as_tracker_state(self):
+        self.fx.plant_unreadable_record(content='{"version": 1}')
+        code, payload = self.fx.cli("--check")
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "outstanding")
+        self.assertFalse(payload["record_readable"])
+        self.assertIn("resolved by hand", payload["next_action"])
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--check-pending",
+            ])
+        preflight = json.loads(buffer.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(preflight["status"], "pending")
+        self.assertEqual(preflight["pending_kinds"], ["tracker-transaction"])
+        self.assertNotIn("internal-error", json.dumps(preflight))
+        self.assertFalse(preflight["tracker_transaction"]["record_readable"])
+
+    def test_the_report_never_raises_even_if_building_it_fails(self):
+        # observed_report promises never to raise, and every caller relies on
+        # that: it runs with a failure already on its way out, and one thrown
+        # from here would replace the refusal it was describing. Building the
+        # report used to sit outside its own guard.
+        self.fx.acquire()
+        original = tracker.transaction_report
+
+        def broken(*args, **kwargs):
+            raise KeyError("steps")
+
+        tracker.transaction_report = broken
+        self.addCleanup(setattr, tracker, "transaction_report", original)
+        report = tracker.observed_report(self.fx.docs, self.fx.ref())
+        self.assertFalse(report["record_readable"])
+        self.assertIsNone(report["acquired"])
+        self.assertIn("resolved by hand", report["next_action"])
 
     def test_the_check_reports_an_unreadable_record_rather_than_raising(self):
         # The preflight's result is what a caller acts on by deciding whether it

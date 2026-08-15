@@ -87,6 +87,13 @@ STATE_MUTATION_CONFIRMED = "mutation-confirmed"
 STATE_PUBLICATION_PENDING = "publication-pending"
 STATE_RESOLVED = "resolved"
 
+RECORD_STATES = (
+    STATE_INTENT_ONLY,
+    STATE_TRACKER_PENDING,
+    STATE_MUTATION_CONFIRMED,
+    STATE_PUBLICATION_PENDING,
+)
+
 STEP_PLANNED = "planned"
 STEP_INTENT = "intent"
 STEP_CONFIRMED = "confirmed"
@@ -110,6 +117,16 @@ STEP_KINDS = (
 # the observable postcondition, because a fresh invocation with no conversation
 # history has nothing else to check a candidate artifact against.
 STEP_PLAN_FIELDS = ("kind", "target", "payload_fingerprint", "postcondition")
+
+# What a record read back from the reference must actually contain. Every reader
+# below indexes these directly, so this is the boundary at which a document that
+# merely parses as JSON stops being mistaken for a record.
+RECORD_FIELDS = (
+    "repository", "document", "entry_key", "disposition", "state", "steps",
+)
+RECORD_STEP_FIELDS = (
+    "kind", "target", "payload_fingerprint", "postcondition", "state", "identity",
+)
 
 DISPOSITIONS = ("new-issue", "existing-issue", "epic-create", "epic-adopt")
 
@@ -226,6 +243,36 @@ def transaction_ref(repository: str, document: str) -> str:
 # ------------------------------------------------------------------ record --
 
 
+def record_fault(record: dict) -> str | None:
+    """What stops `record` being usable, or None when nothing does.
+
+    Checked once, here, rather than defended against at each reader: the readers
+    index these fields directly because a record that reached the reference was
+    written by this module, and the one case that breaks that assumption — a
+    document that is valid JSON but is not a record — has to be caught while it
+    can still be reported as an unreadable transaction.
+    """
+    missing = [field for field in RECORD_FIELDS if field not in record]
+    if missing:
+        return f"it is missing {missing}"
+    if record["state"] not in RECORD_STATES:
+        return f"its state {record['state']!r} is not a known transaction state"
+    steps = record["steps"]
+    if not isinstance(steps, list) or not steps:
+        return "its steps are not a non-empty list"
+    for position, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return f"step {position} is not an object"
+        absent = [field for field in RECORD_STEP_FIELDS if field not in step]
+        if absent:
+            return f"step {position} is missing {absent}"
+        if step["state"] not in (STEP_PLANNED, STEP_INTENT, STEP_CONFIRMED):
+            return f"step {position} has unknown state {step['state']!r}"
+        if step["state"] == STEP_CONFIRMED and not isinstance(step["identity"], dict):
+            return f"step {position} is confirmed but records no identity"
+    return None
+
+
 def read_record(root: Path, ref: str):
     """The durable record and the exact reference value it was read from.
 
@@ -265,6 +312,21 @@ def read_record(root: Path, ref: str):
             "record-unreadable",
             f"the tracker transaction at {ref} is not a version {RECORD_VERSION} "
             "record; it cannot be interpreted and must be resolved by hand",
+            transaction_ref=ref,
+            transaction_commit=observed,
+        )
+    fault = record_fault(record)
+    if fault is not None:
+        # Parsing as JSON is not the same as being a record. Every reader below
+        # indexes these fields directly, so a well-formed-but-incomplete
+        # document — a half-written record, a hand edit — would fail somewhere
+        # deeper as a KeyError, escaping the structured refusal this raise
+        # exists to give and reaching the caller as a generic internal error
+        # with nothing about the transaction in it.
+        raise TransactionError(
+            "record-unreadable",
+            f"the tracker transaction at {ref} is not a well-formed record "
+            f"({fault}); it cannot be interpreted and must be resolved by hand",
             transaction_ref=ref,
             transaction_commit=observed,
         )
@@ -322,6 +384,7 @@ def observed_report(root: Path, ref: str) -> dict:
     """
     try:
         record, observed = read_record(root, ref)
+        return {"record_readable": True} | transaction_report(record, ref, observed)
     except Exception as error:  # noqa: BLE001 - reporting may not fail
         message = getattr(error, "message", str(error))
         return {
@@ -340,7 +403,6 @@ def observed_report(root: Path, ref: str) -> dict:
                 "clearing is permitted until it is resolved by hand"
             ),
         }
-    return {"record_readable": True} | transaction_report(record, ref, observed)
 
 
 def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
