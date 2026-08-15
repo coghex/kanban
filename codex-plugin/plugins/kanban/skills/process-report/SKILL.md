@@ -465,11 +465,15 @@ approval and matches no artifact. Losing the token costs a reconciliation, which
 is the safe direction to fail.
 
 An identity is the one its own kind of mutation actually has, and it must agree
-with itself: a created issue or epic records its number, the URL naming that
-number, and the `[#N]` token the entry will carry; a label records its name and
-the metadata it was created with; a comment records its comment ID and URL; an
-edit to an existing artifact records that artifact's identity and the verified
-post-edit fingerprint. Nothing but a created issue or epic contributes a token
+with itself: a created issue or epic records its number, a URL naming that
+number in `$DOC_REPO`, and the `[#N]` token the entry will carry; a label
+records its name and the metadata it was created with; a comment records its
+comment ID and a URL naming that comment on the approved target in `$DOC_REPO`;
+an edit to an existing artifact records that artifact's identity and the
+verified post-edit fingerprint. The repository is part of the identity, not
+decoration: the document carries only `[#N]`, so an identity free to name
+another repository's issue would let a transaction clear against an artifact
+this one never got. Nothing but a created issue or epic contributes a token
 the document must name.
 
 Not every step returns an issue number and a URL, and the record does not

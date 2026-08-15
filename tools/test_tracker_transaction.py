@@ -784,6 +784,71 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, "identity-invalid")
         self.assertIn("produces no marker", caught.exception.message)
 
+    def test_an_issue_url_in_another_repository_is_refused(self):
+        # Resolution sees only `[#311]` in the document, so an identity free to
+        # name another repository's #311 would let a transaction clear against
+        # an issue this repository never got.
+        self.fx.acquire()
+        self.fx.begin(0)
+        for url in (
+            "https://github.com/other/repo/issues/311",
+            "https://github.com/coghex/other/issues/311",
+            "https://example.com/issues/311",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(0, issue_identity(url=url))
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertIn("of coghex/kanban", caught.exception.message)
+
+    def test_reconciliation_cannot_bind_a_foreign_issue_either(self):
+        # The path that actually reaches this: a human approving a candidate for
+        # an ambiguous step. The target and payload match; only the repository
+        # in the url does not.
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.reconcile(
+                0,
+                issue_identity(
+                    url="https://github.com/other/repo/issues/311",
+                    matched_target="new issue in coghex/kanban",
+                    matched_payload_fingerprint="sha256:body",
+                ),
+            )
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertEqual(self.fx.read()[0]["steps"][0]["state"], "intent")
+
+    def test_a_persisted_foreign_issue_url_makes_the_record_unreadable(self):
+        confirmed = json.loads(record_json())
+        confirmed["state"] = "mutation-confirmed"
+        confirmed["steps"][0]["state"] = "confirmed"
+        confirmed["steps"][0]["identity"] = issue_identity(
+            url="https://github.com/other/repo/issues/311"
+        )
+        self.fx.plant_unreadable_record(content=json.dumps(confirmed))
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.read()
+        self.assertEqual(caught.exception.status, "record-unreadable")
+        self.assertFalse(self.fx.check()["record_readable"])
+
+    def test_a_comment_url_must_be_this_repository_and_the_approved_target(self):
+        self.fx.acquire(comment_plan())
+        self.fx.begin(0)
+        for url, expected in (
+            ("https://github.com/other/repo/issues/288#issuecomment-5303396262",
+             "is not in coghex/kanban"),
+            ("https://github.com/coghex/kanban/issues/288#issuecomment-999",
+             "does not name comment"),
+            ("https://github.com/coghex/kanban/issues/999#issuecomment-5303396262",
+             "not on the approved target"),
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(0, comment_identity(url=url))
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertIn(expected, caught.exception.message)
+
     # -- reconciliation ------------------------------------------------------
 
     def test_reconciliation_binds_an_ambiguous_step_to_one_exact_artifact(self):
@@ -1196,7 +1261,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-3. Checkpoint tracker mutations",
                 "- [ ] DW-3. Checkpoint tracker mutations — [#311]",
             ),
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_incidental_prose_naming_the_key_and_the_link_does_not_resolve(self):
@@ -1206,7 +1271,7 @@ class TrackerTransactionTests(unittest.TestCase):
         self.confirmed_transaction()
         self.resolution_refused(
             DOCUMENT + "\nSee DW-3, which became [#311] last week.\n",
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_a_terminal_entry_with_a_contradictory_marker_does_not_resolve(self):
@@ -1228,7 +1293,7 @@ class TrackerTransactionTests(unittest.TestCase):
     def test_an_entry_the_document_never_names_does_not_resolve(self):
         self.confirmed_transaction()
         self.resolution_refused(
-            DOCUMENT.replace("DW-3", "DW-9"), "no index entry names"
+            DOCUMENT.replace("DW-3", "DW-9"), "no index entry has the key"
         )
 
     def test_the_terminal_forms_the_documents_actually_use_are_accepted(self):
@@ -1256,7 +1321,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-4. Something else",
                 "- [x] DW-4. Something else — [#311]",
             ),
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_a_checked_task_outside_the_index_does_not_resolve(self):
@@ -1273,7 +1338,7 @@ class TrackerTransactionTests(unittest.TestCase):
             ),
             # The index still names DW-3, unchecked; the checked task below is
             # simply not part of the cursor and is never consulted.
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_a_checked_task_in_a_fenced_block_inside_the_index_does_not_resolve(self):
@@ -1285,7 +1350,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-4. Something else\n\n```markdown\n"
                 "- [x] DW-3. Checkpoint tracker mutations — [#311]\n```\n",
             ),
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_a_nested_checked_task_in_the_index_does_not_resolve(self):
@@ -1298,7 +1363,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-3. Checkpoint tracker mutations\n"
                 "  - [x] DW-3. Checkpoint tracker mutations — [#311]",
             ),
-            "no terminal '- [x]' index entry names",
+            "no terminal '- [x]' index entry has the key",
         )
 
     def test_a_document_with_no_index_does_not_resolve(self):
@@ -1318,6 +1383,40 @@ class TrackerTransactionTests(unittest.TestCase):
             "- [ ] DW-4. Something else\n"
         )
         self.assertEqual(self.fx.resolve()["status"], "resolved")
+
+    def test_a_key_that_merely_starts_with_this_one_does_not_resolve(self):
+        # DW-3 and DW-30 are different entries. Under a substring test they are
+        # not, so a terminal DW-30 line carrying the same number would clear a
+        # DW-3 transaction while DW-3's own entry stayed unchecked — and the
+        # next run would repeat the mutation.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "- [ ] DW-4. Something else",
+                "- [x] DW-30. A later finding — [#311]",
+            ),
+            "no terminal '- [x]' index entry has the key",
+        )
+
+    def test_the_key_is_parsed_from_each_documented_entry_form(self):
+        # The forms §4 and the assets actually write, so the parse is pinned
+        # against real ledger lines rather than one fixture's shape.
+        for line, expected in (
+            ("- [x] EPIC. Asset streaming — [#210]", ("x", "EPIC")),
+            ("- [ ] STREAM-1. Define loading — [#211]", (" ", "STREAM-1")),
+            ("- [x] 1. Test suite is one module — [#148]", ("x", "1")),
+            ("- [x] DW-3 — Checkpoint mutations — [#311]", ("x", "DW-3")),
+            ("* [X] DW-3. Checkpoint — [#311]", ("X", "DW-3")),
+            ("  - [x] DW-3. Nested — [#311]", None),
+            ("Some prose about DW-3 and [#311].", None),
+            ("- [x]", None),
+        ):
+            with self.subTest(line=line):
+                parsed = tracker.index_entry(line)
+                if expected is None:
+                    self.assertIsNone(parsed)
+                else:
+                    self.assertEqual(parsed[:2], expected)
 
     def test_reachability_alone_does_not_clear_the_record(self):
         # Requirement 11 and its acceptance bullet: the publication landed, and

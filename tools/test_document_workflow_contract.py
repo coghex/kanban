@@ -304,6 +304,10 @@ CONTRACT_STATEMENTS = {
     "transaction-entry-is-the-one-section-4-defines": (
         "the entry is a top-level task-list line marked exactly - [x]"
     ),
+    "transaction-entry-key-is-parsed-not-searched-for": (
+        "parsed from the line rather than found in it, so DW-3 and DW-30 are "
+        "different entries"
+    ),
     "transaction-clearing-is-bound-to-the-entry": (
         "Clearing is bound to the published entry, not to reachability"
     ),
@@ -454,6 +458,9 @@ TRANSACTION_CLAUSES = {
     ),
     "a-fresh-session-must-reconcile-instead": (
         "a fresh session cannot produce one and must reconcile instead"
+    ),
+    "an-identity-names-its-own-repository": (
+        "the repository is part of the identity, not decoration"
     ),
     "an-identity-must-agree-with-itself": (
         "an identity is the one its own kind of mutation actually has, and it "

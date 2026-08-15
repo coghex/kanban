@@ -698,9 +698,11 @@ exact artifact must be approved and matched. Losing the token costs a
 reconciliation, which is the safe direction to fail.
 
 **A confirmed identity is the one its own kind of mutation has, and it must
-agree with itself.** A created issue or epic records its number, the URL naming
-that number, and the `[#N]` token the entry will carry; a label records its name
-and the metadata it was created with; a comment records its comment ID and URL;
+agree with itself.** A created issue or epic records its number, a URL naming
+that number *in the owning repository*, and the `[#N]` token the entry will
+carry; a label records its name
+and the metadata it was created with; a comment records its comment ID and a URL naming that comment on the
+approved target in the owning repository;
 an edit to an existing artifact records that artifact's identity and the
 verified post-edit fingerprint. Those agreements are checked rather than
 assumed: clearing verifies the document's token, so an identity free to record
@@ -760,9 +762,10 @@ at-a-glance index — the design pair's `## Processing status` ledger, the repor
 pair's `## Status` checklist — because that index is the status source of truth
 and a checked task anywhere else is not the cursor: a checklist inside a
 finding's body, an example in a fenced block, a nested list beneath the real
-entry. Within it the entry is a top-level task-list line marked exactly `- [x]`,
-which is what distinguishes the three states a search for the key and the number
-cannot tell apart: an entry still `- [ ]`, which the interrupted run never
+entry. Within it the entry is a top-level task-list line marked exactly `- [x]` whose
+own key is the recorded one — parsed from the line rather than found in it, so
+`DW-3` and `DW-30` are different entries. That is what distinguishes the three
+states a search for the key and the number cannot tell apart: an entry still `- [ ]`, which the interrupted run never
 marked; an incidental mention in prose, a `Related` pointer, or a code fence;
 and a terminal entry carrying `[no-issue]` or `[deferred]` beside the link,
 which is a different disposition from the one the record holds. Every

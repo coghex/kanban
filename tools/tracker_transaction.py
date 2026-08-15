@@ -138,12 +138,14 @@ ISSUE_IDENTITY_KINDS = ("issue-create", "epic-create")
 
 MARKER_RE = re.compile(r"^\[#\d+\]$")
 
-# §4's terminal checklist entry, which is what a resolved disposition looks like
-# in every document these workflows own. `- [ ]` is an entry the document still
-# owes, and a line that is no checklist entry at all is prose. Anchored at the
-# line start rather than after any indent: the index is one flat line per entry,
-# so an indented task is a nested list somebody wrote inside it.
-TERMINAL_ENTRY_RE = re.compile(r"^[-*]\s*\[[xX]\]\s")
+# §4's index entry: a top-level task-list line, its box, and the rest. Anchored
+# at the line start rather than after any indent, because the index is one flat
+# line per entry — an indented task is a nested list somebody wrote inside it.
+INDEX_ENTRY_RE = re.compile(r"^[-*]\s*\[(?P<box>[ xX])\]\s+(?P<rest>.*)$")
+
+# The trailing `#N` of a step target such as `coghex/kanban#288`, which is the
+# issue a comment or an edit was approved against.
+TARGET_ISSUE_RE = re.compile(r"#(?P<number>\d+)\s*$")
 
 # The heading of the document's at-a-glance index, whose entry lines are the
 # only place a disposition is applied. The design pair writes the first, the
@@ -334,7 +336,9 @@ def record_fault(
             # key. One authority, so the two can never disagree about what a
             # confirmed mutation looks like.
             try:
-                validate_identity(step["identity"], step, position)
+                validate_identity(
+                    step["identity"], step, position, record["repository"]
+                )
             except TransactionError as error:
                 return (
                     f"step {position}'s confirmed identity is unusable "
@@ -852,7 +856,7 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
     return built
 
 
-def validate_identity(identity, step: dict, index: int) -> dict:
+def validate_identity(identity, step: dict, index: int, repository: str) -> dict:
     """The confirmed identity of one mutation, in whatever shape that kind of
     mutation actually has. Requirement 5: a label creation returns a name, an
     issue creation a number and URL, a comment a comment ID, an adoption edit a
@@ -918,11 +922,16 @@ def validate_identity(identity, step: dict, index: int) -> dict:
             raise TransactionError(
                 "identity-invalid", f"step {index} records no url for its issue"
             )
-        if confirmed["url"].rstrip("/").rsplit("/", 1)[-1] != confirmed["id"]:
+        # The repository, not just the number. A bare trailing-component check
+        # accepts another repository's issue #311 for a coghex/kanban
+        # transaction, and resolution — which sees only `[#311]` in the
+        # document — could then clear against it.
+        wanted = f"/{repository.lower()}/issues/{confirmed['id']}"
+        if wanted not in confirmed["url"].lower().rstrip("/") + "/":
             raise TransactionError(
                 "identity-invalid",
                 f"step {index}'s url {confirmed['url']} does not name issue "
-                f"{confirmed['id']}",
+                f"{confirmed['id']} of {repository}",
             )
         if confirmed["document_token"] != f"[#{confirmed['id']}]":
             raise TransactionError(
@@ -944,6 +953,26 @@ def validate_identity(identity, step: dict, index: int) -> dict:
                 "identity-invalid",
                 f"step {index} posted a comment, so it records that comment's id "
                 "and url",
+            )
+        lowered = confirmed["url"].lower()
+        if f"/{repository.lower()}/" not in lowered:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index}'s comment url {confirmed['url']} is not in "
+                f"{repository}",
+            )
+        if f"issuecomment-{confirmed['id'].lower()}" not in lowered:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index}'s comment url {confirmed['url']} does not name "
+                f"comment {confirmed['id']}",
+            )
+        approved = TARGET_ISSUE_RE.search(step["target"])
+        if approved is not None and f"/{approved.group('number')}#" not in lowered:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index}'s comment url {confirmed['url']} is not on the "
+                f"approved target {step['target']}",
             )
     elif not confirmed["fingerprint"]:
         raise TransactionError(
@@ -1063,7 +1092,9 @@ def action_confirm(root, ref, record, observed, index, identity, begin_token) ->
             "approved artifact or authorize a retry once it is proven absent",
             **transaction_report(record, ref, observed),
         )
-    step["identity"] = validate_identity(identity, step, index)
+    step["identity"] = validate_identity(
+        identity, step, index, record["repository"]
+    )
     step["state"] = STEP_CONFIRMED
     step.pop("begin_token_digest", None)
     record["state"] = derived_state(record)
@@ -1111,7 +1142,9 @@ def action_reconcile(root, ref, record, observed, index, identity, candidates) -
             f"not step {index}'s recorded {step['payload_fingerprint']!r}",
             **transaction_report(record, ref, observed),
         )
-    step["identity"] = validate_identity(identity, step, index)
+    step["identity"] = validate_identity(
+        identity, step, index, record["repository"]
+    )
     step["state"] = STEP_CONFIRMED
     step.pop("begin_token_digest", None)
     record["state"] = derived_state(record)
@@ -1223,6 +1256,29 @@ def status_index_lines(text: str) -> list[str] | None:
     return lines if collecting or lines else None
 
 
+def index_entry(line: str):
+    """`(box, key, line)` for an index entry, or None when `line` is not one.
+
+    The key is parsed rather than searched for. Every canonical form these
+    documents use puts it first — `- [x] EPIC. Asset streaming — [#210]`,
+    `- [x] STREAM-1. Define observable loading behavior — [#211]`,
+    `- [x] 1. Test suite is one module — [#148]` — so it is the first token
+    after the box, with the separator that follows it dropped.
+
+    Parsing is what makes `DW-3` and `DW-30` different entries. Under a
+    substring test they are not, so a transaction for `DW-3` would resolve
+    against a terminal `DW-30` line carrying the same number while its own entry
+    stayed unchecked — and the next run would repeat the mutation.
+    """
+    match = INDEX_ENTRY_RE.match(line)
+    if match is None:
+        return None
+    rest = match.group("rest").strip()
+    if not rest:
+        return None
+    return match.group("box"), rest.split()[0].rstrip(".:,;"), line
+
+
 def resolution_fault(record: dict, text: str) -> tuple[str | None, list[str]]:
     """Why the published document does not yet carry this disposition, and the
     entry lines that were considered.
@@ -1264,15 +1320,20 @@ def resolution_fault(record: dict, text: str) -> tuple[str | None, list[str]]:
             "resolve against",
             [],
         )
-    naming = [line for line in index if entry_key in line]
+    entries = [
+        parsed for parsed in (index_entry(line) for line in index) if parsed
+    ]
+    naming = [entry for entry in entries if entry[1] == entry_key]
     if not naming:
-        return f"no index entry names {entry_key!r}", naming
-    terminal = [line for line in naming if TERMINAL_ENTRY_RE.match(line)]
+        return f"no index entry has the key {entry_key!r}", [
+            line for _, _, line in entries
+        ]
+    terminal = [line for box, _, line in naming if box in "xX"]
     if not terminal:
         return (
-            f"no terminal '- [x]' index entry names {entry_key!r}; the "
+            f"no terminal '- [x]' index entry has the key {entry_key!r}; the "
             "disposition was not applied to the document's index",
-            naming,
+            [line for _, _, line in naming],
         )
     carrying = [
         line for line in terminal if all(token in line for token in tokens)
