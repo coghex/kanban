@@ -2892,26 +2892,9 @@ def main() -> None:
                     print(f"- {reason}")
             return
         if args.review_queue:
-            # The daemon below is meant to be stoppable with Ctrl-C and exits
-            # zero for it; this mode cannot. Exit zero is its contract for one
-            # of five outcomes, each carrying a complete result document, and
-            # an aborted pass has neither -- a controller would read the
-            # silence as success.
-            #
-            # Emission is INSIDE this guard, not just the pass: an interrupt
-            # arriving as the document is about to be written would otherwise
-            # reach the outer handler and exit zero with an empty stdout. The
-            # window that keeps its zero is only the one after the write has
-            # completed, which is where this block has already returned.
-            try:
-                emit_review_queue_result(
-                    review_queue(ctx, legacy_policy=args.legacy_policy)
-                )
-            except KeyboardInterrupt:
-                fail(
-                    "approve-issues.py error: --review-queue was interrupted "
-                    "before it produced a complete result"
-                )
+            emit_review_queue_result(
+                review_queue(ctx, legacy_policy=args.legacy_policy)
+            )
             return
         if args.rereview is not None:
             status = rereview_one(
@@ -2965,6 +2948,23 @@ def main() -> None:
     except kanban_config.KanbanConfigError as exc:
         fail(f"approve-issues.py error: {exc}")
     except KeyboardInterrupt:
+        # The daemon is meant to be stoppable with Ctrl-C and exits zero for
+        # it. --review-queue cannot: exit zero is its contract for one of five
+        # outcomes, each carrying a complete result document, so an aborted
+        # pass exiting zero with an empty stdout is a success a controller
+        # would believe.
+        #
+        # Decided at the ONE handler every interrupt inside the run reaches,
+        # rather than by wrapping whichever step was noticed last. Loading
+        # configuration, resolving the repository, the pass itself, and
+        # writing the document are all before the queue block's return, so
+        # every interrupt that lands here is one that arrived before a
+        # complete result -- wherever in the run that was.
+        if args.review_queue:
+            fail(
+                "approve-issues.py error: --review-queue was interrupted "
+                "before it produced a complete result"
+            )
         log("Interrupted; exiting")
 
 

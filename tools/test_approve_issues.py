@@ -1585,19 +1585,44 @@ class ReviewQueueArgumentTests(unittest.TestCase):
 
 
 class ReviewQueueMainTests(unittest.TestCase):
-    """--review-queue's exit status and stdout, driven through main()."""
+    """--review-queue's exit status and stdout, driven through main().
 
-    def _main(self, outcome, *, emit=None):
+    An interrupt is a failure for this mode wherever in the run it lands, so
+    each test injects one at a different seam: configuration, repository
+    resolution, the pass, and the write. Guarding a step at a time would leave
+    the next one open, which is why the refusal lives at the single handler
+    every interrupt inside the run reaches.
+    """
+
+    QUEUE_ARGV = ("--path", ".", "--review-queue", "--json")
+    DAEMON_ARGV = ("--path", ".", "--once")
+
+    def _main(
+        self,
+        *,
+        argv=QUEUE_ARGV,
+        config=None,
+        context=None,
+        queue=None,
+        emit=None,
+        daemon=None,
+    ):
         raw = mock.MagicMock()
         raw.remote_name = "origin"
         resolved = mock.MagicMock()
         resolved.workflow.approval_label = "reviewed:approve"
         resolved.workflow.changes_requested_label = "reviewed:changes"
+        self.document = approve_issues.review_queue_result(
+            "idle", issue=None, model_called=False, message="Nothing to review."
+        )
+
+        def raise_or(injected, value):
+            if injected is not None:
+                raise injected
+            return value
+
         with (
-            mock.patch(
-                "sys.argv",
-                ["approve_issues.py", "--path", ".", "--review-queue", "--json"],
-            ),
+            mock.patch("sys.argv", ["approve_issues.py", *argv]),
             # Restored on exit, so main()'s global assignments cannot leak
             # into another test.
             mock.patch.object(approve_issues, "APPROVE_LABEL", "reviewed:approve"),
@@ -1605,20 +1630,39 @@ class ReviewQueueMainTests(unittest.TestCase):
             mock.patch.object(approve_issues, "VERDICT_LABEL_SPECS", {}),
             mock.patch.object(approve_issues, "LOG_DIR", None),
             mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", Path("/tmp")),
+            mock.patch.object(approve_issues, "log"),
+            mock.patch.object(approve_issues, "append_log_line"),
             mock.patch.object(
                 approve_issues, "resolve_effective_config_path", return_value=None
             ),
             mock.patch.object(
-                approve_issues.kanban_config, "load_raw_config", return_value=(raw, [])
+                approve_issues.kanban_config,
+                "load_raw_config",
+                side_effect=lambda path: raise_or(config, (raw, [])),
             ),
             mock.patch.object(
                 approve_issues.kanban_config, "resolve_config", return_value=resolved
             ),
             mock.patch.object(
-                approve_issues, "get_repo_context", return_value=make_ctx(Path("/tmp"))
+                approve_issues,
+                "get_repo_context",
+                side_effect=lambda *a, **k: raise_or(context, make_ctx(Path("/tmp"))),
             ),
-            mock.patch.object(approve_issues, "append_log_line"),
-            mock.patch.object(approve_issues, "review_queue", side_effect=outcome),
+            mock.patch.object(
+                approve_issues,
+                "blocking_pipeline_incident",
+                return_value=None,
+            ),
+            mock.patch.object(
+                approve_issues,
+                "review_queue",
+                side_effect=lambda ctx, **k: raise_or(queue, self.document),
+            ),
+            mock.patch.object(
+                approve_issues,
+                "daemon_loop",
+                side_effect=lambda ctx, **k: raise_or(daemon, None),
+            ),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
@@ -1638,34 +1682,39 @@ class ReviewQueueMainTests(unittest.TestCase):
                     code = exit_code.code
             return code, stdout.getvalue(), stderr.getvalue()
 
+    def assertInterrupted(self, code, stdout, stderr):
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("interrupted before it produced a complete result", stderr)
+
     def test_a_completed_pass_prints_one_document_and_exits_zero(self):
-        document = approve_issues.review_queue_result(
-            "idle", issue=None, model_called=False, message="Nothing to review."
-        )
-        code, stdout, _ = self._main(lambda ctx, **kwargs: document)
+        code, stdout, _ = self._main()
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(stdout), document)
+        self.assertEqual(json.loads(stdout), self.document)
 
-    def test_an_interrupted_pass_exits_non_zero_with_no_document(self):
-        # An aborted pass is not one of the five successful outcomes, and a
-        # controller reading exit zero and empty stdout would take it for one.
-        code, stdout, stderr = self._main(KeyboardInterrupt)
-        self.assertEqual(code, 1)
-        self.assertEqual(stdout, "")
-        self.assertIn("interrupted before it produced a complete result", stderr)
+    def test_an_interrupt_loading_configuration_is_a_failure(self):
+        self.assertInterrupted(*self._main(config=KeyboardInterrupt))
 
-    def test_an_interrupt_reaching_emission_exits_non_zero_with_no_document(self):
-        # The pass itself completed, so guarding only review_queue would let
-        # this reach the shared handler and exit zero having written nothing.
-        document = approve_issues.review_queue_result(
-            "advanced", issue=7, model_called=True, message="Issue #7 approved."
-        )
+    def test_an_interrupt_resolving_the_repository_is_a_failure(self):
+        # get_repo_context makes a GitHub call, so this is the longest
+        # pre-queue window an operator can actually interrupt.
+        self.assertInterrupted(*self._main(context=KeyboardInterrupt))
+
+    def test_an_interrupt_during_the_pass_is_a_failure(self):
+        self.assertInterrupted(*self._main(queue=KeyboardInterrupt))
+
+    def test_an_interrupt_reaching_emission_is_a_failure(self):
+        self.assertInterrupted(*self._main(emit=KeyboardInterrupt))
+
+    def test_the_daemon_keeps_its_zero_exit_on_interrupt(self):
+        # The shared handler still returns for every other mode; only
+        # --review-queue converts an interrupt into a failure.
         code, stdout, stderr = self._main(
-            lambda ctx, **kwargs: document, emit=KeyboardInterrupt
+            argv=self.DAEMON_ARGV, daemon=KeyboardInterrupt
         )
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertEqual(stdout, "")
-        self.assertIn("interrupted before it produced a complete result", stderr)
+        self.assertNotIn("interrupted", stderr)
 
     def test_the_document_reaches_stdout_in_a_single_write(self):
         # A signal cannot land part-way through one write, so this is what
@@ -1689,7 +1738,7 @@ class ReviewQueueMainTests(unittest.TestCase):
 
     def test_a_failed_pass_exits_non_zero_with_no_document(self):
         code, stdout, stderr = self._main(
-            approve_issues.ApproveError("inventory fetch ceiling")
+            queue=approve_issues.ApproveError("inventory fetch ceiling")
         )
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
@@ -1698,7 +1747,7 @@ class ReviewQueueMainTests(unittest.TestCase):
     def test_an_invalid_issue_exits_non_zero_with_no_document(self):
         with mock.patch.dict(os.environ, {"APPROVE_ISSUES_MANAGED": "1"}):
             code, stdout, stderr = self._main(
-                approve_issues.InvalidIssueError(7, "issue #7 remains INVALID")
+                queue=approve_issues.InvalidIssueError(7, "issue #7 remains INVALID")
             )
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")

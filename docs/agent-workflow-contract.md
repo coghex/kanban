@@ -324,11 +324,13 @@ arithmetic, which §2.3 owns.
   pipeline incident, a GitHub or model failure, an inventory it cannot prove
   complete, and any indeterminate post-review state are failures: a non-zero
   exit with diagnostics on stderr and **no** document on stdout that a caller
-  could read as `idle`, `advanced`, `retry`, or `busy`. An interruption at any
-  point before the document has been written in full is a failure too, unlike
-  the daemon's zero-exit Ctrl-C: an aborted pass is none of the five outcomes,
-  and a controller would otherwise read the silence as success. The document
-  itself is written in a single call, so a caller never reads a truncated one.
+  could read as `idle`, `advanced`, `retry`, or `busy`. An interruption is a
+  failure for this mode wherever in the run it lands — loading configuration,
+  resolving the repository, the pass itself, or writing the document — unlike
+  the daemon's deliberate zero-exit Ctrl-C: an aborted pass is none of the
+  five outcomes, and a controller would otherwise read the silence as success.
+  The document itself is written in a single call, so a caller never reads a
+  truncated one.
 - **Required authority:** the same GitHub write scope as PR review for
   `--review`/`--rereview` and for the one issue `--review-queue` reviews
   (`--check` performs no GitHub write); local read
