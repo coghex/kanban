@@ -36,9 +36,11 @@ import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.AutoSolve (boardPullRequestNumbers)
+import Kanban.Review (ReviewStage (..))
 import Kanban.UI.Board (trackerHeaderText)
 import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate, settledSessionRefusal)
 import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
+import Kanban.UI.Review (deferredRevisionLaunches)
 import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Search (entriesFor, selectableRows)
 import Kanban.UI.Selection (selectedEntry)
@@ -54,7 +56,7 @@ import Kanban.Worker
     WorkerTask (..),
   )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
-import Spec.Support.App (testAppState)
+import Spec.Support.App (testAppState, testReviewSession)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
 import Test.Hspec
 
@@ -487,6 +489,28 @@ refusalSpec = describe "read-only history refusals" $ do
         | subject <- [IssueId 800, IssueId 801, PullRequestId 820, PullRequestId 830]
       ]
 
+  -- The deferred launch boundary. A revision session is created while the
+  -- review backend is still starting, so the turn it is waiting for is
+  -- started an arbitrary time later — long enough for a refresh to settle the
+  -- issue underneath it.
+  it "starts no deferred revision turn for an issue that settled while the backend started" $ do
+    settled <- settledState
+    let waiting number = withRevisionSession number settled
+        (liveLaunches, settledLaunches) = deferredRevisionLaunches (waiting 800)
+        (staleLaunches, staleRefusals) = deferredRevisionLaunches (waiting 940)
+    -- The issue is still live, so its turn is started and nothing refused.
+    map (.issueNumber) liveLaunches `shouldBe` [800]
+    settledLaunches `shouldBe` []
+    -- The issue settled while the backend was starting, so no turn is
+    -- started — and the session is refused rather than left waiting for one.
+    staleLaunches `shouldBe` []
+    staleRefusals `shouldBe` [(940, expectedNotice (IssueItem (closedIssue 940)))]
+
+  it "leaves a revision session that already has its turn alone" $ do
+    settled <- settledState
+    let running = withRunningRevisionSession 940 settled
+    deferredRevisionLaunches running `shouldBe` ([], [])
+
   -- The merge chain, refused at the launch decision itself rather than only
   -- at the key press: it outranks the wrong-kind, in-flight and
   -- drainer-state answers this same function would otherwise give.
@@ -740,6 +764,30 @@ withWorker task state =
 
 testWorkerId :: WorkerId
 testWorkerId = WorkerId "worker-1"
+
+-- | A revision session in the state a backend that is still starting leaves
+-- behind: created, waiting, and with no turn of its own yet.
+withRevisionSession :: Int -> AppState -> AppState
+withRevisionSession issueNumber = withReviewSessionDetail issueNumber Nothing
+
+-- | The same session once its turn has been started, which a later backend
+-- start must not launch a second time.
+withRunningRevisionSession :: Int -> AppState -> AppState
+withRunningRevisionSession issueNumber = withReviewSessionDetail issueNumber (Just "thread-1")
+
+withReviewSessionDetail :: Int -> Maybe Text -> AppState -> AppState
+withReviewSessionDetail issueNumber threadId state =
+  state {appReviewSessions = Map.singleton issueNumber session}
+  where
+    base = testReviewSession (baseIssue issueNumber []) ReviewStarting
+    session =
+      base
+        { sessionDetail =
+            base.sessionDetail
+              { reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = threadId
+              }
+        }
 
 solveWorkerOn :: Int -> WorkerTask
 solveWorkerOn issueNumber = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly ClaudeSolver)
