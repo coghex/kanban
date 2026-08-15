@@ -496,7 +496,9 @@ is the safe direction to fail.
 An identity is the one its own kind of mutation actually has, and it must agree
 with itself: a created issue or epic records its number, a URL naming that
 number in `$DOC_REPO`, and the `[#N]` token the entry will carry; a label
-records its name and the metadata it was created with; a comment records its
+records its name and the metadata it was created with, both of which must be the
+exact approved values the plan carries as `approved_name` and
+`approved_metadata`; a comment records its
 comment ID and a URL naming that comment on the approved target in `$DOC_REPO`;
 an edit to an existing artifact records that artifact's identity and the
 verified post-edit fingerprint. Every one of those is bound to what was

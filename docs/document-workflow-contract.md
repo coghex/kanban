@@ -701,7 +701,9 @@ reconciliation, which is the safe direction to fail.
 agree with itself.** A created issue or epic records its number, its canonical GitHub
 URL naming that number *in the owning repository*, and the `[#N]` token the
 entry will carry; a label records its name
-and the metadata it was created with; a comment records its comment ID and a URL naming that comment on the
+and the metadata it was created with, both checked against the exact approved
+values the plan carries, since a name in prose is nothing a confirmation can be
+held to; a comment records its comment ID and a URL naming that comment on the
 approved target in the owning repository;
 an edit to an existing artifact records that artifact's identity — the
 approved target, not merely some artifact — and the verified post-edit
@@ -719,6 +721,12 @@ epic contributes a token the document must name.
 A failed or interrupted transition leaves the earlier durable value exactly as
 it was, and no transition may drop or rewrite a confirmed step's identity or
 otherwise authorize repeating a mutation GitHub has already accepted.
+
+**The preflight's report survives the preflight's own failure.** The records are
+read before the remote is contacted, and they are what the run has to report: an
+unreachable remote that failed without them would tell a caller holding an
+outstanding transaction nothing about it, at the one moment it most needs to
+know it may not mutate anything.
 
 **The pre-mutation preflight reports both records.** The read-only check of §9.4
 answers for the outstanding publication and the outstanding tracker transaction

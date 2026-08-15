@@ -982,41 +982,53 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
             "status": "outstanding",
             "message": getattr(error, "message", str(error)),
         } | module.observed_report(resolved, module.transaction_ref(owner, document))
-    # Not check=False: the tip this returns becomes the caller's binding, and a
-    # binding minted from a stale cached ref is worse than no preflight at all
-    # — it reads as current and licenses a publication against a document that
-    # has already moved.
-    git(["fetch", "origin", branch], cwd=resolved)
-    observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
     kinds = []
     if recorded:
         kinds.append("publication")
     if tracker["status"] != "clear":
         kinds.append("tracker-transaction")
-    outcome = {
-        "status": "pending" if kinds else "clear",
-        "document": document,
-        "pending_ref": pending,
-        "publication_tip": observed_tip,
-        "pending_kinds": kinds,
-        "tracker_transaction": tracker,
-    }
-    if not recorded:
-        return outcome
-    landed = is_ancestor(resolved, recorded, f"origin/{branch}")
-    return outcome | {
-        "pending_commit": recorded,
-        "recorded_blob": blob_at(resolved, recorded, document),
-        "already_landed": landed,
-        "resolution": (
-            "the recorded publication reached the branch; re-run publication with "
-            "the recorded content to reconcile and clear it"
-            if landed
-            else "re-run publication with the recorded content to retry it, or "
-            "clear the record deliberately; do not approve a different "
-            "disposition for this document first"
-        ),
-    }
+    try:
+        # Not check=False: the tip this returns becomes the caller's binding,
+        # and a binding minted from a stale cached ref is worse than no
+        # preflight at all — it reads as current and licenses a publication
+        # against a document that has already moved.
+        git(["fetch", "origin", branch], cwd=resolved)
+        observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
+        outcome = {
+            "status": "pending" if kinds else "clear",
+            "document": document,
+            "pending_ref": pending,
+            "publication_tip": observed_tip,
+            "pending_kinds": kinds,
+            "tracker_transaction": tracker,
+        }
+        if not recorded:
+            return outcome
+        landed = is_ancestor(resolved, recorded, f"origin/{branch}")
+        return outcome | {
+            "pending_commit": recorded,
+            "recorded_blob": blob_at(resolved, recorded, document),
+            "already_landed": landed,
+            "resolution": (
+                "the recorded publication reached the branch; re-run publication "
+                "with the recorded content to reconcile and clear it"
+                if landed
+                else "re-run publication with the recorded content to retry it, or "
+                "clear the record deliberately; do not approve a different "
+                "disposition for this document first"
+            ),
+        }
+    except Exception as error:  # noqa: BLE001 - the report survives the failure
+        # An unreachable remote, a branch that no longer exists, a broken object
+        # database. Whatever it is, the records were already read and they are
+        # what the run has to report: failing here without them tells a caller
+        # holding an outstanding transaction nothing about it, at the one moment
+        # it most needs to know it may not mutate anything.
+        if not isinstance(error, PublishError):
+            error = PublishError("internal-error", f"{type(error).__name__}: {error}")
+        error.detail.setdefault("pending_kinds", kinds)
+        error.detail.setdefault("tracker_transaction", tracker)
+        raise error
 
 
 def failure_states(root: Path, document: str, *, commit: str | None,

@@ -167,6 +167,8 @@ def label_plan(**overrides):
                 "target": "label agent-workflows in coghex/kanban",
                 "payload_fingerprint": "sha256:label",
                 "postcondition": "the label exists with the approved color",
+                "approved_name": "agent-workflows",
+                "approved_metadata": {"color": "ededed", "description": "x"},
             },
             {
                 "kind": "epic-create",
@@ -749,6 +751,56 @@ class TrackerTransactionTests(unittest.TestCase):
             {"color": "ededed", "description": "x"},
         )
 
+    def test_a_label_must_be_the_approved_one(self):
+        # A plan for one label could confirm another, and the epic would then
+        # publish with the approved label never created.
+        self.fx.acquire(label_plan())
+        self.fx.begin(0)
+        for identity, expected in (
+            (label_identity(id="something-else"), "but the approved one is"),
+            (label_identity(metadata={"color": "ff0000", "description": "x"}),
+             "is not the approved"),
+            (label_identity(metadata={"color": "ededed"}), "is not the approved"),
+        ):
+            with self.subTest(identity=identity):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(0, identity)
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertIn(expected, caught.exception.message)
+        self.assertEqual(self.fx.read()[0]["steps"][0]["state"], "intent")
+
+    def test_a_label_step_must_carry_its_approved_name_and_metadata(self):
+        for missing in ("approved_name", "approved_metadata"):
+            with self.subTest(missing=missing):
+                broken = label_plan()
+                broken["steps"][0][missing] = "" if missing == "approved_name" else {}
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.acquire(broken)
+                self.assertEqual(caught.exception.status, "plan-invalid")
+                self.assertIn(missing, caught.exception.message)
+
+    def test_a_numbered_step_may_not_carry_an_approved_name(self):
+        # The fields belong to artifacts identified by name; on a step whose
+        # artifact has a number they would be a second, unchecked identity.
+        broken = plan()
+        broken["steps"][0]["approved_name"] = "agent-workflows"
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(broken)
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("identified by number", caught.exception.message)
+
+    def test_a_persisted_mismatched_label_identity_is_unreadable(self):
+        self.fx.acquire(label_plan())
+        self.fx.begin(0)
+        self.fx.confirm(0, label_identity())
+        record, _ = self.fx.read()
+        record["steps"][0]["identity"]["id"] = "something-else"
+        self.fx.plant_unreadable_record(content=json.dumps(record))
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.read()
+        self.assertEqual(caught.exception.status, "record-unreadable")
+        self.assertIn("confirmed identity is unusable", caught.exception.message)
+
     def test_a_label_without_metadata_is_refused(self):
         self.fx.acquire(label_plan())
         self.fx.begin(0)
@@ -794,6 +846,8 @@ class TrackerTransactionTests(unittest.TestCase):
                     "payload_fingerprint": "sha256:label",
                     "postcondition": "the label exists",
                     "provides_marker": True,
+                    "approved_name": "agent-workflows",
+                    "approved_metadata": {"color": "ededed", "description": "x"},
                 }
             ],
         )
@@ -1921,6 +1975,36 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(outcome["pending_kinds"], ["tracker-transaction"])
         self.assertEqual(outcome["tracker_transaction"]["message"], "planted")
         self.assertIn("next_action", outcome["tracker_transaction"])
+
+    def test_an_unreachable_remote_still_reports_the_outstanding_transaction(self):
+        # The records are read before the fetch, and they are what the run has
+        # to report. Failing here without them tells a caller holding an
+        # outstanding transaction nothing about it, at the one moment it most
+        # needs to know it may not mutate anything.
+        self.fx.acquire()
+        self.fx.origin.rename(self.fx.origin.with_suffix(".gone"))
+        with self.assertRaises(publisher.PublishError) as caught:
+            self.preflight()
+        detail = caught.exception.detail
+        self.assertEqual(detail["pending_kinds"], ["tracker-transaction"])
+        self.assertEqual(detail["tracker_transaction"]["entry_key"], "DW-3")
+        self.assertTrue(detail["tracker_transaction"]["acquired"])
+
+    def test_the_check_pending_command_line_reports_it_too(self):
+        self.fx.acquire()
+        self.fx.origin.rename(self.fx.origin.with_suffix(".gone"))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--check-pending",
+            ])
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["pending_kinds"], ["tracker-transaction"])
+        self.assertEqual(payload["tracker_transaction"]["entry_key"], "DW-3")
+        self.assertIn("next_action", payload["tracker_transaction"])
 
     def test_an_unloadable_tracker_module_fails_the_preflight_closed(self):
         original = publisher.tracker_transaction_module

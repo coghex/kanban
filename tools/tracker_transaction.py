@@ -118,6 +118,12 @@ STEP_KINDS = (
 # history has nothing else to check a candidate artifact against.
 STEP_PLAN_FIELDS = ("kind", "target", "payload_fingerprint", "postcondition")
 
+# The kinds whose artifact is identified by a name and a body of metadata rather
+# than by a number. Their approved values are carried structurally, because a
+# free-text target like "label agent-workflows in coghex/kanban" is not
+# something a confirmation can be checked against.
+NAMED_ARTIFACT_KINDS = ("label-create",)
+
 # What a record read back from the reference must actually contain. Every reader
 # below indexes these directly, so this is the boundary at which a document that
 # merely parses as JSON stops being mistaken for a record.
@@ -349,6 +355,25 @@ def record_fault(
             return f"step {position} has unknown kind {step['kind']!r}"
         if not isinstance(step.get("provides_marker", False), bool):
             return f"step {position} has a non-boolean provides_marker"
+        named = step["kind"] in NAMED_ARTIFACT_KINDS
+        approved_name = step.get("approved_name")
+        approved_metadata = step.get("approved_metadata")
+        if named:
+            if not isinstance(approved_name, str) or not approved_name.strip():
+                return (
+                    f"step {position} creates a named artifact and must carry the "
+                    "exact approved_name"
+                )
+            if not isinstance(approved_metadata, dict) or not approved_metadata:
+                return (
+                    f"step {position} creates a named artifact and must carry the "
+                    "exact approved_metadata"
+                )
+        elif approved_name is not None or approved_metadata is not None:
+            return (
+                f"step {position} is a {step['kind']}, which is identified by "
+                "number rather than by an approved name and metadata"
+            )
         if step["state"] not in (STEP_PLANNED, STEP_INTENT, STEP_CONFIRMED):
             return f"step {position} has unknown state {step['state']!r}"
         if step["state"] == STEP_CONFIRMED:
@@ -877,6 +902,17 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
                 f"{list(STEP_KINDS)}",
             )
         step["provides_marker"] = bool(raw.get("provides_marker"))
+        if step["kind"] in NAMED_ARTIFACT_KINDS:
+            step["approved_name"] = _text(raw.get("approved_name"))
+            step["approved_metadata"] = raw.get("approved_metadata")
+        elif raw.get("approved_name") is not None or (
+            raw.get("approved_metadata") is not None
+        ):
+            raise TransactionError(
+                "plan-invalid",
+                f"step {position} is a {step['kind']}, which is identified by "
+                "number rather than by an approved name and metadata",
+            )
         step["state"] = STEP_PLANNED
         step["identity"] = None
         steps.append(step)
@@ -1018,6 +1054,23 @@ def validate_identity(identity, step: dict, index: int, repository: str) -> dict
                 "identity-invalid",
                 f"step {index} created a label, whose identity is its name and the "
                 "metadata it was created with",
+            )
+        # And it must be *the approved* label. The plan carries the exact name
+        # and metadata that were signed off, so what now exists is checked
+        # against them rather than merely being well-shaped — otherwise a plan
+        # for one label could confirm another, and the epic would publish with
+        # the approved label never created.
+        if confirmed["id"] != step.get("approved_name"):
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} created label {confirmed['id']!r}, but the approved "
+                f"one is {step.get('approved_name')!r}",
+            )
+        if confirmed["metadata"] != step.get("approved_metadata"):
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index}'s label metadata {confirmed['metadata']!r} is not "
+                f"the approved {step.get('approved_metadata')!r}",
             )
     elif kind == "issue-comment":
         if not confirmed["url"]:

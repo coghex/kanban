@@ -280,6 +280,9 @@ CONTRACT_STATEMENTS = {
         "Every transition is a compare-and-swap, and confirmations are never "
         "erased"
     ),
+    "transaction-preflight-report-survives-failure": (
+        "The preflight's report survives the preflight's own failure"
+    ),
     "transaction-preflight-reports-both": (
         "The pre-mutation preflight reports both records"
     ),
@@ -458,6 +461,10 @@ TRANSACTION_CLAUSES = {
     ),
     "a-fresh-session-must-reconcile-instead": (
         "a fresh session cannot produce one and must reconcile instead"
+    ),
+    "a-label-is-bound-to-its-approved-values": (
+        "both of which must be the exact approved values the plan carries as "
+        "approved_name and approved_metadata"
     ),
     "an-identity-is-bound-to-what-was-approved": (
         "every one of those is bound to what was approved rather than merely "
