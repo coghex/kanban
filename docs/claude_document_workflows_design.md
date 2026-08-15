@@ -30,8 +30,8 @@ concrete precondition
 - [x] EPIC. Make the document and issue-drafting workflow loops brand-complete — [#260]
 - [x] CDW-1. Merge the decision-authority guardrails into the tracked design workflows — [#239]
 - [x] CDW-2. Derive Claude counterparts for design-epic and process-design-doc — [#241]
-- [ ] CDW-3. Package the report write side for both brands
-- [ ] CDW-4. Package issue-rereview for both brands
+- [x] CDW-3. Package the report write side for both brands — [#328]
+- [x] CDW-4. Package issue-rereview for both brands — [#240]
 
 ## Epic contract
 
@@ -593,7 +593,7 @@ Resolved by D-8.
   (CDW-4); emptying §3.5's Codex-only set.
 - **Open questions:** None
 
-### CDW-3. Package the report write side for both brands
+### [#328] CDW-3. Package the report write side for both brands
 
 - **Outcome:** `/draft-report` exists as a Claude command; `note-problem`
   exists in both plugins as a cross-brand pair; the declared sets, the
@@ -615,8 +615,9 @@ Resolved by D-8.
   - `tools/test_claude_plugin.py` discovery twelve→fourteen with parity still
     five; `tools/test_agent_workflow_contract.py`'s enumerated surfaces and
     `docs/agent-workflow-contract.md`; the three READMEs and the manifest.
-- **Filed as:** not filed. D-6 removes this slice's work from #241, so it
-  becomes a new issue.
+- **Filed as:** #328, created 2026-08-15 once CDW-2 (#241) merged and D-7's
+  serialization cleared. D-6 removed this slice's work from #241, so it became
+  a new issue.
 - **Phase:** 2
 - **Depends on:** CDW-1, CDW-2 (D-7)
 - **Ordering:** not on the critical path
@@ -629,7 +630,7 @@ Resolved by D-8.
 - **Out of scope:** `backlog` (stays personal, D-1).
 - **Open questions:** None
 
-### CDW-4. Package issue-rereview for both brands
+### [#240] CDW-4. Package issue-rereview for both brands
 
 - **Outcome:** issue-rereview is a declared cross-brand pair under the
   drafting contract; the issue-review assets point at it instead of
@@ -638,8 +639,8 @@ Resolved by D-8.
   `DRAFTING_WORKFLOW_NAMES`/path constants and affected rule families in
   its test, the two issue-review asset sentences, backend-resolution
   parity with issue-review.
-- **Filed as:** #240 (open, `reviewed:approve`). Covers this slice as
-  written; its stated prerequisite #238 has merged (PR #244).
+- **Filed as:** #240, merged as PR #284 on 2026-08-12. Covers this slice as
+  written; its stated prerequisite #238 had merged (PR #244).
 - **Phase:** 2
 - **Depends on:** none (contract-independent of CDW-1..3)
 - **Ordering:** independent
