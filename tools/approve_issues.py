@@ -2886,9 +2886,23 @@ def main() -> None:
                     print(f"- {reason}")
             return
         if args.review_queue:
-            emit_review_queue_result(
-                review_queue(ctx, legacy_policy=args.legacy_policy)
-            )
+            try:
+                result = review_queue(ctx, legacy_policy=args.legacy_policy)
+            except KeyboardInterrupt:
+                # The daemon below is meant to be stoppable with Ctrl-C and
+                # exits zero for it; this mode cannot. Exit zero is its
+                # contract for one of five outcomes, each carrying a result
+                # document, and an aborted pass has neither -- a controller
+                # would read the silence as success. Caught HERE rather than
+                # beside the daemon's handler so the refusal covers exactly
+                # the window before the document is written: an interrupt
+                # arriving after it has already been printed leaves a pass
+                # that really did complete, and keeps its zero.
+                fail(
+                    "approve-issues.py error: --review-queue was interrupted "
+                    "before it produced a result"
+                )
+            emit_review_queue_result(result)
             return
         if args.rereview is not None:
             status = rereview_one(

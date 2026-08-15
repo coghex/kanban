@@ -11,6 +11,7 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 import argparse
 import io
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -1580,6 +1581,85 @@ class ReviewQueueArgumentTests(unittest.TestCase):
         code, _ = self._main(["--self-test"], expect_exit=False)
         self.assertEqual(code, 0)
         self.self_test.assert_called_once_with()
+
+
+class ReviewQueueMainTests(unittest.TestCase):
+    """--review-queue's exit status and stdout, driven through main()."""
+
+    def _main(self, outcome):
+        raw = mock.MagicMock()
+        raw.remote_name = "origin"
+        resolved = mock.MagicMock()
+        resolved.workflow.approval_label = "reviewed:approve"
+        resolved.workflow.changes_requested_label = "reviewed:changes"
+        with (
+            mock.patch(
+                "sys.argv",
+                ["approve_issues.py", "--path", ".", "--review-queue", "--json"],
+            ),
+            # Restored on exit, so main()'s global assignments cannot leak
+            # into another test.
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "reviewed:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "reviewed:changes"),
+            mock.patch.object(approve_issues, "VERDICT_LABEL_SPECS", {}),
+            mock.patch.object(approve_issues, "LOG_DIR", None),
+            mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", Path("/tmp")),
+            mock.patch.object(
+                approve_issues, "resolve_effective_config_path", return_value=None
+            ),
+            mock.patch.object(
+                approve_issues.kanban_config, "load_raw_config", return_value=(raw, [])
+            ),
+            mock.patch.object(
+                approve_issues.kanban_config, "resolve_config", return_value=resolved
+            ),
+            mock.patch.object(
+                approve_issues, "get_repo_context", return_value=make_ctx(Path("/tmp"))
+            ),
+            mock.patch.object(approve_issues, "append_log_line"),
+            mock.patch.object(approve_issues, "review_queue", side_effect=outcome),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            try:
+                approve_issues.main()
+                code = 0
+            except SystemExit as exit_code:
+                code = exit_code.code
+            return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_a_completed_pass_prints_one_document_and_exits_zero(self):
+        document = approve_issues.review_queue_result(
+            "idle", issue=None, model_called=False, message="Nothing to review."
+        )
+        code, stdout, _ = self._main(lambda ctx, **kwargs: document)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout), document)
+
+    def test_an_interrupted_pass_exits_non_zero_with_no_document(self):
+        # An aborted pass is not one of the five successful outcomes, and a
+        # controller reading exit zero and empty stdout would take it for one.
+        code, stdout, stderr = self._main(KeyboardInterrupt)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("interrupted before it produced a result", stderr)
+
+    def test_a_failed_pass_exits_non_zero_with_no_document(self):
+        code, stdout, stderr = self._main(
+            approve_issues.ApproveError("inventory fetch ceiling")
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("inventory fetch ceiling", stderr)
+
+    def test_an_invalid_issue_exits_non_zero_with_no_document(self):
+        with mock.patch.dict(os.environ, {"APPROVE_ISSUES_MANAGED": "1"}):
+            code, stdout, stderr = self._main(
+                approve_issues.InvalidIssueError(7, "issue #7 remains INVALID")
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("INVALID", stderr)
 
 
 class LegacyDaemonUnchangedTests(unittest.TestCase):
