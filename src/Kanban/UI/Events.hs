@@ -12,6 +12,7 @@ module Kanban.UI.Events
     incidentsAction,
     killSelectionNotice,
     mutatesSelectedWork,
+    settledSessionRefusal,
     overlayMouseAction,
     quitDecision,
     readOnlyHistoryGate,
@@ -59,7 +60,7 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
-import Kanban.UI.Filter (readOnlyHistoryRefusal)
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys
 import Kanban.UI.SessionCore
 import Kanban.UI.State
@@ -688,6 +689,12 @@ killSelectedAgentSession = do
   case safeIndex resolved.processSelectionRow entries of
     Nothing -> setNotice "No agent session is selected"
     Just entry
+      -- The processes overlay reaches every kill route without going through
+      -- a card, so the read-only-history refusal has to be asked here too, and
+      -- ahead of the process-presence answer below: a session left over from
+      -- work that has since closed or merged is history, whatever it still
+      -- holds open.
+      | Just notice <- settledSessionRefusal state entry.agentSessionRef -> setNotice notice
       | not entry.agentSessionLive -> setNotice (entry.agentSessionLabel <> " has no live process to kill")
       | otherwise -> case entry.agentSessionRef of
           SolveAgent issueNumber -> killSolveAgent issueNumber
@@ -707,6 +714,17 @@ killSelectedAgentSession = do
                 )
               void . liftIO . forkIO $ terminateWorker descriptor
               setNotice ("Killing " <> entry.agentSessionLabel <> " and its process tree…")
+
+-- | Whether one agent session names work the completed generation has
+-- settled, and what to say instead of acting on it.
+--
+-- The processes overlay is keyed by session rather than by card, so this is
+-- how a row reaches the same refusal every board and overlay route already
+-- asks for. A worker whose descriptor is gone names no work at all, which is
+-- the one case there is nothing left to refuse.
+settledSessionRefusal :: AppState -> AgentSessionRef -> Maybe Text
+settledSessionRefusal state reference =
+  agentSessionSubject state reference >>= readOnlyHistoryRefusalFor state
 
 killSolveAgent :: Int -> EventM Name AppState ()
 killSolveAgent issueNumber = do

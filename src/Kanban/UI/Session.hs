@@ -4,6 +4,7 @@ module Kanban.UI.Session
     IncidentActivation (..),
     ReviewTarget (..),
     agentSessionEntries,
+    agentSessionSubject,
     drainerSourceState,
     incidentEntries,
     incidentSourceLabel,
@@ -457,6 +458,23 @@ data BoardWorkLocation = BoardWorkLocation
     boardWorkExpands :: Maybe Int
   }
   deriving stock (Eq, Show)
+
+-- | The board work one agent session acts on, as the identity a lifecycle
+-- question is asked with.
+--
+-- Every session is keyed by a number already, except a persistent worker,
+-- which is keyed by its own identifier and names its target through the task
+-- it was created for. 'Nothing' means the worker is no longer registered, so
+-- there is nothing left to act on either way.
+agentSessionSubject :: AppState -> AgentSessionRef -> Maybe ItemId
+agentSessionSubject _ (SolveAgent issueNumber) = Just (IssueId issueNumber)
+agentSessionSubject _ (ReviewAgent issueNumber) = Just (IssueId issueNumber)
+agentSessionSubject _ (PullRequestAgent number) = Just (PullRequestId number)
+agentSessionSubject state (WorkerAgent identifier) = do
+  descriptor <- Map.lookup identifier state.appWorkers
+  pure $ case descriptor.workerDescriptorSpec.workerTask of
+    SolveWorkerTaskKind task -> IssueId task.solveWorkerIssueNumber
+    PullRequestWorkerTaskKind task -> PullRequestId task.pullRequestWorkerNumber
 
 -- | Finds the row a number names, in the four shapes the board can hold it.
 --

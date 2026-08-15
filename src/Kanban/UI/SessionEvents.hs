@@ -284,18 +284,22 @@ handleSessionInputEvent ops hooks key = \case
   SessionInputInsert character -> modifySession ops key (insertSessionInput character)
   SessionInputSubmit -> whenWorkIsLive (hooks.sessionHookSubmit key)
   SessionInputCycle -> cycleSession ops key
-  -- Interrupting is deliberately not guarded. It stops work rather than
-  -- advancing it, and a turn still running against work that has just settled
-  -- is exactly the turn a user must still be able to stop.
-  SessionInputInterrupt -> hooks.sessionHookInterrupt key
+  SessionInputInterrupt -> whenWorkIsLive (hooks.sessionHookInterrupt key)
   SessionInputChoice choiceIndex -> whenWorkIsLive (hooks.sessionHookChoice key choiceIndex)
   where
-    -- The launch boundary for a session left open across a refresh. A session
-    -- can sit waiting for input for as long as the user leaves the overlay up,
-    -- so the answer it is about to resume with may be aimed at work that has
-    -- since closed or merged. Asked here rather than in each kind's own hook
-    -- so no overlay can advance settled history, and asked before the hook
-    -- runs so nothing is appended to a transcript that will not be sent.
+    -- The launch and termination boundary for a session left open across a
+    -- refresh. A session can sit on screen for as long as the user leaves the
+    -- overlay up, so the answer it is about to resume with — or the Ctrl-C
+    -- about to stop its turn — may be aimed at work that has since closed or
+    -- merged. Asked here rather than in each kind's own hook so no overlay can
+    -- act on settled history, and asked before the hook runs so nothing is
+    -- appended to a transcript that will not be sent.
+    --
+    -- Interrupting is guarded alongside the rest because §8 refuses every
+    -- termination boundary, not only the board's kill binding. A process still
+    -- running against work that settled underneath it is stopped the way any
+    -- other stray agent process is, rather than through a card that is now
+    -- history.
     whenWorkIsLive action = do
       state <- get
       case readOnlyHistoryRefusalFor state (hooks.sessionHookSubject key) of

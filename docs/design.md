@@ -730,6 +730,14 @@ or termination boundary, so a chooser, details overlay, or session opened
 before a refresh cannot act after the item completes. Details and the item URL
 remain readable.
 
+Every route reaching those actions is covered, not only the board's own keys:
+a session overlay's Enter, numbered choice and Ctrl-C, and every row of the
+processes overlay — which is keyed by session rather than by card, and resolves
+a persistent worker's subject through the task it was created for. Termination
+is refused on the same terms as launch. An agent still running against work
+that settled underneath it is therefore stopped the way any other stray agent
+process is, rather than through a card that is now history.
+
 Live workflow behavior never observes completed data at all. The autosolve
 baseline and worker and session item resolution read the open generation
 whatever the criteria say, so checking `Closed` changes nothing about any of

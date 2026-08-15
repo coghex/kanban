@@ -32,17 +32,27 @@ import Kanban.Filter
     itemWorkflowFacet,
     visibleBoardFor,
   )
+import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
+import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.AutoSolve (boardPullRequestNumbers)
 import Kanban.UI.Board (trackerHeaderText)
-import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate)
+import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate, settledSessionRefusal)
 import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Search (entriesFor, selectableRows)
 import Kanban.UI.Selection (selectedEntry)
-import Kanban.UI.Session (locateBoardWork)
+import Kanban.UI.Session (agentSessionSubject, locateBoardWork)
 import Kanban.UI.Types
 import Kanban.UI.Util (entriesForBoard, itemMetadata)
+import Kanban.Worker
+  ( PullRequestWorkerTask (..),
+    SolveWorkerTask (..),
+    WorkerDescriptor (..),
+    WorkerId (..),
+    WorkerSpec (..),
+    WorkerTask (..),
+  )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
@@ -419,10 +429,48 @@ refusalSpec = describe "read-only history refusals" $ do
     plain <- testAppState openBoard
     readOnlyHistoryRefusal plain (IssueItem (baseIssue 940 [])) `shouldBe` Nothing
 
+  -- The processes overlay reaches every kill route without going through a
+  -- card, so it has to ask the same question keyed by session identity — and
+  -- a persistent worker names its target only through the task it was
+  -- created for.
+  it "refuses every processes-overlay row whose work has settled" $ do
+    settled <- settledState
+    sequence_
+      [ (label, settledSessionRefusal settled reference) `shouldBe` (label, Just notice)
+        | (label, reference, notice) <-
+            [ ("solve" :: String, SolveAgent 940, expectedNotice (IssueItem (closedIssue 940))),
+              ("review", ReviewAgent 941, expectedNotice (IssueItem (closedIssue 941))),
+              ("pull request", PullRequestAgent 951, expectedNotice (PullRequestItem (mergedPullRequest 951)))
+            ]
+      ]
+    sequence_
+      [ settledSessionRefusal settled reference `shouldBe` Nothing
+        | reference <- [SolveAgent 800, ReviewAgent 801, PullRequestAgent 820, PullRequestAgent 830]
+      ]
+
+  it "resolves a persistent worker's row through the task it was created for" $ do
+    settled <- settledState
+    let solveWorker = withWorker (solveWorkerOn 940) settled
+        pullRequestWorker = withWorker (pullRequestWorkerOn 951) settled
+        liveWorker = withWorker (solveWorkerOn 800) settled
+    agentSessionSubject solveWorker (WorkerAgent testWorkerId) `shouldBe` Just (IssueId 940)
+    agentSessionSubject pullRequestWorker (WorkerAgent testWorkerId) `shouldBe` Just (PullRequestId 951)
+    settledSessionRefusal solveWorker (WorkerAgent testWorkerId)
+      `shouldBe` Just (expectedNotice (IssueItem (closedIssue 940)))
+    settledSessionRefusal pullRequestWorker (WorkerAgent testWorkerId)
+      `shouldBe` Just (expectedNotice (PullRequestItem (mergedPullRequest 951)))
+    settledSessionRefusal liveWorker (WorkerAgent testWorkerId) `shouldBe` Nothing
+    -- A worker no longer registered names no work, so there is nothing left
+    -- to refuse rather than a refusal invented for it.
+    agentSessionSubject settled (WorkerAgent testWorkerId) `shouldBe` Nothing
+    settledSessionRefusal settled (WorkerAgent testWorkerId) `shouldBe` Nothing
+
   -- A session overlay left open across a refresh is the other stale case: it
   -- goes on accepting input for work that has since settled, and its answer
   -- would resume a worker against history. The guard is on the shared session
-  -- table, so no overlay kind can skip it.
+  -- table, so no overlay kind can skip it — and it covers Ctrl-C as well as
+  -- Enter, because §8 refuses every termination boundary and not only the
+  -- board's kill binding.
   it "refuses to resume any session overlay whose work has settled" $ do
     settled <- settledState
     sequence_
@@ -682,6 +730,50 @@ settledState = do
 
 admitClosed :: AppState -> AppState
 admitClosed state = refreshVisibleBoard state {appFilterCriteria = everyLifecycle}
+
+-- | The dashboard with one persistent worker registered, which is the only
+-- processes-overlay row that names its work through a task rather than
+-- through the number it is keyed by.
+withWorker :: WorkerTask -> AppState -> AppState
+withWorker task state =
+  state {appWorkers = Map.singleton testWorkerId (testWorkerDescriptor task)}
+
+testWorkerId :: WorkerId
+testWorkerId = WorkerId "worker-1"
+
+solveWorkerOn :: Int -> WorkerTask
+solveWorkerOn issueNumber = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly ClaudeSolver)
+
+pullRequestWorkerOn :: Int -> WorkerTask
+pullRequestWorkerOn number =
+  PullRequestWorkerTaskKind (PullRequestWorkerTask number PullRequestClaude PullRequestReview)
+
+testWorkerDescriptor :: WorkerTask -> WorkerDescriptor
+testWorkerDescriptor task =
+  WorkerDescriptor
+    { workerDescriptorSpec =
+        WorkerSpec
+          { workerId = testWorkerId,
+            workerRepository = Repository "/tmp/example-project" "example" "project",
+            workerTask = task,
+            workerExistingSession = Nothing,
+            workerExistingLogPath = Nothing,
+            workerResumeProvenance = ResumeAnswer,
+            workerUserMessage = "",
+            workerParent = Nothing,
+            workerCreatedAt = epoch,
+            workerMaxRuntimeSeconds = 60,
+            workerConfigPath = Nothing,
+            workerWorkflowConfig = defaultWorkflowConfig
+          },
+      workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
+      workerDescriptorEventPath = "/tmp/worker-1.events.jsonl",
+      workerDescriptorStatePath = "/tmp/worker-1.state.json",
+      workerDescriptorAckPath = "/tmp/worker-1.ack",
+      workerDescriptorLeasePath = "/tmp/worker-1.lease",
+      workerDescriptorLeaseOwnerPath = "/tmp/worker-1.lease.owner",
+      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating"
+    }
 
 -- | The dashboard with @item@ selected, at whichever column and row it drew.
 -- Located by identity, because the card the board holds is the one the
