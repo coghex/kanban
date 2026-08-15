@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
+import Kanban.Filter (defaultFilterCriteria)
 import Kanban.GitHub (newHistoryTraversal)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
@@ -56,6 +57,12 @@ testAppState board = do
     AppState
       { appRepository = Repository "/tmp/example-project" "example" "project",
         appBoard = board,
+        -- The default criteria admit the open board unchanged, which is what
+        -- lets a test that only cares about drawing or dispatch name one
+        -- board. A test about the criteria themselves builds both sides with
+        -- 'Kanban.UI.Filter.refreshVisibleBoard'.
+        appVisibleBoard = board,
+        appFilterCriteria = defaultFilterCriteria,
         appUsage = Map.empty,
         appUsageFreshness = Map.empty,
         appSelectedColumn = Issues,

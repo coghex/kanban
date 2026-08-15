@@ -68,7 +68,7 @@ import Kanban.Process
     killVerifiedGroup,
   )
 import Kanban.Text (sanitizeText, withoutJsonPath)
-import Kanban.Workflow (classifyPullRequest)
+import Kanban.Workflow (classifyPullRequest, itemCompleted, readOnlyHistoryNotice)
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
@@ -957,14 +957,17 @@ data DirectMergeDecision
 -- | The whole decision, as a total function of the selection, whatever direct
 -- merge is already in flight, and the last status the controller reported.
 --
--- The order is the point. An ineligible selection is answered first, because
--- what is wrong is the card rather than the service, and reporting the
--- drainer's state for an issue card would be a true statement about the wrong
--- thing. An unresolved incident comes next and outranks every service state:
--- it is the one condition that says merging is unsafe even though the service
--- is idle. Only a service known to be stopped, with no open incident, may
--- launch — every other state, including one this cannot classify at all,
--- refuses, so a status that could not be read never merges anything.
+-- The order is the point. Settled history is answered before anything else:
+-- a merged or closed pull request has no merge left to run, and so has a
+-- closed issue, whatever the service is doing and whichever key reached here.
+-- An ineligible selection comes next, because what is wrong is then the card
+-- rather than the service, and reporting the drainer's state for an issue card
+-- would be a true statement about the wrong thing. An unresolved incident
+-- follows and outranks every service state: it is the one condition that says
+-- merging is unsafe even though the service is idle. Only a service known to
+-- be stopped, with no open incident, may launch — every other state, including
+-- one this cannot classify at all, refuses, so a status that could not be read
+-- never merges anything.
 directMergeDecision ::
   WorkflowConfig ->
   -- | The pull request a direct merge this dashboard started is still
@@ -973,28 +976,30 @@ directMergeDecision ::
   DrainerStatus ->
   Maybe BoardItem ->
   DirectMergeDecision
-directMergeDecision config pending status selection = case eligiblePullRequest config selection of
-  Left refusal -> RefuseDirectMerge refusal
-  Right number -> case pending of
-    Just running ->
-      RefuseDirectMerge
-        ("PR #" <> showNumber running <> " is already being merged; wait for that run to finish")
-    Nothing
-      | Just summary <- status.drainerIncident -> RefuseDirectMerge (incidentRefusal summary)
-      | otherwise -> case status.drainerActivity of
-          DrainerServiceStopped -> RunDirectMerge number
-          DrainerServiceRunning ->
-            RefuseDirectMerge "the PR drainer is running and merges approved pull requests itself; stop it with d to merge one directly"
-          DrainerServiceStarting ->
-            RefuseDirectMerge "the PR drainer is starting; wait for it to settle, then stop it with d to merge one directly"
-          DrainerServiceStopping ->
-            RefuseDirectMerge "the PR drainer is stopping; wait for it to settle"
-          DrainerServiceExternal ->
-            RefuseDirectMerge "a PR drainer is already running outside launchd and holds this repository"
-          DrainerServiceBlocked ->
-            RefuseDirectMerge ("this checkout cannot be merged into yet: " <> status.drainerDetail)
-          DrainerServiceUnknown ->
-            RefuseDirectMerge ("the PR drainer's state could not be established, so nothing was merged: " <> status.drainerDetail)
+directMergeDecision config pending status selection
+  | Just item <- selection, itemCompleted item = RefuseDirectMerge (readOnlyHistoryNotice item)
+  | otherwise = case eligiblePullRequest config selection of
+      Left refusal -> RefuseDirectMerge refusal
+      Right number -> case pending of
+        Just running ->
+          RefuseDirectMerge
+            ("PR #" <> showNumber running <> " is already being merged; wait for that run to finish")
+        Nothing
+          | Just summary <- status.drainerIncident -> RefuseDirectMerge (incidentRefusal summary)
+          | otherwise -> case status.drainerActivity of
+              DrainerServiceStopped -> RunDirectMerge number
+              DrainerServiceRunning ->
+                RefuseDirectMerge "the PR drainer is running and merges approved pull requests itself; stop it with d to merge one directly"
+              DrainerServiceStarting ->
+                RefuseDirectMerge "the PR drainer is starting; wait for it to settle, then stop it with d to merge one directly"
+              DrainerServiceStopping ->
+                RefuseDirectMerge "the PR drainer is stopping; wait for it to settle"
+              DrainerServiceExternal ->
+                RefuseDirectMerge "a PR drainer is already running outside launchd and holds this repository"
+              DrainerServiceBlocked ->
+                RefuseDirectMerge ("this checkout cannot be merged into yet: " <> status.drainerDetail)
+              DrainerServiceUnknown ->
+                RefuseDirectMerge ("the PR drainer's state could not be established, so nothing was merged: " <> status.drainerDetail)
   where
     incidentRefusal summary
       | Text.null summary = "the PR drainer has an unresolved incident; resolve it before merging"

@@ -660,10 +660,28 @@ children their checklist yielded; they appear only as tracker group headers
 (section 12), which follow their children's columns or, having none, sit in
 Issues.
 
+Which cards reach a column at all is decided first by the filter criteria. They
+are four independent facets — state, kind, workflow, and structure — whose
+values are ORed inside a facet and ANDed across facets, so an empty facet is a
+valid empty result rather than an implicit reset. Every value starts checked
+except `Closed`, so the ordinary view is the complete live open board and the
+column rules below read exactly as they always have. Criteria are
+process-lifetime presentation state: they survive every refresh, overlay and
+dismissal, initialize to their defaults at every start, and are never written
+to the cache, the settings file, or the configuration.
+
+Lifecycle outranks every other classification rule. A completed item — a closed
+issue, or a pull request that merged or was closed unmerged — is settled
+history, and the assignees, draft flag, and approval state it carried while it
+was worked say nothing about where it belongs now.
+
 ### Issues
 
 Open, unassigned issues. A linked pull request does not suppress the issue
 card; the issue and PR represent different workflow objects.
+
+Closed issues also appear here when the criteria admit them, regardless of the
+assignees they were worked under, each carrying a `CLOSED` badge.
 
 ### Active
 
@@ -686,13 +704,36 @@ older or external tooling.
 
 ### Done
 
-Open, non-draft pull requests satisfying the approval predicate. A Done card
-disappears as soon as the pull request is merged or closed. Done is a
-ready-to-finalize queue, not a history column.
+Open, non-draft pull requests satisfying the approval predicate, and — when the
+criteria admit them — every completed pull request, carrying a `MERGED` badge
+when it landed and a `CLOSED` badge when it did not. A completed pull request
+reaches Done whatever approval predicate it did or did not satisfy and whether
+or not it was a draft, and never appears in Reviewing: it is not under review.
+
+With `Closed` unchecked, which is the default, Done holds only the
+ready-to-finalize queue and a card leaves it as soon as its pull request merges
+or closes. With `Closed` checked, Done is additionally the history of every
+pull request the repository has finished.
 
 The approval predicate is configurable: the approval label (default
 `reviewed:approve`), GitHub's native `reviewDecision == APPROVED`, or either.
 The default is label-only, matching label-driven review workflows.
+
+### Completed cards are read-only
+
+Every mutating action refuses a completed card with a read-only-history notice
+and launches nothing: review, solve, autosolve, rereview, merge, direct merge,
+and killing a working process. The refusal outranks the wrong-kind, approval,
+drainer-state, structural, reusable-session, and process-presence errors those
+actions would otherwise report, and is re-checked at each action's own launch
+or termination boundary, so a chooser, details overlay, or session opened
+before a refresh cannot act after the item completes. Details and the item URL
+remain readable.
+
+Live workflow behavior never observes completed data at all. The autosolve
+baseline and worker and session item resolution read the open generation
+whatever the criteria say, so checking `Closed` changes nothing about any of
+them.
 
 Explicit GitHub closing-issue relationships connect issue and PR cards for
 tracker inheritance, but never collapse the two cards into one. Title and
@@ -816,6 +857,10 @@ Fields:
   fixed text. Redraws happen only on input, resize, or worker results, so no
   timer is needed to keep it honest.
 - Tracker sequence key when the issue is a tracker child.
+- A `CLOSED` lifecycle badge when the issue is completed, leading the metadata
+  row. It is not part of the heading, which is the identity card search matches
+  against, so a completed card is still found by the same `#number title` text
+  it always was.
 
 ### Pull-request card
 
@@ -836,6 +881,10 @@ Fields:
 - Author and base branch.
 - Mergeability and aggregate CI summary.
 - Up to three wrapped excerpt lines.
+- A `MERGED` or `CLOSED` lifecycle badge when the pull request is completed,
+  leading the metadata row on the same terms as the issue card's. The two are
+  kept apart because they are different outcomes: one landed the work and one
+  abandoned it.
 
 ### Label chip color
 
@@ -1062,7 +1111,9 @@ based only on child titles.
 
 Defaults:
 
-- An open issue carrying the `epic` label is a tracker.
+- An issue carrying the `epic` label is a tracker, whether it is open or
+  closed. A completed tracker is still a tracker: it keeps its group header,
+  carries the `CLOSED` badge, and groups its children.
 - Additional configurable tracker labels may be added, such as `tracker`.
 - A title beginning with `Epic:` or `[epic]` is a fallback hint when the issue
   has no labels; an explicitly labelled issue uses labels as the source of
@@ -1095,8 +1146,17 @@ Parsing rules:
 4. Preserve checklist order as the ultimate fallback.
 5. Order explicit keys naturally by letter and number: `A1`, `A2`, `A10`,
    `B1`, `C1`, `C2`.
-6. Completed checklist children may still appear elsewhere on GitHub, but only
-   currently open issues or PRs appear on this live board.
+6. A checklist child appears on the board only when the current filter criteria
+   admit it. Under the default criteria that is exactly the currently open
+   issues and PRs; with `Closed` checked, completed children join their group
+   too. A child the criteria leave off the board cannot be rendered or acted
+   on, so it is dropped from the tracker's children and folded into checklist
+   progress rather than staying a permanently unreachable pending entry.
+7. A child whose own tracker the criteria hide falls back to a standalone
+   card, which is exactly what the board renders for a child whose epic is not
+   on it. A tracker the criteria keep with none of its children left collapses
+   to a header, so the epic is still represented rather than vanishing behind
+   its filtered-out group.
 
 Membership resolution is structured as ordered sources feeding one internal
 model. The checklist parser above is the first source, and GitHub's native
@@ -1244,6 +1304,30 @@ Global attention sorting and implementation order interact as follows:
 - Collapsed tracker headers participate in keyboard focus for expansion but do
   not open a details overlay. The details overlay for an expanded child includes
   its tracker context.
+
+Completed cards take no part in any of those attention tiers. A completed card
+never promotes itself or its group, whatever labels it carries — a closed
+blocked issue is not an outstanding problem, and a closed `reviewed:revised`
+issue has nothing left to rereview — while keeping the status color and border
+its labels and checks earned, so a closed issue that was blocked still reads as
+blocked. What they form instead is a settled block at the tail of each
+partition:
+
+- Implementation order stays authoritative for every tracked child whatever its
+  lifecycle, so a group holding both open and completed children orders all of
+  them the same way it always did.
+- Standalone completed cards form one block after every open standalone card,
+  ordered by newest updated first, with the item's own identity as the
+  tie-break so two cards updated in the same second keep a stable order across
+  refreshes.
+- Wholly completed groups form one block after every group holding open work,
+  ordered by the greatest update time among the tracker and its members,
+  newest first, with the tracker number as the tie-break. A group is wholly
+  completed when its tracker issue and every member grouped under it are
+  completed — a property of the whole group across all four columns, not of one
+  column's slice of it.
+- The existing placement between the group and standalone partitions is
+  otherwise unchanged.
 
 ## 13. GitHub data acquisition
 

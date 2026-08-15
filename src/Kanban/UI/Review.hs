@@ -74,6 +74,7 @@ import Kanban.Settings
   ( ChatVerbosity (..)
     )
 import Kanban.Text (sanitizeText)
+import Kanban.UI.Filter (readOnlyHistoryRefusal)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -359,7 +360,12 @@ startSelectedReview = do
   state <- get
   case selectedReviewTarget state of
     ReviewTargetNone -> setNotice ("Select an issue or PR before pressing " <> actionKeyText ReviewSelection)
-    ReviewTargetRefused refusal -> setNotice (epicReviewRefusalNotice refusal)
+    -- Lifecycle outranks the structural refusal: a closed epic's header is
+    -- read-only history first and board structure second, and saying only the
+    -- second would invite expanding it to find reviewable work that is not
+    -- there.
+    ReviewTargetRefused refusal ->
+      setNotice (fromMaybe (epicReviewRefusalNotice refusal) (selectedReadOnlyHistoryRefusal state))
     ReviewTargetItem item -> startItemReview item
 
 -- | The details overlay presses the review key against the item it already
@@ -367,14 +373,29 @@ startSelectedReview = do
 -- paths therefore meet here, and the refusal is a plain notice: the overlay
 -- stays open and 'appReviewSessions' is left exactly as it was, so no badge
 -- appears on the header and no unrelated session is disturbed.
+--
+-- The read-only-history refusal is asked first, ahead of the structural one
+-- and ahead of everything 'startIssueReview' and 'startPullRequestReview' go
+-- on to decide — the review stage, the action, and whether a session already
+-- open may be reused. An overlay or a reusable session can have been opened
+-- while the work was live, so this is also the launch boundary that stops one
+-- acting after a refresh settled the item beneath it.
 startItemReview :: BoardItem -> EventM Name AppState ()
 startItemReview item = do
   state <- get
-  case itemReviewRefusal state item of
-    Just refusal -> setNotice (epicReviewRefusalNotice refusal)
-    Nothing -> case item of
+  case (readOnlyHistoryRefusal state item, itemReviewRefusal state item) of
+    (Just notice, _) -> setNotice notice
+    (Nothing, Just refusal) -> setNotice (epicReviewRefusalNotice refusal)
+    (Nothing, Nothing) -> case item of
       IssueItem issue -> startIssueReview issue
       PullRequestItem pullRequest -> startPullRequestReview pullRequest
+
+-- | The read-only-history refusal for whatever the board has selected, which
+-- is the one the structural refusals above have to be checked against: a
+-- collapsed or childless epic never becomes a 'ReviewTargetItem', so its own
+-- lifecycle has to be asked for here.
+selectedReadOnlyHistoryRefusal :: AppState -> Maybe Text
+selectedReadOnlyHistoryRefusal state = selectedReviewItem state >>= readOnlyHistoryRefusal state
 
 -- | Why the review key did nothing, in the shape 'openSelectedDetails' set
 -- for the same headers: name the reason, and name the key that reaches the

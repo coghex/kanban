@@ -88,6 +88,7 @@ library
     Kanban.CommandCapture
     Kanban.Config
     Kanban.Domain
+    Kanban.Filter
     Kanban.Drainer
     Kanban.Fixture
     Kanban.GlyphTest
@@ -111,6 +112,7 @@ library
     Kanban.UI.Board
     Kanban.UI.Details
     Kanban.UI.Events
+    Kanban.UI.Filter
     Kanban.UI.Keys
     Kanban.UI.Overlay
     Kanban.UI.PullRequest
@@ -238,6 +240,7 @@ test-suite kanban-test
     Spec.UI.AutoSolve
     Spec.UI.Cards
     Spec.UI.CompletedHistory
+    Spec.UI.Filter
     Spec.UI.Golden
     Spec.UI.Incidents
     Spec.UI.Keys

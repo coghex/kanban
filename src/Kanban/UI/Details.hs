@@ -43,7 +43,9 @@ detailsEnv :: AppState -> DetailsEnv
 detailsEnv state =
   DetailsEnv
     { detailsConfig = state.appConfig,
-      detailsBoard = state.appBoard,
+      -- The view the overlay was opened from, so a completed card's tracker
+      -- context and structural diagnostics resolve exactly as they drew.
+      detailsBoard = state.appVisibleBoard,
       detailsNow = state.appNow,
       detailsTimeZone = state.appTimeZone
     }

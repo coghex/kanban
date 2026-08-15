@@ -62,6 +62,7 @@ import Kanban.Solve
     solverLabel
   )
 import Kanban.Text (sanitizeText)
+import Kanban.Workflow (itemLifecycleBadge)
 import Kanban.Worker
   ( workerDeadlineReason
   )
@@ -179,8 +180,16 @@ itemBody :: BoardItem -> Text
 itemBody (IssueItem issue) = issue.issueBody
 itemBody (PullRequestItem pullRequest) = pullRequest.pullRequestBody
 
+-- | A card's metadata row, led by its lifecycle badge when it has one (§11).
+--
+-- The badge goes here rather than into 'itemHeading' on purpose: the heading
+-- is the identity search matches against, and a settled card must be found by
+-- the same @#number title@ text it always was.
 itemMetadata :: UTCTime -> BoardItem -> Text
-itemMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge now issue.issueUpdatedAt
+itemMetadata now item = maybe "" (<> " · ") (itemLifecycleBadge item) <> kindMetadata now item
+
+kindMetadata :: UTCTime -> BoardItem -> Text
+kindMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge now issue.issueUpdatedAt
   where
     ownership
       | AssigneesUnavailable `elem` issue.issueDataGaps = unknownAssigneesText
@@ -188,7 +197,7 @@ itemMetadata now (IssueItem issue) = ownership <> " · updated " <> relativeAge 
       | otherwise =
           Text.intercalate ", " ["@" <> assignee.assigneeLogin | assignee <- issue.issueAssignees]
             <> overflowText issue.issueAssigneeOverflow
-itemMetadata now (PullRequestItem pullRequest) =
+kindMetadata now (PullRequestItem pullRequest) =
   linked <> pullRequest.pullRequestAuthor <> " → " <> pullRequest.pullRequestBase <> " · updated " <> relativeAge now pullRequest.pullRequestUpdatedAt
   where
     linked

@@ -71,6 +71,7 @@ import Kanban.Worker
     launchPullRequestWorker,
     pendingTerminationDiagnosticPrefix
     )
+import Kanban.UI.Filter (readOnlyHistoryRefusal)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -402,8 +403,20 @@ mergeItemDoneCard = mergeDoneCard . Just
 -- The run is forked, so the interface keeps redrawing while it works, and
 -- 'appDirectMergePending' is set before the fork so a second @m@ finds it and
 -- refuses rather than starting a second process against the same repository.
+-- | The selection is re-read against the newest completed generation before
+-- 'directMergeDecision' is asked at all, because a details overlay can be
+-- holding a pull request that merged since it opened. The decision refuses a
+-- settled item on its own too, so a stale card cannot reach the drainer by
+-- either door.
 mergeDoneCard :: Maybe BoardItem -> EventM Name AppState ()
 mergeDoneCard selection = do
+  state <- get
+  case selection >>= readOnlyHistoryRefusal state of
+    Just notice -> setNotice (sanitizeText ("Not merging: " <> notice))
+    Nothing -> runMergeDecision selection
+
+runMergeDecision :: Maybe BoardItem -> EventM Name AppState ()
+runMergeDecision selection = do
   state <- get
   case directMergeDecision state.appConfig.resolvedWorkflow state.appDirectMergePending state.appDrainerStatus selection of
     RefuseDirectMerge refusal -> setNotice (sanitizeText ("Not merging: " <> refusal))

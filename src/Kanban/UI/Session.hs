@@ -763,7 +763,7 @@ selectedReviewTarget state = case selectedEntry state of
 -- tracker with visible children never reaches an overlay of its own.
 itemReviewRefusal :: AppState -> BoardItem -> Maybe EpicReviewRefusal
 itemReviewRefusal state (IssueItem issue)
-  | any headerFor (concat (Map.elems state.appBoard.boardColumns)) = Just StructuralEpicHeader
+  | any headerFor (concat (Map.elems state.appVisibleBoard.boardColumns)) = Just StructuralEpicHeader
   | otherwise = Nothing
   where
     headerFor (TrackerHeader tracker) = tracker.trackerIssue.issueNumber == issue.issueNumber

@@ -1,0 +1,590 @@
+-- | What the filter criteria admit, how settled history renders once they
+-- admit it, and what refuses to act on it.
+--
+-- Every question here is decided by a total function the @EventM@ arms only
+-- project — 'visibleBoardFor' for the view, 'deriveBoard' for column and
+-- order, 'readOnlyHistoryGate' and 'directMergeDecision' for the refusals — so
+-- the whole matrix is settled without a terminal, a network, or a GitHub
+-- account.
+module Spec.UI.Filter (spec) where
+
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Time (addUTCTime)
+import Kanban.Domain
+import Kanban.Drainer
+  ( DirectMergeDecision (..),
+    DrainerActivity (..),
+    DrainerState (..),
+    DrainerStatus (..),
+    directMergeDecision,
+  )
+import Kanban.Filter
+  ( FilterCriteria (..),
+    KindFacet (..),
+    LifecycleFacet (..),
+    StructureFacet (..),
+    WorkflowFacet (..),
+    defaultFilterCriteria,
+    everyFacetValue,
+    itemWorkflowFacet,
+    visibleBoardFor,
+  )
+import Kanban.UI.AutoSolve (boardPullRequestNumbers)
+import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate)
+import Kanban.UI.Filter (readOnlyHistoryRefusal, refreshVisibleBoard)
+import Kanban.UI.Keys (BoardAction (..))
+import Kanban.UI.Search (entriesFor, selectableRows)
+import Kanban.UI.Selection (selectedEntry)
+import Kanban.UI.Session (locateBoardWork)
+import Kanban.UI.Types
+import Kanban.UI.Util (entriesForBoard, itemMetadata)
+import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
+import Spec.Support.App (testAppState)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
+import Test.Hspec
+
+spec :: Spec
+spec = do
+  defaultsSpec
+  admittedSpec
+  orderingSpec
+  attentionSpec
+  refusalSpec
+  openAuthoritySpec
+  addressingSpec
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 3. Under the defaults the application behaves exactly as it
+-- did before a completed generation could reach a card at all.
+defaultsSpec :: Spec
+defaultsSpec = describe "the default filter criteria" $ do
+  it "hides Closed and checks everything else" $ do
+    defaultFilterCriteria.filterLifecycle `shouldBe` Set.singleton LifecycleOpen
+    defaultFilterCriteria.filterKind `shouldBe` everyFacetValue
+    defaultFilterCriteria.filterWorkflow `shouldBe` everyFacetValue
+    defaultFilterCriteria.filterStructure `shouldBe` everyFacetValue
+
+  it "leaves every column identical to the board derived without any history" $
+    sequence_
+      [ (column, entriesForBoard (visible openBoard mixedHistory) column)
+          `shouldBe` (column, entriesForBoard (deriveBoard workflow openSnapshot) column)
+        | column <- allBoardColumns
+      ]
+
+  it "admits the open board itself whatever history is in memory" $ do
+    visible openBoard mixedHistory `shouldBe` openBoard
+    visible openBoard Nothing `shouldBe` openBoard
+
+  -- Requirement 1. Criteria are process-lifetime state, so recomputing the
+  -- view a refresh or a publication produces cannot disturb them.
+  it "leaves the criteria themselves untouched when the view is recomputed" $ do
+    settled <- settledState
+    (refreshVisibleBoard settled).appFilterCriteria `shouldBe` defaultFilterCriteria
+    let admitted = admitClosed settled
+    (refreshVisibleBoard admitted).appFilterCriteria `shouldBe` everyLifecycle
+    (refreshVisibleBoard admitted).appVisibleBoard `shouldBe` admitted.appVisibleBoard
+
+  -- Requirement 8's live case: the closed epic is simply not in the dataset,
+  -- so its open child is a 'Standalone' card exactly as it is today.
+  it "renders a closed epic's surviving open child as Standalone" $ do
+    let board = visibleFrom defaultFilterCriteria childOnlySnapshot closedEpicHistory
+    map summarize (entriesForBoard board Issues) `shouldBe` [("standalone", 811)]
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirements 4, 5 and 8: where settled cards land once Closed is checked.
+admittedSpec :: Spec
+admittedSpec = describe "criteria admitting completed history" $ do
+  it "renders closed issues in Issues however many assignees they kept" $ do
+    let board = withClosed openBoard mixedHistory
+    numbersIn board Issues `shouldBe` [800, 940, 941]
+    -- #941 is closed with the assignee it was worked under still on it, which
+    -- is Active's rule for live work and says nothing about history.
+    numbersIn board Active `shouldBe` [801]
+
+  it "renders closed and merged pull requests in Done and never in Reviewing" $ do
+    let board = withClosed openBoard mixedHistory
+    numbersIn board Reviewing `shouldBe` [820]
+    numbersIn board Done `shouldBe` [830, 951, 950]
+
+  -- The approval predicate does not decide this: a merged pull request that
+  -- never carried an approval label still goes to Done, and so does a draft
+  -- one that was closed unmerged.
+  it "sends a settled pull request to Done whatever its draft or approval state" $ do
+    let history = CompletedHistory [] [mergedPullRequest 960, closedDraftPullRequest 961] epoch
+        board = withClosed openBoard (Just history)
+    numbersIn board Reviewing `shouldBe` [820]
+    -- Both settled at the same instant, so the stable tie-break decides.
+    numbersIn board Done `shouldBe` [830, 960, 961]
+
+  -- Requirement 4 and 5's badges, which §11 puts on the metadata row rather
+  -- than in the heading search matches against.
+  it "badges a settled card CLOSED or MERGED, and a live one not at all" $ do
+    itemLifecycleBadge (IssueItem (closedIssue 940)) `shouldBe` Just "CLOSED"
+    itemLifecycleBadge (PullRequestItem (closedPullRequest 950)) `shouldBe` Just "CLOSED"
+    itemLifecycleBadge (PullRequestItem (mergedPullRequest 951)) `shouldBe` Just "MERGED"
+    itemLifecycleBadge (IssueItem (baseIssue 800 [])) `shouldBe` Nothing
+    itemMetadata epoch (IssueItem (closedIssue 940))
+      `shouldBe` "CLOSED · unassigned · updated now"
+    itemMetadata epoch (PullRequestItem (mergedPullRequest 951))
+      `shouldBe` "MERGED · UNLINKED · agent → master · updated now"
+    itemMetadata epoch (IssueItem (baseIssue 800 [])) `shouldBe` "unassigned · updated now"
+
+  -- Requirement 8. The epic is closed and its child is open; admitting the
+  -- history is what lets both reach tracker recognition together.
+  it "keeps a completed tracker a tracker, grouping the open child it kept" $ do
+    let board = visibleFrom everyLifecycle childOnlySnapshot closedEpicHistory
+    map summarize (entriesForBoard board Issues) `shouldBe` [("tracked", 811)]
+    trackerNumbers (entriesForBoard board Issues) `shouldBe` [Just 810]
+
+  -- The other half of requirement 8, which is what makes requirement 3 true
+  -- for this shape: hide the header and the child is the Standalone card the
+  -- board renders today.
+  it "falls the same child back to Standalone when the criteria hide its epic" $ do
+    let hidden =
+          visibleFrom
+            everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved}
+            childOnlySnapshot
+            (Just (CompletedHistory [approvedClosedEpic] [] epoch))
+        shown =
+          visibleFrom
+            everyLifecycle {filterWorkflow = everyFacetValue}
+            childOnlySnapshot
+            (Just (CompletedHistory [approvedClosedEpic] [] epoch))
+    -- The epic is approved and the child is not, so a workflow facet holding
+    -- only Approved keeps the epic and drops the child; adding the child back
+    -- regroups it.
+    map summarize (entriesForBoard hidden Issues) `shouldBe` [("header", 810)]
+    map summarize (entriesForBoard shown Issues) `shouldBe` [("tracked", 811)]
+
+  -- Values are ORed inside a facet and the facets ANDed, so an empty facet is
+  -- a real empty result rather than an implicit reset.
+  it "shows only settled work with Open unchecked, and nothing at all with neither" $ do
+    let settledOnly = visibleWith everyLifecycle {filterLifecycle = Set.singleton LifecycleClosed} openBoard openSnapshot mixedHistory
+        neither = visibleWith defaultFilterCriteria {filterLifecycle = Set.empty} openBoard openSnapshot mixedHistory
+    numbersIn settledOnly Issues `shouldBe` [940, 941]
+    concat [entriesForBoard neither column | column <- allBoardColumns] `shouldBe` []
+
+  -- The workflow facet is exclusive by strongest-state precedence, which is
+  -- what makes its four values exhaustive rather than overlapping.
+  it "classifies each card into exactly one workflow category, strongest first" $ do
+    itemWorkflowFacet workflow (IssueItem (labelled 1 ["reviewed:changes", "reviewed:approve"]))
+      `shouldBe` WorkflowChanges
+    itemWorkflowFacet workflow (IssueItem (labelled 2 ["blocked"])) `shouldBe` WorkflowProblems
+    itemWorkflowFacet workflow (IssueItem (labelled 3 ["reviewed:approve"])) `shouldBe` WorkflowApproved
+    itemWorkflowFacet workflow (IssueItem (labelled 4 [])) `shouldBe` WorkflowOther
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 6. Implementation order stays authoritative inside a group,
+-- and newest-updated ordering applies only to the settled blocks.
+orderingSpec :: Spec
+orderingSpec = describe "ordering with settled cards" $ do
+  it "orders every child of a mixed group by implementation order, not by lifecycle" $ do
+    let snapshot = RepoSnapshot [orderedEpic, baseIssue 862 []] [] epoch
+        history = CompletedHistory [closedIssue 861, closedIssue 863] [] epoch
+        board = visibleFrom everyLifecycle snapshot (Just history)
+    numbersIn board Issues `shouldBe` [861, 862, 863]
+
+  it "puts settled standalone cards after every open one, newest updated first" $ do
+    let snapshot = RepoSnapshot [baseIssue 800 [], baseIssue 802 []] [] epoch
+        history =
+          CompletedHistory
+            [updatedAfter 60 (closedIssue 940), updatedAfter 600 (closedIssue 941), updatedAfter 300 (closedIssue 942)]
+            []
+            epoch
+        board = visibleFrom everyLifecycle snapshot (Just history)
+    numbersIn board Issues `shouldBe` [800, 802, 941, 942, 940]
+
+  -- Two wholly completed groups whose recency differs, which is what proves
+  -- their relative order rather than only their placement after open groups.
+  it "puts wholly completed groups after open ones, newest updated first" $ do
+    let snapshot = RepoSnapshot [epicIssue 870 [871], baseIssue 871 [], baseIssue 879 []] [] epoch
+        history =
+          CompletedHistory
+            [ closed (epicIssue 880 [881]),
+              updatedAfter 120 (closedIssue 881),
+              closed (epicIssue 890 [891]),
+              updatedAfter 900 (closedIssue 891)
+            ]
+            []
+            epoch
+        board = visibleFrom everyLifecycle snapshot (Just history)
+    -- The live group leads, then #890's group (updated 900s in) ahead of
+    -- #880's (120s in), and the open standalone card sits between the group
+    -- and standalone partitions exactly as §12 already places it.
+    trackerNumbers (entriesForBoard board Issues)
+      `shouldBe` [Just 870, Just 890, Just 880, Nothing]
+    numbersIn board Issues `shouldBe` [871, 891, 881, 879]
+
+  -- "Wholly completed" is a property of the whole group rather than of one
+  -- column's slice of it: a live member anywhere keeps the group live.
+  it "keeps a group holding any open member out of the settled block" $ do
+    let snapshot = RepoSnapshot [baseIssue 811 [], baseIssue 879 []] [] epoch
+        board = visibleFrom everyLifecycle snapshot closedEpicHistory
+    -- #810 is closed but #811 is not, so the group stays ahead of the open
+    -- standalone card rather than dropping behind it.
+    trackerNumbers (entriesForBoard board Issues) `shouldBe` [Just 810, Nothing]
+    numbersIn board Issues `shouldBe` [811, 879]
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 7. A settled card is attention-neutral, and keeps the status
+-- treatment its labels earned.
+attentionSpec :: Spec
+attentionSpec = describe "settled cards and attention" $ do
+  it "never promotes itself out of the settled block, whatever it carries" $ do
+    let snapshot = RepoSnapshot [baseIssue 800 []] [] epoch
+        history =
+          CompletedHistory
+            [ updatedAfter 300 (labelledClosed 940 ["reviewed:revised"]),
+              updatedAfter 200 (labelledClosed 941 ["blocked"]),
+              updatedAfter 100 (labelledClosed 942 ["reviewed:approve"])
+            ]
+            []
+            epoch
+        board = visibleFrom everyLifecycle snapshot (Just history)
+    -- The live card leads, and the three settled ones are ordered by recency
+    -- rather than by the attention tiers those labels would otherwise buy.
+    numbersIn board Issues `shouldBe` [800, 940, 941, 942]
+
+  it "never promotes the group it belongs to" $ do
+    let snapshot = RepoSnapshot [epicIssue 870 [871], baseIssue 871 [], epicIssue 875 [876, 877], baseIssue 876 []] [] epoch
+        -- #877 is a settled, blocked, revised child of the later epic. If it
+        -- promoted, #875's group would jump ahead of #870's.
+        history = CompletedHistory [labelledClosed 877 ["blocked", "reviewed:revised"]] [] epoch
+        board = visibleFrom everyLifecycle snapshot (Just history)
+    trackerNumbers (entriesForBoard board Issues) `shouldBe` [Just 870, Just 875, Just 875]
+    numbersIn board Issues `shouldBe` [871, 876, 877]
+
+  it "keeps the workflow category its labels earned" $ do
+    itemWorkflowFacet workflow (IssueItem (labelledClosed 941 ["blocked"])) `shouldBe` WorkflowProblems
+    itemWorkflowFacet workflow (IssueItem (labelledClosed 942 ["reviewed:approve"])) `shouldBe` WorkflowApproved
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 9. Every settled mutating action refuses a completed card,
+-- launches nothing, and leaves reading it alone.
+refusalSpec :: Spec
+refusalSpec = describe "read-only history refusals" $ do
+  it "names exactly the mutating bindings" $
+    filter mutatesSelectedWork [minBound .. maxBound]
+      `shouldBe` [KillWorking, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard]
+
+  it "declines every mutating binding on a completed issue and a completed pull request" $ do
+    settled <- settledState
+    sequence_
+      [ (action, itemNumber item, readOnlyHistoryGate (selecting item settled) action)
+          `shouldBe` (action, itemNumber item, Just (expectedNotice item))
+        | action <- filter mutatesSelectedWork [minBound .. maxBound],
+          item <- [IssueItem (closedIssue 940), PullRequestItem (mergedPullRequest 951)]
+      ]
+
+  it "declines them from a details overlay held open on a settled card too" $ do
+    settled <- settledState
+    let overlaid item = (admitClosed settled) {appOverlay = Just (DetailsOverlay item)}
+    sequence_
+      [ readOnlyHistoryGate (overlaid item) action `shouldBe` Just (expectedNotice item)
+        | action <- filter mutatesSelectedWork [minBound .. maxBound],
+          item <- [IssueItem (closedIssue 940), PullRequestItem (mergedPullRequest 951)]
+      ]
+
+  it "leaves every reading binding alone, and the card itself selectable" $ do
+    settled <- settledState
+    let selected = selecting (IssueItem (closedIssue 940)) settled
+    sequence_
+      [ (action, readOnlyHistoryGate selected action) `shouldBe` (action, Nothing)
+        | action <- filter (not . mutatesSelectedWork) [minBound .. maxBound]
+      ]
+    (entryItem <$> selectedEntry selected) `shouldBe` Just (IssueItem (closedIssue 940))
+
+  -- The launch boundary. A chooser, an overlay, and a reusable session each
+  -- hold an item captured before a refresh, so the refusal is re-asked
+  -- against the newest completed generation rather than trusted from it.
+  it "refuses an item that was live when it was captured and has since settled" $ do
+    settled <- settledState
+    readOnlyHistoryRefusal settled (IssueItem (baseIssue 940 []))
+      `shouldBe` Just (expectedNotice (IssueItem (closedIssue 940)))
+    plain <- testAppState openBoard
+    readOnlyHistoryRefusal plain (IssueItem (baseIssue 940 [])) `shouldBe` Nothing
+
+  -- The merge chain, refused at the launch decision itself rather than only
+  -- at the key press: it outranks the wrong-kind, in-flight and
+  -- drainer-state answers this same function would otherwise give.
+  it "refuses a settled card at the direct-merge decision, ahead of every other cause" $ do
+    directMergeDecision workflow Nothing idleDrainer (Just (PullRequestItem (mergedPullRequest 951)))
+      `shouldBe` RefuseDirectMerge (expectedNotice (PullRequestItem (mergedPullRequest 951)))
+    directMergeDecision workflow Nothing idleDrainer (Just (IssueItem (closedIssue 940)))
+      `shouldBe` RefuseDirectMerge (expectedNotice (IssueItem (closedIssue 940)))
+    directMergeDecision workflow (Just 5) busyDrainer (Just (PullRequestItem (mergedPullRequest 951)))
+      `shouldBe` RefuseDirectMerge (expectedNotice (PullRequestItem (mergedPullRequest 951)))
+
+  it "still merges an approved live pull request" $
+    directMergeDecision workflow Nothing idleDrainer (Just (PullRequestItem approvedLivePullRequest))
+      `shouldBe` RunDirectMerge 830
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 10. Live workflow behavior reads open data, so turning Closed
+-- on changes nothing about any of it.
+openAuthoritySpec :: Spec
+openAuthoritySpec = describe "the open-only authority" $ do
+  it "leaves the autosolve baseline identical with Closed admitted" $ do
+    hidden <- settledState
+    let admitted = admitClosed hidden
+    boardPullRequestNumbers admitted.appBoard `shouldBe` boardPullRequestNumbers hidden.appBoard
+    boardPullRequestNumbers admitted.appBoard `shouldBe` Set.fromList [820, 830]
+
+  it "leaves worker and session item resolution identical with Closed admitted" $ do
+    hidden <- settledState
+    let admitted = admitClosed hidden
+    admitted.appBoard `shouldBe` hidden.appBoard
+    -- The settled pull request is admitted to the view and stays absent from
+    -- the authority those resolutions read.
+    numbersIn admitted.appVisibleBoard Done `shouldBe` [830, 951, 950]
+    locateBoardWork admitted.appBoard (PullRequestId 951) `shouldBe` Nothing
+    locateBoardWork hidden.appBoard (PullRequestId 951) `shouldBe` Nothing
+    sequence_
+      [ locateBoardWork admitted.appBoard target `shouldBe` locateBoardWork hidden.appBoard target
+        | target <- [IssueId 800, IssueId 801, IssueId 940, PullRequestId 820, PullRequestId 830]
+      ]
+
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 11. No visible row resolves to a different entry, at every
+-- criteria combination.
+addressingSpec :: Spec
+addressingSpec = describe "row addressing under criteria" $
+  it "resolves every selectable row to the entry drawn there" $ do
+    settled <- settledState
+    sequence_
+      [ (describeCriteria criteria, column, row, selectedEntry seated)
+          `shouldBe` (describeCriteria criteria, column, row, Just drawn)
+        | criteria <- criteriaCombinations,
+          let state = refreshVisibleBoard settled {appFilterCriteria = criteria},
+          column <- allBoardColumns,
+          (row, drawn) <- zip [0 ..] (entriesFor state column),
+          row `elem` selectableRows state column,
+          let seated =
+                state
+                  { appSelectedColumn = column,
+                    appSelectedRows = Map.insert column row state.appSelectedRows
+                  }
+      ]
+
+-- ---------------------------------------------------------------------------
+-- Fixtures
+
+-- | The same workflow configuration 'testAppState' holds, so a board derived
+-- here and one the dashboard recomputes cannot disagree.
+workflow :: WorkflowConfig
+workflow = defaultWorkflowConfig
+
+allBoardColumns :: [BoardColumn]
+allBoardColumns = [minBound .. maxBound]
+
+-- | The open generation every case starts from: a backlog issue, an assigned
+-- one, a pull request under review, and an approved one in Done.
+openSnapshot :: RepoSnapshot
+openSnapshot =
+  RepoSnapshot
+    [baseIssue 800 [], baseIssue 801 [Assignee "agent"]]
+    [basePullRequest 820 [] False [], approvedLivePullRequest]
+    epoch
+
+openBoard :: Board
+openBoard = deriveBoard workflow openSnapshot
+
+approvedLivePullRequest :: PullRequest
+approvedLivePullRequest = basePullRequest 830 [] False [Label "reviewed:approve" "0e8a16"]
+
+-- | Two closed issues — one still carrying the assignee it was worked under —
+-- a closed pull request, and a merged one. The merged one is the more
+-- recently updated of the two, which is the order Done must put them in.
+mixedHistory :: Maybe CompletedHistory
+mixedHistory =
+  Just
+    ( CompletedHistory
+        [closedIssue 940, (closedIssue 941) {issueAssignees = [Assignee "agent"]}]
+        [closedPullRequest 950, updatedPullRequestAfter 300 (mergedPullRequest 951)]
+        epoch
+    )
+
+-- | The child of an epic that closed ahead of it, which is the shape
+-- requirement 8 turns on.
+childOnlySnapshot :: RepoSnapshot
+childOnlySnapshot = RepoSnapshot [baseIssue 811 []] [] epoch
+
+closedEpicHistory :: Maybe CompletedHistory
+closedEpicHistory = Just (CompletedHistory [closed (epicIssue 810 [811])] [] epoch)
+
+approvedClosedEpic :: Issue
+approvedClosedEpic =
+  (closed (epicIssue 810 [811])) {issueLabels = [Label "epic" "5319e7", Label "reviewed:approve" "0e8a16"]}
+
+-- | An epic whose checklist names the given children in implementation order.
+epicIssue :: Int -> [Int] -> Issue
+epicIssue number children =
+  (baseIssue number [])
+    { issueLabels = [Label "epic" "5319e7"],
+      issueBody =
+        "## Children\n"
+          <> Text.concat
+            [ "- [ ] #" <> showNumber child <> " — A" <> showNumber (order + 1) <> ": step\n"
+              | (order, child) <- zip [0 :: Int ..] children
+            ]
+    }
+
+-- | Three children in implementation order, the outer two of which a case
+-- then closes.
+orderedEpic :: Issue
+orderedEpic = epicIssue 860 [861, 862, 863]
+
+closed :: Issue -> Issue
+closed issue = issue {issueState = IssueClosed}
+
+closedIssue :: Int -> Issue
+closedIssue number = closed (baseIssue number [])
+
+labelled :: Int -> [Text] -> Issue
+labelled number names = (baseIssue number []) {issueLabels = [Label name "cccccc" | name <- names]}
+
+labelledClosed :: Int -> [Text] -> Issue
+labelledClosed number names = closed (labelled number names)
+
+closedPullRequest :: Int -> PullRequest
+closedPullRequest number = (basePullRequest number [] False []) {pullRequestState = PullRequestClosed}
+
+mergedPullRequest :: Int -> PullRequest
+mergedPullRequest number = (basePullRequest number [] False []) {pullRequestState = PullRequestMerged}
+
+closedDraftPullRequest :: Int -> PullRequest
+closedDraftPullRequest number = (basePullRequest number [] True []) {pullRequestState = PullRequestClosed}
+
+updatedAfter :: Int -> Issue -> Issue
+updatedAfter seconds issue = issue {issueUpdatedAt = addUTCTime (fromIntegral seconds) epoch}
+
+updatedPullRequestAfter :: Int -> PullRequest -> PullRequest
+updatedPullRequestAfter seconds pullRequest =
+  pullRequest {pullRequestUpdatedAt = addUTCTime (fromIntegral seconds) epoch}
+
+idleDrainer :: DrainerStatus
+idleDrainer = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing
+
+busyDrainer :: DrainerStatus
+busyDrainer = DrainerStatus DrainerOn "running" DrainerServiceRunning Nothing
+
+everyLifecycle :: FilterCriteria
+everyLifecycle = defaultFilterCriteria {filterLifecycle = everyFacetValue}
+
+visible :: Board -> Maybe CompletedHistory -> Board
+visible board = visibleWith defaultFilterCriteria board openSnapshot
+
+withClosed :: Board -> Maybe CompletedHistory -> Board
+withClosed board = visibleWith everyLifecycle board openSnapshot
+
+-- | The visible board for a snapshot of this case's own, whose open board is
+-- derived here so the two sides cannot disagree.
+visibleFrom :: FilterCriteria -> RepoSnapshot -> Maybe CompletedHistory -> Board
+visibleFrom criteria snapshot = visibleWith criteria (deriveBoard workflow snapshot) snapshot
+
+visibleWith :: FilterCriteria -> Board -> RepoSnapshot -> Maybe CompletedHistory -> Board
+visibleWith criteria board snapshot history =
+  visibleBoardFor workflow criteria board (Just snapshot) history
+
+-- | A dashboard holding both generations, with the history hidden.
+settledState :: IO AppState
+settledState = do
+  state <- testAppState openBoard
+  pure
+    ( refreshVisibleBoard
+        state {appOpenSnapshot = Just openSnapshot, appCompletedHistory = mixedHistory}
+    )
+
+admitClosed :: AppState -> AppState
+admitClosed state = refreshVisibleBoard state {appFilterCriteria = everyLifecycle}
+
+-- | The dashboard with @item@ selected, at whichever column and row it drew.
+-- Located by identity, because the card the board holds is the one the
+-- generation delivered rather than the literal a case names.
+selecting :: BoardItem -> AppState -> AppState
+selecting item state = case located of
+  Just (column, row) ->
+    admitted
+      { appSelectedColumn = column,
+        appSelectedRows = Map.insert column row admitted.appSelectedRows
+      }
+  Nothing -> admitted
+  where
+    admitted = admitClosed state
+    located = case matches of
+      value : _ -> Just value
+      [] -> Nothing
+    matches =
+      [ (column, row)
+        | column <- allBoardColumns,
+          (row, entry) <- zip [0 ..] (entriesFor admitted column),
+          itemId (entryItem entry) == itemId item
+      ]
+
+expectedNotice :: BoardItem -> Text
+expectedNotice (IssueItem issue) =
+  "Issue #" <> showNumber issue.issueNumber <> " is closed; completed history is read-only"
+expectedNotice (PullRequestItem pullRequest) =
+  "PR #"
+    <> showNumber pullRequest.pullRequestNumber
+    <> " is "
+    <> (if pullRequest.pullRequestState == PullRequestMerged then "merged" else "closed")
+    <> "; completed history is read-only"
+
+-- | Criteria that between them exercise every facet, including the empty ones
+-- an edit can leave behind.
+criteriaCombinations :: [FilterCriteria]
+criteriaCombinations =
+  [ defaultFilterCriteria,
+    everyLifecycle,
+    defaultFilterCriteria {filterLifecycle = Set.singleton LifecycleClosed},
+    everyLifecycle {filterKind = Set.singleton KindIssues},
+    everyLifecycle {filterKind = Set.singleton KindPullRequests},
+    everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved},
+    everyLifecycle {filterWorkflow = Set.singleton WorkflowOther},
+    everyLifecycle {filterStructure = Set.singleton StructureStandalone},
+    everyLifecycle {filterStructure = Set.singleton StructureEpicGroups},
+    defaultFilterCriteria {filterLifecycle = Set.empty},
+    everyLifecycle {filterKind = Set.empty},
+    everyLifecycle {filterWorkflow = Set.empty},
+    everyLifecycle {filterStructure = Set.empty}
+  ]
+
+describeCriteria :: FilterCriteria -> String
+describeCriteria criteria =
+  show
+    ( Set.toList criteria.filterLifecycle,
+      Set.toList criteria.filterKind,
+      Set.toList criteria.filterWorkflow,
+      Set.toList criteria.filterStructure
+    )
+
+numbersIn :: Board -> BoardColumn -> [Int]
+numbersIn board column = map (itemNumber . entryItem) (entriesForBoard board column)
+
+summarize :: ColumnEntry -> (String, Int)
+summarize entry = (shape entry, itemNumber (entryItem entry))
+  where
+    shape (Standalone _) = "standalone"
+    shape (Tracked _ _) = "tracked"
+    shape (TrackerHeader _) = "header"
+
+trackerNumbers :: [ColumnEntry] -> [Maybe Int]
+trackerNumbers = map primaryTracker
+  where
+    primaryTracker (Tracked tracking _) = Just tracking.trackingPrimary.membershipTracker.trackerIssue.issueNumber
+    primaryTracker (TrackerHeader tracker) = Just tracker.trackerIssue.issueNumber
+    primaryTracker (Standalone _) = Nothing
+
+showNumber :: Int -> Text
+showNumber = Text.pack . show
