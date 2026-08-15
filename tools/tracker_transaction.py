@@ -140,8 +140,16 @@ MARKER_RE = re.compile(r"^\[#\d+\]$")
 
 # §4's terminal checklist entry, which is what a resolved disposition looks like
 # in every document these workflows own. `- [ ]` is an entry the document still
-# owes, and a line that is no checklist entry at all is prose.
-TERMINAL_ENTRY_RE = re.compile(r"^\s*[-*]\s*\[[xX]\]\s")
+# owes, and a line that is no checklist entry at all is prose. Anchored at the
+# line start rather than after any indent: the index is one flat line per entry,
+# so an indented task is a nested list somebody wrote inside it.
+TERMINAL_ENTRY_RE = re.compile(r"^[-*]\s*\[[xX]\]\s")
+
+# The heading of the document's at-a-glance index, whose entry lines are the
+# only place a disposition is applied. The design pair writes the first, the
+# report pair the second.
+HEADING_RE = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
+STATUS_INDEX_TITLES = ("processing status", "status")
 
 # §4's other two markers. Both are terminal-or-not dispositions that mutate no
 # tracker and therefore acquire no transaction, so either one appearing on the
@@ -316,8 +324,22 @@ def record_fault(
             return f"step {position} has a non-boolean provides_marker"
         if step["state"] not in (STEP_PLANNED, STEP_INTENT, STEP_CONFIRMED):
             return f"step {position} has unknown state {step['state']!r}"
-        if step["state"] == STEP_CONFIRMED and not isinstance(step["identity"], dict):
-            return f"step {position} is confirmed but records no identity"
+        if step["state"] == STEP_CONFIRMED:
+            if not isinstance(step["identity"], dict):
+                return f"step {position} is confirmed but records no identity"
+            # Held to exactly what confirmation demanded, through the same
+            # function: an identity that is merely *a dict* — `{}` — would
+            # otherwise read as confirmed while contributing no document token,
+            # and resolution would then clear against an entry carrying only the
+            # key. One authority, so the two can never disagree about what a
+            # confirmed mutation looks like.
+            try:
+                validate_identity(step["identity"], step, position)
+            except TransactionError as error:
+                return (
+                    f"step {position}'s confirmed identity is unusable "
+                    f"({error.message})"
+                )
         if step["state"] != STEP_CONFIRMED and step["identity"] is not None:
             return f"step {position} is {step['state']} but records an identity"
     providers = [
@@ -1163,6 +1185,44 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
     return proc.stdout.decode(errors="replace")
 
 
+def status_index_lines(text: str) -> list[str] | None:
+    """The document's at-a-glance index, or None when it has none.
+
+    §4 gives every document these workflows own exactly one such index — the
+    design pair's `## Processing status` ledger, the report pair's `## Status`
+    checklist — and it is the status source of truth. Restricting resolution to
+    it is what keeps a checked task somewhere *else* in the document from
+    clearing a transaction: a checklist inside a finding's body, an example in
+    a fenced block, a nested list under some other heading. Each of those can
+    name the key and the number while the real cursor entry is still unchecked,
+    which is precisely the state an interrupted run leaves behind.
+
+    The section runs from its heading to the next heading of any level, since
+    the index is a flat task list rather than something with subsections. Fenced
+    blocks are skipped throughout, so neither a heading nor a task inside one is
+    read as document structure.
+    """
+    collecting = False
+    fenced = False
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        heading = HEADING_RE.match(line)
+        if heading is not None:
+            if collecting:
+                break
+            title = heading.group("title").strip().strip("#").strip().lower()
+            collecting = title in STATUS_INDEX_TITLES
+            continue
+        if collecting:
+            lines.append(line)
+    return lines if collecting or lines else None
+
+
 def resolution_fault(record: dict, text: str) -> tuple[str | None, list[str]]:
     """Why the published document does not yet carry this disposition, and the
     entry lines that were considered.
@@ -1188,14 +1248,30 @@ def resolution_fault(record: dict, text: str) -> tuple[str | None, list[str]]:
     """
     entry_key = record["entry_key"]
     tokens = required_document_tokens(record)
-    naming = [line for line in text.splitlines() if entry_key in line]
+    if not tokens:
+        # Unreachable through a well-formed record, and fail-closed rather than
+        # vacuous if it ever is: `all(token in line for token in [])` is true of
+        # every line, so an empty requirement would clear against anything.
+        return (
+            "this transaction requires no document identity at all, which no "
+            "well-formed record can",
+            [],
+        )
+    index = status_index_lines(text)
+    if index is None:
+        return (
+            "the document has no '## Status' or '## Processing status' index to "
+            "resolve against",
+            [],
+        )
+    naming = [line for line in index if entry_key in line]
     if not naming:
-        return f"no line in the document names {entry_key!r}", naming
+        return f"no index entry names {entry_key!r}", naming
     terminal = [line for line in naming if TERMINAL_ENTRY_RE.match(line)]
     if not terminal:
         return (
-            f"no terminal '- [x]' entry names {entry_key!r}; the disposition was "
-            "not applied to the document's index",
+            f"no terminal '- [x]' index entry names {entry_key!r}; the "
+            "disposition was not applied to the document's index",
             naming,
         )
     carrying = [

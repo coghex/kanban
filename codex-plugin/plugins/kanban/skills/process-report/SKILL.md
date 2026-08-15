@@ -619,10 +619,12 @@ python3 "$DOC_ROOT/tools/tracker_transaction.py" \
   --resolve --source branch --branch "$DOC_BRANCH"
 ```
 
-The module verifies that the recorded entry key's own terminal `- [x]` index
-entry on `$DOC_BRANCH` carries the recorded disposition and every exact tracker
-identity that disposition requires the document to name, and clears the record
-only then. An entry still `- [ ]`, an incidental mention in prose, and a
+The module verifies that the recorded entry key's own terminal `- [x]` entry in
+the document's at-a-glance index on `$DOC_BRANCH` carries the recorded
+disposition and every exact tracker identity that disposition requires the
+document to name, and clears the record only then. It looks in that index alone,
+because a checked task in a finding's body, in a fenced example, or nested
+beneath the real entry is not the cursor. An entry still `- [ ]`, an incidental mention in prose, and a
 terminal entry carrying `[no-issue]` or `[deferred]` beside the link are each
 refused: the first is the interrupted run's own signature, the second is not the
 cursor at all, and the third is a different disposition from the recorded one. On a `not-published`

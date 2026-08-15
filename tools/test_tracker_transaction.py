@@ -1059,6 +1059,30 @@ class TrackerTransactionTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertFalse(payload["record_readable"])
 
+    def test_a_confirmed_identity_that_is_merely_a_dict_is_unreadable(self):
+        # `{}` used to read as a confirmed step. required_document_tokens then
+        # returned nothing, and "every required token is on the line" is
+        # vacuously true of any line — so a checked entry carrying the key alone
+        # cleared the transaction.
+        confirmed = json.loads(record_json())
+        confirmed["state"] = "mutation-confirmed"
+        confirmed["steps"][0]["state"] = "confirmed"
+        for identity, expected in (
+            ({}, "names no id"),
+            ({"id": "311", "postcondition_verified": True}, "records no url"),
+            (issue_identity(document_token="[#999]"), "actually created"),
+            (issue_identity(kind="issue-comment"), "approved step is a"),
+        ):
+            with self.subTest(identity=identity):
+                confirmed["steps"][0]["identity"] = identity
+                self.fx.plant_unreadable_record(content=json.dumps(confirmed))
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.read()
+                self.assertEqual(caught.exception.status, "record-unreadable")
+                self.assertIn("confirmed identity is unusable", caught.exception.message)
+                self.assertIn(expected, caught.exception.message)
+                self.assertFalse(self.fx.check()["record_readable"])
+
     def test_a_malformed_record_reaches_both_command_lines_as_tracker_state(self):
         self.fx.plant_unreadable_record(content='{"version": 1}')
         code, payload = self.fx.cli("--check")
@@ -1172,7 +1196,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-3. Checkpoint tracker mutations",
                 "- [ ] DW-3. Checkpoint tracker mutations — [#311]",
             ),
-            "no terminal '- [x]' entry names",
+            "no terminal '- [x]' index entry names",
         )
 
     def test_incidental_prose_naming_the_key_and_the_link_does_not_resolve(self):
@@ -1182,7 +1206,7 @@ class TrackerTransactionTests(unittest.TestCase):
         self.confirmed_transaction()
         self.resolution_refused(
             DOCUMENT + "\nSee DW-3, which became [#311] last week.\n",
-            "no terminal '- [x]' entry names",
+            "no terminal '- [x]' index entry names",
         )
 
     def test_a_terminal_entry_with_a_contradictory_marker_does_not_resolve(self):
@@ -1204,7 +1228,7 @@ class TrackerTransactionTests(unittest.TestCase):
     def test_an_entry_the_document_never_names_does_not_resolve(self):
         self.confirmed_transaction()
         self.resolution_refused(
-            DOCUMENT.replace("DW-3", "DW-9"), "no line in the document names"
+            DOCUMENT.replace("DW-3", "DW-9"), "no index entry names"
         )
 
     def test_the_terminal_forms_the_documents_actually_use_are_accepted(self):
@@ -1232,8 +1256,68 @@ class TrackerTransactionTests(unittest.TestCase):
                 "- [ ] DW-4. Something else",
                 "- [x] DW-4. Something else — [#311]",
             ),
-            "no terminal '- [x]' entry names",
+            "no terminal '- [x]' index entry names",
         )
+
+    def test_a_checked_task_outside_the_index_does_not_resolve(self):
+        # The cursor is the document's one at-a-glance index. A checked task
+        # anywhere else — inside a finding's body, under another heading — can
+        # name the key and the number while the real entry is still unchecked,
+        # which is exactly what an interrupted run leaves behind.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "### DW-3 — Checkpoint tracker mutations\n\nBody.",
+                "### DW-3 — Checkpoint tracker mutations\n\n"
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]\n",
+            ),
+            # The index still names DW-3, unchecked; the checked task below is
+            # simply not part of the cursor and is never consulted.
+            "no terminal '- [x]' index entry names",
+        )
+
+    def test_a_checked_task_in_a_fenced_block_inside_the_index_does_not_resolve(self):
+        # An example of the finished form, quoted in the index's own section.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "- [ ] DW-4. Something else",
+                "- [ ] DW-4. Something else\n\n```markdown\n"
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]\n```\n",
+            ),
+            "no terminal '- [x]' index entry names",
+        )
+
+    def test_a_nested_checked_task_in_the_index_does_not_resolve(self):
+        # One flat line per entry, so an indented task is a sub-list somebody
+        # wrote beneath the real entry rather than the entry itself.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [ ] DW-3. Checkpoint tracker mutations\n"
+                "  - [x] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            "no terminal '- [x]' index entry names",
+        )
+
+    def test_a_document_with_no_index_does_not_resolve(self):
+        self.confirmed_transaction()
+        self.resolution_refused(
+            "# Findings\n\n- [x] DW-3. Checkpoint tracker mutations — [#311]\n",
+            "has no '## Status' or '## Processing status' index",
+        )
+
+    def test_the_design_pairs_processing_status_ledger_resolves(self):
+        # The other of the two index headings §4 defines, so the design pair's
+        # ledger is not left unresolvable by a rule written for reports.
+        self.confirmed_transaction()
+        self.fx.publish_document(
+            "# Design\n\n## Processing status\n\n"
+            "- [x] DW-3. Checkpoint tracker mutations — [#311]\n"
+            "- [ ] DW-4. Something else\n"
+        )
+        self.assertEqual(self.fx.resolve()["status"], "resolved")
 
     def test_reachability_alone_does_not_clear_the_record(self):
         # Requirement 11 and its acceptance bullet: the publication landed, and

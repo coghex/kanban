@@ -298,8 +298,11 @@ CONTRACT_STATEMENTS = {
         "the recorded entry key's own terminal index entry on the publication "
         "branch"
     ),
+    "transaction-entry-lives-in-the-status-index": (
+        "it is looked for only in the document's own at-a-glance index"
+    ),
     "transaction-entry-is-the-one-section-4-defines": (
-        "a task-list line marked exactly - [x]"
+        "the entry is a top-level task-list line marked exactly - [x]"
     ),
     "transaction-clearing-is-bound-to-the-entry": (
         "Clearing is bound to the published entry, not to reachability"
@@ -487,7 +490,13 @@ TRANSACTION_CLAUSES = {
         "a similarly titled artifact is never sufficient evidence"
     ),
     "clearing-needs-the-terminal-entry": (
-        "the recorded entry key's own terminal - [x] index entry on $doc_branch"
+        "the recorded entry key's own terminal - [x] entry in the document's "
+        "at-a-glance index on $doc_branch"
+    ),
+    "clearing-looks-only-in-the-index": (
+        "it looks in that index alone, because a checked task in a finding's "
+        "body, in a fenced example, or nested beneath the real entry is not the "
+        "cursor"
     ),
     "an-unmarked-or-contradicted-entry-is-refused": (
         "an entry still - [ ], an incidental mention in prose, and a terminal "

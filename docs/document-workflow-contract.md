@@ -755,8 +755,13 @@ resolves only once the recorded entry key's own **terminal index entry** on the
 publication branch carries the recorded disposition and every exact tracker
 identity that disposition requires the document to name. A commit reaching the
 branch proves a commit landed, not that it carried this disposition. The entry
-is the one §4 defines — a task-list line marked exactly `- [x]` — because that
-is what distinguishes the three states a search for the key and the number
+is the one §4 defines, and it is looked for only in the document's own
+at-a-glance index — the design pair's `## Processing status` ledger, the report
+pair's `## Status` checklist — because that index is the status source of truth
+and a checked task anywhere else is not the cursor: a checklist inside a
+finding's body, an example in a fenced block, a nested list beneath the real
+entry. Within it the entry is a top-level task-list line marked exactly `- [x]`,
+which is what distinguishes the three states a search for the key and the number
 cannot tell apart: an entry still `- [ ]`, which the interrupted run never
 marked; an incidental mention in prose, a `Related` pointer, or a code fence;
 and a terminal entry carrying `[no-issue]` or `[deferred]` beside the link,
