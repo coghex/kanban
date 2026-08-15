@@ -122,6 +122,11 @@ PROCESS_REPORT_ASSETS = CROSS_BRAND_PAIRS["process-report"]
 # rule legitimately starts a sentence in one variant and appears mid-sentence
 # in the other.
 PROCESS_REPORT_SHARED_BOUNDARIES = (
+    # Issue #327: the report pair's own no-transaction case. A linked issue with
+    # no approved comment mutates no tracker, and an empty plan is refused, so
+    # an asset that did not say this would direct a run into a refusal.
+    "an existing issue with no approved comment",
+    "there is no tracker mutation and no transaction",
     "process exactly one finding",
     "stop for explicit approval",
     "only after explicit approval",
@@ -255,6 +260,10 @@ CONTRACT_STATEMENTS = {
     ),
     "transaction-no-mutation-acquires-nothing": (
         "A disposition that mutates no tracker acquires no transaction"
+    ),
+    "transaction-linking-alone-mutates-nothing": (
+        "neither does an Existing issue linked through process-report with no "
+        "approved comment"
     ),
     "transaction-acquisition-is-create-only": (
         "Acquisition is atomic and create-only"
@@ -455,6 +464,9 @@ TRANSACTION_CLAUSES = {
     ),
     "no-tracker-mutation-acquires-nothing": (
         "a disposition that mutates no tracker acquires nothing"
+    ),
+    "linking-alone-is-not-a-tracker-mutation": (
+        "linking an issue that already exists mutates nothing by itself"
     ),
     "steps-are-begun-then-confirmed": (
         "begin a step before its external mutation runs and confirm it with the "

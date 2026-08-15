@@ -532,8 +532,11 @@ step of its own:
   is a checkpointed step: begin it before that call and confirm it with the
   number and URL it returned.
 - **Child issue linking.** Linking an issue that already exists mutates nothing
-  by itself, so the transaction plans only the mutations it really performs and
-  records the `[#N]` marker the ledger line will carry.
+  by itself, but this workflow always updates the umbrella epic's checklist for
+  a linked child, so there is always at least that one step. The transaction
+  plans only the mutations it really performs, and `marker_target` names the
+  issue being linked — which is not any step's target, since the checklist edit
+  targets the epic.
 - **Approved comment.** Posting an explicitly approved comment is a checkpointed
   step: begin it before the comment is posted and confirm it with the comment ID
   and URL, then confirm the target still exists.

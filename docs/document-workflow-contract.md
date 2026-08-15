@@ -648,8 +648,9 @@ the identity appropriate to its own kind of mutation, never an assumed issue
 number.
 
 **A disposition that mutates no tracker acquires no transaction.** `[no-issue]`
-and `[deferred]` mutate nothing, and neither does `process-report`'s `Epic`
-disposition: that arc is handed to the design pair, and its epic is created
+and `[deferred]` mutate nothing; neither does an `Existing issue` linked through
+`process-report` with no approved comment, which is a document change and not a
+tracker one; and neither does `process-report`'s `Epic` disposition: that arc is handed to the design pair, and its epic is created
 later inside the design document's own transaction. Acquiring a record for one
 of these would leave it outstanding across a separate human-led workflow and
 block every other entry in the document.

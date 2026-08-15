@@ -1782,25 +1782,69 @@ class TrackerTransactionTests(unittest.TestCase):
         )
         self.assertEqual(self.fx.resolve()["status"], "resolved")
 
-    def test_a_document_absent_from_the_tip_resolves_locally(self):
-        # A novel document is legitimately local and unpublished until a
-        # separate pull request adds it and its classification, so the working
-        # tree is the only evidence there is.
-        novel = "docs/new_design.md"
-        self.fx.acquire(document=novel)
-        self.fx.begin(0, document=novel)
-        self.fx.confirm(0, issue_identity(), document=novel)
-        self.fx.begin(1, document=novel)
-        self.fx.confirm(1, edit_identity(), document=novel)
-        (self.fx.docs / novel).write_text(
+    def test_a_document_absent_from_the_tip_does_not_resolve_locally(self):
+        # A novel document is legitimately local — but the publication module
+        # applies content only over an existing baseline, so it never wrote this
+        # one and the disposition reached nothing. Being local makes the record
+        # outstanding, not resolvable; it clears when a pull request adds the
+        # document and a later run publishes to it.
+        for novel in ("docs/new_design.md", "docs/ui-bugs-new.md"):
+            with self.subTest(document=novel):
+                self.fx.acquire(document=novel)
+                self.fx.begin(0, document=novel)
+                self.fx.confirm(0, issue_identity(), document=novel)
+                self.fx.begin(1, document=novel)
+                self.fx.confirm(1, edit_identity(), document=novel)
+                (self.fx.docs / novel).write_text(
+                    DOCUMENT.replace(
+                        "- [ ] DW-3. Checkpoint tracker mutations",
+                        "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.resolve(source="local", document=novel)
+                self.assertEqual(caught.exception.status, "local-resolution-refused")
+                self.assertIn("never applied this disposition",
+                              caught.exception.message)
+                self.assertEqual(
+                    self.fx.check(document=novel)["status"], "outstanding"
+                )
+
+    def test_a_coordination_document_absent_from_the_tip_does_not_resolve_either(self):
+        # Classified for the direct lane but not yet on the branch: the helper
+        # reports not-published with document_written false, so a locally edited
+        # terminal entry is not evidence of anything.
+        classified = "docs/drainer-bugs.md"
+        run(["git", "checkout", "-q", "master"], self.fx.primary)
+        (self.fx.primary / "docs" / "agent-workflow-contract.md").write_text(
+            CLASSIFICATION.replace(
+                "docs/design.md | pr-atomic | test-parsed",
+                "docs/design.md | pr-atomic | test-parsed\n"
+                "docs/drainer-bugs.md | coordination | audit-report",
+            ),
+            encoding="utf-8",
+        )
+        run(["git", "commit", "-qam", "classify"], self.fx.primary)
+        run(["git", "push", "-q", "origin", "master:master"], self.fx.primary)
+        self.fx.acquire(document=classified)
+        self.fx.begin(0, document=classified)
+        self.fx.confirm(0, issue_identity(), document=classified)
+        self.fx.begin(1, document=classified)
+        self.fx.confirm(1, edit_identity(), document=classified)
+        (self.fx.docs / classified).write_text(
             DOCUMENT.replace(
                 "- [ ] DW-3. Checkpoint tracker mutations",
                 "- [x] DW-3. Checkpoint tracker mutations — [#311]",
             ),
             encoding="utf-8",
         )
-        outcome = self.fx.resolve(source="local", document=novel)
-        self.assertEqual(outcome["status"], "resolved")
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document=classified)
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertEqual(
+            self.fx.check(document=classified)["status"], "outstanding"
+        )
 
     # -- abandonment ---------------------------------------------------------
 

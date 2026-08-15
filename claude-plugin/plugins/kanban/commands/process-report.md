@@ -426,7 +426,11 @@ irreversible action and report that; an unreadable transaction is never read as
 no transaction.
 
 **A disposition that mutates no tracker acquires nothing.** `[no-issue]`,
-`[deferred]`, and `Epic` make no tracker mutation here — the arc goes to
+`[deferred]`, an **Existing issue with no approved comment**, and `Epic` make no
+tracker mutation here. Linking an issue that already exists is a document
+change, not a tracker one: without an approved comment there is nothing to
+checkpoint, so no transaction is acquired at all rather than an empty one, which
+this module refuses. For `Epic` the arc goes to
 `/design-epic`, and its epic is created later inside `/process-design-doc`'s own
 transaction for the design document — so they plan no steps and leave no
 transaction outstanding. Acquiring one for them would block every later finding
@@ -494,9 +498,10 @@ Then, only after explicit approval and a `"clear"` preflight:
   approved existing labels, is a checkpointed step: begin it before that call
   and confirm it with the number and URL it returned.
 - **Child issue linking.** Linking an issue that already exists mutates nothing
-  by itself, so the transaction plans only the mutations it really performs and
-  records the `[#N]` marker the checklist line will carry; confirm the target
-  issue still exists.
+  by itself. With an approved comment, that comment is the transaction's one
+  step and `marker_target` names the issue being linked; with none, there is no
+  tracker mutation and no transaction. Either way, confirm the target issue
+  still exists.
 - **Approved comment.** Posting an explicitly approved comment on that issue is
   a checkpointed step: begin it before the comment is posted and confirm it with
   the comment ID and URL.

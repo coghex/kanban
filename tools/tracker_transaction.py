@@ -1365,34 +1365,44 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     """Whether this document may be resolved against the working tree, and why
     not when it may not.
 
-    `--source local` exists for the helper's ordinary `not-published` outcome: a
-    `pr-atomic`, unmatched, or not-yet-tracked document is never published, so
-    the applied local document is the only evidence there will ever be. A
-    document that *does* have a coordination lane is a different matter — its
-    disposition belongs on the branch, and clearing from a locally edited cursor
-    would leave the next preflight clear while the entry never landed, which is
-    exactly the duplicate tracker work this record exists to prevent.
+    `--source local` exists for exactly one outcome: the publication module
+    reported `not-published` *and* applied the approved content to the document
+    itself. Then the working tree is the only evidence there will ever be, and a
+    legitimate terminal state. Both halves matter, and each rules out a case:
 
-    So the permission is derived rather than asserted: the caller says which
-    source it wants, and this decides whether that source is admissible, from
-    the same classification the publication module itself uses.
+    - a document that *does* have a coordination lane belongs on the branch, and
+      clearing it from a locally edited cursor would leave the next preflight
+      clear while the entry never landed; and
+    - a document absent from the publication tip was never written by the module
+      at all — it applies the content only over an existing baseline — so
+      whatever the working tree holds, the disposition reached nothing. A novel
+      document is legitimately local, but that makes its record outstanding
+      rather than resolvable.
+
+    The permission is derived rather than asserted: the caller says which source
+    it wants, and this decides whether that source is admissible, from the same
+    classification the publication module itself applies.
     """
     publisher = publication_module()
     git(["fetch", "origin", branch], cwd=root)
     tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
-    publishable, why_not = publisher.eligibility(
-        root, record["repository"], tip, record["document"]
-    )
-    if publishable and publisher.blob_at(root, tip, record["document"]) is None:
-        publishable, why_not = False, (
-            f"{record['document']} is absent from the publication tip"
+    document = record["document"]
+    if publisher.blob_at(root, tip, document) is None:
+        return False, (
+            f"{document} is absent from {branch}, so the publication module never "
+            "applied this disposition to it — it writes only over an existing "
+            "baseline, and a novel document stays local and unresolved until a "
+            "pull request adds it and its classification"
         )
-    if not publishable:
-        return True, why_not
-    return False, (
-        f"{record['document']} publishes directly to {branch}, so its disposition "
-        "is verified there rather than in the working tree"
+    publishable, why_not = publisher.eligibility(
+        root, record["repository"], tip, document
     )
+    if publishable:
+        return False, (
+            f"{document} publishes directly to {branch}, so its disposition is "
+            "verified there rather than in the working tree"
+        )
+    return True, why_not
 
 
 def published_document(root: Path, record: dict, source: str, branch: str) -> str:
