@@ -25,21 +25,36 @@ module Kanban.GitHub
     GhFetchGuard,
     GhRecordLock,
     GitHubResult (..),
+    HistoryFetchState (..),
     RateObserver,
+    advanceHistoryState,
     advanceState,
     classifyFailure,
     compactError,
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    fetchHistoryPage,
     ghFailureKind,
     ghFetchCleanupFailure,
     graphqlArguments,
+    historyFetchProgress,
+    historyGraphqlArguments,
+    historyTraversalComplete,
+    initialHistoryFetchState,
     newGhFetchGuard,
     newGhRecordLock,
     paginationDecision,
     reclaimRecordedGhGroups,
     setCleanupFailure,
     snapshotWarnings,
+
+    -- * The completed traversal
+    CompletedGeneration,
+    HistoryOutcome (..),
+    HistoryTraversal,
+    beginCompletedGeneration,
+    newHistoryTraversal,
+    runCompletedHistoryPage,
 
     -- * The repository's refresh coordinator
     CoordinatorNotice (..),
@@ -109,8 +124,32 @@ import Kanban.GitHub.Coordinator
     settleOpenJob,
     shutdownRefreshCoordinator,
   )
-import Kanban.GitHub.Fetch (FetchState (..), GitHubResult (..), RateObserver, advanceState, decodeGitHubItems, fetchGitHubSnapshot, graphqlArguments, paginationDecision)
+import Kanban.GitHub.Fetch
+  ( FetchState (..),
+    GitHubResult (..),
+    HistoryFetchState (..),
+    RateObserver,
+    advanceHistoryState,
+    advanceState,
+    decodeGitHubItems,
+    fetchGitHubSnapshot,
+    fetchHistoryPage,
+    graphqlArguments,
+    historyFetchProgress,
+    historyGraphqlArguments,
+    historyTraversalComplete,
+    initialHistoryFetchState,
+    paginationDecision,
+  )
 import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupConfirmedEmpty)
+import Kanban.GitHub.History
+  ( CompletedGeneration,
+    HistoryOutcome (..),
+    HistoryTraversal,
+    beginCompletedGeneration,
+    newHistoryTraversal,
+    runCompletedHistoryPage,
+  )
 import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)

@@ -9,15 +9,23 @@
 module Kanban.GitHub.Fetch
   ( FetchState (..),
     GitHubResult (..),
+    HistoryFetchState (..),
     RateObserver,
+    advanceHistoryState,
     advanceState,
     decodeGitHubItems,
     fetchGitHubSnapshot,
+    fetchHistoryPage,
     graphqlArguments,
+    historyFetchProgress,
+    historyGraphqlArguments,
+    historyTraversalComplete,
+    initialHistoryFetchState,
     paginationDecision,
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Exception (try)
 import Data.Aeson (eitherDecode)
 import Data.Bifunctor (first)
@@ -63,11 +71,100 @@ data FetchState = FetchState
     fetchWarnings :: [Text]
   }
 
+-- | The completed traversal's own page state.
+--
+-- It is a type of its own rather than a flag on 'FetchState' because the two
+-- traversals are answered on different schedules: an open generation runs its
+-- pages back to back inside one call, while a completed generation is one page
+-- per coordinator job and has to survive between them. What it adds is the
+-- pair of totals §15's progress is reported as; what it drops is the warning
+-- list, since the only warning a page can raise is the sub-issue fallback the
+-- open generation already reports for the same repository in the same process.
+data HistoryFetchState = HistoryFetchState
+  { historyFetchedIssues :: [Issue],
+    historyFetchedPullRequests :: [PullRequest],
+    historyIssueCursor :: Maybe Text,
+    historyPullRequestCursor :: Maybe Text,
+    historyMoreIssues :: Bool,
+    historyMorePullRequests :: Bool,
+    -- | GitHub's own count for each completed connection, once a page has
+    -- reported one. It survives the connection running out, because the query
+    -- stops asking for an exhausted connection at all and a total already
+    -- known is not unlearned by the page that omits it.
+    historyIssueTotal :: Maybe Int,
+    historyPullRequestTotal :: Maybe Int,
+    -- | See 'fetchSubIssues': the same one-time fallback, because a completed
+    -- tracker's native children are as much a part of requirement 7's
+    -- old-item update detection as its title is.
+    historyFetchSubIssues :: Bool
+  }
+  deriving stock (Eq, Show)
+
+initialHistoryFetchState :: HistoryFetchState
+initialHistoryFetchState = HistoryFetchState [] [] Nothing Nothing True True Nothing Nothing True
+
+-- | Whether both completed connections have reached their final page, which is
+-- the only condition under which a completed generation is whole.
+historyTraversalComplete :: HistoryFetchState -> Bool
+historyTraversalComplete state = not state.historyMoreIssues && not state.historyMorePullRequests
+
+historyFetchProgress :: HistoryFetchState -> CompletedProgress
+historyFetchProgress state =
+  CompletedProgress
+    { completedIssuesLoaded = length state.historyFetchedIssues,
+      completedIssuesTotal = state.historyIssueTotal,
+      completedPullRequestsLoaded = length state.historyFetchedPullRequests,
+      completedPullRequestsTotal = state.historyPullRequestTotal
+    }
+
 -- | GitHub's own maximum for a connection page, and therefore the size every
 -- page asks for: with no configured cap to stop short of, the traversal wants
 -- the fewest requests it can make.
 pageLimit :: Int
 pageLimit = 100
+
+-- | Which lifecycle a page is asking about.
+--
+-- The two scopes differ only in the @states:@ filters and in whether the
+-- connection's @totalCount@ is requested, so they share one query text and one
+-- argument vector rather than two that could drift on any of the two dozen
+-- fields a card is built from.
+data ItemScope = OpenItems | CompletedItems
+  deriving stock (Eq, Show)
+
+-- | Everything one page request varies by: which lifecycle it asks about,
+-- which connections are still being followed, and where each of them resumed.
+data PageRequest = PageRequest
+  { requestScope :: ItemScope,
+    requestIssues :: Bool,
+    requestPullRequests :: Bool,
+    requestIssueCursor :: Maybe Text,
+    requestPullRequestCursor :: Maybe Text,
+    requestSubIssues :: Bool
+  }
+  deriving stock (Eq, Show)
+
+openRequest :: FetchState -> PageRequest
+openRequest state =
+  PageRequest
+    { requestScope = OpenItems,
+      requestIssues = state.fetchMoreIssues,
+      requestPullRequests = state.fetchMorePullRequests,
+      requestIssueCursor = state.issueCursor,
+      requestPullRequestCursor = state.pullRequestCursor,
+      requestSubIssues = state.fetchSubIssues
+    }
+
+historyRequest :: HistoryFetchState -> PageRequest
+historyRequest state =
+  PageRequest
+    { requestScope = CompletedItems,
+      requestIssues = state.historyMoreIssues,
+      requestPullRequests = state.historyMorePullRequests,
+      requestIssueCursor = state.historyIssueCursor,
+      requestPullRequestCursor = state.historyPullRequestCursor,
+      requestSubIssues = state.historyFetchSubIssues
+    }
 
 -- | Told what each page reported about the budget, in the order the pages
 -- were fetched.
@@ -121,7 +218,7 @@ fetchGitHubSnapshot guard observeRate pageSeconds workflowConfig repository = do
                   fetchedAt
           pure (Right (GitHubResult repoSnapshot (snapshotWarnings workflowConfig repoSnapshot <> state.fetchWarnings)))
       | otherwise = do
-          timedPage <- timeout (pageSeconds * 1000000) (fetchPage guard observeRate repository state)
+          timedPage <- timeout (pageSeconds * 1000000) (fetchPage guard observeRate repository (openRequest state))
           case timedPage of
             Nothing -> pure (Left (pageTimedOut pageSeconds))
             Just (Left providerError)
@@ -135,6 +232,37 @@ fetchGitHubSnapshot guard observeRate pageSeconds workflowConfig repository = do
             Just (Right page) -> case advanceState state page of
               Left providerError -> pure (Left providerError)
               Right nextState -> fetchPages nextState
+
+-- | Fetches exactly one page of the completed traversal and folds it in.
+--
+-- One page rather than the whole of it, because the coordinator gives the
+-- owner back at every page boundary (§15) and the accumulator between calls is
+-- the caller's to hold. Everything else is the open traversal's: the same
+-- reclaim before anything is spawned, the same per-page deadline, the same
+-- verified @gh@ cleanup on the way out, and the same one-time retreat from a
+-- deployment whose schema has no sub-issue fields.
+fetchHistoryPage :: GhFetchGuard -> RateObserver -> Int -> Repository -> HistoryFetchState -> IO (Either ProviderError HistoryFetchState)
+fetchHistoryPage guard observeRate pageSeconds repository initial = do
+  -- The record is the only thing that carries "a gh of ours may still be
+  -- running" across a job, and a history page spawns gh exactly as a foreground
+  -- one does, so it is held to the same refusal rather than starting beside a
+  -- group nothing has confirmed gone.
+  reclaimed <- uninterruptiblyBounded reclaimInterrupted (reclaimRecordedGhGroups guard repository)
+  case reclaimed of
+    Left message -> pure (Left (ProviderError RequestFailed message))
+    Right () -> fetchOnce initial
+  where
+    reclaimInterrupted = Left "reclaiming a gh process group left by an earlier GitHub refresh did not run to completion"
+
+    fetchOnce state = do
+      timedPage <- timeout (pageSeconds * 1000000) (fetchPage guard observeRate repository (historyRequest state))
+      case timedPage of
+        Nothing -> pure (Left (pageTimedOut pageSeconds))
+        Just (Left providerError)
+          | state.historyFetchSubIssues && subIssueSchemaUnsupported providerError.providerErrorMessage ->
+              fetchOnce state {historyFetchSubIssues = False}
+          | otherwise -> pure (Left providerError)
+        Just (Right page) -> pure (advanceHistoryState state page)
 
 -- | What a page that outran the configured GitHub timeout reports. The
 -- wording is the one §17 already renders for a refresh that timed out, since
@@ -175,14 +303,14 @@ decodeGitHubItems input = do
       maybe [] (.connectionNodes) page.pagePullRequests
     )
 
-fetchPage :: GhFetchGuard -> RateObserver -> Repository -> FetchState -> IO (Either ProviderError GitHubPage)
-fetchPage guard observeRate repository state = do
+fetchPage :: GhFetchGuard -> RateObserver -> Repository -> PageRequest -> IO (Either ProviderError GitHubPage)
+fetchPage guard observeRate repository request = do
   -- The unwritable-guard failure is deliberately not folded in with the
   -- IOExceptions below: those mean gh could not be run, while this means gh
   -- ran and was then stopped again because nothing durable could account for
   -- it. Reporting it as a missing executable would send the user looking in
   -- entirely the wrong place.
-  guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (graphqlArguments repository state)))
+  guarded <- try @GhFetchAborted (try @GhProcessFailed (runGh guard repository (pageArguments repository request)))
   -- Reported off the response body rather than off a decoded page, and for a
   -- failed request as readily as a successful one: gh prints what GitHub
   -- answered whatever the status was, and a rejected page's own report is the
@@ -278,6 +406,41 @@ advanceState previous page = first explainStructuralFailure $ do
         { providerErrorMessage = withGraphQLErrors page.pageGraphQLErrors providerError.providerErrorMessage
         }
 
+-- | Folds one decoded completed page into the traversal.
+--
+-- It answers the same structural questions 'advanceState' does, and defers to
+-- the same helpers for them, so the two traversals cannot disagree about what
+-- an omitted connection or a next page without a cursor means. The GraphQL
+-- @errors@ array is deliberately not carried: a completed page that is
+-- structurally intact and partly errored degrades its own items exactly as an
+-- open one does, and the banner that would report it belongs to the open
+-- generation this slice does not touch.
+advanceHistoryState :: HistoryFetchState -> GitHubPage -> Either ProviderError HistoryFetchState
+advanceHistoryState previous page = first explainStructuralFailure $ do
+  issueConnection <- requireConnection "issues" previous.historyMoreIssues page.pageIssues
+  pullRequestConnection <- requireConnection "pull requests" previous.historyMorePullRequests page.pagePullRequests
+  let newIssues = map (forgetSubIssueRequest previous.historyFetchSubIssues) (maybe [] (.connectionNodes) issueConnection)
+      newPullRequests = maybe [] (.connectionNodes) pullRequestConnection
+  (moreIssues, nextIssueCursor) <- advanceConnection previous.historyMoreIssues issueConnection
+  (morePullRequests, nextPullRequestCursor) <- advanceConnection previous.historyMorePullRequests pullRequestConnection
+  pure
+    HistoryFetchState
+      { historyFetchedIssues = previous.historyFetchedIssues <> newIssues,
+        historyFetchedPullRequests = previous.historyFetchedPullRequests <> newPullRequests,
+        historyIssueCursor = nextIssueCursor,
+        historyPullRequestCursor = nextPullRequestCursor,
+        historyMoreIssues = moreIssues,
+        historyMorePullRequests = morePullRequests,
+        historyIssueTotal = (issueConnection >>= (.connectionTotalCount)) <|> previous.historyIssueTotal,
+        historyPullRequestTotal = (pullRequestConnection >>= (.connectionTotalCount)) <|> previous.historyPullRequestTotal,
+        historyFetchSubIssues = previous.historyFetchSubIssues
+      }
+  where
+    explainStructuralFailure providerError =
+      providerError
+        { providerErrorMessage = withGraphQLErrors page.pageGraphQLErrors providerError.providerErrorMessage
+        }
+
 -- | Separates \"GitHub was asked and did not answer\" from \"nobody asked\".
 --
 -- The decoder cannot tell the two apart: a page fetched without the sub-issue
@@ -333,7 +496,15 @@ paginationDecision True (Just cursor) = Right (True, Just cursor)
 -- for every page of every refresh.  Only the genuinely typed variables --
 -- the @Int!@ page sizes and @Boolean!@ fetch controls -- keep @-F@.
 graphqlArguments :: Repository -> FetchState -> [String]
-graphqlArguments repository state =
+graphqlArguments repository = pageArguments repository . openRequest
+
+-- | The completed traversal's argument vector, built by the same rules from
+-- the same builder — only the scope differs.
+historyGraphqlArguments :: Repository -> HistoryFetchState -> [String]
+historyGraphqlArguments repository = pageArguments repository . historyRequest
+
+pageArguments :: Repository -> PageRequest -> [String]
+pageArguments repository request =
   [ "api",
     "graphql",
     "-f",
@@ -345,13 +516,13 @@ graphqlArguments repository state =
     "-F",
     "pullRequestPageSize=" <> show pageLimit,
     "-F",
-    "fetchIssues=" <> boolText state.fetchMoreIssues,
+    "fetchIssues=" <> boolText request.requestIssues,
     "-F",
-    "fetchPullRequests=" <> boolText state.fetchMorePullRequests
+    "fetchPullRequests=" <> boolText request.requestPullRequests
   ]
-    <> cursorArgument "issueCursor" state.issueCursor
-    <> cursorArgument "pullRequestCursor" state.pullRequestCursor
-    <> ["-f", "query=" <> Text.unpack (graphqlQuery state.fetchSubIssues)]
+    <> cursorArgument "issueCursor" request.requestIssueCursor
+    <> cursorArgument "pullRequestCursor" request.requestPullRequestCursor
+    <> ["-f", "query=" <> Text.unpack (graphqlQuery request.requestScope request.requestSubIssues)]
 
 -- | Cursors are declared @String@ and are opaque to us, so they are passed
 -- raw as well; an all-digit cursor would otherwise corrupt pagination the
@@ -365,7 +536,8 @@ boolText :: Bool -> String
 boolText True = "true"
 boolText False = "false"
 
--- | The page query, with or without §12's native sub-issue selection.
+-- | The page query, for one lifecycle scope, with or without §12's native
+-- sub-issue selection.
 --
 -- The selection is a plain part of the issue node rather than an
 -- @\@include@-guarded one, because a GraphQL directive still leaves the field
@@ -377,9 +549,16 @@ boolText False = "false"
 -- than only for trackers, since tracker recognition happens after decoding;
 -- only the tracker ones are ever consumed. @first: 100@ is GitHub's own
 -- per-parent sub-issue limit, so one page holds every immediate child.
-graphqlQuery :: Bool -> Text
-graphqlQuery withSubIssues =
-  Text.unlines
+--
+-- The two scopes select the same fields from the same connections and differ
+-- only in the @states:@ filters and in the completed scope's @totalCount@.
+-- Sharing one text is what keeps requirement 7 true without a second list to
+-- maintain: a field a card is built from is asked for in both scopes or in
+-- neither, so an edit to a long-closed item is picked up by the same
+-- selection that would have picked it up while the item was open.
+graphqlQuery :: ItemScope -> Bool -> Text
+graphqlQuery scope withSubIssues =
+  queryLines
     [ "query(",
       "  $owner: String!,",
       "  $name: String!,",
@@ -397,20 +576,22 @@ graphqlQuery withSubIssues =
       "  rateLimit { cost remaining resetAt }",
       "  repository(owner: $owner, name: $name) {",
       "    nameWithOwner",
-      "    issues(first: $issuePageSize, after: $issueCursor, states: OPEN) @include(if: $fetchIssues) {",
+      "    issues(first: $issuePageSize, after: $issueCursor, states: " <> issueStates <> ") @include(if: $fetchIssues) {",
+      connectionTotal,
       "      nodes {",
-      "        number title body url createdAt updatedAt",
+      "        number title body url state createdAt updatedAt",
       "        labels(first: 20) { totalCount nodes { name color } }",
       "        assignees(first: 10) { totalCount nodes { login } }"
     ]
     <> subIssueSelection
-    <> Text.unlines
+    <> queryLines
       [ "      }",
         "      pageInfo { hasNextPage endCursor }",
         "    }",
-        "    pullRequests(first: $pullRequestPageSize, after: $pullRequestCursor, states: OPEN) @include(if: $fetchPullRequests) {",
+        "    pullRequests(first: $pullRequestPageSize, after: $pullRequestCursor, states: " <> pullRequestStates <> ") @include(if: $fetchPullRequests) {",
+        connectionTotal,
         "      nodes {",
-        "        number title body url createdAt updatedAt isDraft",
+        "        number title body url state createdAt updatedAt isDraft",
         "        baseRefName headRefName author { login }",
         "        labels(first: 20) { totalCount nodes { name color } }",
         "        closingIssuesReferences(first: 20) { totalCount nodes { number } }",
@@ -432,6 +613,19 @@ graphqlQuery withSubIssues =
         "}"
       ]
   where
+    (issueStates, pullRequestStates) = case scope of
+      OpenItems -> ("OPEN", "OPEN")
+      CompletedItems -> ("[CLOSED]", "[CLOSED, MERGED]")
+    -- Only the completed scope pays for it, and only because §15's progress is
+    -- a loaded/total pair: the open generation publishes atomically and has
+    -- nothing to report a denominator for.
+    connectionTotal = case scope of
+      OpenItems -> ""
+      CompletedItems -> "      totalCount"
+    -- A selection the scope does not want is an empty entry rather than an
+    -- absent one, and a blank line in the middle of a query is noise in every
+    -- log that ever prints it.
+    queryLines = Text.unlines . filter (not . Text.null)
     subIssueSelection
       | withSubIssues =
           Text.unlines

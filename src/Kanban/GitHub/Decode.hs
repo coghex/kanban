@@ -38,6 +38,11 @@ data PageInfo = PageInfo
 
 data Connection item = Connection
   { connectionNodes :: [item],
+    -- | GitHub's own count for the whole connection, when the query asked for
+    -- it. The open traversal does not, because nothing reads a total it would
+    -- pay a field for; the completed one does, since §15's progress is a
+    -- loaded\/total pair and a page counter cannot stand in for one.
+    connectionTotalCount :: Maybe Int,
     connectionPageInfo :: PageInfo
   }
   deriving stock (Eq, Show)
@@ -151,6 +156,7 @@ parseConnection itemParser = withObject "connection" $ \object -> do
   nodes <- object .:? "nodes" .!= []
   Connection
     <$> traverse itemParser nodes
+    <*> object .:? "totalCount"
     <*> object .: "pageInfo"
 
 parseLabel :: Value -> Parser Label
@@ -172,6 +178,7 @@ parseIssue repositoryIdentity = withObject "issue" $ \object -> do
     <*> object .: "title"
     <*> object .:? "body" .!= ""
     <*> object .: "url"
+    <*> (parseIssueState =<< object .: "state")
     <*> pure labels
     <*> pure assignees
     <*> object .: "createdAt"
@@ -193,6 +200,7 @@ parsePullRequest = withObject "pull request" $ \object -> do
       <*> object .: "title"
       <*> object .:? "body" .!= ""
       <*> object .: "url"
+      <*> (parsePullRequestState =<< object .: "state")
       <*> pure labels
       <*> parseAuthor object
       <*> object .: "isDraft"
@@ -316,6 +324,26 @@ parseAuthor object = do
   case author of
     Nothing -> pure "ghost"
     Just value -> withObject "author" (\actor -> actor .: "login") value
+
+-- | An item's lifecycle, held to the same strictness as any other required
+-- scalar (§13).
+--
+-- There is no unknown constructor to fall back to, and inventing one would be
+-- worse than failing: every state this build does not recognise would have to
+-- be placed on the board somewhere, and placing a settled item among the open
+-- ones — or the reverse — is exactly the confusion the field exists to end.
+-- GitHub's two enumerations are closed, so an unrecognised value is a response
+-- this build genuinely cannot reason about.
+parseIssueState :: Text -> Parser IssueState
+parseIssueState "OPEN" = pure IssueOpen
+parseIssueState "CLOSED" = pure IssueClosed
+parseIssueState other = fail ("unsupported issue state: " <> Text.unpack other)
+
+parsePullRequestState :: Text -> Parser PullRequestState
+parsePullRequestState "OPEN" = pure PullRequestOpen
+parsePullRequestState "CLOSED" = pure PullRequestClosed
+parsePullRequestState "MERGED" = pure PullRequestMerged
+parsePullRequestState other = fail ("unsupported pull request state: " <> Text.unpack other)
 
 parseReviewDecision :: Maybe Text -> ReviewDecision
 parseReviewDecision (Just "APPROVED") = ReviewApproved

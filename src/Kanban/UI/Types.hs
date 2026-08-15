@@ -9,6 +9,7 @@ module Kanban.UI.Types
     BoardRefreshOutcome (..),
     ChatTranscript (..),
     ColumnSearch (..),
+    CompletedGeneration,
     DirectMergeReport (..),
     DrainerSourceState (..),
     IncidentClickOutcome (..),
@@ -53,7 +54,15 @@ import Kanban.Drainer
     DrainerObservation (..),
     DrainerStatus (..)
     )
-import Kanban.GitHub (GhCleanupFailure (..), GitHubResult (..), OpenGeneration, RefreshCoordinator )
+import Kanban.GitHub
+  ( CompletedGeneration,
+    GhCleanupFailure (..),
+    GitHubResult (..),
+    HistoryOutcome (..),
+    HistoryTraversal,
+    OpenGeneration,
+    RefreshCoordinator
+    )
 import Kanban.Process (ManagedProcess )
 import Kanban.Provider (ProviderError (..) )
 import Kanban.PullRequestFlow
@@ -450,6 +459,11 @@ data AppEvent
   | -- | Background history yielded the budget reserved for foreground work,
     -- and resumes no earlier than the moment GitHub reported.
     BoardHistoryPaused UTCTime
+  | -- | What one completed page meant, under the generation it answers for.
+    -- An outcome older than the newest generation the board has claimed is
+    -- discarded, exactly as a superseded open outcome is: the history it
+    -- describes is one nobody asked for any more.
+    BoardHistoryUpdated CompletedGeneration HistoryOutcome
   | -- | The coordinator finished cancelling everything a quit asked it to,
     -- carrying the cleanup verdict for whatever @gh@ it had running. Whether
     -- the dashboard may actually stop is decided from that verdict, not from
@@ -500,6 +514,12 @@ data AppState = AppState
     appOverlay :: Maybe Overlay,
     appNotice :: Maybe Text,
     appBoardFreshness :: Freshness,
+    -- | The newest complete open generation, kept beside the board it derived.
+    -- The board alone cannot answer requirement 8: reconciling a completed
+    -- generation against the open one means removing items and deriving again,
+    -- and a derived board has already folded its items into columns, trackers,
+    -- and order. 'Nothing' until the first open generation publishes.
+    appOpenSnapshot :: Maybe RepoSnapshot,
     -- | When the newest complete open generation was fetched, and 'Nothing'
     -- until one has published. It is what separates a first load — which
     -- shows §7's centered loading and unavailable panels and no cards at all
@@ -508,6 +528,29 @@ data AppState = AppState
     -- | The newest open generation the coordinator has told this board about.
     -- An outcome arriving under an older identity is discarded.
     appOpenGeneration :: OpenGeneration,
+    -- | The repository's completed traversal: the accumulator a history page
+    -- resumes from, and the identity every launch and @u@ claims before
+    -- queueing one (§15).
+    appHistoryTraversal :: HistoryTraversal,
+    -- | The newest complete completed generation, reconciled against the open
+    -- one, or 'Nothing' when none stands — no cache to seed from and none
+    -- fetched yet, which is simply an absent history rather than a failure.
+    --
+    -- Nothing renders from it in this slice: completed cards are FILT-5's.
+    appCompletedHistory :: Maybe CompletedHistory,
+    -- | The newest completed generation the user has asked for. It is claimed
+    -- before the history job is queued, so an outcome carrying an older
+    -- identity is one the request that superseded it already answered for.
+    appCompletedGeneration :: CompletedGeneration,
+    -- | How far the completed generation in flight has got, counted separately
+    -- for issues and pull requests. Held apart from the open generation's
+    -- freshness on purpose: the two run on different schedules, and a history
+    -- still loading says nothing about whether the open board is current.
+    appCompletedProgress :: CompletedProgress,
+    -- | Why the completed generation ended without completing, if it did. It
+    -- never disturbs 'appCompletedHistory': a failed generation leaves the last
+    -- complete one exactly where it was (§15).
+    appCompletedFailure :: Maybe Text,
     appDrainerController :: Either Text DrainerController,
     appDrainerStatus :: DrainerStatus,
     -- | The last observed set of open incidents, or 'Nothing' whenever no

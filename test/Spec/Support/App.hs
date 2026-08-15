@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import Data.Time (utc)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
+import Kanban.GitHub (newHistoryTraversal)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Settings (defaultSettings)
@@ -50,6 +51,7 @@ testAppState :: Board -> IO AppState
 testAppState board = do
   eventChannel <- newBChan 16
   refreshCoordinator <- inertRefreshCoordinator
+  historyTraversal <- newHistoryTraversal
   pure
     AppState
       { appRepository = Repository "/tmp/example-project" "example" "project",
@@ -69,8 +71,14 @@ testAppState board = do
         appOverlay = Nothing,
         appNotice = Nothing,
         appBoardFreshness = Fresh epoch,
+        appOpenSnapshot = Nothing,
         appLastSuccessfulFetch = Just epoch,
         appOpenGeneration = 0,
+        appHistoryTraversal = historyTraversal,
+        appCompletedHistory = Nothing,
+        appCompletedGeneration = 0,
+        appCompletedProgress = emptyCompletedProgress,
+        appCompletedFailure = Nothing,
         appDrainerController = Left "no drainer in tests",
         appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
         appDrainerIncidents = Just [],

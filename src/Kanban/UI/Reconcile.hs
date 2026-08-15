@@ -1,8 +1,10 @@
 module Kanban.UI.Reconcile
   ( appendWarnings,
+    applyBoardHistory,
     applyBoardRefresh,
     applyClaudeRefresh,
     applyCodexRefresh,
+    currentCompletedGeneration,
     currentOpenGeneration,
     failureFreshness,
     reconcilePullRequestSessions,
@@ -23,12 +25,13 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import Kanban.Cache
-  ( writeUsageCache
+  ( writeCompletedCache,
+    writeUsageCache
   )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..) )
+import Kanban.GitHub (GhCleanupFailure (..), GhCleanupGuard (..), GitHubResult (..), HistoryOutcome (..) )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Review
   ( ReviewStage (..)
@@ -115,6 +118,14 @@ applyCurrentBoardRefresh outcome = do
           successNotice = refreshSuccessNotice snapshot githubResult.githubWarnings
        in state
             { appBoard = refreshedBoard,
+              appOpenSnapshot = Just snapshot,
+              -- This generation published second, so it answers for every item
+              -- it lists: one GitHub has just reported open leaves the
+              -- completed set rather than standing in both. The board itself is
+              -- derived from the snapshot untouched, which is what keeps a
+              -- reopened item from waiting for the next completed generation
+              -- before it can appear as open work.
+              appCompletedHistory = historyWithoutOpen snapshot <$> state.appCompletedHistory,
               appSelectedColumn = selectedColumn,
               appSelectedRows = selectedRows,
               appOverlay = refreshedOverlay,
@@ -149,6 +160,106 @@ applyCurrentBoardRefresh outcome = do
     BoardRefreshCompleted (Right githubResult) -> advanceAutoSolves githubResult.githubSnapshot
     _ -> pure ()
   startQueuedBoardRefresh
+
+-- | Applies one completed generation's outcome, or drops it.
+--
+-- The generation check is the same rule the open path uses and for the same
+-- reason, with one difference: a completed identity is claimed by the board
+-- itself, synchronously, before the job that answers under it is queued. So
+-- the newest identity is never behind an arriving one, and anything other than
+-- an exact match is an outcome for a generation some later request already
+-- superseded — which requirement 4 keeps out of both the in-memory history and
+-- the cache.
+applyBoardHistory :: CompletedGeneration -> HistoryOutcome -> EventM Name AppState ()
+applyBoardHistory generation outcome = do
+  current <- get
+  when (currentCompletedGeneration current.appCompletedGeneration generation) $ case outcome of
+    HistoryProgressed progress -> modify (\state -> state {appCompletedProgress = progress})
+    -- The last complete history is deliberately untouched. A generation that
+    -- failed proves nothing about the one that succeeded before it, and with
+    -- no complete generation behind it the history is simply absent (§15).
+    HistoryFailed providerError ->
+      modify (\state -> state {appCompletedFailure = Just (renderProviderErrorMessage providerError)})
+    HistoryCompleted history -> publishCompletedHistory history
+
+-- | Whether an outcome arriving under @arriving@ still answers the generation
+-- the board is waiting for, given that @newest@ is the newest identity it has
+-- claimed.
+currentCompletedGeneration :: CompletedGeneration -> CompletedGeneration -> Bool
+currentCompletedGeneration newest arriving = arriving == newest
+
+-- | Publishes a whole completed generation: to disk when caching is on, to
+-- memory always, and to the open board when the two sets overlap.
+--
+-- Publishing in memory does not wait on the cache. The cache is an
+-- optimisation the user may switch off entirely, so a write that fails leaves
+-- the generation that succeeded in memory and says what went wrong, rather
+-- than discarding a complete history over a file (§16).
+publishCompletedHistory :: CompletedHistory -> EventM Name AppState ()
+publishCompletedHistory history = do
+  state <- get
+  cacheWarning <-
+    if cacheEnabled state.appOptions state.appConfig
+      then either Just (const Nothing) <$> liftIO (writeCompletedCache state.appRepository history)
+      else pure Nothing
+  modify
+    ( \current ->
+        current
+          { appCompletedHistory = Just history,
+            appCompletedFailure = Nothing,
+            appCompletedProgress = completedHistoryProgress history
+          }
+    )
+  -- This generation published second, so an open card it proves settled is
+  -- stale and leaves the open set (requirement 8). Nothing else about the
+  -- board moves: with no overlap the reconciled snapshot is the one already
+  -- stored, and the columns are never re-derived at all.
+  mapM_ reconcileOpenBoard (openWithoutHistory history <$> state.appOpenSnapshot)
+  mapM_ (setNotice . ("Completed history cached with a warning · " <>)) cacheWarning
+
+-- | What a published generation reports as its progress: complete, with the
+-- totals read off the history itself rather than off the pages that built it.
+completedHistoryProgress :: CompletedHistory -> CompletedProgress
+completedHistoryProgress history =
+  CompletedProgress
+    { completedIssuesLoaded = issues,
+      completedIssuesTotal = Just issues,
+      completedPullRequestsLoaded = pullRequests,
+      completedPullRequestsTotal = Just pullRequests
+    }
+  where
+    issues = length history.historyIssues
+    pullRequests = length history.historyPullRequests
+
+-- | Re-derives the open board from a snapshot the completed generation
+-- corrected, and only when it actually corrected one.
+--
+-- The guard is what keeps requirement 10 true. Deriving unconditionally would
+-- produce the identical board in the overwhelmingly common case, but it would
+-- also re-run selection, search, and overlay reconciliation on every completed
+-- publication — behavior this slice is supposed to leave exactly alone.
+reconcileOpenBoard :: RepoSnapshot -> EventM Name AppState ()
+reconcileOpenBoard reconciled = do
+  before <- get
+  when (before.appOpenSnapshot /= Just reconciled) $ do
+    let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
+    modify $ \state ->
+      let reconciledBoard = deriveBoard state.appConfig.resolvedWorkflow reconciled
+          (selectedColumn, selectedRows) = preserveSelection state reconciledBoard
+          (reconciledOverlay, overlayNotice) = refreshOverlay reconciledBoard state.appOverlay
+       in state
+            { appBoard = reconciledBoard,
+              appOpenSnapshot = Just reconciled,
+              appSelectedColumn = selectedColumn,
+              appSelectedRows = selectedRows,
+              appOverlay = reconciledOverlay,
+              -- Only when an overlay actually closed under the user. Nothing
+              -- else about a completed publication is worth the notice line:
+              -- reporting the history itself is FILT-2's footer, not this
+              -- slice's.
+              appNotice = maybe state.appNotice Just overlayNotice
+            }
+    modify (reseatSearch searchAnchor)
 
 -- | What the board reports when a refresh's @gh@ process group could not be
 -- confirmed gone. It names the cause and then what will happen next, which

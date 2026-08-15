@@ -21,12 +21,14 @@ import qualified Spec.Config.Settings as Settings
 import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
+import qualified Spec.GitHub.History as GitHubHistory
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.Repository.Identity as RepositoryIdentity
 import qualified Spec.Repository.State as RepositoryState
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
+import qualified Spec.UI.CompletedHistory as CompletedHistory
 import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Keys as Keys
@@ -67,6 +69,7 @@ suite = do
   GitHubDecoding.spec
   BoardRefresh.spec
   RefreshCoordinator.spec
+  GitHubHistory.spec
   Capture.spec
   SolveChooser.spec
   Usage.spec
@@ -80,6 +83,7 @@ suite = do
   ConfigLoading.spec
   Layout.spec
   OpenData.spec
+  CompletedHistory.spec
   Golden.spec
   Incidents.spec
   Keys.spec

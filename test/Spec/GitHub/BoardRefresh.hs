@@ -387,7 +387,7 @@ spec = do
           [ "printf '%s\\377%s' "
               <> "'{\"data\":{\"repository\":{\"issues\":{\"nodes\":[{\"number\":41,\"title\":\"Broken "
               <> "' '"
-              <> "byte\",\"body\":\"B\",\"url\":\"https://example.test/issues/41\","
+              <> "byte\",\"body\":\"B\",\"url\":\"https://example.test/issues/41\",\"state\":\"OPEN\","
               <> "\"createdAt\":\"2026-01-01T00:00:00Z\",\"updatedAt\":\"2026-01-02T00:00:00Z\"}],"
               <> "\"pageInfo\":{\"hasNextPage\":false}},"
               <> "\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}'"

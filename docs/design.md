@@ -1253,6 +1253,13 @@ only the fields required by the board. Expected data includes:
   base/head branches, creation/update timestamps, closing issue references,
   mergeability, merge-state status, review decision, and status-check rollup.
 - Open tracker issue bodies so ordered checklist membership can be parsed.
+- Every item's own lifecycle state, as GitHub reports it: open or closed for an
+  issue, and open, closed, or merged for a pull request. It is decoded from the
+  item rather than inferred from the traversal that returned it, because a
+  generation restored from the cache has no traversal behind it at all. Both
+  enumerations are closed, so a state this build does not recognise fails the
+  page: there is no placement for it that would not put a settled item among the
+  open ones or the reverse.
 - Each page's own rate report under `rateLimit` — what that page cost, what is
   left of the budget, and when the budget resets — as GitHub reports them.
   Every page asks, because only the newest report is worth anything to the
@@ -1284,13 +1291,33 @@ through the same verified `gh` cleanup an interrupted fetch has always used.
 Waiting for the coordinator's owner and waiting out a rate limit are not the
 fetch being slow and consume none of that budget (section 15).
 
-Open cards live only in the running process. The board reads no repository
-snapshot at startup and writes none after a successful refresh, so every card
-on screen was fetched by the process showing it. The per-repository snapshot
-file an earlier release left behind is inert: the schema version has advanced
-past it, so the compatibility gate in section 16 reads it as absent without
-decoding, rewriting, or removing it. `--no-cache` and `cache = false` keep
-their documented meaning for every cache that remains.
+Completed history is acquired the same way, in the background. A second
+traversal follows the closed issues and the closed-or-merged pull requests, each
+connection to its final page, asking for the same fields as the open one and for
+GitHub's `totalCount` besides. Nothing bounds either connection: every closed
+issue and every settled pull request is reachable, and no loading, current, or
+failure state ever describes a partial set as a whole one. It runs one page per
+scheduled job rather than one traversal per call, so the coordinator in section
+15 can take the owner back between pages; each of those pages is bounded by the
+same `timeouts.github_seconds`, spawns `gh` under the same durable group record
+and re-verifies that record first, unwinds through the same verified cleanup,
+and reports its own `rateLimit` figures like any other page.
+
+Every launch and every `u` re-traverses the whole history rather than fetching
+what has newly completed. Nothing about a title, label, body, review, check, or
+sub-issue relationship changing moves an item into a recently-completed window,
+so an incremental fetch would silently never see an edit to an item closed years
+ago. The cost is the reason it runs in the background and yields the budget
+foreground work is reserved out of.
+
+Open cards live only in the running process. The board reads no open snapshot at
+startup and writes none after a successful refresh, so every open card on screen
+was fetched by the process showing it. The per-repository snapshot file an
+earlier release left behind is inert: the schema version has advanced past it,
+so the compatibility gate in section 16 reads it as absent without decoding,
+rewriting, or removing it — and the completed generation now stored at that same
+path is inert to that gate for the same reason. `--no-cache` and `cache = false`
+keep their documented meaning for every cache that remains.
 
 Nested connections that return nodes — labels, assignees, closing-issue
 references, and sub-issues — carry explicit `first:` limits and request
@@ -1572,6 +1599,43 @@ a countdown.
   and review session association is reconciled, exactly as every refresh has
   always done — all of it in one step, so nothing on screen is ever half of one
   generation and half of another.
+- Every completed generation has an identity too, claimed by the board itself
+  before the history job is queued rather than by the coordinator when one
+  starts. That is the difference the two kinds of work force: a completed
+  generation spans many jobs over many minutes, so what an outcome has to be
+  checked against is the newest history the user asked for, which is known the
+  moment they ask. Launch and `u` each claim one. A request arriving while a
+  page is in flight supersedes that page at the next page boundary — the only
+  point the traversal ever stops at — and any number of further requests
+  coalesce onto one newest full restart. Nothing accumulated under a superseded
+  identity contributes to its replacement, and a page that finishes under one
+  publishes nothing at all.
+- A completed generation publishes only when it is whole. A partial page set, a
+  cancelled traversal, a page that timed out, a failed page, and a completion
+  belonging to a superseded identity can none of them become the in-memory
+  history or reach the cache. While one is in flight the board records its
+  progress as loaded and total counts, kept separately for issues and pull
+  requests because the two connections paginate independently; the total is
+  GitHub's own count for that connection and is unknown rather than zero until a
+  page has reported one. Progress and failure are recorded independently of the
+  open generation's freshness: a history still loading says nothing about
+  whether the open board is current.
+- Background history never delays open work. Launch and `u` publish the open
+  board without waiting for any part of the traversal, and a completed
+  generation in flight neither postpones nor cancels an open refresh. A newly
+  requested open job may wait for the deadline-bounded history page that happens
+  to hold the owner, and for its verified cleanup, and for nothing further — not
+  another page, and never the rest of the traversal.
+- At publication the two generations are reconciled, so no item is ever in both
+  sets. Whichever publishes second answers for the items it lists: an item
+  GitHub has just reported open leaves the completed set, and one a newer
+  completed generation proves settled leaves the open board. That is the one
+  way a completed generation may remove an open card, and it removes only a
+  card the newer generation has positively contradicted.
+- A completed-generation failure keeps the last complete history. It does not
+  erase the last complete cached or in-memory generation, and does not disturb
+  the open board; with no complete generation behind it, completed history is
+  simply absent rather than partial.
 - Until the first complete generation publishes there is no board to draw, and
   section 17's two centered panels stand in for one. They replace the columns
   rather than covering them, so no card, heading, or count from any source
@@ -1836,6 +1900,7 @@ Suggested paths:
 ```text
 ~/.config/kanban/config.toml
 ~/.config/kanban/settings.json
+~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
@@ -1845,9 +1910,21 @@ Suggested paths:
 Defaults:
 
 - Cache only the latest good snapshot. Open issues and open pull requests are
-  not cached at all: nothing writes a per-repository snapshot, and the
-  snapshot's schema version has advanced past the last one that did, so a file
-  an earlier release wrote is read as absent and left exactly as it was found.
+  not cached at all: nothing writes an open snapshot, and the open reader's
+  schema version has advanced past the last one that did, so a file an earlier
+  release wrote is read as absent and left exactly as it was found.
+- Cache the completed generation, and only a whole one. The per-repository path
+  above holds it under a schema version of its own, so the two payloads that
+  path has held are alternatives rather than companions and neither reader ever
+  decodes the other's: to the open reader a completed generation is another
+  unrecognised version, and therefore absent. Only a generation that reached
+  both connections' final pages is written, and it replaces the stored one
+  atomically, so an interrupted or failed generation leaves whatever was there
+  exactly as it was. A stored generation seeds the history at startup without
+  waiting for GitHub, and is superseded by the first live generation of that
+  process. Publishing does not wait on the cache: with caching switched off, or
+  after a write that failed, the complete generation still stands in memory and
+  the failure is reported rather than the generation discarded.
 - Persist lightweight UI preferences separately from future repository
   semantics. Chat verbosity defaults to Standard and offers Compact, Standard,
   and Full display modes.
@@ -1862,9 +1939,17 @@ Defaults:
   `0600` whatever the umask, and is tightened to `0600` before each append, so
   one an earlier release left loose self-corrects instead of waiting for a
   rewrite that never comes.
-- Never cache issue or PR bodies. Startup renders no card until the first live
-  generation publishes, so nothing about a private repository's open work is
-  written to disk; user-only permissions protect the caches that remain.
+- Never cache an open issue or PR body. Startup renders no open card until the
+  first live generation publishes, so nothing about a private repository's open
+  work is written to disk. Completed history is the one exception, and carries
+  the whole stable payload of a settled item, bodies included: an item that is
+  closed or merged has stopped changing in the ways the board reacts to, its
+  body is what the details overlay renders from, and rereading every one of them
+  from GitHub before anything could be shown would defeat the point of storing
+  the generation at all. That exception is protected by permission rather than
+  by omission — the file is created `0600` under a `0700` directory like every
+  other cache here — and it extends to nothing else: no open item's body reaches
+  disk under any circumstances.
 - Bound the per-repository worker cache during startup discovery, so neither
   retired leases nor finished workers accumulate for the life of the cache. A
   retired `.stale-*` lease directory is collected once every identity it
@@ -1886,7 +1971,10 @@ Defaults:
   no integer version, or fails to decode under a version Kanban does recognise
   is corruption and keeps its warning. Settings follow the same rule, falling
   back to the defaults silently for an unknown version.
-- Permit `--no-cache` and a global `cache = false` setting.
+- Permit `--no-cache` and a global `cache = false` setting. Either suppresses
+  both the read and the write of every cache here, the completed generation
+  included: a run with caching off seeds no history and stores none, and leaves
+  whatever an earlier cached run wrote exactly where it was.
 - Key repository settings by `owner/name`; do not require modifying the target
   repository. The key is canonical: two non-empty segments of ASCII lowercase
   letters, digits, `.`, `_`, and `-` around exactly one `/`, with no
@@ -1922,8 +2010,8 @@ Configurable repository semantics include:
 - Approval predicate mode: label, review decision, or either; default label.
 - Card excerpt line count, default 3.
 - Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s. The GitHub
-  timeout bounds one page of the open traversal rather than the whole refresh
-  (section 13).
+  timeout bounds one page of a traversal — open or completed — rather than the
+  whole of either (section 13).
 - External usage provider commands (section 14).
 
 ## 17. Error presentation

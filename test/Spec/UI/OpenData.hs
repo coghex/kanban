@@ -15,11 +15,18 @@ import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text
-import Kanban.Cache (repositoryCachePath)
+import Kanban.CLI (Options (..))
+import Kanban.Cache
+  ( CompletedCacheLoad (..),
+    UsageCacheLoad (..),
+    loadCompletedCache,
+    repositoryCachePath,
+    writeCompletedCache
+  )
 import Kanban.Config (ResolvedConfig (..))
 import Kanban.Domain
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.UI (loadStartupCaches, startupBoard)
+import Kanban.UI (initialCompletedHistory, loadStartupCaches, startupBoard)
 import Kanban.UI.Refresh (BoardRefreshDispatch (..), boardRefreshDispatch)
 import Kanban.UI.Reconcile
   ( currentOpenGeneration,
@@ -118,10 +125,11 @@ spec = do
     it "draws the loading panel for the state the dashboard is constructed in" $
       openDataView Nothing NotLoaded `shouldBe` OpenDataLoading
 
-    -- Requirement 5, from the startup side: the one durable read startup makes
-    -- is the usage cache. A repository snapshot an earlier release left behind
-    -- is not opened at all, so it cannot be decoded, rewritten, or removed.
-    it "reads no repository snapshot, leaving a schema 5 file exactly as it found it" $
+    -- Requirement 5, from the startup side: startup restores no /open/ card.
+    -- The repository cache path is now consulted for completed history, so it
+    -- is opened -- but a snapshot an earlier release wrote is turned away by
+    -- both version gates, seeds nothing, and is left exactly as it was found.
+    it "restores no open snapshot, leaving a schema 5 file exactly as it found it" $
       withTemporaryCacheRoot $ \cacheRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
           let repository = Repository "/tmp/project" "coghex" "kanban"
@@ -129,9 +137,31 @@ spec = do
           createDirectoryIfMissing True (takeDirectory cachePath)
           ByteString.writeFile cachePath (versionFiveCacheFile 5)
           asFound <- ByteString.readFile cachePath
-          _ <- loadStartupCaches testOptions (testResolvedConfig {resolvedCache = True})
+          (_, completedLoad) <- loadStartupCaches testOptions (testResolvedConfig {resolvedCache = True}) repository
+          completedLoad `shouldBe` CompletedCacheAbsent
+          initialCompletedHistory completedLoad `shouldBe` (Nothing, Nothing)
           doesFileExist cachePath `shouldReturn` True
           ByteString.readFile cachePath `shouldReturn` asFound
+
+    -- `--no-cache` reads nothing at all, so a stored completed generation is
+    -- not merely ignored: the file is never opened.
+    it "reads no completed history at all under --no-cache" $
+      withTemporaryCacheRoot $ \cacheRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          let repository = Repository "/tmp/project" "coghex" "kanban"
+          cachePath <- repositoryCachePath repository
+          createDirectoryIfMissing True (takeDirectory cachePath)
+          writeCompletedCache repository (CompletedHistory [baseIssue 10 []] [] epoch) `shouldReturn` Right ()
+          (usageLoad, completedLoad) <-
+            loadStartupCaches
+              testOptions {optionNoCache = True}
+              (testResolvedConfig {resolvedCache = True})
+              repository
+          usageLoad `shouldBe` UsageCacheAbsent
+          completedLoad `shouldBe` CompletedCacheAbsent
+          -- And the stored generation is still there: suppressing the read is
+          -- not the same as discarding what an earlier cached run wrote.
+          loadCompletedCache repository `shouldReturn` CompletedCacheLoaded (CompletedHistory [baseIssue 10 []] [] epoch)
 
   describe "publication ordering" $ do
     -- Requirement 9, and the correction that pins what "newest" means: a `u`

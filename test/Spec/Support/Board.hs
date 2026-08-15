@@ -5,10 +5,12 @@ module Spec.Support.Board
     withFakeGh,
     captureBoardRefresh,
     heldOffMessage,
+    openOnlyRefreshRunner,
     readMarkerPid
   )
 where
 
+import Brick.BChan (newBChan)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
@@ -23,8 +25,10 @@ import Kanban.GitHub
     RefreshCoordinator,
     RefreshRunner (..),
     newGhRecordLock,
+    newHistoryTraversal,
     newRefreshCoordinator
   )
+import Kanban.UI.Refresh (boardRefreshRunner)
 import Kanban.Process (ProcessIdentity (..), readProcessSnapshot)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.UI.Refresh (runBoardRefreshWith)
@@ -103,6 +107,19 @@ inertRefreshCoordinator = do
     (const (pure ()))
   where
     inertOutcome = BoardRefreshCompleted (Left (ProviderError RequestFailed "no refresh runner is wired up in this test"))
+
+-- | The board's own runner, for a coordinator that is only ever asked for
+-- open work.
+--
+-- The traversal and channel it is given are its own and nothing drains them,
+-- which is safe for exactly the reason it is worth stating: a history page
+-- reports through that channel and is only ever run by a job somebody asked
+-- for, so a coordinator that never requests one writes nothing to it.
+openOnlyRefreshRunner :: ResolvedConfig -> Repository -> IO (RefreshRunner BoardRefreshOutcome)
+openOnlyRefreshRunner config repository = do
+  traversal <- newHistoryTraversal
+  channel <- newBChan 16
+  pure (boardRefreshRunner config repository traversal channel)
 
 -- | Puts a shell script named @gh@ first on PATH, so a board refresh drives
 -- it instead of the real thing.

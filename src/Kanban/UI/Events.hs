@@ -81,6 +81,7 @@ handleEvent event = do
     (_, AppEvent (BoardRefreshFinished generation result)) -> applyBoardRefresh generation result
     (_, AppEvent (BoardRefreshStarted generation)) -> markBoardRefreshRunning generation
     (_, AppEvent (BoardHistoryPaused resetAt)) -> setNotice (historyPausedNotice state.appTimeZone resetAt)
+    (_, AppEvent (BoardHistoryUpdated generation historyOutcome)) -> applyBoardHistory generation historyOutcome
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
     (_, AppEvent (ClaudeRefreshFinished result)) -> applyClaudeRefresh result

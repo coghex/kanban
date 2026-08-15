@@ -14,6 +14,7 @@ module Kanban.UI.Refresh
     runCodexRefresh,
     startAllRefreshes,
     startBoardRefresh,
+    startCompletedHistory,
     startQueuedBoardRefresh,
   )
 where
@@ -35,19 +36,21 @@ import Kanban.Domain
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhFetchGuard,
-    HistoryPageResult (..),
+    HistoryTraversal,
     OpenRefreshResult (..),
     RateObserver,
     RefreshCoordinator,
     RefreshJob (..),
     RefreshRunner (..),
+    beginCompletedGeneration,
     coordinatorOpenCycleInFlight,
     fetchGitHubSnapshot,
     ghFetchCleanupFailure,
     newGhFetchGuard,
     newGhRecordLock,
     newRefreshCoordinator,
-    requestRefreshJob
+    requestRefreshJob,
+    runCompletedHistoryPage
     )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.UsageCommand (runUsageCommand)
@@ -157,6 +160,42 @@ startBoardRefresh = do
       -- refusal is published when it happens and the job is reissued once the
       -- reported reset passes (§15).
       liftIO (requestRefreshJob state.appRefreshCoordinator OpenJob Nothing)
+      -- Queued after the open job rather than before it. The coordinator
+      -- answers a pending open job first whatever the order they arrived in,
+      -- so this only decides which one an /idle/ coordinator picks up in the
+      -- instant between the two calls -- and the press is waiting for the open
+      -- board, not for a page of history it will never see (§15).
+      startCompletedHistory
+
+-- | Claims the next completed identity and asks for the traversal that
+-- answers under it.
+--
+-- Every launch and every @u@ starts the whole history again rather than
+-- fetching what has newly completed, which is what makes an edit to a
+-- long-closed item visible at all: nothing about a title, label, or check
+-- changing moves an item into a "recently completed" window.
+--
+-- The identity is claimed before the job is queued, so from this instant a
+-- page still in flight for the previous generation is answering for a history
+-- nobody wants: it cannot publish, and it cannot contribute to the generation
+-- that replaced it. Presses arriving during one page claim an identity each
+-- and leave a single restart, since only the newest is ever compared against.
+startCompletedHistory :: EventM Name AppState ()
+startCompletedHistory = do
+  state <- get
+  generation <- liftIO (beginCompletedGeneration state.appHistoryTraversal)
+  modify
+    ( \current ->
+        current
+          { appCompletedGeneration = generation,
+            appCompletedProgress = emptyCompletedProgress,
+            -- The previous generation's failure described a generation that no
+            -- longer exists. The history it failed to replace stays exactly
+            -- where it is.
+            appCompletedFailure = Nothing
+          }
+    )
+  liftIO (requestRefreshJob state.appRefreshCoordinator HistoryJob Nothing)
 
 -- | Records that the coordinator has taken the owner for a foreground cycle.
 --
@@ -193,12 +232,12 @@ claudeRefreshTimeoutMicros config = config.resolvedTimeouts.timeoutsClaudeSecond
 -- | The repository's one coordinator, wired to the board: outcomes reach the
 -- event channel exactly as a lone refresh thread's did, and what the
 -- scheduler has to say for itself reaches the same notice line.
-newBoardRefreshCoordinator :: ResolvedConfig -> Repository -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
-newBoardRefreshCoordinator config repository eventChannel = do
+newBoardRefreshCoordinator :: ResolvedConfig -> Repository -> HistoryTraversal -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
+newBoardRefreshCoordinator config repository traversal eventChannel = do
   recordLock <- newGhRecordLock
   newRefreshCoordinator
     recordLock
-    (boardRefreshRunner config repository)
+    (boardRefreshRunner config repository traversal eventChannel)
     (\generation outcome -> writeBChan eventChannel (BoardRefreshFinished generation outcome))
     ( \notice -> case notice of
         HistoryPausedUntilReset resetAt -> writeBChan eventChannel (BoardHistoryPaused resetAt)
@@ -207,17 +246,24 @@ newBoardRefreshCoordinator config repository eventChannel = do
 
 -- | What the coordinator's two job kinds do for the board.
 --
--- History has no source yet: completed issue and pull-request traversal
--- arrives with its own slice, and until then a history page reports itself
--- immediately finished rather than pretending to fetch. The scheduling around
--- it is real all the same, which is what lets that slice supply a page and
--- nothing else change.
-boardRefreshRunner :: ResolvedConfig -> Repository -> RefreshRunner BoardRefreshOutcome
-boardRefreshRunner config repository =
+-- The two are deliberately asymmetric. A foreground job is one whole open
+-- generation and the coordinator publishes its outcome; a history job is one
+-- page of a traversal that spans many of them, so it reports through the event
+-- channel itself and hands the coordinator nothing but "is there more". That
+-- asymmetry is the page-boundary yield: everything a completed generation
+-- accumulates lives in the traversal below rather than in a call the
+-- coordinator is waiting on.
+boardRefreshRunner :: ResolvedConfig -> Repository -> HistoryTraversal -> BChan AppEvent -> RefreshRunner BoardRefreshOutcome
+boardRefreshRunner config repository traversal eventChannel =
   RefreshRunner
     { runOpenRefresh = runBoardOpenRefresh config repository,
       openRefreshExpired = boardRefreshUnanswered config,
-      runHistoryPage = \_ _ -> pure (HistoryPageFetched False)
+      runHistoryPage =
+        runCompletedHistoryPage
+          (\generation outcome -> writeBChan eventChannel (BoardHistoryUpdated generation outcome))
+          config.resolvedTimeouts.timeoutsGithubSeconds
+          repository
+          traversal
     }
 
 -- | What a request earns when its own job produced no outcome.

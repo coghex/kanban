@@ -49,7 +49,7 @@ import Spec.Support.Json (fixtureRepositoryIdentity)
 
 baseIssue :: Int -> [Assignee] -> Issue
 baseIssue number assignees =
-  Issue number ("Issue " <> showText number) "Body" "https://example.test" [] assignees epoch epoch 0 0 SubIssuesNotRequested []
+  Issue number ("Issue " <> showText number) "Body" "https://example.test" IssueOpen [] assignees epoch epoch 0 0 SubIssuesNotRequested []
 
 -- | The issue with GitHub's whole native sub-issue answer attached: the
 -- immediate children in the order returned, and the summary counts GitHub
@@ -143,6 +143,7 @@ basePullRequest number linked draft labels =
     ("PR " <> showText number)
     "Body"
     "https://example.test"
+    PullRequestOpen
     labels
     "agent"
     draft
@@ -189,6 +190,7 @@ cardFixtureIssue =
         "Empty modal areas currently allow pointer events to reach lower pages, which is "
           <> "visible whenever a dialog overlaps the world and the reviewer scrolls the board.",
       issueUrl = "https://example.test/issues/812",
+      issueState = IssueOpen,
       issueLabels =
         [ Label "ui" "5319e7",
           Label "bug" "d73a4a",
