@@ -107,7 +107,9 @@ concrete precondition
    transition behavior. Its status persists independently of the dashboard.
 8. Backend, model, GitHub, lock, malformed-state, or outcome-unknown failures
    stop processing and surface as red errors rather than allowing later issues
-   to run.
+   to run. Ordinary contention for the canonical approval lock is not one of
+   those lock failures: the backend reports it as the normal `busy` outcome and
+   the controller backs off while the control stays green, as D-16 requires.
 
 Detailed live progress such as `reviewing issue #N` is deliberately deferred.
 After this epic is done, a separate extension design document will explore a
@@ -212,19 +214,23 @@ work. A stale result cannot count as crossing that issue number.
 ### Backend pass result
 
 Stdout stays reserved for one bounded JSON document; diagnostics and dated logs
-stay off stdout. The result contains a schema version, an outcome (`idle`,
-`advanced`, `changes_requested`, or `retry`), the positive issue number for
-every non-idle outcome, whether this invocation made a model call, and
-caller-displayable text. All four observed outcomes are normal backend
-completions. A specification that changes during review cannot return
-`advanced`; it returns `retry`, and the controller applies bounded backoff
-before re-reading live state. Failures are non-zero and must not be mistaken
-for an idle, retryable, or advanced queue.
+stay off stdout, and `--review-queue` requires `--json` so no code path can let
+anything else share it. The result contains a schema version, an outcome
+(`idle`, `advanced`, `changes_requested`, `retry`, or `busy`), the positive
+issue number for the `advanced`, `changes_requested`, and `retry` outcomes,
+whether this invocation made a model call, and caller-displayable text. All
+five observed outcomes are normal backend completions. A specification that
+changes during review cannot return `advanced`; it returns `retry`, and the
+controller applies bounded backoff before re-reading live state. A pass that
+cannot take the canonical approval lock returns `busy` before selecting any
+issue, and the controller backs off the same way. Failures are non-zero and
+must not be mistaken for an idle, busy, retryable, or advanced queue.
 
-The result schema rejects unknown versions, an issue on `idle`, a non-idle
-outcome without a positive issue number, an `advanced` outcome without a
-current approval, or any contradictory model-call claim. There is no per-issue
-streaming protocol in this epic.
+The result schema rejects unknown versions, an issue number on `idle` or
+`busy`, a missing or non-positive issue number on `advanced`,
+`changes_requested`, or `retry`, an `advanced` outcome without a current
+approval, or any contradictory model-call claim, including a `busy` result
+claiming a model call. There is no per-issue streaming protocol in this epic.
 
 ### Persistent service topology
 
@@ -449,9 +455,31 @@ key table, footer, help overlay, and event routing.
 
 `--review-queue` scans from the lowest open number on every invocation, but it
 performs model work for no more than the first issue that needs it. It then
-returns `advanced`, `changes_requested`, `retry`, or `idle` to the controller.
-The controller owns repetition. This preserves the ordered barrier while
-releasing the canonical lock between issues, as D-10 requires.
+returns `advanced`, `changes_requested`, `retry`, `busy`, or `idle` to the
+controller. The controller owns repetition. This preserves the ordered barrier
+while releasing the canonical lock between issues, as D-10 requires.
+
+### D-16. Lock contention is a fifth normal outcome and the queue mode requires --json
+
+Ordinary contention for the canonical approval lock is an expected condition
+rather than a failure, so `--review-queue` reports it as a fifth normal outcome
+`busy`. A `busy` pass exits zero, carries no issue number, performs no GitHub
+mutation, records `model_called` as false, and names the current lock owner
+in its caller-displayable text. It carries no issue number because contention
+happens at lock acquisition, before the pass has selected an issue, so the
+positive-issue-number rule that binds `advanced`, `changes_requested`, and
+`retry` cannot apply to it. Result validation therefore rejects a `busy` result
+that carries an issue number or claims a model call. Reporting contention
+distinguishably is what lets the controller apply the bounded backoff that
+"Dashboard lifecycle and concurrency" requires; that section, not D-10, is the
+source of the rule that ordinary contention must never become a red pipeline
+incident, while D-10 governs concurrent barrier repair and releasing the lock
+between issues.
+
+`--review-queue` additionally requires `--json`. Invoking it without `--json`
+is a usage error rather than a human-readable pass, so no code path lets a log
+line or diagnostic share stdout with the single result document the controller
+parses.
 
 ## Open questions
 
@@ -520,11 +548,11 @@ Resolved by D-14.
 - **Phase:** 1 — backend contract.
 - **Depends on:** `none`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-7`, `D-15`.
+- **Relevant decisions:** `D-1`, `D-2`, `D-3`, `D-7`, `D-15`, `D-16`.
 - **Acceptance signals:** Fake-executable tests show ascending numeric calls,
   at most one model-reviewed issue per invocation, no call above a barrier,
-  unchanged v2 publications, validated idle/advanced/changes/retry results, and
-  safe handling of concurrent lock ownership.
+  unchanged v2 publications, validated `idle`, `advanced`, `changes_requested`,
+  `retry`, and `busy` results, and safe handling of concurrent lock ownership.
 - **Out of scope:** Persistent supervision, Haskell, sidebar UI, and revision.
 - **Open questions:** `None`.
 
@@ -540,7 +568,8 @@ Resolved by D-14.
 - **Phase:** 2 — service runtime.
 - **Depends on:** `IAQ-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-3`, `D-4`, `D-7`, `D-8`, `D-9`, `D-10`, `D-15`.
+- **Relevant decisions:** `D-3`, `D-4`, `D-7`, `D-8`, `D-9`, `D-10`, `D-15`,
+  `D-16`.
 - **Acceptance signals:** Fixture runs remain alive across idle polls, review at
   most one issue under each backend lock, pause without model work at the
   barrier, auto-resolve only after a current approval, preserve the barrier on
