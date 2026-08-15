@@ -17,6 +17,7 @@ module Kanban.GitHub.Guard
     dropGhGroup,
     ghFetchCleanupFailure,
     ghGroupIsRecorded,
+    holdBackUnrecordedGroup,
     newGhFetchGuard,
     newGhRecordLock,
     reclaimRecordedGhGroups,
@@ -59,24 +60,54 @@ data GhFetchGuard = GhFetchGuard
   }
 
 -- | The repository's durable @gh@ group record, held as something that can
--- only be updated by one writer at a time.
+-- only be updated by one writer at a time — and beside it, the one thing about
+-- that record which is not durable at all.
 --
--- Every update to that record is a read-modify-write of the whole list of
+-- Every update to the record is a read-modify-write of the whole list of
 -- groups: an entry is added or removed by rewriting the others beside it. Two
 -- of those interleaving lose whichever entry the later write had not read,
 -- and a lost entry is a possibly-live @gh@ that no later fetch -- and no later
 -- run of the dashboard -- knows to reclaim. The lock is what the coordinator
 -- owns on behalf of the repository, so every job it schedules writes the
 -- record through the same one (§15).
-newtype GhRecordLock = GhRecordLock (MVar ())
+data GhRecordLock = GhRecordLock
+  { ghRecordMutex :: MVar (),
+    -- | Set once a job ended holding back a group nothing durable accounts
+    -- for, and never cleared.
+    --
+    -- It is repository-scoped rather than per job because that is the only
+    -- scope at which it means anything. 'GuardInMemoryOnly' says this
+    -- process's own refusal to start another @gh@ is all that stands between
+    -- a possibly-live group and an overlapping one — and a refusal recorded
+    -- only on the guard of the job that ended dies with that job, leaving the
+    -- next one to spawn freely. Every job the coordinator schedules shares
+    -- this lock, so a refusal recorded here outlives the guard that earned it
+    -- and reaches every later fetch, whatever kind of job makes it.
+    ghRecordHeldBack :: IORef (Maybe Text)
+  }
 
 newGhRecordLock :: IO GhRecordLock
-newGhRecordLock = GhRecordLock <$> newMVar ()
+newGhRecordLock = GhRecordLock <$> newMVar () <*> newIORef Nothing
 
 -- | Serializes one read-modify-write of the durable record.
 withRecordLock :: GhFetchGuard -> IO result -> IO result
-withRecordLock guard action = case guard.ghGuardRecordLock of
-  GhRecordLock lock -> withMVar lock (const action)
+withRecordLock guard action = withMVar guard.ghGuardRecordLock.ghRecordMutex (const action)
+
+-- | Records a finished job's verdict against the repository, when that verdict
+-- is one only this process is holding back.
+--
+-- Called once per job, after its body has fully unwound and its verdict is
+-- final. A recorded group needs nothing from this — the durable record already
+-- makes every later fetch re-verify it — and a group confirmed gone is holding
+-- nothing back at all, so only 'GuardInMemoryOnly' latches.
+holdBackUnrecordedGroup :: GhFetchGuard -> IO ()
+holdBackUnrecordedGroup guard = do
+  verdict <- ghFetchCleanupFailure guard
+  case verdict of
+    Just failure
+      | failure.ghCleanupGuard == GuardInMemoryOnly ->
+          writeIORef guard.ghGuardRecordLock.ghRecordHeldBack (Just failure.ghCleanupMessage)
+    _ -> pure ()
 
 -- | A cleanup that could not confirm its @gh@ group is gone.
 data GhCleanupFailure = GhCleanupFailure
@@ -295,11 +326,32 @@ recordedGhGroups repository = do
 -- spawned alongside one that may still be running.
 reclaimRecordedGhGroups :: GhFetchGuard -> Repository -> IO (Either Text ())
 reclaimRecordedGhGroups guard repository = do
-  recordLoad <- loadGhGroupRecord repository
-  case recordLoad of
-    GhGroupRecordAbsent -> pure (Right ())
-    GhGroupRecordUnusable message -> refuse message
-    GhGroupRecordLoaded groups -> do
+  -- Asked before the record, and answered without consulting it, because this
+  -- is exactly the group the record does not have. A job that ended holding one
+  -- back leaves nothing on disk to re-verify, so every later fetch would find
+  -- an absent record and spawn straight past it; the refusal has to come from
+  -- the one place that outlived that job.
+  heldBack <- readIORef guard.ghGuardRecordLock.ghRecordHeldBack
+  case heldBack of
+    Just message -> refuseUnrecorded message
+    Nothing -> reclaimRecorded
+  where
+    refuseUnrecorded message = do
+      -- 'GuardInMemoryOnly' rather than 'GuardRecorded': this job is refusing
+      -- over a group that is still on nothing but this process's word, and the
+      -- notice §17 renders for the two differs precisely because a restart
+      -- cannot know to hold back over this one.
+      setCleanupFailure guard (GhCleanupFailure (refusalText message) GuardInMemoryOnly)
+      pure (Left (refusalText message))
+
+    reclaimRecorded = do
+      recordLoad <- loadGhGroupRecord repository
+      case recordLoad of
+        GhGroupRecordAbsent -> pure (Right ())
+        GhGroupRecordUnusable message -> refuse message
+        GhGroupRecordLoaded groups -> reclaimGroups groups
+
+    reclaimGroups groups = do
       -- A record exists from here on, so every exit other than clearing it
       -- has to leave the guard set. It is set now, pessimistically, because
       -- the exits that matter most are the ones that never reach a `case`:
@@ -318,7 +370,7 @@ reclaimRecordedGhGroups guard repository = do
               clearCleanupFailure guard
               pure (Right ())
         message : _ -> refuse message
-  where
+
     refuse message = do
       setCleanupFailure guard (GhCleanupFailure (refusalText message) GuardRecorded)
       pure (Left (refusalText message))

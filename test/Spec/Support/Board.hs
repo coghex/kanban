@@ -2,6 +2,7 @@
 module Spec.Support.Board
   ( forcedCleanupRun,
     inertRefreshCoordinator,
+    withForcedCleanup,
     withFakeGh,
     captureBoardRefresh,
     heldOffMessage,
@@ -52,7 +53,19 @@ import Test.Hspec
 -- answers both halves of the question: what the guard claimed, and whether
 -- the descendant actually died.
 forcedCleanupRun :: FilePath -> Int -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
-forcedCleanupRun temporaryRoot githubSeconds psFailures = do
+forcedCleanupRun temporaryRoot githubSeconds psFailures =
+  withForcedCleanup temporaryRoot psFailures (fst <$> captureBoardRefresh temporaryRoot githubSeconds)
+
+-- | Runs @action@ with both of those facilities broken, and reports anything of
+-- this fixture's still alive once the real @ps@ is back.
+--
+-- It is a seam of its own because the environment is what the last-resort path
+-- needs, and more than one kind of job now has to be driven into it: the same
+-- unrecordable cleanup a foreground refresh can suffer is reachable from a
+-- background history page, and what it must leave behind is the same either
+-- way.
+withForcedCleanup :: FilePath -> Maybe Int -> IO result -> IO (result, [ProcessIdentity])
+withForcedCleanup temporaryRoot psFailures action = do
   let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
       binaryRoot = temporaryRoot </> "bin"
       psCounter = temporaryRoot </> "ps.count"
@@ -79,7 +92,7 @@ forcedCleanupRun temporaryRoot githubSeconds psFailures = do
                 ]
             )
           setFileMode (binaryRoot </> "ps") 0o700
-          fst <$> captureBoardRefresh temporaryRoot githubSeconds
+          action
   -- Asked with the real ps, now that the fake is off PATH again.
   snapshot <- readProcessSnapshot
   case snapshot of

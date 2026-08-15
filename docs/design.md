@@ -1654,6 +1654,16 @@ a countdown.
   thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
   and then end it from outside. A live interactive review still refuses the quit
   exactly as it did, and is asked first.
+- That in-memory refusal is the repository's for the rest of the process, not
+  the finished job's. Any job may end holding a group back this way — a
+  background history page spawns `gh` under the same durable record a
+  foreground refresh does — and a refusal recorded only against the guard of
+  the job that ended would die with it, leaving the next job to find an absent
+  record, reclaim nothing, and spawn straight past a possibly-live group. So
+  the refusal is recorded once the job's verdict is final and while it still
+  holds the owner, and every later fetch of either kind is turned away by it
+  before it spawns anything — reported as the in-memory case it is, since a
+  restart cannot know to hold back over a group nothing wrote down.
 - Every canonical GitHub repository has its own PR drainer: its own LaunchAgent
   label and plist, its own runtime status, its own service and dated logs, and
   its own `--config` selection. Starting, stopping, querying, logs, status, and

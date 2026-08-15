@@ -18,7 +18,6 @@ import Kanban.Domain
 import Kanban.GitHub
   ( CompletedGeneration,
     CoordinatorState (..),
-    GhCleanupFailure,
     GhRecordLock,
     HistoryOutcome (..),
     HistoryPageResult (..),
@@ -26,7 +25,10 @@ import Kanban.GitHub
     HoldReason (..),
     JobHold (..),
     RefreshJob (..),
+    GhCleanupFailure (..),
+    GhCleanupGuard (..),
     beginCompletedGeneration,
+    fetchGitHubSnapshot,
     ghFetchCleanupFailure,
     initialCoordinatorState,
     newGhFetchGuard,
@@ -36,7 +38,7 @@ import Kanban.GitHub
     settleHistoryJob
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Spec.Support.Board (withFakeGh)
+import Spec.Support.Board (withFakeGh, withForcedCleanup)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (epoch)
 import Spec.Support.Json
@@ -197,6 +199,48 @@ spec = describe "completed history traversal" $ do
         case map snd reported of
           [HistoryCompleted history] -> map (.issueNumber) history.historyIssues `shouldBe` [7]
           other -> expectationFailure ("expected the newest generation to complete on its own, got " <> show other)
+
+  -- Requirement 2's fail-closed half. A history page spawns @gh@ under the
+  -- same durable record a foreground one does, so a page that ends holding
+  -- back a group nothing durable accounts for has to refuse every later job
+  -- too. Without that the record is absent, the next open refresh reclaims
+  -- nothing, and it spawns straight past a group only the finished page's own
+  -- guard ever knew about.
+  it "refuses a later open refresh after a history page left a group nothing durable accounts for" $
+    withTemporaryCacheRoot $ \temporaryRoot -> do
+      let repository = Repository temporaryRoot "coghex" "kanban"
+      traversal <- newHistoryTraversal
+      -- One record lock for the repository, exactly as the coordinator gives
+      -- every job it schedules.
+      recordLock <- newGhRecordLock
+      ((historyVerdict, openOutcome, openVerdict), _) <-
+        withForcedCleanup temporaryRoot Nothing $ do
+          _ <- beginCompletedGeneration traversal
+          historyGuard <- newGhFetchGuard recordLock
+          page <-
+            runCompletedHistoryPage
+              (\_ _ -> pure ())
+              1
+              repository
+              traversal
+              historyGuard
+              (const (pure ()))
+          page `shouldBe` HistoryPageFailed False
+          verdict <- ghFetchCleanupFailure historyGuard
+          -- Now the open refresh the board would start next.
+          openGuard <- newGhFetchGuard recordLock
+          outcome <- fetchGitHubSnapshot openGuard (const (pure ())) 30 defaultWorkflowConfig repository
+          (,,) verdict outcome <$> ghFetchCleanupFailure openGuard
+      -- The page really did reach the last-resort path: nothing on disk, and
+      -- nothing confirmed.
+      fmap (.ghCleanupGuard) historyVerdict `shouldBe` Just GuardInMemoryOnly
+      case openOutcome of
+        Left providerError -> providerError.providerErrorKind `shouldBe` RequestFailed
+        Right _ -> expectationFailure "expected the later open refresh to be refused, not to fetch"
+      -- And it is refused as the in-memory refusal it is, so §17 tells the
+      -- user to look for a stray gh rather than offering a restart that
+      -- cannot know to hold back.
+      fmap (.ghCleanupGuard) openVerdict `shouldBe` Just GuardInMemoryOnly
 
   -- Requirement 7. Nothing about the traversal is incremental, so an edit to
   -- an item closed or merged long ago is picked up by the ordinary next
