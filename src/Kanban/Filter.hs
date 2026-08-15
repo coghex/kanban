@@ -207,44 +207,91 @@ visibleBoardFor config criteria openBoard openSnapshot history =
 -- 'pruneOffBoardChildren' 'deriveBoard' already applies, rather than leaving
 -- the header counting rows nothing is drawing.
 --
+-- All of that is decided over the whole board rather than column by column,
+-- because a group's membership is not confined to one: an epic can hold an
+-- unassigned child in Issues, an assigned one in Active, and their pull
+-- requests in Reviewing and Done. Repairing per column would report every
+-- other column's surviving children as completed and would draw one collapsed
+-- header per column the group had lost its rows in.
+--
 -- Criteria admitting every card return the board untouched. That is the
 -- default, and returning the same value rather than an equal one keeps every
 -- row index the caller may already hold pointing at the same entry.
 filterBoardEntries :: WorkflowConfig -> FilterCriteria -> Board -> Board
 filterBoardEntries config criteria board
   | admitsEveryEntry criteria = board
-  | otherwise = Board (Map.map (filterColumn config criteria) board.boardColumns)
-
--- | Whether the kind, workflow and structure facets are all complete, in which
--- case no entry can fail them. The lifecycle facet is not asked here: it
--- selects the dataset rather than filtering entries drawn from it.
-admitsEveryEntry :: FilterCriteria -> Bool
-admitsEveryEntry criteria =
-  criteria.filterKind == everyFacetValue
-    && criteria.filterWorkflow == everyFacetValue
-    && criteria.filterStructure == everyFacetValue
-
--- | One column's entries, group by group, so a group's repair is decided with
--- its whole run of rows in hand. Groups are contiguous in a sorted column,
--- which is the same shape "Kanban.UI.Search" filters over.
-filterColumn :: WorkflowConfig -> FilterCriteria -> [ColumnEntry] -> [ColumnEntry]
-filterColumn config criteria = keep
+  | otherwise = Board (Map.mapWithKey rebuild board.boardColumns)
   where
-    keep [] = []
-    keep remaining@(entry : rest) = case entry of
-      Standalone _ -> [entry | admits entry] <> keep rest
-      TrackerHeader _ -> [entry | admits entry] <> keep rest
-      Tracked context _ ->
-        let tracker = context.trackingPrimary.membershipTracker
-            number = tracker.trackerIssue.issueNumber
-            (group, after) = span ((== Just number) . primaryTrackerOf) remaining
-            children = filter admits group
-            repaired = pruneOffBoardChildren (survivingChildNumbers children) tracker
-            kept
-              | not (admitsTracker tracker) = map demote children
-              | not (null children) = map (reseatTracker repaired) children
-              | otherwise = [TrackerHeader repaired]
-         in kept <> keep after
+    -- Ascending column order, which is what makes the home column below the
+    -- leftmost one a group appears in rather than an arbitrary one.
+    orderedColumns = Map.toAscList board.boardColumns
+
+    -- Pass one, board-wide: every tracked child the criteria admit under a
+    -- tracker they also admit, keyed by that tracker.
+    survivingChildren :: Map.Map Int (Set Int)
+    survivingChildren =
+      Map.fromListWith
+        (<>)
+        [ (trackerNumberOf context, Set.singleton context.trackingPrimary.membershipChild.trackerChildIssueNumber)
+          | (_, entries) <- orderedColumns,
+            entry@(Tracked context _) <- entries,
+            admits entry,
+            admitsTracker context.trackingPrimary.membershipTracker
+        ]
+
+    -- The one column a group that lost every row still draws its header in.
+    homeColumns :: Map.Map Int BoardColumn
+    homeColumns =
+      Map.fromListWith
+        (\_ first -> first)
+        [ (trackerNumberOf context, column)
+          | (column, entries) <- orderedColumns,
+            Tracked context _ <- entries
+        ]
+
+    repairedFor tracker =
+      pruneOffBoardChildren
+        (Map.findWithDefault Set.empty tracker.trackerIssue.issueNumber survivingChildren)
+        tracker
+
+    keptNothingAnywhere tracker =
+      Map.notMember tracker.trackerIssue.issueNumber survivingChildren
+
+    -- Pass two, per column. Groups are contiguous in a sorted column, which is
+    -- the same shape "Kanban.UI.Search" filters over, so a run is still the
+    -- unit a group's rows are decided in — but every question the run asks is
+    -- answered from the board-wide pass above.
+    rebuild column entries = kept <> demoted
+      where
+        (kept, demoted) = walk entries
+        walk [] = ([], [])
+        walk remaining@(entry : rest) = case entry of
+          Standalone _ -> prepend [entry | admits entry] (walk rest)
+          TrackerHeader tracker -> prepend [TrackerHeader (repairedFor tracker) | admits entry] (walk rest)
+          Tracked context _ ->
+            let tracker = context.trackingPrimary.membershipTracker
+                number = trackerNumberOf context
+                (group, after) = span ((== Just number) . primaryTrackerOf) remaining
+                children = filter admits group
+                repaired = repairedFor tracker
+                (here, moved)
+                  -- The criteria hid the epic itself, so its children are
+                  -- standalone cards. They are moved to the tail rather than
+                  -- left where the group was, because §12 puts every group
+                  -- ahead of every standalone card and the renderer draws one
+                  -- STANDALONE heading per run.
+                  | not (admitsTracker tracker) = ([], map demote children)
+                  | not (null children) = (map (reseatTracker repaired) children, [])
+                  -- Nothing of this group survived anywhere, so it is
+                  -- represented by a header — once, in the leftmost column its
+                  -- rows appeared in, never one per column it lost them in.
+                  | keptNothingAnywhere tracker, homeColumns Map.!? number == Just column =
+                      ([TrackerHeader repaired], [])
+                  | otherwise = ([], [])
+             in prepend here (prependMoved moved (walk after))
+        prepend values (front, back) = (values <> front, back)
+        prependMoved values (front, back) = (front, values <> back)
+
     admits entry =
       entryStructureFacet entry `Set.member` criteria.filterStructure
         && admitsItem (entryItem entry)
@@ -258,19 +305,19 @@ filterColumn config criteria = keep
       itemKindFacet item `Set.member` criteria.filterKind
         && itemWorkflowFacet config item `Set.member` criteria.filterWorkflow
     demote entry = Standalone (entryItem entry)
-    primaryTrackerOf (Tracked context _) = Just context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
+    trackerNumberOf context = context.trackingPrimary.membershipTracker.trackerIssue.issueNumber
+    primaryTrackerOf (Tracked context _) = Just (trackerNumberOf context)
     primaryTrackerOf (TrackerHeader tracker) = Just tracker.trackerIssue.issueNumber
     primaryTrackerOf (Standalone _) = Nothing
 
--- | The children a group kept, named the way its tracker names them: by the
--- child issue number the membership carries, which is what a linked pull
--- request is grouped under too.
-survivingChildNumbers :: [ColumnEntry] -> Set Int
-survivingChildNumbers entries =
-  Set.fromList
-    [ context.trackingPrimary.membershipChild.trackerChildIssueNumber
-      | Tracked context _ <- entries
-    ]
+-- | Whether the kind, workflow and structure facets are all complete, in which
+-- case no entry can fail them. The lifecycle facet is not asked here: it
+-- selects the dataset rather than filtering entries drawn from it.
+admitsEveryEntry :: FilterCriteria -> Bool
+admitsEveryEntry criteria =
+  criteria.filterKind == everyFacetValue
+    && criteria.filterWorkflow == everyFacetValue
+    && criteria.filterStructure == everyFacetValue
 
 -- | Puts the repaired tracker back on a surviving child, so the header the
 -- group draws and the reference the card prints both come from the tracker

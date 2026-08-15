@@ -205,6 +205,69 @@ admittedSpec = describe "criteria admitting completed history" $ do
     map summarize (entriesForBoard filtered Issues) `shouldBe` [("header", 870)]
     map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (1, 1)]
 
+  -- A group's membership is not confined to one column: an epic holds an
+  -- unassigned child in Issues and an assigned one in Active. Repairing per
+  -- column would report each column's own child as the only survivor and
+  -- fold the other — still on screen — into completed progress.
+  it "repairs a tracker spanning columns from every column at once" $ do
+    let filtered =
+          visibleFrom everyLifecycle {filterKind = Set.singleton KindIssues} crossColumnSnapshot Nothing
+    numbersIn filtered Issues `shouldBe` [871]
+    numbersIn filtered Active `shouldBe` [872]
+    -- Both children are still drawn, so neither is folded into progress in
+    -- either column, and both headers report the same tracker.
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (0, 2)]
+    map trackerProgress (entriesForBoard filtered Active) `shouldBe` [Just (0, 2)]
+
+  -- The other half of the same mistake: a group that lost its rows in one
+  -- column but kept them in another must not sprout an orphan header there.
+  it "draws no header in a column a spanning group merely lost its rows in" $ do
+    let filtered =
+          visibleFrom
+            everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved}
+            crossColumnSnapshot
+            Nothing
+    -- Only #872, in Active, is approved. Issues lost its only child of the
+    -- group and must show nothing rather than a second header for it.
+    numbersIn filtered Active `shouldBe` [872]
+    map trackerProgress (entriesForBoard filtered Active) `shouldBe` [Just (1, 2)]
+    entriesForBoard filtered Issues `shouldBe` []
+
+  it "draws exactly one header, in the leftmost column, when a spanning group loses every row" $ do
+    let filtered =
+          visibleFrom
+            everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved}
+            spanningChangesSnapshot
+            Nothing
+    -- The epic is approved and both its children carry changes-requested, so
+    -- the tracker survives with nothing under it in either column and is
+    -- represented once rather than once per column it lost rows in.
+    map summarize (entriesForBoard filtered Issues) `shouldBe` [("header", 870)]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (2, 2)]
+    concat [entriesForBoard filtered column | column <- [Active, Reviewing, Done]] `shouldBe` []
+
+  -- A child whose epic the criteria hide is a standalone card, and §12 puts
+  -- every group ahead of every standalone card.
+  it "moves a demoted child behind the groups it no longer belongs to" $ do
+    let snapshot =
+          RepoSnapshot
+            [ (epicIssue 870 [871]) {issueLabels = [Label "epic" "5319e7", Label "reviewed:changes" "b60205"]},
+              baseIssue 871 [],
+              approvedEpic 875 [876],
+              baseIssue 876 []
+            ]
+            []
+            epoch
+        -- #870 carries changes-requested, so an Approved-or-Other facet hides
+        -- that epic while keeping its child and the whole of #875's group.
+        filtered =
+          visibleFrom
+            everyLifecycle {filterWorkflow = Set.fromList [WorkflowApproved, WorkflowOther]}
+            snapshot
+            Nothing
+    map summarize (entriesForBoard filtered Issues)
+      `shouldBe` [("tracked", 876), ("standalone", 871)]
+
   -- Values are ORed inside a facet and the facets ANDed, so an empty facet is
   -- a real empty result rather than an implicit reset.
   it "shows only settled work with Open unchecked, and nothing at all with neither" $ do
@@ -515,6 +578,32 @@ approvedEpic number children =
   (epicIssue number children)
     { issueLabels = [Label "epic" "5319e7", Label "reviewed:approve" "0e8a16"]
     }
+
+-- | One epic whose two children sit in different columns: #871 is unassigned
+-- and lands in Issues, #872 is assigned and lands in Active. Only #872 is
+-- approved, which is what lets a workflow facet keep one column's child while
+-- dropping the other's.
+crossColumnSnapshot :: RepoSnapshot
+crossColumnSnapshot =
+  RepoSnapshot
+    [ approvedEpic 870 [871, 872],
+      baseIssue 871 [],
+      (baseIssue 872 [Assignee "agent"]) {issueLabels = [Label "reviewed:approve" "0e8a16"]}
+    ]
+    []
+    epoch
+
+-- | The same two-column group with both children carrying changes-requested,
+-- so an Approved-only facet keeps the epic and hides every row of it.
+spanningChangesSnapshot :: RepoSnapshot
+spanningChangesSnapshot =
+  RepoSnapshot
+    [ approvedEpic 870 [871, 872],
+      (baseIssue 871 []) {issueLabels = [Label "reviewed:changes" "b60205"]},
+      (baseIssue 872 [Assignee "agent"]) {issueLabels = [Label "reviewed:changes" "b60205"]}
+    ]
+    []
+    epoch
 
 -- | The tracker one epic issue yields, for the header line it draws.
 trackerFor :: Issue -> Tracker

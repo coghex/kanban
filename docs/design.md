@@ -1157,9 +1157,18 @@ Parsing rules:
    progress rather than staying a permanently unreachable pending entry.
 7. A child whose own tracker the criteria hide falls back to a standalone
    card, which is exactly what the board renders for a child whose epic is not
-   on it. A tracker the criteria keep with none of its children left collapses
-   to a header, so the epic is still represented rather than vanishing behind
-   its filtered-out group.
+   on it, and takes its place behind every group in that column. A tracker the
+   criteria keep with none of its children left collapses to a header, so the
+   epic is still represented rather than vanishing behind its filtered-out
+   group.
+8. Both of those, and the progress a header reports, are decided over the whole
+   board rather than one column at a time. A group's membership is not confined
+   to a single column — an epic can hold an unassigned child in Issues, an
+   assigned one in Active, and their pull requests in Reviewing and Done — so a
+   child still drawn in one column is never folded into another column's
+   progress, and a group that lost its rows in one column but kept them
+   elsewhere draws no header there. A group that lost every row board-wide
+   draws exactly one header, in the leftmost column its rows appeared in.
 
 Membership resolution is structured as ordered sources feeding one internal
 model. The checklist parser above is the first source, and GitHub's native
