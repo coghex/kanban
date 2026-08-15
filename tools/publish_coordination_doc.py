@@ -967,7 +967,21 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     recorded = git(
         ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
     ).stdout.decode().strip()
-    tracker = tracker_transaction_module().check(resolved, repository, document)
+    module = tracker_transaction_module()
+    try:
+        tracker = module.check(resolved, repository, document)
+    except Exception as error:  # noqa: BLE001 - the preflight must stay structured
+        # The whole point of this call is to tell a caller whether it may mutate
+        # the tracker, so a failure inside it has to arrive as a tracker answer
+        # rather than as an exception that leaves the boundary reporting a
+        # document failure and an internal error. `observed_report` never
+        # raises, and reports an unreadable record as unreadable rather than as
+        # absent — which is what keeps this fail-closed instead of merely
+        # structured.
+        tracker = {
+            "status": "outstanding",
+            "message": getattr(error, "message", str(error)),
+        } | module.observed_report(resolved, module.transaction_ref(owner, document))
     # Not check=False: the tip this returns becomes the caller's binding, and a
     # binding minted from a stale cached ref is worse than no preflight at all
     # — it reads as current and licenses a publication against a document that

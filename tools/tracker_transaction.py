@@ -986,13 +986,23 @@ def check(root: Path, repository: str, document: str) -> dict:
     Read-only, takes no lock, and mutates nothing: this is asked during the
     pre-mutation preflight, before the first irreversible step of a run, which
     is the only moment at which learning the answer is still useful.
+
+    A record it cannot interpret is an answer rather than an exception. This is
+    the one question whose result a caller acts on by deciding whether it may
+    mutate GitHub, so an unreadable record is reported as outstanding and
+    unreadable — with the reference and the permitted next action — rather than
+    raised past the report and collapsed into a generic failure somewhere up the
+    stack. Only an unusable write root or a repository that is not the declared
+    one still raises: those are wrong inputs, not record states.
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
     ref = transaction_ref(owner, document)
-    record, observed = read_record(resolved, ref)
-    report = transaction_report(record, ref, observed)
-    return {"status": "clear" if record is None else "outstanding"} | report
+    report = observed_report(resolved, ref)
+    # `acquired` is False only for a record that is genuinely absent and
+    # readable. An unreadable one reports None, and reading that as clear is the
+    # single conclusion this check must never license.
+    return {"status": "clear" if report["acquired"] is False else "outstanding"} | report
 
 
 def load_json(source: str):

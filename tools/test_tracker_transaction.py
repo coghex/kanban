@@ -237,6 +237,20 @@ class Fixture:
         finally:
             blob.unlink(missing_ok=True)
 
+    def plant_unreadable_record(self, document="docs/ui-bugs.md"):
+        """Leave the reference standing over content no version of this module
+        can interpret — the shape a partially written or hand-edited record
+        takes."""
+        blob = run(
+            ["git", "hash-object", "-w", "-t", "blob", "--stdin"],
+            self.docs, input="not json",
+        )
+        tree = run(
+            ["git", "mktree"], self.docs, input=f"100644 blob {blob}\trecord.json\n"
+        )
+        commit = run(["git", "commit-tree", tree, "-m", "broken"], self.docs)
+        run(["git", "update-ref", self.ref(document), commit], self.docs)
+
     def linked(self, name="second"):
         """Another linked worktree of the same clone: a later invocation may
         resolve a different write root for the same repository."""
@@ -616,7 +630,7 @@ class TrackerTransactionTests(unittest.TestCase):
         # And when it cannot be read, it says so. Reporting it as absent would
         # let the losing run conclude it may proceed.
         self.fx.acquire()
-        self.plant_unreadable_record()
+        self.fx.plant_unreadable_record()
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.acquire()
         detail = caught.exception.detail
@@ -707,27 +721,43 @@ class TrackerTransactionTests(unittest.TestCase):
             tracker.require_preserved_confirmations(before, after)
         self.assertEqual(caught.exception.status, "confirmation-erased")
 
-    def plant_unreadable_record(self):
-        """Leave the reference standing over content no version of this module
-        can interpret — the shape a partially written or hand-edited record
-        takes."""
-        ref = self.fx.ref()
-        blob = run(
-            ["git", "hash-object", "-w", "-t", "blob", "--stdin"],
-            self.fx.docs, input="not json",
-        )
-        tree = run(
-            ["git", "mktree"], self.fx.docs, input=f"100644 blob {blob}\trecord.json\n"
-        )
-        commit = run(["git", "commit-tree", tree, "-m", "broken"], self.fx.docs)
-        run(["git", "update-ref", ref, commit], self.fx.docs)
-
     def test_an_unreadable_record_fails_closed_rather_than_reading_clear(self):
         self.fx.acquire()
-        self.plant_unreadable_record()
+        self.fx.plant_unreadable_record()
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.read()
         self.assertEqual(caught.exception.status, "record-unreadable")
+
+    def test_the_check_reports_an_unreadable_record_rather_than_raising(self):
+        # The preflight's result is what a caller acts on by deciding whether it
+        # may mutate GitHub, so an uninterpretable record has to arrive as a
+        # tracker answer. Raised past the report it becomes a generic failure
+        # with no reference, no unreadable status and no recovery action.
+        self.fx.acquire()
+        self.fx.plant_unreadable_record()
+        outcome = self.fx.check()
+        self.assertEqual(outcome["status"], "outstanding")
+        self.assertIsNone(outcome["acquired"])
+        self.assertFalse(outcome["record_readable"])
+        self.assertEqual(outcome["transaction_ref"], self.fx.ref())
+        self.assertIn("resolved by hand", outcome["next_action"])
+
+    def test_the_check_command_line_exits_nonzero_on_an_unreadable_record(self):
+        self.fx.acquire()
+        self.fx.plant_unreadable_record()
+        code, payload = self.fx.cli("--check")
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "outstanding")
+        self.assertFalse(payload["record_readable"])
+
+    def test_a_readable_absent_record_is_still_clear(self):
+        # The other side of the same predicate: absent and readable is the only
+        # state that licenses proceeding, and it must not be lost to the change
+        # that stopped unreadable from raising.
+        outcome = self.fx.check()
+        self.assertEqual(outcome["status"], "clear")
+        self.assertFalse(outcome["acquired"])
+        self.assertTrue(outcome["record_readable"])
 
     # -- resolution ----------------------------------------------------------
 
@@ -1007,6 +1037,65 @@ class PreflightTests(unittest.TestCase):
         with contextlib.redirect_stdout(buffer):
             self.assertEqual(publisher.main(argv), 1)
         self.assertEqual(json.loads(buffer.getvalue())["status"], "pending")
+
+    def test_an_unreadable_record_makes_the_preflight_pending_and_says_why(self):
+        # Through --check-pending, which is the call the four assets actually
+        # make. The document states are not the answer here: what the run needs
+        # is the reference, the unreadable status and the permitted next action.
+        self.fx.acquire()
+        self.fx.plant_unreadable_record()
+        outcome = self.preflight()
+        self.assertEqual(outcome["status"], "pending")
+        self.assertEqual(outcome["pending_kinds"], ["tracker-transaction"])
+        tracked = outcome["tracker_transaction"]
+        self.assertFalse(tracked["record_readable"])
+        self.assertEqual(tracked["transaction_ref"], self.fx.ref())
+        self.assertIn("resolved by hand", tracked["next_action"])
+        # And the binding the assets extract survives the failure.
+        self.assertTrue(outcome["publication_tip"])
+
+    def test_the_check_pending_command_line_reports_the_unreadable_record(self):
+        self.fx.acquire()
+        self.fx.plant_unreadable_record()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = publisher.main([
+                "--repo", "coghex/kanban", "--branch", "master",
+                "--root", str(self.fx.docs), "--path", "docs/ui-bugs.md",
+                "--check-pending",
+            ])
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "pending")
+        self.assertNotIn("internal-error", json.dumps(payload))
+        self.assertFalse(payload["tracker_transaction"]["record_readable"])
+        self.assertIn(
+            "resolved by hand", payload["tracker_transaction"]["next_action"]
+        )
+
+    def test_a_raising_tracker_check_is_reported_as_tracker_state(self):
+        # Belt and braces for the same contract: even a failure the tracker
+        # module never modelled arrives as an outstanding, unreadable
+        # transaction rather than as a generic internal error carrying only
+        # document fields.
+        module = publisher.tracker_transaction_module()
+        original = module.check
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("planted")
+
+        module.check = broken
+        self.addCleanup(setattr, module, "check", original)
+        self.addCleanup(
+            setattr, publisher, "tracker_transaction_module",
+            publisher.tracker_transaction_module,
+        )
+        publisher.tracker_transaction_module = lambda: module
+        outcome = self.preflight()
+        self.assertEqual(outcome["status"], "pending")
+        self.assertEqual(outcome["pending_kinds"], ["tracker-transaction"])
+        self.assertEqual(outcome["tracker_transaction"]["message"], "planted")
+        self.assertIn("next_action", outcome["tracker_transaction"])
 
     def test_an_unloadable_tracker_module_fails_the_preflight_closed(self):
         original = publisher.tracker_transaction_module
