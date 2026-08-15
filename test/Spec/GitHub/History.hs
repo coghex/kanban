@@ -9,11 +9,14 @@
 -- the pure functions covered in "Spec.UI.CompletedHistory".
 module Spec.GitHub.History (spec) where
 
+import Brick.BChan (newBChan, readBChan)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
+import qualified Data.Text
 import qualified Data.Map.Strict as Map
+import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), defaultTimeoutsConfig)
 import Kanban.Domain
 import Kanban.GitHub
   ( CompletedGeneration,
@@ -28,8 +31,11 @@ import Kanban.GitHub
     GhCleanupFailure (..),
     GhCleanupGuard (..),
     beginCompletedGeneration,
-    fetchGitHubSnapshot,
     ghFetchCleanupFailure,
+    newRefreshCoordinator,
+    reclaimRecordedGhGroups,
+    requestRefreshJob,
+    shutdownRefreshCoordinator,
     initialCoordinatorState,
     newGhFetchGuard,
     newGhRecordLock,
@@ -38,9 +44,11 @@ import Kanban.GitHub
     settleHistoryJob
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Spec.Support.Board (withFakeGh, withForcedCleanup)
+import Kanban.UI.Refresh (boardRefreshRunner)
+import Kanban.UI.Types (BoardRefreshOutcome (..))
+import Spec.Support.Board (termIgnoringGh, withFakeGh, withForcedCleanup)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (epoch)
+import Spec.Support.Fixtures (epoch, testResolvedConfig)
 import Spec.Support.Json
   ( completedPageJson,
     emptyAssigneesJson,
@@ -206,41 +214,69 @@ spec = describe "completed history traversal" $ do
   -- too. Without that the record is absent, the next open refresh reclaims
   -- nothing, and it spawns straight past a group only the finished page's own
   -- guard ever knew about.
-  it "refuses a later open refresh after a history page left a group nothing durable accounts for" $
+  --
+  -- Driven through a real coordinator rather than through 'runCompletedHistoryPage'
+  -- directly, because the latch is set by 'runHistoryJob' after the page's body
+  -- unwinds: a test that called the page itself would never reach it, and would
+  -- pass on the fixture's unwritable cache alone.
+  --
+  -- What the open job's failure /says/ is the observable, and it discriminates
+  -- because the two refusals happen at different points. The latch answers
+  -- inside 'reclaimRecordedGhGroups', before @runGh@ is called at all; without
+  -- it the job reaches @runGh@, spawns, and fails afterwards with the
+  -- record-write wording instead. Counting spawned @gh@ processes cannot tell
+  -- them apart here: a @gh@ whose spawn cannot be recorded is killed while
+  -- still parked on its barrier, so it never runs a line of its own script
+  -- either way. The control below closes the remaining gap — that the refusal
+  -- is this record lock's and not something ambient about the fixture.
+  it "refuses a later open job after a history page left a group nothing durable accounts for" $
     withTemporaryCacheRoot $ \temporaryRoot -> do
       let repository = Repository temporaryRoot "coghex" "kanban"
+          config =
+            testResolvedConfig
+              { resolvedCache = False,
+                resolvedTimeouts = defaultTimeoutsConfig {timeoutsGithubSeconds = 1}
+              }
       traversal <- newHistoryTraversal
-      -- One record lock for the repository, exactly as the coordinator gives
-      -- every job it schedules.
       recordLock <- newGhRecordLock
-      ((historyVerdict, openOutcome, openVerdict), _) <-
-        withForcedCleanup temporaryRoot Nothing $ do
+      channel <- newBChan 16
+      published <- newEmptyMVar
+      coordinator <-
+        newRefreshCoordinator
+          recordLock
+          (boardRefreshRunner config repository traversal channel)
+          (\_ outcome -> putMVar published outcome)
+          (const (pure ()))
+      ((openOutcome, uninvolved), _) <-
+        withForcedCleanup temporaryRoot Nothing termIgnoringGh $ do
           _ <- beginCompletedGeneration traversal
-          historyGuard <- newGhFetchGuard recordLock
-          page <-
-            runCompletedHistoryPage
-              (\_ _ -> pure ())
-              1
-              repository
-              traversal
-              historyGuard
-              (const (pure ()))
-          page `shouldBe` HistoryPageFailed False
-          verdict <- ghFetchCleanupFailure historyGuard
-          -- Now the open refresh the board would start next.
-          openGuard <- newGhFetchGuard recordLock
-          outcome <- fetchGitHubSnapshot openGuard (const (pure ())) 30 defaultWorkflowConfig repository
-          (,,) verdict outcome <$> ghFetchCleanupFailure openGuard
-      -- The page really did reach the last-resort path: nothing on disk, and
-      -- nothing confirmed.
-      fmap (.ghCleanupGuard) historyVerdict `shouldBe` Just GuardInMemoryOnly
+          requestRefreshJob coordinator HistoryJob Nothing
+          -- The page has reported, so its gh has been spawned, abandoned, and
+          -- cleaned up. Waited for through the runner's own channel rather
+          -- than a marker file, because this fixture's gh never reaches its
+          -- own first line.
+          _ <- readBChan channel
+          requestRefreshJob coordinator OpenJob Nothing
+          outcome <- takeMVar published
+          -- The control: the same repository, in the same broken environment,
+          -- through a record lock no job ever ran under. Nothing about the
+          -- fixture refuses it, so the refusal above is the latch's.
+          uninvolvedLock <- newGhRecordLock
+          uninvolvedGuard <- newGhFetchGuard uninvolvedLock
+          (,) outcome <$> reclaimRecordedGhGroups uninvolvedGuard repository
+      _ <- shutdownRefreshCoordinator coordinator
+      uninvolved `shouldBe` Right ()
       case openOutcome of
-        Left providerError -> providerError.providerErrorKind `shouldBe` RequestFailed
-        Right _ -> expectationFailure "expected the later open refresh to be refused, not to fetch"
-      -- And it is refused as the in-memory refusal it is, so §17 tells the
-      -- user to look for a stray gh rather than offering a restart that
-      -- cannot know to hold back.
-      fmap (.ghCleanupGuard) openVerdict `shouldBe` Just GuardInMemoryOnly
+        BoardRefreshUnverified failure -> do
+          -- Refused as the in-memory case it is, so §17 tells the user to look
+          -- for a stray gh rather than offering a restart that cannot know to
+          -- hold back.
+          failure.ghCleanupGuard `shouldBe` GuardInMemoryOnly
+          -- And refused before anything was spawned: this is the reclaim's own
+          -- wording, not the record-write failure of a job that already had a
+          -- gh to record.
+          failure.ghCleanupMessage `shouldSatisfy` Data.Text.isInfixOf "refusing to start another until it is"
+        other -> expectationFailure ("expected the open job to be refused outright, got " <> show other)
 
   -- Requirement 7. Nothing about the traversal is incremental, so an edit to
   -- an item closed or merged long ago is picked up by the ordinary next

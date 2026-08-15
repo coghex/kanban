@@ -2,6 +2,7 @@
 module Spec.Support.Board
   ( forcedCleanupRun,
     inertRefreshCoordinator,
+    termIgnoringGh,
     withForcedCleanup,
     withFakeGh,
     captureBoardRefresh,
@@ -54,7 +55,17 @@ import Test.Hspec
 -- the descendant actually died.
 forcedCleanupRun :: FilePath -> Int -> Maybe Int -> IO (BoardRefreshOutcome, [ProcessIdentity])
 forcedCleanupRun temporaryRoot githubSeconds psFailures =
-  withForcedCleanup temporaryRoot psFailures (fst <$> captureBoardRefresh temporaryRoot githubSeconds)
+  withForcedCleanup temporaryRoot psFailures termIgnoringGh (fst <$> captureBoardRefresh temporaryRoot githubSeconds)
+
+-- | The @gh@ the forced-cleanup fixture drives: it ignores TERM and leaves a
+-- TERM-ignoring descendant in a group of its own, so nothing about its death
+-- can be assumed from having signalled it.
+termIgnoringGh :: [ByteString.ByteString]
+termIgnoringGh =
+  [ "trap '' TERM",
+    "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+    "while :; do sleep 1; done"
+  ]
 
 -- | Runs @action@ with both of those facilities broken, and reports anything of
 -- this fixture's still alive once the real @ps@ is back.
@@ -64,21 +75,15 @@ forcedCleanupRun temporaryRoot githubSeconds psFailures =
 -- unrecordable cleanup a foreground refresh can suffer is reachable from a
 -- background history page, and what it must leave behind is the same either
 -- way.
-withForcedCleanup :: FilePath -> Maybe Int -> IO result -> IO (result, [ProcessIdentity])
-withForcedCleanup temporaryRoot psFailures action = do
+withForcedCleanup :: FilePath -> Maybe Int -> [ByteString.ByteString] -> IO result -> IO (result, [ProcessIdentity])
+withForcedCleanup temporaryRoot psFailures ghBody action = do
   let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
       binaryRoot = temporaryRoot </> "bin"
       psCounter = temporaryRoot </> "ps.count"
   ByteString.writeFile unwritableCacheRoot "not a directory"
   outcome <-
     withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
-      withFakeGh
-        temporaryRoot
-        [ "trap '' TERM",
-          "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
-          "while :; do sleep 1; done"
-        ]
-        $ do
+      withFakeGh temporaryRoot ghBody $ do
           createDirectoryIfMissing True binaryRoot
           ByteString.writeFile
             (binaryRoot </> "ps")
