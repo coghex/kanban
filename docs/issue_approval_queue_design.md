@@ -464,7 +464,7 @@ while releasing the canonical lock between issues, as D-10 requires.
 Ordinary contention for the canonical approval lock is an expected condition
 rather than a failure, so `--review-queue` reports it as a fifth normal outcome
 `busy`. A `busy` pass exits zero, carries no issue number, performs no GitHub
-mutation, records `made_model_call` as false, and names the current lock owner
+mutation, records `model_called` as false, and names the current lock owner
 in its caller-displayable text. It carries no issue number because contention
 happens at lock acquisition, before the pass has selected an issue, so the
 positive-issue-number rule that binds `advanced`, `changes_requested`, and
