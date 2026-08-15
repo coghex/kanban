@@ -2046,9 +2046,14 @@ def validate_review_queue_result(
             f"Review-queue result has unknown schema {result['schema']!r}"
         )
     version = result["version"]
-    # `bool` is an `int` in Python and True == 1, so an accidental Boolean
-    # would pass a bare equality check against version 1.
-    if isinstance(version, bool) or version != REVIEW_QUEUE_SCHEMA_VERSION:
+    # The contract pins an integer, and equality alone does not enforce that.
+    # `bool` is an `int` in Python with True == 1, and the JSON float 1.0
+    # compares equal to 1 as well, so both would pass a bare `!= 1` check.
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != REVIEW_QUEUE_SCHEMA_VERSION
+    ):
         raise ApproveError(
             f"Review-queue result has unknown schema version {version!r}"
         )
@@ -2781,11 +2786,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.self_test:
-        self_test()
-        return
-    if not args.path:
-        fail("approve-issues.py error: --path is required unless --self-test is used")
+    # Mode selection is resolved BEFORE --self-test's early return, because a
+    # rejected --review-queue invocation must exit non-zero having written
+    # nothing to stdout. Returning through --self-test would do the exact
+    # opposite -- print that mode's own text and exit zero -- and the --json
+    # requirement below would never be reached at all.
     selected_actions = sum(
         value is not None for value in (args.check, args.review, args.rereview)
     ) + int(args.review_queue)
@@ -2794,12 +2799,25 @@ def main() -> None:
             "approve-issues.py error: --check, --review, --rereview, and "
             "--review-queue are mutually exclusive"
         )
-    # Refused here, before the repository context and therefore before any
-    # GitHub call: --review-queue's result is a document a controller parses,
-    # and LOG_TO_STDERR is bound to --json below, so this is what guarantees no
-    # log line can ever share stdout with it.
-    if args.review_queue and not args.json:
-        fail("approve-issues.py error: --review-queue requires --json")
+    if args.review_queue:
+        # --self-test joins that exclusivity for this mode alone, leaving the
+        # other three modes' long-standing handling of it untouched.
+        if args.self_test:
+            fail(
+                "approve-issues.py error: --review-queue and --self-test are "
+                "mutually exclusive"
+            )
+        # Refused before the repository context and therefore before any
+        # GitHub call: --review-queue's result is a document a controller
+        # parses, and LOG_TO_STDERR is bound to --json below, so this is what
+        # guarantees no log line can ever share stdout with it.
+        if not args.json:
+            fail("approve-issues.py error: --review-queue requires --json")
+    if args.self_test:
+        self_test()
+        return
+    if not args.path:
+        fail("approve-issues.py error: --path is required unless --self-test is used")
     global LOG_DIR, LOG_TO_STDERR, PIPELINE_INCIDENT_DIR
     global APPROVE_LABEL, CHANGES_LABEL, VERDICT_LABEL_SPECS
     LOG_DIR = Path(args.log_dir).expanduser().resolve()

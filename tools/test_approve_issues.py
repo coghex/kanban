@@ -1424,6 +1424,16 @@ class ReviewQueueResultValidationTests(unittest.TestCase):
         ):
             self.check(self.valid(version="1"))
 
+    def test_rejects_a_json_float_that_compares_equal_to_version_one(self):
+        # json.loads("1.0") is a float, and 1.0 == 1 in Python, so equality
+        # alone would let a mistyped version through.
+        for version in (1.0, json.loads("1.0")):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "unknown schema version"
+                ):
+                    self.check(self.valid(version=version))
+
     def test_rejects_an_unknown_outcome(self):
         with self.assertRaisesRegex(approve_issues.ApproveError, "unknown outcome"):
             self.check(self.valid(outcome="stalled"))
@@ -1488,7 +1498,7 @@ class ReviewQueueResultValidationTests(unittest.TestCase):
 class ReviewQueueArgumentTests(unittest.TestCase):
     """--review-queue refuses before any GitHub call."""
 
-    def _main(self, argv):
+    def _main(self, argv, *, expect_exit=True):
         with (
             mock.patch("sys.argv", ["approve_issues.py", *argv]),
             mock.patch.object(
@@ -1496,12 +1506,21 @@ class ReviewQueueArgumentTests(unittest.TestCase):
                 "get_repo_context",
                 side_effect=AssertionError("reached GitHub"),
             ),
+            mock.patch.object(approve_issues, "self_test") as self_test,
             mock.patch.object(approve_issues, "append_log_line"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
-            with self.assertRaises(SystemExit) as raised:
+            if expect_exit:
+                with self.assertRaises(SystemExit) as raised:
+                    approve_issues.main()
+                code = raised.exception.code
+            else:
                 approve_issues.main()
-        return raised.exception.code, stderr.getvalue()
+                code = 0
+        self.self_test = self_test
+        self.stdout = stdout.getvalue()
+        return code, stderr.getvalue()
 
     def test_the_flag_parses_as_its_own_mode(self):
         with mock.patch("sys.argv", ["approve_issues.py", "--review-queue", "--json"]):
@@ -1527,6 +1546,40 @@ class ReviewQueueArgumentTests(unittest.TestCase):
         code, stderr = self._main(["--path", ".", "--review-queue"])
         self.assertEqual(code, 1)
         self.assertIn("--review-queue requires --json", stderr)
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_cannot_short_circuit_the_json_requirement(self):
+        # --self-test returns early and exits zero, so reaching it first would
+        # both skip the --json refusal and print non-JSON text on the stdout
+        # a controller parses.
+        code, stderr = self._main(["--path", ".", "--review-queue", "--self-test"])
+        self.assertEqual(code, 1)
+        self.assertIn("--review-queue and --self-test are mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_cannot_replace_the_result_document(self):
+        code, stderr = self._main(
+            ["--path", ".", "--review-queue", "--json", "--self-test"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--review-queue and --self-test are mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_another_mode_combined_with_self_test_is_still_refused_first(self):
+        code, stderr = self._main(
+            ["--path", ".", "--review-queue", "--json", "--check", "1", "--self-test"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_alone_is_untouched(self):
+        code, _ = self._main(["--self-test"], expect_exit=False)
+        self.assertEqual(code, 0)
+        self.self_test.assert_called_once_with()
 
 
 class LegacyDaemonUnchangedTests(unittest.TestCase):

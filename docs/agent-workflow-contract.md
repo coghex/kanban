@@ -260,7 +260,12 @@ arithmetic, which §2.3 owns.
     and `--rereview`, shares their single mutual-exclusion diagnostic, and
     **requires `--json`**; without it the command exits non-zero with a usage
     error before any GitHub call, so no log line can share stdout with the
-    result document. It considers open issues in ascending **issue number**
+    result document. It is mutually exclusive with `--self-test` as well —
+    that mode returns early and exits zero, which would both bypass the
+    `--json` refusal and put non-JSON text on the stdout a controller parses;
+    the other three modes' handling of `--self-test` is unchanged. Every
+    combination is resolved before the repository context, so a refusal costs
+    no GitHub call and writes nothing to stdout. It considers open issues in ascending **issue number**
     (not the legacy daemon's `(createdAt, number)`), over an inventory it has
     proven complete, skips an issue whose complete canonical gate is already
     approved, and stops at the first issue holding a current
