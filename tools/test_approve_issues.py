@@ -9,6 +9,7 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 """
 
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -1586,7 +1587,7 @@ class ReviewQueueArgumentTests(unittest.TestCase):
 class ReviewQueueMainTests(unittest.TestCase):
     """--review-queue's exit status and stdout, driven through main()."""
 
-    def _main(self, outcome):
+    def _main(self, outcome, *, emit=None):
         raw = mock.MagicMock()
         raw.remote_name = "origin"
         resolved = mock.MagicMock()
@@ -1621,11 +1622,20 @@ class ReviewQueueMainTests(unittest.TestCase):
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
-            try:
-                approve_issues.main()
-                code = 0
-            except SystemExit as exit_code:
-                code = exit_code.code
+            with contextlib.ExitStack() as stack:
+                if emit is not None:
+                    stack.enter_context(
+                        mock.patch.object(
+                            approve_issues,
+                            "emit_review_queue_result",
+                            side_effect=emit,
+                        )
+                    )
+                try:
+                    approve_issues.main()
+                    code = 0
+                except SystemExit as exit_code:
+                    code = exit_code.code
             return code, stdout.getvalue(), stderr.getvalue()
 
     def test_a_completed_pass_prints_one_document_and_exits_zero(self):
@@ -1642,7 +1652,40 @@ class ReviewQueueMainTests(unittest.TestCase):
         code, stdout, stderr = self._main(KeyboardInterrupt)
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
-        self.assertIn("interrupted before it produced a result", stderr)
+        self.assertIn("interrupted before it produced a complete result", stderr)
+
+    def test_an_interrupt_reaching_emission_exits_non_zero_with_no_document(self):
+        # The pass itself completed, so guarding only review_queue would let
+        # this reach the shared handler and exit zero having written nothing.
+        document = approve_issues.review_queue_result(
+            "advanced", issue=7, model_called=True, message="Issue #7 approved."
+        )
+        code, stdout, stderr = self._main(
+            lambda ctx, **kwargs: document, emit=KeyboardInterrupt
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("interrupted before it produced a complete result", stderr)
+
+    def test_the_document_reaches_stdout_in_a_single_write(self):
+        # A signal cannot land part-way through one write, so this is what
+        # makes a truncated document unreachable. print() would write the
+        # terminator separately and reopen that window.
+        writes: list[str] = []
+
+        class Recorder(io.StringIO):
+            def write(self, text):
+                writes.append(text)
+                return super().write(text)
+
+        document = approve_issues.review_queue_result(
+            "idle", issue=None, model_called=False, message="Nothing to review."
+        )
+        with mock.patch("sys.stdout", new=Recorder()):
+            approve_issues.emit_review_queue_result(document)
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0].endswith("\n"))
+        self.assertEqual(json.loads(writes[0]), document)
 
     def test_a_failed_pass_exits_non_zero_with_no_document(self):
         code, stdout, stderr = self._main(

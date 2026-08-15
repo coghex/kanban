@@ -2096,7 +2096,13 @@ def validate_review_queue_result(
 def emit_review_queue_result(result: dict[str, Any]) -> None:
     # stdout carries this document and nothing else; --review-queue requires
     # --json, which is what routes every diagnostic to stderr and the log file.
-    print(json.dumps(result, sort_keys=True), flush=True)
+    #
+    # Rendered whole and written in ONE call, rather than through print, which
+    # writes its terminator separately. A signal cannot be delivered part-way
+    # through a single write, so an interrupt lands either side of this line
+    # and never leaves a truncated document a caller could parse.
+    sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+    sys.stdout.flush()
 
 
 def review_queue_idle_result() -> dict[str, Any]:
@@ -2886,23 +2892,26 @@ def main() -> None:
                     print(f"- {reason}")
             return
         if args.review_queue:
+            # The daemon below is meant to be stoppable with Ctrl-C and exits
+            # zero for it; this mode cannot. Exit zero is its contract for one
+            # of five outcomes, each carrying a complete result document, and
+            # an aborted pass has neither -- a controller would read the
+            # silence as success.
+            #
+            # Emission is INSIDE this guard, not just the pass: an interrupt
+            # arriving as the document is about to be written would otherwise
+            # reach the outer handler and exit zero with an empty stdout. The
+            # window that keeps its zero is only the one after the write has
+            # completed, which is where this block has already returned.
             try:
-                result = review_queue(ctx, legacy_policy=args.legacy_policy)
+                emit_review_queue_result(
+                    review_queue(ctx, legacy_policy=args.legacy_policy)
+                )
             except KeyboardInterrupt:
-                # The daemon below is meant to be stoppable with Ctrl-C and
-                # exits zero for it; this mode cannot. Exit zero is its
-                # contract for one of five outcomes, each carrying a result
-                # document, and an aborted pass has neither -- a controller
-                # would read the silence as success. Caught HERE rather than
-                # beside the daemon's handler so the refusal covers exactly
-                # the window before the document is written: an interrupt
-                # arriving after it has already been printed leaves a pass
-                # that really did complete, and keeps its zero.
                 fail(
                     "approve-issues.py error: --review-queue was interrupted "
-                    "before it produced a result"
+                    "before it produced a complete result"
                 )
-            emit_review_queue_result(result)
             return
         if args.rereview is not None:
             status = rereview_one(
