@@ -12,7 +12,7 @@ concrete precondition
 - [x] REL-1. Record real-terminal performance measurements — [#269]
 - [x] REL-2. Verify live Codex and Claude usage refreshes — [#270]
 - [x] REL-3. Exercise the installed terminal application — [#273]
-- [ ] REL-4. Publish the first Kanban release — [deferred]: #269, #270, and #273 must merge with a passing record in section 21
+- [ ] REL-4. Publish the first Kanban release — [deferred]: #269 and #270 have merged with passing records in section 21; #273 is the last of the three
 
 ## Epic contract
 
@@ -4809,6 +4809,832 @@ bottom: the four artifacts are created in dependency order, the census
 self-test passes from the source printed above, and the three configuration
 probes emit exactly the three messages quoted earlier.
 
+### REL-3. Installed terminal exercise, macOS, 2026-08-14
+
+D-6's seven-step script **passes** end to end against the sdist-installed
+executable. Every step the live board could exercise was exercised, the two
+things it could not are named below rather than omitted, shutdown was clean by
+three independent checks, and no mutating binding was pressed.
+
+| Step | What it covers | Outcome |
+| --- | --- | :---: |
+| 1 | Launch and wait for the startup refresh to settle | **pass** |
+| 2 | Navigate every column, first/last, card details, expand and collapse an epic | **pass** |
+| 3 | Open and close Help, Settings, Processes, Incidents | **pass** |
+| 4 | Collapse and restore the sidebar, resize wide → narrow → wide | **pass** |
+| 5 | Two explicit `u` refreshes 180 s apart, board navigable during each | **pass** |
+| 6 | Five continuous idle minutes, observed as content churn | **pass** |
+| 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
+
+The observation spanned **623.7 s (10 min 24 s)**, of which step 6's untouched
+window was **420.0 s (7 min)** — both above the ten-minute total and
+five-minute idle floors the issue sets.
+
+#### Build provenance
+
+| Item | Value |
+| --- | --- |
+| Commit (`git rev-parse HEAD`) | `02796721058454c4bc678de9d1f50100a8f91da7` |
+| Working tree at that commit | `git status --porcelain=v1 --untracked-files=all` returned empty, so the archive input is exactly that commit |
+| Archive | `kanban-1.0.0.0.tar.gz` |
+| Installed `--version` | `kanban 1.0.0.0` |
+| Install directory | a temporary directory; neither `~/.local/bin` nor `~/.cabal/bin` was used or written |
+
+```console
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+TMP="$(mktemp -d)"
+mkdir -p "$TMP/unpacked" "$TMP/bin"
+cabal sdist all --builddir "$TMP/dist" --output-directory "$TMP/sdist"
+tar -xzf "$TMP"/sdist/kanban-*.tar.gz -C "$TMP/unpacked"
+( cd "$TMP"/unpacked/kanban-* && cabal install exe:kanban --installdir "$TMP/bin" --install-method=copy )
+"$TMP/bin/kanban" --version
+```
+
+The `cd` into the unpacked archive is confined to a subshell deliberately. The
+suites below read the *tracked* `docs/design.md` — `test/Spec/UI/Keys.hs` opens
+it by relative path — so running them from the unpacked pre-evidence sdist
+would validate a copy of this file that does not contain this record.
+
+#### Measurement environment
+
+| Item | Value |
+| --- | --- |
+| macOS | 26.6 (build 25G5065a) |
+| Architecture | arm64, Apple M3 Max, 16 logical CPUs |
+| tmux | 3.5a |
+| Session | detached, with no client attached; the pane's pty is the terminal under test, which is what D-9's tmux decision contemplates |
+| Pane geometry, wide | `200x50`, read back from `#{pane_width}x#{pane_height}` |
+| Pane geometry, narrow | `62x40`, read back the same way |
+| Toolchain | GHC 9.12.2, cabal-install 3.16.1.0 |
+| Python (driver) | 3.14.6 |
+| Repository identity | `coghex/kanban` |
+| Checkout path | `~/worktrees/coghex/kanban/issue-273-terminal-smoke`, a linked worktree of that repository, passed as `--path` (home abbreviated per D-8) |
+
+#### Safety: nothing was mutated
+
+The script is keyboard-only and sends just the bindings D-6 names. The mutating
+ones — `r` review, `S` solve, `A` autosolve, `m` merge, `x` kill, and `d`, which
+starts or stops the operator's launchd-managed PR drainer — are refused by the
+driver *before* tmux is invoked, so a typo in the step sequence raises rather
+than reaching the application. The complete key sequence actually sent was:
+
+```text
+l l l h h h  G g G Enter Esc  g e e  ? Esc  o Esc  p Esc  i Esc  c c
+g u j  g u j  C-l  q
+```
+
+None of `r`, `S`, `A`, `m`, `x`, `d` appears in it.
+
+The drainer's loaded state was read before and after the run with the same
+read-only query, `launchctl list | grep drain-prs`, which reports a job's label
+and status without altering it:
+
+| When | Result |
+| --- | --- |
+| Before | `-	0	com.coghex.drain-prs.coghex.kanban` and `-	0	com.coghex.drain-prs.coghex.synarchy` |
+| After | byte-identical to the above |
+
+Both jobs stayed loaded and not running (`-` for the pid column, exit status
+`0`) across the whole exercise. Kanban's own ten-second drainer poll only
+queries status, and the record shows that querying is all that happened.
+
+#### Step 1 — launch and settle
+
+The startup refresh settled **0.66 s** after the driver's first sample, with the
+footer reading `board: updated now` and all four column headers present. The
+board loaded from the live repository rather than a fixture.
+
+#### Step 2 — navigation
+
+`l` was pressed three times and `h` three times, walking the focus across all
+four columns and back. The selection marker's path was:
+
+| After | Column holding the marker | Selected card |
+| --- | --- | --- |
+| start | `ISSUES` | `#282` |
+| `l` | `ACTIVE` | `#268` |
+| `l` | none observable | none observable |
+| `l` | none observable | none observable |
+| `h` | none observable | none observable |
+| `h` | `ACTIVE` | `#268` |
+| `h` | `ISSUES` | `#282` |
+
+The three unobservable rows are the first thing this record must be honest
+about, and they are a limitation of the observation method, not a defect. Focus
+is drawn only as the `▌` marker on a selected card, and the `REVIEWING` and
+`DONE` columns held no cards during the run, so a focused empty column renders
+nothing that distinguishes it. This was checked rather than assumed: captures
+taken with focus on `REVIEWING` and on `DONE` are **byte-identical, including
+the escape sequences** that `capture-pane -e` returns, so no attribute change
+distinguishes them either. The traversal is evidenced instead by the marker's
+symmetric return path — three `l` presses moved focus two columns past the last
+card-bearing column, and three `h` presses brought it back through `ACTIVE` to
+`ISSUES`, which is only consistent with the focus index having moved across all
+four.
+
+`G` moved the selection to the column's last item, the standalone card `#321`,
+and `g` returned it to the first, the epic `#282`. `Enter` on `#321` opened its
+details overlay — whose panel header is the card's own title rather than a
+fixed label — and `Esc` closed it. `e` on `#282` expanded the epic, turning its
+`▸` glyph to `▾` and revealing its children, and a second `e` collapsed it
+again.
+
+#### Step 3 — overlays
+
+Each overlay opened on its own key and closed with `Esc`:
+
+| Overlay | Key | Opened | Closed | Content |
+| --- | --- | --- | --- | --- |
+| `HELP` | `?` | yes | yes | populated |
+| `SETTINGS` | `o` | yes | yes | populated |
+| `PROCESSES` | `p` | yes | yes | empty — `tracked sessions: 0 · live processes: 0` |
+| `NEEDS ATTENTION` | `i` | yes | yes | empty — `PR drainer: 0 open incidents` |
+
+Processes and Incidents were **empty, not unavailable**, and are recorded as
+exercised: D-6 step 3 asks only that each overlay open and close, and both did
+so with their empty-state text rendered. No review, solve, merge, or other
+mutation was started from any of them.
+
+#### Step 4 — sidebar and resize
+
+`c` collapsed the 28-column usage sidebar and a second `c` restored it, both
+confirmed by the `USAGE` panel leaving and re-entering the frame.
+
+`tmux resize-window` then took the detached session from `200x50` to `62x40` and
+back, with both geometries read back from tmux rather than assumed. At `62x40`
+exactly one board column, `ISSUES`, was visible; at `200x50` all four were. That
+matches section 6: the restored 28-cell sidebar plus a two-cell gutter leaves a
+single 32-cell column inside 62 cells, and four columns need 134.
+
+#### Step 5 — two refreshes, board navigable during each
+
+Two explicit `u` refreshes were run **180 s apart**, comfortably over the
+one-minute separation the script requires.
+
+Responsiveness is evidenced rather than asserted. In each round the driver
+recorded the selection, pressed `u`, waited until the footer actually read
+`board: refreshing…`, and only then pressed `j` — capturing a frame in which the
+footer still reads `board: refreshing…` while the selection has already moved:
+
+| Round | Footer at the captured frame | Selection before `u` | Selection after `j`, same frame |
+| --- | --- | --- | --- |
+| 1 | `board: refreshing…` | `#282` | `#260` |
+| 2 | `board: refreshing…` | `#282` | `#260` |
+
+Both refreshes then settled back to `board: updated now`.
+
+#### Step 6 — five continuous idle minutes
+
+The application was left untouched for **420.0 s**, sampled **1664 times** at a
+**0.23 s** cadence. The cadence is deliberately non-commensurate with the
+spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
+event processing, so its live period is near one second without being exactly
+one, and a 1 Hz sample would return a near-identical glyph every time and make a
+running animation look frozen.
+
+Seven of the 1664 frames differed from their predecessor. Every one is
+accounted for by a change in underlying state:
+
+| At | Rows changed | What changed | Underlying state |
+| --- | --- | --- | --- |
+| 5.5 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 65.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
+| 125.9 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 186.6 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 247.5 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 308.5 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 369.3 s | 1 | `updated 5m ago` → `6m ago` | as above |
+
+**Observable content churn: none.** D-9 defines churn as the screen changing
+when no underlying state changed, and no such frame occurred: six changes are
+the relative-age footer ticking over one minute at a time, and the seventh is a
+provider refresh dispatched before the idle window began finishing inside it. No
+frame changed for any other reason, and no line outside rows 10, 47, and 48 ever
+changed.
+
+As D-9 requires this to be said plainly: **true flicker is not measured at
+1.0.** `capture-pane` returns content, not repaints, so a redraw that rewrites
+identical cells is invisible to this method. What is recorded above is content
+churn only, and no human watched the frame.
+
+#### Step 7 — repaint and quit
+
+`Ctrl-L` forced a repaint. The frame before and after is not byte-identical, and
+the two rows that differ are both explained state, not churn: the footer's
+relative age ticked `6m ago` → `7m ago`, and the notice line became
+`Terminal repainted`, which is the repaint's own acknowledgement. No board
+content moved.
+
+`q` then quit the application.
+
+#### Shutdown, checked three independent ways
+
+A session whose command *is* Kanban dies with it, which proves the session is
+gone but can say nothing about the terminal it left behind. So Kanban was run
+inside a shell in the pane, letting the pty outlive it and be inspected:
+
+| Check | Method | Result |
+| --- | --- | --- |
+| Terminal restored | `stty -g` captured in the same pty before launch and after exit | **identical**, 220 bytes both times — line discipline fully restored |
+| Process exited | the wrapping shell echoed Kanban's status, and the captured pid was checked afterwards | `KANBAN_EXIT=0`; `ps -p <pid>` reports it gone |
+| Session gone | `tmux has-session -t rel3` | absent |
+
+The pane after quitting shows the normal screen restored with `KANBAN_EXIT=0`
+and the shell's own marker visible, so the alternate screen was exited rather
+than merely overwritten.
+
+#### What could not be exercised
+
+Per Requirement 8, named rather than omitted:
+
+- **The `REVIEWING` and `DONE` columns held no cards.** They were navigated
+  through, but with no card to mark, focus on them is not observable in
+  `capture-pane` output at all — verified byte-identical including escapes, as
+  described under step 2. Card-level actions in those columns were therefore not
+  exercised.
+- **The `PROCESSES` and `NEEDS ATTENTION` overlays had no content**, because no
+  agent session was running and the drainer had no open incidents. Both still
+  opened and closed correctly with their empty-state text, which is what D-6
+  step 3 asks for, so they are recorded as exercised rather than unavailable.
+
+Neither gap is a script failure. D-6 explicitly allows a live fixture to lack an
+applicable item provided the record says what could not be exercised.
+
+#### Conclusion
+
+**The script passes.** All seven steps completed, the observation spanned
+10 min 24 s including 7 continuous idle minutes, no interaction failed or hung,
+refresh responsiveness was demonstrated rather than asserted, the safety
+invariant was verified by identical before/after drainer queries and by a key
+log containing no mutating binding, and shutdown was clean by three independent
+checks. Nothing here blocks REL-4.
+
+One earlier run was discarded rather than reinterpreted. It completed all seven
+steps and passed each of them, but its total span was 534.1 s — under the
+ten-minute floor the issue sets — because the interactive steps finished far
+faster than budgeted. The run was repeated with a longer refresh separation and
+a longer idle window instead of the floor being reasoned away, and the run
+recorded here is that second one. No threshold, step, or method was altered to
+obtain a pass.
+
+#### Reproducing this record
+
+Two artifacts drive the exercise, given here before the invocation that uses
+them. The first is the session command: it exists so the pty survives Kanban's
+exit, which is what makes the terminal-restoration check above possible.
+
+```console
+cat > "$TMP/session.sh" <<'SESSION'
+#!/bin/bash
+# REL-3 session command. Kanban runs inside this shell rather than as the tmux
+# session's own command, so the PTY outlives it and the same terminal can be
+# inspected for restored line discipline after `q` -- evidence a session that
+# died with the application could never produce.
+set -u
+
+STTY_BEFORE="$1"
+STTY_AFTER="$2"
+BIN="$3"
+CHECKOUT="$4"
+
+stty -g > "$STTY_BEFORE"
+"$BIN" --path "$CHECKOUT"
+status=$?
+echo "KANBAN_EXIT=$status"
+stty -g > "$STTY_AFTER"
+echo "TERMINAL_RESTORED_MARKER"
+sleep 6
+SESSION
+chmod +x "$TMP/session.sh"
+```
+
+The second is the driver, which sends the keys, classifies each frame, times the
+idle window, and refuses every mutating binding:
+
+```console
+cat > "$TMP/smoke_script.py" <<'SMOKE'
+#!/usr/bin/env python3
+"""REL-3 driver for D-6's seven-step installed-terminal smoke script.
+
+Keyboard-only, under a detached tmux session of a stated geometry. The script
+sends ONLY the navigation, overlay, sidebar, refresh, repaint and quit keys D-6
+names; the mutating keys -- `r` review, `S` solve, `A` autosolve, `m` merge,
+`x` kill, and above all `d`, which toggles the operator's launchd-managed PR
+drainer -- are rejected by `send` before tmux is ever invoked.
+
+Screen state is read from `capture-pane`, which returns content rather than
+repaints (D-9), so this measures observable content churn and not true flicker.
+The sampling cadence is deliberately non-commensurate with the spinner: the
+spinner advances on a nominal 100 ms minimum delay scheduled after event
+processing, so its live period is near one second but not exact, and a 1 Hz
+sample would return a near-identical glyph every time.
+
+Temporary measurement artifact for issue #273. Not part of the repository.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+
+SESSION = "rel3"
+FORBIDDEN = {"r", "S", "A", "m", "x", "d"}
+PANEL_RE = re.compile(r"━ ([A-Z][A-Z ]*[A-Z]) ━")
+DETAILS_RE = re.compile(r"┏ #(\d+)")
+SELECTION_RE = re.compile(r"▌.*?#(\d+)")
+
+log_lines = []
+
+
+def log(message):
+    stamp = time.strftime("%H:%M:%S")
+    line = f"[{stamp}] {message}"
+    print(line, flush=True)
+    log_lines.append(line)
+
+
+def tmux(*args, text=True):
+    return subprocess.run(["tmux", *args], capture_output=True, text=text, check=False)
+
+
+def capture(escapes=False):
+    args = ["capture-pane", "-t", SESSION, "-p"]
+    if escapes:
+        args.append("-e")
+    return tmux(*args).stdout
+
+
+def send(key, literal=True):
+    """Send one key, refusing every mutating binding D-6 forbids."""
+    if literal and key in FORBIDDEN:
+        raise SystemExit(f"REFUSED: {key!r} is a mutating binding and must never be sent")
+    if literal:
+        tmux("send-keys", "-t", SESSION, "-l", key)
+    else:
+        tmux("send-keys", "-t", SESSION, key)
+    time.sleep(0.12)
+
+
+def panels(frame):
+    """Titled overlay panels currently on screen, excluding the board chrome."""
+    found = set(PANEL_RE.findall(frame))
+    found.discard("USAGE")
+    for name in list(found):
+        if name in {"ISSUES", "ACTIVE", "REVIEWING", "DONE"}:
+            found.discard(name)
+    if DETAILS_RE.search(frame):
+        found.add("DETAILS")
+    return found
+
+
+def selection(frame):
+    """The selected card's issue number, or None when nothing is marked.
+
+    Focus is drawn only as the `▌` marker on the selected card, so a column
+    holding no cards shows no marker at all.
+    """
+    lines = frame.splitlines()
+    for index, line in enumerate(lines):
+        if "▌" in line:
+            match = SELECTION_RE.search(line)
+            if match:
+                return match.group(1)
+            # A standalone card's marked row is the box's top border, so the
+            # issue number sits on one of the following rows inside the box.
+            column = line.find("▌")
+            for following in lines[index + 1 : index + 4]:
+                found = re.search(r"#(\d+)", following[max(0, column - 2) :])
+                if found:
+                    return found.group(1)
+            return "marked-no-id"
+    return None
+
+
+def selected_column(frame):
+    """Which board column the `▌` marker sits in, by its x offset."""
+    header = next((l for l in frame.splitlines() if "ISSUES" in l and "DONE" in l), "")
+    bounds = []
+    for name in ("ISSUES", "ACTIVE", "REVIEWING", "DONE"):
+        idx = header.find(name)
+        if idx >= 0:
+            bounds.append((idx, name))
+    bounds.sort()
+    for line in frame.splitlines():
+        pos = line.find("▌")
+        if pos >= 0:
+            chosen = None
+            for idx, name in bounds:
+                if pos >= idx - 20:
+                    chosen = name
+            return chosen
+    return None
+
+
+def footer(frame):
+    for line in frame.splitlines():
+        stripped = line.strip("║ ").strip()
+        if stripped.startswith("board:"):
+            return stripped
+    return ""
+
+
+def sidebar_present(frame):
+    return "━ USAGE ━" in frame or " USAGE " in frame
+
+
+def pane_size():
+    out = tmux("display-message", "-p", "-t", SESSION, "#{pane_width}x#{pane_height}").stdout.strip()
+    return out
+
+
+def wait_for(predicate, timeout, poll=0.15, what=""):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        frame = capture()
+        if predicate(frame):
+            return frame
+        time.sleep(poll)
+    raise SystemExit(f"TIMEOUT after {timeout}s waiting for {what}")
+
+
+def drainer_state():
+    out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
+    return sorted(l for l in out.splitlines() if "drain-prs" in l)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", required=True)
+    parser.add_argument("--checkout", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--session-script", required=True)
+    parser.add_argument("--stty-before", required=True)
+    parser.add_argument("--stty-after", required=True)
+    parser.add_argument("--refresh-gap", type=float, default=150.0)
+    parser.add_argument("--idle", type=float, default=360.0)
+    parser.add_argument("--idle-interval", type=float, default=0.23)
+    args = parser.parse_args()
+
+    results = {"steps": {}, "keys_sent": [], "forbidden_keys": sorted(FORBIDDEN)}
+
+    drainer_before = drainer_state()
+    log(f"drainer BEFORE (launchctl list | grep drain-prs): {drainer_before}")
+    results["drainer_before"] = drainer_before
+    results["drainer_query"] = "launchctl list | grep drain-prs"
+
+    tmux("kill-server")
+    time.sleep(1)
+
+    # The session command is a script that wraps Kanban in a shell so the PTY
+    # outlives it: the same terminal can then be inspected for restored line
+    # discipline, which a session that dies with the application could never
+    # show.
+    shell_command = (
+        f"{args.session_script} {args.stty_before} {args.stty_after} "
+        f"{args.binary} {args.checkout}"
+    )
+    tmux("new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50", shell_command)
+    started = time.monotonic()
+
+    pane_pid = tmux("display-message", "-p", "-t", SESSION, "#{pane_pid}").stdout.strip()
+    kanban_pid = ""
+    for _ in range(120):
+        out = subprocess.run(
+            ["pgrep", "-P", pane_pid, "-f", "bin/kanban"], capture_output=True, text=True
+        ).stdout.split()
+        if out:
+            kanban_pid = out[0]
+            break
+        time.sleep(0.1)
+    if not kanban_pid:
+        raise SystemExit("could not resolve the Kanban pid")
+    results["kanban_pid"] = kanban_pid
+    results["pane_pid"] = pane_pid
+    log(f"kanban pid {kanban_pid} in pane {pane_pid}, geometry {pane_size()}")
+
+    def step(name, body):
+        t0 = time.monotonic()
+        log(f"--- STEP {name} ---")
+        outcome = body()
+        outcome["elapsed_s"] = round(time.monotonic() - t0, 2)
+        results["steps"][name] = outcome
+        log(f"    -> {outcome.get('verdict')}  ({outcome['elapsed_s']}s)")
+
+    def keyed(key, literal=True):
+        results["keys_sent"].append(key)
+        send(key, literal)
+
+    # ---------------------------------------------------------------- step 1
+    def step1():
+        frame = wait_for(
+            lambda f: "board:" in footer(f) and "refreshing" not in footer(f),
+            60,
+            what="the startup refresh to settle",
+        )
+        return {
+            "verdict": "pass",
+            "geometry": pane_size(),
+            "footer": footer(frame),
+            "columns_seen": [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in frame],
+            "initial_selection": selection(frame),
+        }
+
+    # ---------------------------------------------------------------- step 2
+    def step2():
+        detail = {}
+        frame = capture()
+        detail["start_column"] = selected_column(frame)
+
+        traversal = []
+        for _ in range(3):
+            keyed("l")
+            time.sleep(0.5)
+            f = capture()
+            traversal.append({"column": selected_column(f), "selection": selection(f)})
+        for _ in range(3):
+            keyed("h")
+            time.sleep(0.5)
+            f = capture()
+            traversal.append({"column": selected_column(f), "selection": selection(f)})
+        detail["traversal"] = traversal
+
+        keyed("G")
+        time.sleep(0.6)
+        last_sel = selection(capture())
+        keyed("g")
+        time.sleep(0.6)
+        first_sel = selection(capture())
+        detail["last_item"] = last_sel
+        detail["first_item"] = first_sel
+        detail["g_G_moved"] = last_sel != first_sel
+
+        # Details overlay on a real card: G lands on a standalone card, and the
+        # overlay's panel header is the card's own title rather than a label.
+        keyed("G")
+        time.sleep(0.6)
+        send("Enter", literal=False)
+        results["keys_sent"].append("Enter")
+        opened = wait_for(lambda f: "DETAILS" in panels(f), 10, what="the details overlay")
+        detail["details_opened"] = True
+        detail["details_for"] = DETAILS_RE.search(opened).group(1)
+        send("Escape", literal=False)
+        results["keys_sent"].append("Escape")
+        closed = wait_for(lambda f: "DETAILS" not in panels(f), 10, what="details to close")
+        detail["details_closed"] = True
+
+        keyed("g")
+        time.sleep(0.6)
+        before = capture()
+        epic_line_before = next((l for l in before.splitlines() if "▌" in l), "")
+        keyed("e")
+        time.sleep(1.0)
+        after = capture()
+        expanded = "▾" in after and "▾" not in before
+        keyed("e")
+        time.sleep(1.0)
+        recollapsed = capture()
+        detail["epic_collapsed_glyph_before"] = "▸" if "▸" in epic_line_before else None
+        detail["epic_expanded"] = expanded
+        detail["epic_recollapsed"] = ("▾" in recollapsed) is False or (
+            recollapsed.count("▾") < after.count("▾")
+        )
+        detail["verdict"] = (
+            "pass"
+            if detail["g_G_moved"] and detail["details_opened"] and detail["epic_expanded"]
+            else "fail"
+        )
+        return detail
+
+    # ---------------------------------------------------------------- step 3
+    def step3():
+        overlays = {}
+        for key, expect in (("?", "HELP"), ("o", "SETTINGS"), ("p", "PROCESSES"), ("i", "NEEDS ATTENTION")):
+            keyed(key)
+            frame = wait_for(lambda f, e=expect: e in panels(f), 10, what=f"the {expect} overlay")
+            body = [l for l in frame.splitlines() if expect in l]
+            send("Escape", literal=False)
+            results["keys_sent"].append("Escape")
+            wait_for(lambda f, e=expect: e not in panels(f), 10, what=f"{expect} to close")
+            overlays[expect] = {"key": key, "opened": True, "closed": True, "header": body[:1]}
+            log(f"    {expect}: opened with {key!r}, closed with Esc")
+        return {"verdict": "pass", "overlays": overlays}
+
+    # ---------------------------------------------------------------- step 4
+    def step4():
+        wide = pane_size()
+        before = capture()
+        keyed("c")
+        collapsed = wait_for(lambda f: not sidebar_present(f), 10, what="the sidebar to collapse")
+        keyed("c")
+        restored = wait_for(lambda f: sidebar_present(f), 10, what="the sidebar to restore")
+
+        tmux("resize-window", "-t", SESSION, "-x", "62", "-y", "40")
+        time.sleep(2.0)
+        narrow_size = pane_size()
+        narrow = capture()
+        narrow_columns = [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in narrow]
+
+        tmux("resize-window", "-t", SESSION, "-x", "200", "-y", "50")
+        time.sleep(2.0)
+        back_size = pane_size()
+        back = capture()
+        back_columns = [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in back]
+
+        return {
+            "verdict": "pass"
+            if (not sidebar_present(collapsed))
+            and sidebar_present(restored)
+            and len(narrow_columns) < len(back_columns)
+            and back_size == wide
+            else "fail",
+            "wide_geometry": wide,
+            "narrow_geometry": narrow_size,
+            "restored_geometry": back_size,
+            "narrow_columns_visible": narrow_columns,
+            "wide_columns_visible": back_columns,
+            "sidebar_collapsed_ok": not sidebar_present(collapsed),
+            "sidebar_restored_ok": sidebar_present(restored),
+        }
+
+    # ---------------------------------------------------------------- step 5
+    def refresh_round(label):
+        # Focus a column with several cards so `j` has somewhere to move.
+        keyed("g")
+        time.sleep(0.5)
+        before_sel = selection(capture())
+        keyed("u")
+        proof = None
+        deadline = time.monotonic() + 20
+        moved = False
+        while time.monotonic() < deadline:
+            frame = capture()
+            if "refreshing" in footer(frame):
+                if not moved:
+                    keyed("j")
+                    moved = True
+                    continue
+                now_sel = selection(frame)
+                if now_sel != before_sel:
+                    proof = {
+                        "footer": footer(frame),
+                        "selection_before": before_sel,
+                        "selection_during": now_sel,
+                    }
+                    break
+            time.sleep(0.05)
+        settled = wait_for(
+            lambda f: "refreshing" not in footer(f), 60, what="the refresh to settle"
+        )
+        return {
+            "label": label,
+            "responsive_proof": proof,
+            "settled_footer": footer(settled),
+        }
+
+    def step5():
+        first = refresh_round("refresh-1")
+        log(f"    refresh 1 proof: {first['responsive_proof']}")
+        log(f"    waiting {args.refresh_gap}s before the second refresh")
+        time.sleep(args.refresh_gap)
+        second = refresh_round("refresh-2")
+        log(f"    refresh 2 proof: {second['responsive_proof']}")
+        ok = bool(first["responsive_proof"]) and bool(second["responsive_proof"])
+        return {
+            "verdict": "pass" if ok else "fail",
+            "gap_s": args.refresh_gap,
+            "rounds": [first, second],
+        }
+
+    # ---------------------------------------------------------------- step 6
+    def step6():
+        log(f"    idle window: {args.idle}s at {args.idle_interval}s cadence")
+        frames = []
+        t0 = time.monotonic()
+        previous = None
+        changes = []
+        count = 0
+        while time.monotonic() - t0 < args.idle:
+            frame = capture()
+            count += 1
+            if previous is not None and frame != previous:
+                before_lines = previous.splitlines()
+                after_lines = frame.splitlines()
+                changed = [
+                    {"row": i, "before": b.strip("║ ").rstrip(), "after": a.strip("║ ").rstrip()}
+                    for i, (b, a) in enumerate(zip(before_lines, after_lines))
+                    if b != a
+                ]
+                changes.append({"t": round(time.monotonic() - t0, 2), "lines": changed})
+            previous = frame
+            time.sleep(args.idle_interval)
+        return {
+            "verdict": "pass",
+            "captures": count,
+            "cadence_s": args.idle_interval,
+            "window_s": round(time.monotonic() - t0, 1),
+            "frames_differing_from_predecessor": len(changes),
+            "changes": changes,
+        }
+
+    # ---------------------------------------------------------------- step 7
+    def step7():
+        before = capture()
+        send("C-l", literal=False)
+        results["keys_sent"].append("C-l")
+        time.sleep(1.5)
+        after = capture()
+        repaint_identical = before.strip() == after.strip()
+        repaint_diff = [
+            {"row": i, "before": b.strip("║ ").rstrip(), "after": a.strip("║ ").rstrip()}
+            for i, (b, a) in enumerate(zip(before.splitlines(), after.splitlines()))
+            if b != a
+        ]
+        keyed("q")
+        time.sleep(3.0)
+        post = capture()
+        return {
+            "verdict": "pass",
+            "repaint_content_identical": repaint_identical,
+            "repaint_diff": repaint_diff,
+            "post_quit_pane_has_marker": "TERMINAL_RESTORED_MARKER" in post,
+            "post_quit_pane_tail": [l for l in post.splitlines() if l.strip()][-6:],
+        }
+
+    step("1-launch-and-settle", step1)
+    step("2-navigation", step2)
+    step("3-overlays", step3)
+    step("4-sidebar-and-resize", step4)
+    step("5-two-refreshes", step5)
+    step("6-idle-five-minutes", step6)
+    step("7-repaint-and-quit", step7)
+
+    results["total_elapsed_s"] = round(time.monotonic() - started, 1)
+    log(f"total observation: {results['total_elapsed_s']}s")
+
+    # Shutdown, three independent ways.
+    time.sleep(6)
+    alive = subprocess.run(["ps", "-p", kanban_pid], capture_output=True).returncode == 0
+    has_session = subprocess.run(
+        ["tmux", "has-session", "-t", SESSION], capture_output=True
+    ).returncode == 0
+    results["shutdown"] = {
+        "kanban_pid_alive": alive,
+        "tmux_session_present": has_session,
+    }
+    log(f"shutdown: pid alive={alive}, session present={has_session}")
+
+    drainer_after = drainer_state()
+    results["drainer_after"] = drainer_after
+    results["drainer_unchanged"] = drainer_after == drainer_before
+    log(f"drainer AFTER: {drainer_after} (unchanged={results['drainer_unchanged']})")
+
+    results["log"] = log_lines
+    with open(args.out, "w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=2, ensure_ascii=False)
+    log(f"wrote {args.out}")
+
+    failed = [n for n, s in results["steps"].items() if s.get("verdict") != "pass"]
+    return 1 if failed or alive or has_session or not results["drainer_unchanged"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+SMOKE
+```
+
+Running it, from the implementation checkout so the suites afterwards read the
+tracked `docs/design.md`:
+
+```console
+python3 -u "$TMP/smoke_script.py" \
+  --binary "$TMP/bin/kanban" --checkout "$ROOT" \
+  --session-script "$TMP/session.sh" \
+  --out "$TMP/smoke.json" \
+  --stty-before "$TMP/stty_before.txt" --stty-after "$TMP/stty_after.txt" \
+  --refresh-gap 180 --idle 420 --idle-interval 0.23
+diff "$TMP/stty_before.txt" "$TMP/stty_after.txt" && echo "terminal restored"
+tmux has-session -t rel3 2>/dev/null && echo "STILL RUNNING (fail)" || echo "session gone"
+```
+
+#### Suites
+
+Both suites pass at the recorded commit with this record in place, run from the
+implementation checkout rather than the unpacked archive:
+
+```console
+cabal test all --test-show-details=direct
+python3 -m unittest discover -s tools -p 'test_*.py' < /dev/null
+```
+
+The Haskell suite reported `1101 examples, 0 failures` and
+`Test suite kanban-test: PASS`; the Python suite ran 1336 tests, `OK`. The
+Python suite's stdin is redirected because a fake-CLI call stalls for 60 seconds
+per invocation when stdin is a non-tty pipe.
+
 ## Decisions
 
 ### D-1. First-release evidence includes a real installed-terminal run
@@ -5170,9 +5996,12 @@ for release and verify the published tag and GitHub Release resolve to it.
 ### REL-4. Publish the first Kanban release
 
 > **Deferred 2026-08-12.** Precondition: #269, #270, and #273 have merged and
-> section 21 records a pass for each gate. Terminal ledger links are not enough —
-> none of the three gates has been run, and a release-blocking defect found by
-> any of them changes this slice's scope before it can start.
+> section 21 records a pass for each gate. Terminal ledger links are not enough.
+> Updated 2026-08-14: all three gates have now been run and each records a pass
+> in section 21 — REL-1 and REL-2 have merged, and REL-3 lands with this
+> record — so the remaining precondition is #273 merging, not the gates being
+> performed. A release-blocking defect found by any of them would still change
+> this slice's scope before it can start; none was.
 >
 > Two things to settle when this slice is reprocessed. First, it does not fit one
 > pull request at all: #283 established the package version and the changelog
