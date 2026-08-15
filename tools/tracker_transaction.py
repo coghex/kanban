@@ -65,6 +65,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -111,6 +112,12 @@ STEP_KINDS = (
 STEP_PLAN_FIELDS = ("kind", "target", "payload_fingerprint", "postcondition")
 
 DISPOSITIONS = ("new-issue", "existing-issue", "epic-create", "epic-adopt")
+
+# The two kinds that create something the document then names. Everything else
+# mutates the tracker without contributing a token the entry must carry, which
+# is the distinction requirement 11's "every exact tracker identity *required by
+# that disposition*" turns on.
+ISSUE_IDENTITY_KINDS = ("issue-create", "epic-create")
 
 MARKER_RE = re.compile(r"^\[#\d+\]$")
 
@@ -563,6 +570,10 @@ def _text(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def validate_plan(plan, repository: str, document: str, publication_tip: str) -> dict:
     """The approved plan, normalized into a fresh `intent-only` record.
 
@@ -677,12 +688,21 @@ def validate_identity(identity, step: dict, index: int) -> dict:
         raise TransactionError(
             "identity-invalid", f"the identity for step {index} is not a JSON object"
         )
+    kind = _text(identity.get("kind")) or step["kind"]
+    if kind != step["kind"]:
+        raise TransactionError(
+            "identity-invalid",
+            f"the identity for step {index} is a {kind!r}, but the approved step "
+            f"is a {step['kind']!r}; a checkpoint records the mutation that was "
+            "approved, not another one",
+        )
     confirmed = {
-        "kind": _text(identity.get("kind")) or step["kind"],
+        "kind": kind,
         "id": _text(identity.get("id")),
         "url": _text(identity.get("url")) or None,
         "fingerprint": _text(identity.get("fingerprint")) or None,
         "document_token": _text(identity.get("document_token")) or None,
+        "metadata": identity.get("metadata"),
         "postcondition_verified": bool(identity.get("postcondition_verified")),
     }
     if not confirmed["id"]:
@@ -697,17 +717,77 @@ def validate_identity(identity, step: dict, index: int) -> dict:
             f"the identity for step {index} does not report its observable "
             f"postcondition as verified: {step['postcondition']}",
         )
-    if step.get("provides_marker") and not confirmed["document_token"]:
+    if confirmed["metadata"] is not None and not isinstance(confirmed["metadata"], dict):
         raise TransactionError(
             "identity-invalid",
-            f"step {index} provides the document marker, so its identity must "
-            "carry the exact document_token the entry will read",
+            f"the metadata for step {index} is not a JSON object",
         )
     if confirmed["document_token"] and not MARKER_RE.match(confirmed["document_token"]):
         raise TransactionError(
             "identity-invalid",
             f"document_token {confirmed['document_token']!r} is not of the exact "
             "form [#N]",
+        )
+    # What "the identity appropriate to its mutation kind" actually means, per
+    # kind. Without this the fields are decorative: an issue creation could
+    # record any id beside any document token, and resolution — which checks
+    # only the token — would then clear a record whose documented artifact is
+    # not the one the tracker actually got.
+    if kind in ISSUE_IDENTITY_KINDS:
+        if not confirmed["id"].isdigit():
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} created an issue, so its id is that issue's number, "
+                f"not {confirmed['id']!r}",
+            )
+        if not confirmed["url"]:
+            raise TransactionError(
+                "identity-invalid", f"step {index} records no url for its issue"
+            )
+        if confirmed["url"].rstrip("/").rsplit("/", 1)[-1] != confirmed["id"]:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index}'s url {confirmed['url']} does not name issue "
+                f"{confirmed['id']}",
+            )
+        if confirmed["document_token"] != f"[#{confirmed['id']}]":
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} created issue {confirmed['id']} but its document "
+                f"token is {confirmed['document_token']!r}; the entry must name "
+                "the artifact that was actually created",
+            )
+    elif kind == "label-create":
+        if not isinstance(confirmed["metadata"], dict) or not confirmed["metadata"]:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} created a label, whose identity is its name and the "
+                "metadata it was created with",
+            )
+    elif kind == "issue-comment":
+        if not confirmed["url"]:
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} posted a comment, so it records that comment's id "
+                "and url",
+            )
+    elif not confirmed["fingerprint"]:
+        raise TransactionError(
+            "identity-invalid",
+            f"step {index} edited an existing artifact, so it records that "
+            "artifact's identity and the verified post-edit fingerprint",
+        )
+    if kind not in ISSUE_IDENTITY_KINDS and confirmed["document_token"]:
+        raise TransactionError(
+            "identity-invalid",
+            f"step {index} is a {kind}, which never appears in the document; only "
+            "a created issue or epic contributes a token the entry must carry",
+        )
+    if step.get("provides_marker") and kind not in ISSUE_IDENTITY_KINDS:
+        raise TransactionError(
+            "identity-invalid",
+            f"step {index} claims to provide the document marker, but a {kind} "
+            "produces no marker the entry can carry",
         )
     return confirmed
 
@@ -770,18 +850,48 @@ def action_begin(root, ref, record, observed, index) -> dict:
             f"step(s) {earlier} are not confirmed, so step {index} may not begin; "
             "the recorded order is the order the mutations happen in",
         )
+    token = secrets.token_hex(16)
     record["steps"][index]["state"] = STEP_INTENT
+    # Only the digest is durable. The token itself is returned once, to this
+    # caller, and exists nowhere else — which is what makes holding it evidence
+    # of having run the mutation rather than of having read the record.
+    record["steps"][index]["begin_token_digest"] = _digest(token)
     record["state"] = derived_state(record)
     commit = write_record(root, ref, record, observed)
-    return {"status": "step-begun", "step": index} | transaction_report(
-        record, ref, commit
-    )
+    return {
+        "status": "step-begun", "step": index, "begin_token": token,
+    } | transaction_report(record, ref, commit)
 
 
-def action_confirm(root, ref, record, observed, index, identity) -> dict:
+def action_confirm(root, ref, record, observed, index, identity, begin_token) -> dict:
+    """Confirm a step, but only from the run that began it.
+
+    Begin and confirm are separate invocations by design — the mutation happens
+    between them — so process identity cannot tell the run that just created an
+    issue from a fresh session looking at an interrupted one. What can: the
+    token minted by `--begin-step` and returned only to that caller. A resuming
+    session has no conversation history and therefore does not have it, so the
+    ordinary confirmation stays one flag wide while adoption of an ambiguous
+    step is pushed onto `--reconcile-step`, where an exact artifact must be
+    approved and matched. Losing the token costs a reconciliation, which is the
+    safe direction to fail.
+    """
     step = require_step(record, index, STEP_INTENT)
+    expected = step.get("begin_token_digest")
+    if not expected or not begin_token or not secrets.compare_digest(
+        _digest(begin_token), expected
+    ):
+        raise TransactionError(
+            "begin-token-mismatch",
+            f"step {index} was begun by another run, so this one cannot confirm "
+            "what that mutation returned. It is ambiguous: verify read-only "
+            "whether its exact postcondition holds, then reconcile it against one "
+            "approved artifact or authorize a retry once it is proven absent",
+            **transaction_report(record, ref, observed),
+        )
     step["identity"] = validate_identity(identity, step, index)
     step["state"] = STEP_CONFIRMED
+    step.pop("begin_token_digest", None)
     record["state"] = derived_state(record)
     commit = write_record(root, ref, record, observed)
     return {"status": "step-confirmed", "step": index} | transaction_report(
@@ -829,6 +939,7 @@ def action_reconcile(root, ref, record, observed, index, identity, candidates) -
         )
     step["identity"] = validate_identity(identity, step, index)
     step["state"] = STEP_CONFIRMED
+    step.pop("begin_token_digest", None)
     record["state"] = derived_state(record)
     commit = write_record(root, ref, record, observed)
     return {"status": "step-reconciled", "step": index} | transaction_report(
@@ -843,6 +954,9 @@ def action_authorize_retry(root, ref, record, observed, index) -> dict:
     approved mutation becomes two."""
     require_step(record, index, STEP_INTENT)
     record["steps"][index]["state"] = STEP_PLANNED
+    # The retried attempt mints its own token; the abandoned one must not stay
+    # presentable by whatever still holds it.
+    record["steps"][index].pop("begin_token_digest", None)
     record["state"] = derived_state(record)
     commit = write_record(root, ref, record, observed)
     return {"status": "retry-authorized", "step": index} | transaction_report(
@@ -1051,6 +1165,10 @@ def main(argv: list[str] | None = None) -> int:
         "--identity", help="file holding the confirmed identity, or - for stdin"
     )
     parser.add_argument(
+        "--begin-token",
+        help="the token --begin-step returned to the run that began this step",
+    )
+    parser.add_argument(
         "--candidates",
         type=int,
         help="how many candidate artifacts the read-only verification found",
@@ -1128,7 +1246,7 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--confirm-step requires --identity")
             outcome = action_confirm(
                 root, ref, record, observed, args.confirm_step,
-                load_json(args.identity),
+                load_json(args.identity), args.begin_token,
             )
         elif args.reconcile_step is not None:
             if not args.identity:

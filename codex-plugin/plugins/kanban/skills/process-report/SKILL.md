@@ -449,11 +449,28 @@ python3 "$DOC_ROOT/tools/tracker_transaction.py" \
 # ... run exactly that one approved mutation ...
 python3 "$DOC_ROOT/tools/tracker_transaction.py" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
-  --confirm-step 0 --identity - <<'IDENTITY'
-{"kind": "issue", "id": "<number>", "url": "<url>",
+  --confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity - <<'IDENTITY'
+{"kind": "issue-create", "id": "<number>", "url": "<url>",
  "document_token": "[#<number>]", "postcondition_verified": true}
 IDENTITY
 ```
+
+`$BEGIN_TOKEN` is the `begin_token` the `--begin-step` result returned. Keep it
+for exactly this confirmation and pass it back. Only the run that began a step
+may confirm it, and that token is the only evidence of having been it: it is
+returned once and is not readable from the record, so a fresh session cannot
+produce one and must reconcile instead. That is what stops an interrupted
+mutation being adopted through the ordinary confirmation path, which asks for no
+approval and matches no artifact. Losing the token costs a reconciliation, which
+is the safe direction to fail.
+
+An identity is the one its own kind of mutation actually has, and it must agree
+with itself: a created issue or epic records its number, the URL naming that
+number, and the `[#N]` token the entry will carry; a label records its name and
+the metadata it was created with; a comment records its comment ID and URL; an
+edit to an existing artifact records that artifact's identity and the verified
+post-edit fingerprint. Nothing but a created issue or epic contributes a token
+the document must name.
 
 Not every step returns an issue number and a URL, and the record does not
 pretend otherwise: an issue records its number and URL, a comment its comment ID

@@ -686,6 +686,28 @@ verified on the publication branch, and the record is cleared. Each step is
 mutation begins and records its exact confirmed identity and postcondition
 before the next step starts.
 
+**Only the run that performed a mutation may confirm it.** Beginning a step and
+confirming it are separate invocations — the mutation happens between them — so
+nothing about the process can tell the run that just created an issue from a
+fresh session looking at an interrupted one. Beginning a step therefore returns
+a token once, to that caller alone, which is not readable from the record;
+confirming requires it back. A resuming session has no conversation history and
+so cannot produce one, which keeps the ordinary confirmation cheap while forcing
+adoption of an interrupted step onto the reconciliation path below, where an
+exact artifact must be approved and matched. Losing the token costs a
+reconciliation, which is the safe direction to fail.
+
+**A confirmed identity is the one its own kind of mutation has, and it must
+agree with itself.** A created issue or epic records its number, the URL naming
+that number, and the `[#N]` token the entry will carry; a label records its name
+and the metadata it was created with; a comment records its comment ID and URL;
+an edit to an existing artifact records that artifact's identity and the
+verified post-edit fingerprint. Those agreements are checked rather than
+assumed: clearing verifies the document's token, so an identity free to record
+one artifact beside another artifact's token would let a record clear against a
+document naming something the tracker never got. Nothing but a created issue or
+epic contributes a token the document must name.
+
 **Every transition is a compare-and-swap, and confirmations are never erased.**
 A failed or interrupted transition leaves the earlier durable value exactly as
 it was, and no transition may drop or rewrite a confirmed step's identity or

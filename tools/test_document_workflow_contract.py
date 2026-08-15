@@ -269,6 +269,13 @@ CONTRACT_STATEMENTS = {
         "intent-only — the record and its ordered plan exist and no step is "
         "confirmed"
     ),
+    "transaction-confirmation-needs-the-begin-token": (
+        "Only the run that performed a mutation may confirm it"
+    ),
+    "transaction-identity-must-agree-with-itself": (
+        "A confirmed identity is the one its own kind of mutation has, and it "
+        "must agree with itself"
+    ),
     "transaction-transitions-are-compare-and-swap": (
         "Every transition is a compare-and-swap, and confirmations are never "
         "erased"
@@ -431,6 +438,21 @@ TRANSACTION_CLAUSES = {
         "begin a step before its external mutation runs and confirm it with the "
         "exact identity that mutation returned before the next step starts"
     ),
+    "only-the-run-that-began-a-step-confirms-it": (
+        "only the run that began a step may confirm it, and that token is the "
+        "only evidence of having been it"
+    ),
+    "a-fresh-session-must-reconcile-instead": (
+        "a fresh session cannot produce one and must reconcile instead"
+    ),
+    "an-identity-must-agree-with-itself": (
+        "an identity is the one its own kind of mutation actually has, and it "
+        "must agree with itself"
+    ),
+    "only-a-created-issue-contributes-a-token": (
+        "nothing but a created issue or epic contributes a token the document "
+        "must name"
+    ),
     "identity-is-not-always-an-issue-number": (
         "not every step returns an issue number and a url, and the record does "
         "not pretend otherwise"
@@ -533,7 +555,7 @@ DESIGN_PROCESSING_ASSETS = (
 TRANSACTION_INVOCATIONS = (
     '--acquire --approved --publication-tip "$PREFLIGHT_TIP" --plan -',
     '--begin-step 0 --approved',
-    '--confirm-step 0 --identity -',
+    '--confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity -',
     '--publication-pending',
     '--resolve --source branch --branch "$DOC_BRANCH"',
 )

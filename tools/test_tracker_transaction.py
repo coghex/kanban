@@ -116,10 +116,67 @@ def plan(**overrides):
 
 def issue_identity(number=311, **overrides):
     body = {
-        "kind": "issue",
+        "kind": "issue-create",
         "id": str(number),
         "url": f"https://github.com/coghex/kanban/issues/{number}",
         "document_token": f"[#{number}]",
+        "postcondition_verified": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def label_plan(**overrides):
+    """The EPIC path's first step: a label, whose identity is a name and the
+    metadata it was created with rather than a number and a URL."""
+    body = plan(
+        marker="[#288]",
+        steps=[
+            {
+                "kind": "label-create",
+                "target": "label agent-workflows in coghex/kanban",
+                "payload_fingerprint": "sha256:label",
+                "postcondition": "the label exists with the approved color",
+            }
+        ],
+    )
+    body.update(overrides)
+    return body
+
+
+def comment_plan(**overrides):
+    body = plan(
+        disposition="existing-issue",
+        marker="[#288]",
+        steps=[
+            {
+                "kind": "issue-comment",
+                "target": "coghex/kanban#288",
+                "payload_fingerprint": "sha256:comment",
+                "postcondition": "the approved comment exists on #288",
+            }
+        ],
+    )
+    body.update(overrides)
+    return body
+
+
+def label_identity(**overrides):
+    body = {
+        "kind": "label-create",
+        "id": "agent-workflows",
+        "metadata": {"color": "ededed", "description": "x"},
+        "postcondition_verified": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def comment_identity(**overrides):
+    body = {
+        "kind": "issue-comment",
+        "id": "5303396262",
+        "url": "https://github.com/coghex/kanban/issues/288#issuecomment-5303396262",
         "postcondition_verified": True,
     }
     body.update(overrides)
@@ -160,6 +217,7 @@ class Fixture:
         run(["git", "branch", "-M", "master"], self.primary)
         run(["git", "push", "-q", "origin", "master:master"], self.primary)
         run(["git", "fetch", "-q", "origin", "master"], self.primary)
+        self.tokens = {}
         self.docs = directory / "docs-wip"
         run(
             ["git", "worktree", "add", "-q", "-b", "docs-wip", str(self.docs), "master"],
@@ -186,14 +244,19 @@ class Fixture:
 
     def begin(self, index, *, root=None):
         record, observed = self.read(root=root)
-        return tracker.action_begin(
+        outcome = tracker.action_begin(
             root or self.docs, self.ref(), record, observed, index
         )
+        # The token exists only in this result, which is exactly what the run
+        # that performed the mutation is holding when it comes to confirm.
+        self.tokens[index] = outcome["begin_token"]
+        return outcome
 
-    def confirm(self, index, identity, *, root=None):
+    def confirm(self, index, identity, *, root=None, token=None):
         record, observed = self.read(root=root)
         return tracker.action_confirm(
-            root or self.docs, self.ref(), record, observed, index, identity
+            root or self.docs, self.ref(), record, observed, index, identity,
+            self.tokens.get(index) if token is None else token,
         )
 
     def reconcile(self, index, identity, candidates=1, *, root=None):
@@ -509,6 +572,189 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual([step["index"] for step in outcome["completed_steps"]], [0])
         self.assertEqual([step["index"] for step in outcome["remaining_steps"]], [1])
         self.assertEqual(outcome["confirmed_identities"][0]["id"], "311")
+
+    # -- only the run that began a step may confirm it ------------------------
+
+    def test_a_run_without_the_begin_token_cannot_confirm_an_ambiguous_step(self):
+        # The bypass this closes: a fresh session finds an interrupted step,
+        # calls --confirm-step with an artifact it found, and advances the
+        # transaction without ever going through the approved exact-artifact
+        # reconciliation the fail-closed contract requires.
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, issue_identity(), token="")
+        self.assertEqual(caught.exception.status, "begin-token-mismatch")
+        self.assertEqual(self.fx.read()[0]["steps"][0]["state"], "intent")
+        self.assertIn("reconcile", caught.exception.message)
+
+    def test_a_wrong_begin_token_is_refused(self):
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, issue_identity(), token="0" * 32)
+        self.assertEqual(caught.exception.status, "begin-token-mismatch")
+        self.assertEqual(self.fx.read()[0]["steps"][0]["state"], "intent")
+
+    def test_the_token_is_never_readable_from_the_record(self):
+        # Holding it has to mean "I ran the mutation", not "I read the record" —
+        # otherwise a resuming session recovers it and the boundary is gone.
+        self.fx.acquire()
+        outcome = self.fx.begin(0)
+        token = outcome["begin_token"]
+        record, _ = self.fx.read()
+        self.assertNotIn(token, json.dumps(record))
+        self.assertNotIn(token, json.dumps(self.fx.check()))
+
+    def test_the_command_line_confirm_needs_the_token_it_was_given(self):
+        self.fx.acquire()
+        code, begun = self.fx.cli("--begin-step", "0", "--approved")
+        self.assertEqual(code, 0)
+        identity = json.dumps(issue_identity())
+        code, payload = self.fx.cli(
+            "--confirm-step", "0", "--identity", "-", stdin=identity
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "begin-token-mismatch")
+        code, payload = self.fx.cli(
+            "--confirm-step", "0", "--begin-token", begun["begin_token"],
+            "--identity", "-", stdin=identity,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["steps"][0]["state"], "confirmed")
+
+    def test_an_authorized_retry_invalidates_the_abandoned_token(self):
+        self.fx.acquire()
+        stale = self.fx.begin(0)["begin_token"]
+        record, observed = self.fx.read()
+        tracker.action_authorize_retry(
+            self.fx.docs, self.fx.ref(), record, observed, 0
+        )
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, issue_identity(), token=stale)
+        self.assertEqual(caught.exception.status, "begin-token-mismatch")
+
+    def test_reconciliation_is_the_path_a_fresh_run_actually_has(self):
+        # And it still works without a token, because it pays for that with an
+        # approved, uniquely matched, exactly fingerprinted artifact.
+        self.fx.acquire()
+        self.fx.begin(0)
+        self.fx.tokens.clear()
+        outcome = self.fx.reconcile(
+            0,
+            issue_identity(
+                matched_target="new issue in coghex/kanban",
+                matched_payload_fingerprint="sha256:body",
+            ),
+        )
+        self.assertEqual(outcome["status"], "step-reconciled")
+
+    # -- an identity is the one its own kind of mutation has ------------------
+
+    def test_an_identity_of_the_wrong_kind_is_refused(self):
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, issue_identity(kind="issue-comment"))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertIn("approved step is a", caught.exception.message)
+
+    def test_an_issue_identity_must_agree_with_its_own_document_token(self):
+        # The hole this closes: resolution checks the token, so an identity free
+        # to record #311 beside [#999] could clear a record whose documented
+        # artifact is not the one the tracker actually got.
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, issue_identity(document_token="[#999]"))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertIn("actually created", caught.exception.message)
+
+    def test_an_issue_identity_must_agree_with_its_own_url(self):
+        self.fx.acquire()
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(
+                0,
+                issue_identity(url="https://github.com/coghex/kanban/issues/999"),
+            )
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertIn("does not name issue", caught.exception.message)
+
+    def test_an_issue_identity_needs_a_number_and_a_url(self):
+        # A refused confirmation leaves the step exactly as it was, so both
+        # rejections can be driven against the one ambiguous step.
+        self.fx.acquire()
+        self.fx.begin(0)
+        for broken in (issue_identity(id="the-issue"), issue_identity(url="")):
+            with self.subTest(identity=broken):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(0, broken)
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertEqual(self.fx.read()[0]["steps"][0]["state"], "intent")
+
+    def test_a_label_records_and_keeps_its_metadata(self):
+        # Requirement 5's "a label name and metadata": discarding the metadata
+        # leaves a checkpoint that cannot describe what it created.
+        self.fx.acquire(label_plan())
+        self.fx.begin(0)
+        outcome = self.fx.confirm(0, label_identity())
+        identity = outcome["steps"][0]["identity"]
+        self.assertEqual(identity["id"], "agent-workflows")
+        self.assertEqual(identity["metadata"], {"color": "ededed", "description": "x"})
+        self.assertIsNone(identity["document_token"])
+        # And it survives a re-read, rather than living only in this result.
+        self.assertEqual(
+            self.fx.read()[0]["steps"][0]["identity"]["metadata"],
+            {"color": "ededed", "description": "x"},
+        )
+
+    def test_a_label_without_metadata_is_refused(self):
+        self.fx.acquire(label_plan())
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, label_identity(metadata=None))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+
+    def test_a_comment_records_its_id_and_url(self):
+        self.fx.acquire(comment_plan())
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, comment_identity(url=""))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        outcome = self.fx.confirm(0, comment_identity())
+        self.assertEqual(outcome["steps"][0]["identity"]["id"], "5303396262")
+
+    def test_an_edit_records_its_verified_post_edit_fingerprint(self):
+        self.fx.acquire()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        self.fx.begin(1)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(1, edit_identity(fingerprint=""))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+
+    def test_only_a_created_issue_contributes_a_document_token(self):
+        self.fx.acquire()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        self.fx.begin(1)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(1, edit_identity(document_token="[#300]"))
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertIn("never appears in the document", caught.exception.message)
+
+    def test_a_non_issue_step_may_not_claim_to_provide_the_marker(self):
+        broken = label_plan()
+        broken["steps"][0]["provides_marker"] = True
+        broken["marker"] = ""
+        self.fx.acquire(broken)
+        self.fx.begin(0)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.confirm(0, label_identity())
+        self.assertEqual(caught.exception.status, "identity-invalid")
+        self.assertIn("produces no marker", caught.exception.message)
 
     # -- reconciliation ------------------------------------------------------
 
