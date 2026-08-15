@@ -20,7 +20,7 @@ concrete precondition
 - [x] USE-1. Add kanban --usage printing cached windows with reset countdowns — [#333]
 - [x] USE-2. Show reset countdowns and snapshot age in the usage sidebar — [#334]
 - [x] USE-3. Add a deliberate per-brand window-starting ping action — [#337]
-- [ ] USE-4. Add burn-planning display sized to remaining quota
+- [x] USE-4. Add burn-planning display sized to remaining quota — [#338]
 
 ## Epic contract
 
