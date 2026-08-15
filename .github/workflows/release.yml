@@ -1,0 +1,554 @@
+name: Release
+
+# Publishes the archive `cabal sdist` produces -- the complete verified
+# checkout `tools/test_source_distribution.py` asserts -- as the sole asset of
+# a GitHub Release. GitHub is the only distribution channel: nothing here
+# builds or uploads a Hackage artifact, a formula, an installer, or GitHub's
+# own generated source snapshot.
+#
+# Two entry paths share one build-and-verify job:
+#
+#   * a push of a `v*` tag publishes a real, non-draft release, and only after
+#     every gate below has passed; and
+#   * `workflow_dispatch` exercises the same path under an explicitly supplied
+#     `release-dry-run-*` tag and can create nothing but a draft.
+#
+# Pushing the real `v1.0.0.0` tag stays with epic #268 REL-4. This workflow
+# reacts to that authorized tag and never creates one: the publisher passes
+# `--verify-tag`, so a release whose tag is not already on the remote fails
+# instead of being brought into existence here.
+#
+# The safety properties this file is responsible for are asserted mechanically
+# in `tools/test_release_workflow.py`, which extracts these jobs' `if:`
+# expressions and `run:` scripts and executes them, rather than being left to
+# inspection.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run_tag:
+        description: "Unique release-dry-run-* tag for a draft-only rehearsal"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Keyed on values the event carries, because GitHub evaluates a workflow-level
+# concurrency group before any job runs: a job output, or the version derived
+# from `kanban.cabal`, is not available here. `cancel-in-progress: false`
+# because the thing being serialized is a publication -- a second run waits,
+# and a run already attaching an asset is never interrupted.
+concurrency:
+  group: release-${{ github.event.inputs.dry_run_tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Everything that decides whether a release may happen, with no permission to
+  # write repository contents while it decides.
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Same reason as ci.yml: the plugin bundle version gate resolves its
+          # baseline from the default branch and fails rather than skipping
+          # when that history is absent.
+          fetch-depth: 0
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.12.2"
+          cabal-version: "3.16.1.0"
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-${{ hashFiles('kanban.cabal', 'cabal.project') }}
+          restore-keys: |
+            cabal-${{ runner.os }}-${{ runner.arch }}-ghc-9.12.2-
+
+      - name: Derive the version and validate the tag and changelog
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          DRY_RUN_TAG: ${{ github.event.inputs.dry_run_tag }}
+          NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+        run: |
+          set -euo pipefail
+
+          # The package version, from `kanban.cabal`'s own `version:` field.
+          # Anchored at line start and required to be unique, because
+          # `cabal-version: 3.0` is a dotted numeric field too: a loose match
+          # selects it, satisfies the format check, and is caught only later by
+          # the tag comparison.
+          version_fields=$(grep -c '^version:' kanban.cabal || true)
+          if [ "$version_fields" != "1" ]; then
+            echo "kanban.cabal must declare exactly one line-anchored 'version:' field (found $version_fields)"
+            exit 1
+          fi
+          version=$(grep '^version:' kanban.cabal | sed -e 's/^version:[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+            echo "kanban.cabal declares '$version', which is not a dotted numeric package version"
+            exit 1
+          fi
+          echo "package version: $version"
+
+          case "$EVENT_NAME" in
+            push)
+              tag="$PUSH_TAG"
+              if [ -z "$tag" ]; then
+                echo "a production release run must come from a tag push"
+                exit 1
+              fi
+              if [ "$tag" != "v$version" ]; then
+                echo "tag '$tag' does not name the package version -- expected 'v$version'"
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              tag="$DRY_RUN_TAG"
+              if [ -z "$tag" ]; then
+                echo "a dry run requires a dry_run_tag input"
+                exit 1
+              fi
+              case "$tag" in
+                v*)
+                  echo "dry-run tag '$tag' is a production release tag -- refusing"
+                  exit 1
+                  ;;
+              esac
+              case "$tag" in
+                release-dry-run-?*) ;;
+                *)
+                  echo "dry-run tag '$tag' must begin with 'release-dry-run-' and name something after it"
+                  exit 1
+                  ;;
+              esac
+              # Unique in both places a tag can already be spoken for: an
+              # existing release under that name, and a ref on the remote.
+              if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+                echo "dry-run tag '$tag' already has a release -- choose an unused tag"
+                exit 1
+              fi
+              if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+                echo "dry-run tag '$tag' already exists on the remote -- choose an unused tag"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "unsupported event '$EVENT_NAME'"
+              exit 1
+              ;;
+          esac
+          echo "release tag: $tag"
+
+          # The notes are the first release section of CHANGELOG.md and
+          # nothing else: not the document title, not the boundary-rule prose
+          # above the first heading, and nothing from the release below it.
+          if ! changelog_heading=$(grep -m1 '^## ' CHANGELOG.md); then
+            echo "CHANGELOG.md has no '## <version>' release section"
+            exit 1
+          fi
+          changelog_version=$(printf '%s' "$changelog_heading" | sed -e 's/^##[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [ "$changelog_version" != "$version" ]; then
+            echo "CHANGELOG.md's first release section names '$changelog_version', not '$version'"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$NOTES_FILE")"
+          # Everything after the first `## ` heading, stopping at the next one.
+          # Blank lines bracketing the section are dropped; blank lines inside
+          # it are held until the next real line, so the body is exactly the
+          # section's own content.
+          awk '
+            /^## / { if (started) exit; started = 1; next }
+            !started { next }
+            NF {
+              while (pending-- > 0) print ""
+              pending = 0
+              printed = 1
+              print
+              next
+            }
+            printed { pending++ }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "CHANGELOG.md's '$version' section is empty"
+            exit 1
+          fi
+          echo "release notes: $(wc -l < "$NOTES_FILE") line(s) from the '$version' section"
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check package metadata
+        run: cabal check
+
+      - name: Update package index
+        run: cabal update
+
+      - name: Build
+        run: cabal build all
+
+      - name: Haskell tests
+        run: cabal test all --test-show-details=direct
+
+      - name: PR drainer tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
+      - name: Verify the built executable reports the package version
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          # `versionOption` prints "kanban <version>", so the parity check is
+          # against that exact line -- an equality test against the bare
+          # version would fail on a correct build.
+          binary=$(cabal list-bin exe:kanban)
+          reported=$("$binary" --version)
+          expected="kanban $VERSION"
+          if [ "$reported" != "$expected" ]; then
+            echo "kanban --version reported '$reported', expected '$expected'"
+            exit 1
+          fi
+          echo "$reported"
+
+      - name: Build and verify the source distribution
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+          SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
+          NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
+        run: |
+          set -euo pipefail
+          # coreutils on the runner, BSD on a developer's machine running the
+          # extracted script under tools/test_release_workflow.py.
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+          rm -rf "$SDIST_DIR"
+          mkdir -p "$SDIST_DIR"
+          cabal sdist all --output-directory "$SDIST_DIR"
+          archive_count=0
+          archive=""
+          found=""
+          for candidate in "$SDIST_DIR"/*.tar.gz; do
+            [ -e "$candidate" ] || continue
+            archive_count=$((archive_count + 1))
+            archive="$candidate"
+            found="$found  $candidate"$'\n'
+          done
+          if [ "$archive_count" -ne 1 ]; then
+            echo "expected exactly one sdist archive, found $archive_count"
+            printf '%s' "$found"
+            exit 1
+          fi
+          expected="kanban-$VERSION.tar.gz"
+          if [ "$(basename "$archive")" != "$expected" ]; then
+            echo "sdist produced '$(basename "$archive")', expected '$expected'"
+            exit 1
+          fi
+          echo "verified release asset: $(basename "$archive")"
+
+          # The payload crosses a job boundary to reach a publisher, and a
+          # file that is merely non-empty is not an intact one: a truncated or
+          # altered archive would still pass a count, name, and size check.
+          # Record what was verified here so the job that attaches it can
+          # prove it is attaching the same bytes.
+          mkdir -p "$(dirname "$DIGEST_FILE")"
+          {
+            printf '%s  archive\n' "$(digest_of "$archive")"
+            printf '%s  notes\n' "$(digest_of "$NOTES_FILE")"
+          } > "$DIGEST_FILE"
+          echo "recorded payload digest:"
+          cat "$DIGEST_FILE"
+
+      - name: Upload the verified release payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-payload
+          path: ${{ runner.temp }}/release-payload
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that may write, and only once build-test has succeeded whole.
+  publish-release:
+    if: github.event_name == 'push'
+    needs: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-payload
+          path: ${{ runner.temp }}/release-payload
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build-test.outputs.version }}
+          TAG: ${{ needs.build-test.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
+          NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
+        run: |
+          set -euo pipefail
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+
+          # The archive was verified where it was built, but it crossed a job
+          # boundary to get here and this is the job that can write. An asset
+          # that was lost, renamed, truncated, or duplicated in transit fails
+          # here rather than being published as whatever arrived.
+          archive_count=0
+          archive=""
+          found=""
+          for candidate in "$SDIST_DIR"/*.tar.gz; do
+            [ -e "$candidate" ] || continue
+            archive_count=$((archive_count + 1))
+            archive="$candidate"
+            found="$found  $candidate"$'\n'
+          done
+          if [ "$archive_count" -ne 1 ]; then
+            echo "expected exactly one sdist archive in the payload, found $archive_count"
+            printf '%s' "$found"
+            exit 1
+          fi
+          expected="kanban-$VERSION.tar.gz"
+          if [ "$(basename "$archive")" != "$expected" ]; then
+            echo "payload carries '$(basename "$archive")', expected '$expected'"
+            exit 1
+          fi
+          if [ ! -s "$archive" ]; then
+            echo "$archive arrived empty"
+            exit 1
+          fi
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "release notes are missing or empty at $NOTES_FILE"
+            exit 1
+          fi
+
+          # Non-empty is not intact. Compare both payload files against the
+          # digest recorded at the point they were verified.
+          if [ ! -s "$DIGEST_FILE" ]; then
+            echo "the payload carries no integrity digest at $DIGEST_FILE"
+            exit 1
+          fi
+          expected_archive_digest=$(awk '$2 == "archive" { print $1 }' "$DIGEST_FILE")
+          expected_notes_digest=$(awk '$2 == "notes" { print $1 }' "$DIGEST_FILE")
+          if [ -z "$expected_archive_digest" ] || [ -z "$expected_notes_digest" ]; then
+            echo "the payload digest at $DIGEST_FILE does not record both files"
+            exit 1
+          fi
+          if [ "$(digest_of "$archive")" != "$expected_archive_digest" ]; then
+            echo "'$(basename "$archive")' does not match the digest recorded when it was verified"
+            exit 1
+          fi
+          if [ "$(digest_of "$NOTES_FILE")" != "$expected_notes_digest" ]; then
+            echo "the release notes do not match the digest recorded when they were verified"
+            exit 1
+          fi
+
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag '$TAG' does not name package version '$VERSION'"
+            exit 1
+          fi
+
+          # #268 REL-4 owns the act of creating the release tag. This job
+          # reacts to one that already exists and must not be able to stand in
+          # for that authorization, so a missing ref stops the publication.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag '$TAG' is not on the remote -- this workflow never creates a release tag"
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "a release for '$TAG' already exists -- refusing to overwrite or reuse it"
+            exit 1
+          fi
+
+          # --verify-tag so gh itself refuses to create the tag, whatever this
+          # job's own check concluded.
+          gh release create "$TAG" "$archive" \
+            --repo "$REPO" \
+            --title "$VERSION" \
+            --notes-file "$NOTES_FILE" \
+            --target "$COMMIT" \
+            --verify-tag
+
+          {
+            echo "### Released $VERSION"
+            echo
+            echo "- Tag: \`$TAG\`"
+            echo "- Commit: \`$COMMIT\`"
+            echo "- Asset: \`$(basename "$archive")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The rehearsal. Same payload, same notes, same asset checks; a draft under a
+  # tag that cannot be mistaken for a release, and nothing public.
+  publish-dry-run:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-payload
+          path: ${{ runner.temp }}/release-payload
+
+      - name: Create the draft dry-run release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build-test.outputs.version }}
+          TAG: ${{ needs.build-test.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
+          NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
+        run: |
+          set -euo pipefail
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
+
+          archive_count=0
+          archive=""
+          found=""
+          for candidate in "$SDIST_DIR"/*.tar.gz; do
+            [ -e "$candidate" ] || continue
+            archive_count=$((archive_count + 1))
+            archive="$candidate"
+            found="$found  $candidate"$'\n'
+          done
+          if [ "$archive_count" -ne 1 ]; then
+            echo "expected exactly one sdist archive in the payload, found $archive_count"
+            printf '%s' "$found"
+            exit 1
+          fi
+          expected="kanban-$VERSION.tar.gz"
+          if [ "$(basename "$archive")" != "$expected" ]; then
+            echo "payload carries '$(basename "$archive")', expected '$expected'"
+            exit 1
+          fi
+          if [ ! -s "$archive" ]; then
+            echo "$archive arrived empty"
+            exit 1
+          fi
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "release notes are missing or empty at $NOTES_FILE"
+            exit 1
+          fi
+
+          # Non-empty is not intact. Compare both payload files against the
+          # digest recorded at the point they were verified.
+          if [ ! -s "$DIGEST_FILE" ]; then
+            echo "the payload carries no integrity digest at $DIGEST_FILE"
+            exit 1
+          fi
+          expected_archive_digest=$(awk '$2 == "archive" { print $1 }' "$DIGEST_FILE")
+          expected_notes_digest=$(awk '$2 == "notes" { print $1 }' "$DIGEST_FILE")
+          if [ -z "$expected_archive_digest" ] || [ -z "$expected_notes_digest" ]; then
+            echo "the payload digest at $DIGEST_FILE does not record both files"
+            exit 1
+          fi
+          if [ "$(digest_of "$archive")" != "$expected_archive_digest" ]; then
+            echo "'$(basename "$archive")' does not match the digest recorded when it was verified"
+            exit 1
+          fi
+          if [ "$(digest_of "$NOTES_FILE")" != "$expected_notes_digest" ]; then
+            echo "the release notes do not match the digest recorded when they were verified"
+            exit 1
+          fi
+
+          # Re-asserted here for the same reason the archive is: this is the
+          # job holding the write permission, so it decides for itself that
+          # what it is about to create is a rehearsal.
+          case "$TAG" in
+            v*)
+              echo "dry-run tag '$TAG' is a production release tag -- refusing"
+              exit 1
+              ;;
+          esac
+          case "$TAG" in
+            release-dry-run-?*) ;;
+            *)
+              echo "dry-run tag '$TAG' must begin with 'release-dry-run-'"
+              exit 1
+              ;;
+          esac
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "dry-run tag '$TAG' already has a release -- choose an unused tag"
+            exit 1
+          fi
+
+          # --target is a commit SHA, not `master`: `gh release view --json
+          # targetCommitish` echoes back whatever was passed, so a branch name
+          # would make "it targeted the intended commit" unverifiable.
+          gh release create "$TAG" "$archive" \
+            --repo "$REPO" \
+            --title "$VERSION (dry run)" \
+            --notes-file "$NOTES_FILE" \
+            --target "$COMMIT" \
+            --draft \
+            --latest=false
+
+          {
+            echo "### Release dry run (draft only)"
+            echo
+            echo "- Draft tag: \`$TAG\`"
+            echo "- Target commit: \`$COMMIT\`"
+            echo "- Notes file: \`$NOTES_FILE\` (first release section of CHANGELOG.md)"
+            echo "- Asset: \`$(basename "$archive")\`"
+            echo
+            echo "Clean up when you have recorded the result:"
+            echo
+            echo '```console'
+            echo "gh release delete \"$TAG\" --repo \"$REPO\" --yes"
+            echo '```'
+            echo
+            echo "No \`--cleanup-tag\`: GitHub does not create \`refs/tags/$TAG\`"
+            echo "until a draft is published, and this draft never is, so there is"
+            echo "no ref to delete -- \`--cleanup-tag\` would remove the release and"
+            echo "then fail on the missing ref. If a ref does somehow exist, remove"
+            echo "it separately with \`git push origin --delete \"$TAG\"\`."
+          } >> "$GITHUB_STEP_SUMMARY"
