@@ -3452,6 +3452,1363 @@ recorded one:
 
 The run recorded here is the fourth.
 
+### REL-2. Live Codex and Claude usage refreshes, macOS, 2026-08-14
+
+Both built-in usage providers **pass**. Each reached a fresh state well inside
+its configured timeout, each rendered at least one window with a percentage bar
+and a reset time, and no `codex`, `claude`, or `script` process outlived either
+refresh.
+
+| Provider | Configured timeout | Startup refresh | Explicit `u` refresh | Result |
+| --- | --- | --- | --- | :---: |
+| Codex | 10 s | fresh in 0.690 s | fresh in 0.827 s | **pass** |
+| Claude | 45 s | fresh in 6.190 s | fresh in 5.827 s | **pass** |
+
+The two outcomes were recorded independently and neither depended on the other
+(Requirement 9); had one failed, the other's result would still stand as
+written. Requirement 11's "a recorded failure is a correct outcome" was not
+exercised: nothing failed, and no threshold, method, or environment was adjusted
+to reach that. The one deviation from the issue's expectation is a shape
+difference in the Codex response, recorded under Observed states below, which is
+a property of the account's rate-limit payload rather than a provider fault.
+
+#### Build provenance
+
+| Item | Value |
+| --- | --- |
+| Commit (`git rev-parse HEAD`) | `e3e02bb45fd9348055b02c7d55f6e63b95194a2d` |
+| Working tree at that commit | `git status --porcelain=v1 --untracked-files=all` returned empty |
+| Archive | `kanban-1.0.0.0.tar.gz` |
+| Installed `--version` | `kanban 1.0.0.0` |
+| Install directory | a temporary directory; neither `~/.local/bin` nor `~/.cabal/bin` was used or written |
+
+```console
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+TMP="$(mktemp -d)"
+mkdir -p "$TMP/unpacked" "$TMP/bin"
+cabal sdist all --builddir "$TMP/dist" --output-directory "$TMP/sdist"
+tar -xzf "$TMP"/sdist/kanban-*.tar.gz -C "$TMP/unpacked"
+cd "$TMP"/unpacked/kanban-*
+cabal install exe:kanban --installdir "$TMP/bin" --install-method=copy
+"$TMP/bin/kanban" --version
+```
+
+The commit measured is the branch point of the pull request carrying this
+record. Nothing in this slice changes implementation code (Requirement 12), so
+the archive built from that commit is the same executable the record describes.
+
+#### Measurement environment
+
+| Item | Value |
+| --- | --- |
+| macOS | 26.6 (build 25G5065a) |
+| Architecture | arm64, Apple M3 Max, 16 logical CPUs |
+| tmux | 3.5a |
+| Pane geometry | 200 columns × 50 rows, detached session |
+| Toolchain | GHC 9.12.2, cabal-install 3.16.1.0 |
+| Python (probes) | 3.14.6 |
+| Repository identity | `coghex/kanban` |
+| Checkout path | `~/worktrees/coghex/kanban/issue-270-live-usage-evidence`, a linked worktree of that repository, passed as `--path` (home abbreviated per D-8) |
+| launchd drainer job | `com.coghex.drain-prs.coghex.kanban` loaded but not running; Kanban's own ten-second status poll ran throughout, as in REL-1 |
+
+#### Which configuration file the run actually loaded
+
+Requirement 4 asks whether the escape hatch of section 14 was configured, and
+the answer has to be about the file the *measured command* read, not about a
+path assumed on its behalf: `app/Main.hs:36-44` resolves an explicit `--config`
+first, and `src/Kanban/Config.hs:302-305,318-325` otherwise derives the default
+from the XDG configuration root.
+
+The measured command was `kanban --path <checkout>` with **no `--config`
+option**, run with `XDG_CONFIG_HOME` unset and `HOME` at the operator's own home
+directory, so the loaded path is the XDG-derived default
+`~/.config/kanban/config.toml`. That file **does not exist**, so
+`loadRawConfig` returns `defaultRawConfig`, whose `usageCodexCommand` and
+`usageClaudeCommand` are both `Nothing`, and `Kanban.UI.Refresh.runUsageProvider`
+(`src/Kanban/UI/Refresh.hs:349-352`) therefore routes both refreshes to the
+built-in integrations. The built-ins are what this record measures.
+
+Rather than assume that resolution, it was demonstrated against the measured
+binary itself. A deliberately malformed TOML file makes `loadRawConfig` report
+the path it actually read, so three probes pin all three branches:
+
+```console
+PROBE="$TMP/configprobe"
+mkdir -p "$PROBE/xdg/kanban" "$PROBE/home/.config/kanban"
+printf 'this is not toml =\n' > "$PROBE/xdg/kanban/config.toml"
+printf 'this is not toml =\n' > "$PROBE/home/.config/kanban/config.toml"
+env XDG_CONFIG_HOME="$PROBE/xdg" "$TMP/bin/kanban" --path "$ROOT"
+env -u XDG_CONFIG_HOME HOME="$PROBE/home" "$TMP/bin/kanban" --path "$ROOT"
+env XDG_CONFIG_HOME="$PROBE/xdg" "$TMP/bin/kanban" \
+  --config "$PROBE/home/.config/kanban/config.toml" --path "$ROOT"
+```
+
+`$TMP` and `$ROOT` are the variables set in Build provenance above; the probe
+directories are created under the same temporary root, and nothing is written
+to the operator's own configuration directory.
+
+Each named the file it had read, in the message
+`kanban: configuration file <path> is invalid: 1:6: parse error: unexpected bare
+key`: the first named `$PROBE/xdg/kanban/config.toml`, confirming
+`XDG_CONFIG_HOME` is honoured; the second named
+`$PROBE/home/.config/kanban/config.toml`, confirming the `$HOME/.config`
+fallback the measured run relies on; the third named the explicit `--config`
+file even with `XDG_CONFIG_HOME` pointing elsewhere, confirming the override
+precedence. Under the measured run's own environment those rules resolve to
+`~/.config/kanban/config.toml`, and `ls` reports it absent.
+
+Because no configuration file loads at all, the provider timeouts are the
+defaults of `src/Kanban/Config.hs:98-106` — 10 seconds for Codex and 45 for
+Claude — which are the figures the elapsed times below are measured against.
+
+#### Which executables actually answered
+
+On this machine two `cmux-cli-shims` directories precede the operator's clients
+on the ambient `PATH` (entries 1 and 15). Acceptance 1 allows either removing
+the shim for the run or recording that it delegates; the shim was **removed**,
+by launching Kanban through a wrapper that strips every `cmux-cli-shims` entry
+from `PATH` before `exec`ing the executable. The inspected shims would have
+`exec`ed `/Applications/cmux.app/Contents/Resources/bin/cmux-{codex,claude}-wrapper`,
+so leaving them in place would have measured a wrapper rather than the client.
+
+The resolved paths were not taken from `command -v`. They were read off the
+**live processes** with `proc_pidpath(2)` while each refresh was in flight,
+which is what the client actually executed:
+
+| Role | Executable observed running | Version string |
+| --- | --- | --- |
+| Codex client | `~/.codex/packages/standalone/releases/0.147.0-aarch64-apple-darwin/bin/codex` | `codex-cli 0.147.0` |
+| Claude client | `~/.local/share/claude/versions/2.1.233` | `2.1.233 (Claude Code)` |
+| `script` wrapper | `/usr/bin/script` | — |
+
+Those are the canonical targets of the operator's own `~/.local/bin/codex` and
+`~/.local/bin/claude` symlinks, so the gate of Requirement 3 is satisfied: the
+executables that answered are the operator's authenticated clients, with no
+wrapper or shim between Kanban and them. `script` is named because
+`src/Kanban/Claude.hs:76-81,116-124` resolves it through `PATH` too and launches
+the Claude probe through it.
+
+#### What the providers sent
+
+Requirement 7 forbids an ordinary model prompt (D-2). Neither provider submits
+one, and the exact traffic is fixed in source rather than inferred from a
+transcript.
+
+**Codex** sends three JSON-RPC messages and no others. `Kanban.Codex.exchange`
+(`src/Kanban/Codex.hs:67-78`) writes `initialize`, then the `initialized`
+notification, then `account/rateLimits/read`, whose literal texts are
+`src/Kanban/Codex.hs:191-195`. The issue that commissioned this record described
+only the rate-limit request; the other two are part of the exchange, and none of
+the three is a model prompt. Replaying exactly those three messages against
+`codex app-server --stdio` independently returned a rate-limit result with no
+error, confirming the exchange needs nothing else.
+
+**Claude** writes to the probe's standard input from exactly two functions, and
+`sendInput` has no other call site. `respondToScreen`
+(`src/Kanban/Claude.hs:181-189`) sends a bare carriage return when the trust
+prompt is visible, then `/usage\r` when the prompt is visible;
+`requestCleanExit` (`src/Kanban/Claude.hs:214-218`) sends `ESC`, waits 100 ms,
+and sends `/exit\r`. The `ESC` is part of the exit sequence and was likewise
+absent from the issue's description. None of these is a model prompt.
+
+That reading is corroborated from outside the process. After the run the probe's
+scratch directory `~/.cache/kanban/claude-probe` was **empty**, and no Claude
+Code project directory existed for that path — a submitted prompt would have
+created a session transcript under `~/.claude/projects/`. Nothing was recorded
+because nothing was asked.
+
+#### Observed states and elapsed times
+
+Two rounds supply the recorded figures, and the record states which is which
+(Requirement 6); a third round, covering the solver-nesting question, is
+reported separately below.
+The sidebar was sampled every 0.15 s with `capture-pane`, and each provider's
+block was classified independently. The classification is unambiguous once a
+snapshot exists, because a failed refresh over an existing snapshot renders
+`stale · <message>` (`src/Kanban/UI/Reconcile.hs:237-239`) while a successful one
+clears the status line entirely (`src/Kanban/UI/Board.hs:152-160`); reaching
+`Fresh` is therefore only possible on the `Right snapshot` branch of
+`applyUsageRefresh`.
+
+Each round's clock starts at that round's real dispatch instant, and the reading
+is taken *before* the dispatching action rather than after it, so no part of the
+interval being measured is discounted. Round A's is read immediately before
+`tmux new-session` is invoked and handed to the observer; round B's is read
+immediately before the keystroke is injected. Both are `time.monotonic()`
+readings, which are system-wide and therefore comparable across the processes
+that take and use them. The observer is started before the Kanban pid is
+resolved and before the census watcher starts, so neither delays the first
+sample: it landed 0.048 s after dispatch in round A and 0.006 s in round B.
+
+**Round A — the startup refresh, against a cold usage cache.**
+`~/.cache/kanban/usage.json` was moved aside before launch, so Kanban started
+with no snapshot for either provider. The first sample caught the pane before
+Kanban had drawn; by 0.213 s both blocks showed `refreshing…` with **zero**
+windows, and windows appeared only as each provider turned fresh. A rendered
+window in this round therefore cannot have come from the cache — it can only
+have come from the live refresh. Because the clock starts before tmux is asked
+to create the session, this figure includes tmux session creation and Kanban's
+own startup, and is an upper bound on dispatch-to-fresh.
+
+**Round B — a later explicit `u`.** Dispatch is the keystroke itself, and the
+clock is read immediately before it, so the interval covers tmux's delivery of
+the key as well as the refresh. The first sample still showed the previous
+round's fresh state; by the second, at 0.167 s, both blocks had returned to
+`refreshing…`, and both then reached fresh again.
+
+| Round | Provider | Dispatch instant | Elapsed to fresh | Configured timeout | Margin used |
+| --- | --- | --- | --- | --- | --- |
+| A (startup) | Codex | immediately before `tmux new-session` | 0.690 s | 10 s | 6.9% |
+| A (startup) | Claude | immediately before `tmux new-session` | 6.190 s | 45 s | 13.8% |
+| B (explicit `u`) | Codex | immediately before the `u` keystroke | 0.827 s | 10 s | 8.3% |
+| B (explicit `u`) | Claude | immediately before the `u` keystroke | 5.827 s | 45 s | 12.9% |
+
+Neither provider came close to its timeout: the largest share of any budget
+consumed was 13.8%.
+
+In both rounds the final state of both providers was fresh: no `refreshing…`,
+no `stale · `, and no unavailable or unsupported message (Requirement 5). Codex
+rendered one window and Claude two, each with a percentage bar and a reset time.
+The per-provider notices seen in order — `Refreshing Claude usage…`,
+`Codex usage refreshed`, `Claude usage refreshed` — corroborate the sidebar
+reading.
+
+Codex rendering **one** window rather than two is worth recording, because the
+issue's acceptance sketch anticipated a pair. It is not a truncation and not a
+parse failure. `Kanban.Codex.selectRateLimits` prefers the `codex` bucket of
+`rateLimitsByLimitId`, and `parseWindows` builds a window from each of that
+bucket's `primary` and `secondary` keys. Inspecting the response *shape* — key
+presence only, no values — showed `primary` present with its three required
+fields and `secondary` absent, in both the bucket and the top-level `rateLimits`
+fallback. One complete window is what the account's payload supports, which
+satisfies Requirement 5's "at least one window", and the single window is
+labelled `week` because that is what its window duration maps to in
+`durationLabel`.
+
+#### Process lifecycle
+
+Requirement 8 asks that no `codex`, `claude`, or `script` process survive as a
+descendant of the Kanban process once both refreshes have finished. Acceptance 3
+proposed `ps -axo pid=,ppid=,command= | awk -v k="<kanban pid>" '$2==k'`, which
+cannot establish that: it matches only **immediate** children, and the process
+this requirement is most concerned about is not one. `script` gives its `claude`
+child its own session and process group through the pty, so when `script` exits
+that `claude` is reparented away from Kanban entirely — the case
+`src/Kanban/Claude.hs:220-269` exists to handle. Run after the refreshes, that
+command printed nothing — but nothing is what it would print either way, whether
+no provider process survived or one survived after being reparented out of
+view. An empty result from it is therefore not evidence, which is why the check
+below was used to decide the requirement.
+
+The check used instead censuses the **full recursive descendant tree** while the
+refreshes are active, keys every process by pid **and**
+`ri_proc_start_abstime` so pid reuse cannot corrupt the result, and then
+verifies those recorded identities are absent from the **entire process table**
+afterwards rather than from the tree. A reparented survivor is caught by that
+sweep precisely because it is no longer a descendant.
+
+The probe's self-test must pass before any measurement, and it constructs the
+reparenting case rather than assuming it:
+
+```text
+=== REL-2 census probe self-test ===
+reparent case: grandchild pid 98754 ppid 1, in probe's descendant tree = False -> REPARENTED (tree walk alone would miss it)
+whole-table identity scan finds the reparented orphan alive: True -> PASS
+pid/start identity: pid 98754 start 12697409967157 matches, start 12697409967158 is rejected -> PASS
+recursive discovery: child 98808 and grandchild 98809 both in tree -> PASS
+absence after exit: all three recorded identities report gone -> PASS
+SELF-TEST PASSED: recursive descent reaches grandchildren, pid/start identity rejects reuse, and a reparented orphan is caught by the whole-table scan
+```
+
+The orphan's parent really did become pid 1, so the tree walk really did lose
+it while it was still running, and the whole-table identity scan really did
+still find it. That is the failure mode the method is built to survive.
+
+Across both rounds the census took **933 samples over 150.112 s** at a 0.15 s
+interval and recorded **28 distinct descendant identities**, of which seven were
+provider-related:
+
+| Round | Process | Parent | Own process group | Observed alive |
+| --- | --- | --- | --- | --- |
+| A | `/usr/bin/script` | Kanban | yes | 0.002 – 5.762 s |
+| A | `claude` 2.1.233 | `script` | yes, separate from `script` | 0.002 – 5.762 s |
+| A | `codex` 0.147.0 | Kanban | no, Kanban's group | 0.002 – 0.320 s |
+| A | `claude` 2.1.233 helper | the probe's `claude` | shares its parent's group | 0.482 s, one sample |
+| B | `/usr/bin/script` | Kanban | yes | 8.160 – 13.764 s |
+| B | `claude` 2.1.233 | `script` | yes, separate from `script` | 8.160 – 13.764 s |
+| B | `codex` 0.147.0 | Kanban | no, Kanban's group | 8.160 – 8.793 s |
+
+The helper row is the reason recursion is not optional. That process is a
+**grandchild** of `script` and a great-grandchild of Kanban, it was alive for a
+single 0.15 s sample, and no depth-one enumeration would have seen it. The
+remaining twenty-one identities were Kanban's ordinary children and their
+descendants — `gh`, `git`, `bash`, `grep`, `node`, and the ten-second drainer
+status poll's Python — none of which this requirement is about, though all were
+verified absent too.
+
+With Kanban still running, every one of the 28 recorded identities was absent
+from the process table, and an independent sweep for any live `codex`, `claude`,
+or `script` process in any process group the census had recorded returned zero
+hits:
+
+```text
+recorded descendant identities: 28
+  of which codex/claude/script-related: 7
+    pid   22378 start   12709355500730 script           /usr/bin/script -> gone
+    pid   22395 start   12709355594702 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22393 start   12709355578807 codex            ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
+    pid   22449 start   12709370325084 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22885 start   12709552160982 script           /usr/bin/script -> gone
+    pid   22886 start   12709552286148 2.1.233          ~/.local/share/claude/versions/2.1.233 -> gone
+    pid   22901 start   12709552308456 codex            ~/.codex/…/0.147.0-aarch64-apple-darwin/bin/codex -> gone
+stray sweep over recorded process groups [18 groups]: 0 hit(s)
+VERIFY PASSED: every recorded descendant identity is absent from the process table
+```
+
+Home directories are abbreviated and the recorded process-group list is
+summarised by its length, per D-8; nothing else in that output is altered.
+
+Kanban was then quit with `q` and exited cleanly.
+
+#### Claude's exit classification
+
+`src/Kanban/Claude.hs:136-142` returns a snapshot only when `finishProcess`
+reports that SIGKILL was **not** required; a forced kill instead yields the
+distinct error `Claude usage probe did not exit cleanly after /exit and required
+a forced kill`. Both rounds ended `Fresh`, which is reachable only through the
+`Right snapshot` branch, so in both rounds the probe **exited cleanly** and the
+forced-kill message was never shown. That is the only classification this record
+claims: a clean exit is recorded because the result was fresh, and no
+clean-versus-forced claim is made about any other failure path, because
+`src/Kanban/Claude.hs:127-145` does not expose one for timeout, authentication,
+or unsupported-output failures. Had either round failed, the terminal outcome
+would have been recorded alongside the independent process-census result, which
+does not depend on how the probe classified its own exit.
+
+The census is consistent with a clean exit: both `script` and its `claude` child
+disappeared together inside the two-second window `finishProcess` waits before
+it would escalate.
+
+#### Interference from running inside a Claude Code session
+
+The issue notes that a solver already running inside Claude Code should expect
+the Claude probe to nest, since the probe inherits its caller's environment. The
+measured rounds above removed the nesting variables this session exports —
+`CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CLAUDE_CODE_CHILD_SESSION`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_MESSAGING_TOKEN`, and `CLAUDE_CODE_SESSION_ID` — so that the
+environment matches an operator launching Kanban from a terminal rather than the
+solver's own.
+
+A third round was then run with all of them **inherited**, clocked the same way
+as round A, to record whether the nesting interferes. It does not: both
+providers reached fresh, Codex in 0.547 s and Claude in 6.191 s, the latter
+within a millisecond of round A's figure for the same dispatch instant, and a
+separate census over that round found
+its `codex`, `script`, and `claude` identities absent afterwards with zero stray
+hits. No interference was observed in either direction, and the recorded pass
+does not depend on which of the two environments is used.
+
+One caveat on that round, disclosed rather than smoothed over: its **final**
+capture caught the pane mid-redraw, with a window's reset row present and its
+bar row not yet written. The window count from that frame is therefore not used
+as evidence here; rounds A and B, sampled identically, carry the window-shape
+evidence. This is the limit D-9 already names — `capture-pane` returns content,
+not repaints — and it affects a frame's completeness, not the fresh/stale
+classification, which the round reached and held.
+
+#### What this record omits
+
+Per Requirement 10 and D-8, no percentage, no reset time, no account identifier,
+no balance, no token, and no raw provider output appears above. The Codex
+response was inspected for key presence only. What is recorded is the *shape* of
+what rendered — how many windows, whether each carried a bar and a reset time,
+and which state the block was in — which is what the gate is about.
+
+#### Suites
+
+Both suites pass at the recorded commit:
+
+```console
+cabal test all --test-show-details=direct
+python3 -m unittest discover -s tools -p 'test_*.py' < /dev/null
+```
+
+The Haskell suite reported `1101 examples, 0 failures` and
+`Test suite kanban-test: PASS`; the Python suite ran 1336 tests, `OK`. The
+Python suite's stdin is redirected because a fake-CLI call stalls for 60 seconds
+per invocation when stdin is a non-tty pipe.
+
+#### Reproducing this record
+
+The measured run is driven by four artifacts kept outside the checkout. They are
+given here in dependency order — the three the orchestrator calls, then the
+orchestrator — so that following the section top to bottom creates each file
+before anything uses it. All four live in the same `$TMP` directory as the
+installed executable from Build provenance above, and the orchestrator locates
+its siblings from its own path rather than from an inherited variable.
+
+**1. The launcher.** It strips every `cmux-cli-shims` entry from `PATH` so the
+operator's own clients are what Kanban resolves, and — unless
+`REL2_KEEP_NESTING=1` — unsets the Claude Code nesting variables. It resolves
+the installed executable relative to its own location, so no variable has to
+survive into the environment tmux gives it:
+
+```console
+cat > "$TMP/launch_kanban.sh" <<'LAUNCH'
+#!/bin/bash
+# REL-2 measured-run launcher. Builds the environment the operator's terminal
+# would have, then execs the sdist-installed Kanban.
+#
+#  * PATH has every cmux-cli-shims entry removed, so `codex` and `claude`
+#    resolve to the operator's own installed clients rather than to a session
+#    shim (Acceptance 1's "remove it for the run" option).
+#  * The Claude Code nesting variables this solver session exports are unset,
+#    because Kanban's Claude provider inherits its caller's environment and an
+#    operator launching Kanban from a terminal has none of them. Which
+#    variables were removed is recorded in the evidence.
+#  * XDG_CONFIG_HOME stays unset and HOME stays the operator's, so the config
+#    path Kanban resolves is the real default one under test.
+set -u
+
+REL="$(cd "$(dirname "$0")" && pwd)"
+
+export PATH="$(python3 -c "
+import os
+print(':'.join(e for e in os.environ['PATH'].split(':') if 'cmux-cli-shims' not in e))
+")"
+
+if [ "${REL2_KEEP_NESTING:-0}" != "1" ]; then
+  unset CLAUDECODE CLAUDE_PID CLAUDE_EFFORT
+  unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
+  unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID
+fi
+
+exec "$REL/bin/kanban" --path "$1"
+LAUNCH
+chmod +x "$TMP/launch_kanban.sh"
+```
+
+**2. The process census probe** of Requirement 8. Its `--self-test` must pass
+before any measurement:
+
+```console
+cat > "$TMP/census_tree.py" <<'CENSUS'
+#!/usr/bin/env python3
+"""REL-2 recursive descendant process census for an installed Kanban (macOS, unprivileged).
+
+Censuses the FULL recursive PPID descendant tree rooted at a Kanban PID while a
+usage refresh is active, keying every process by (pid, ri_proc_start_abstime) so
+PID reuse cannot make a dead process look alive or a live one look dead. The
+absence check afterwards scans the ENTIRE process table for those recorded
+identities, not the descendant tree, because `script` hands its `claude` child a
+separate session and process group: once `script` exits, that `claude` is
+reparented away from Kanban and a parent-walking check would report it absent
+while it is still running (src/Kanban/Claude.hs:220-269 documents exactly this).
+
+Temporary measurement artifact for issue #270. Not part of the repository.
+"""
+
+import argparse
+import ctypes
+import ctypes.util
+import json
+import os
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------- libproc FFI
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+RUSAGE_INFO_V4 = 4
+PROC_PIDPATHINFO_MAXSIZE = 4096
+PROC_PIDTBSDINFO = 3
+
+
+class RusageInfoV4(ctypes.Structure):
+    """<sys/resource.h> struct rusage_info_v4; only the v0 prefix is read."""
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_cpu_time_qos_default", ctypes.c_uint64),
+        ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+        ("ri_cpu_time_qos_background", ctypes.c_uint64),
+        ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+        ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+        ("ri_billed_system_time", ctypes.c_uint64),
+        ("ri_serviced_system_time", ctypes.c_uint64),
+        ("ri_logical_writes", ctypes.c_uint64),
+        ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+        ("ri_instructions", ctypes.c_uint64),
+        ("ri_cycles", ctypes.c_uint64),
+        ("ri_billed_energy", ctypes.c_uint64),
+        ("ri_serviced_energy", ctypes.c_uint64),
+        ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+        ("ri_runnable_time", ctypes.c_uint64),
+    ]
+
+
+class ProcBsdInfo(ctypes.Structure):
+    """<sys/proc_info.h> struct proc_bsdinfo -- read for pbi_ppid/pbi_status."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+SZOMB = 5
+
+libc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+libc.proc_pid_rusage.restype = ctypes.c_int
+libc.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+libc.proc_listallpids.restype = ctypes.c_int
+libc.proc_pidinfo.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.c_void_p,
+    ctypes.c_int,
+]
+libc.proc_pidinfo.restype = ctypes.c_int
+libc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+libc.proc_pidpath.restype = ctypes.c_int
+
+
+def list_all_pids():
+    """Every pid visible to this (unprivileged) user, plus system pids."""
+    count = libc.proc_listallpids(None, 0)
+    if count <= 0:
+        raise RuntimeError("proc_listallpids failed")
+    capacity = count + 256
+    buffer = (ctypes.c_int * capacity)()
+    written = libc.proc_listallpids(ctypes.byref(buffer), ctypes.sizeof(buffer))
+    if written <= 0:
+        raise RuntimeError("proc_listallpids failed on the sized call")
+    return [pid for pid in buffer[: written // ctypes.sizeof(ctypes.c_int)] if pid > 0]
+
+
+def bsd_info(pid):
+    """proc_pidinfo(PROC_PIDTBSDINFO). None when the process is gone."""
+    buffer = ProcBsdInfo()
+    written = libc.proc_pidinfo(
+        pid, PROC_PIDTBSDINFO, 0, ctypes.byref(buffer), ctypes.sizeof(buffer)
+    )
+    if written != ctypes.sizeof(buffer):
+        return None
+    return buffer
+
+
+def start_abstime(pid):
+    """ri_proc_start_abstime, the per-process start identity. None when gone."""
+    buffer = RusageInfoV4()
+    if libc.proc_pid_rusage(pid, RUSAGE_INFO_V4, ctypes.byref(buffer)) != 0:
+        return None
+    return buffer.ri_proc_start_abstime
+
+
+def executable_path(pid):
+    """proc_pidpath, the on-disk executable actually running. '' when unknown."""
+    buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+    written = libc.proc_pidpath(pid, buffer, PROC_PIDPATHINFO_MAXSIZE)
+    if written <= 0:
+        return ""
+    return buffer.value.decode("utf-8", "replace")
+
+
+def snapshot():
+    """Whole visible process table as {pid: record}, each with a start identity.
+
+    A record's ``start`` is the Mach absolute-time process start; combined with
+    the pid it forms the identity that survives PID reuse. Zombies are marked
+    rather than dropped so a process between exit and reap is never mistaken for
+    a live one nor lost from the tree walk.
+    """
+    table = {}
+    for pid in list_all_pids():
+        info = bsd_info(pid)
+        if info is None:
+            continue
+        start = start_abstime(pid)
+        if start is None:
+            # Not readable (different user, or raced with exit); fall back to the
+            # bsdinfo start time so the entry still carries an identity.
+            start = info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+            start_source = "bsdinfo"
+        else:
+            start_source = "rusage"
+        table[pid] = {
+            "pid": pid,
+            "ppid": int(info.pbi_ppid),
+            "pgid": int(info.pbi_pgid),
+            "comm": info.pbi_comm.decode("utf-8", "replace"),
+            "name": info.pbi_name.decode("utf-8", "replace"),
+            "start": int(start),
+            "start_source": start_source,
+            "zombie": int(info.pbi_status) == SZOMB,
+            "path": executable_path(pid),
+        }
+    return table
+
+
+def descendants(root_pid, table):
+    """Every recursive descendant of ``root_pid`` in ``table`` (root excluded)."""
+    children = {}
+    for record in table.values():
+        children.setdefault(record["ppid"], []).append(record["pid"])
+    found = []
+    seen = set()
+    frontier = list(children.get(root_pid, []))
+    while frontier:
+        pid = frontier.pop()
+        if pid in seen or pid == root_pid:
+            continue
+        seen.add(pid)
+        found.append(table[pid])
+        frontier.extend(children.get(pid, []))
+    return found
+
+
+def identity(record):
+    return (record["pid"], record["start"])
+
+
+def identity_live(pid, start, table):
+    """Whether this exact (pid, start) identity is a live, non-zombie process.
+
+    Scans the whole table rather than a subtree: a `claude` reparented away when
+    `script` exited is no longer a Kanban descendant but is still running.
+    """
+    record = table.get(pid)
+    if record is None:
+        return False, None
+    if record["start"] != start:
+        return False, record  # pid reused by a different process
+    if record["zombie"]:
+        return False, record
+    return True, record
+
+
+PROVIDER_NAMES = ("codex", "claude", "script", "node", "bun")
+
+
+def provider_like(record):
+    haystack = f"{record['comm']} {record['name']} {record['path']}".lower()
+    return any(token in haystack for token in ("codex", "claude", "script"))
+
+
+# ------------------------------------------------------------------ self-test
+
+
+def self_test():
+    """Prove the three properties the census depends on, on this host.
+
+    1. Recursive discovery reaches a grandchild, not just direct children.
+    2. (pid, start) identity rejects a wrong start time.
+    3. A REPARENTED orphan -- the exact case `script`/`claude` produces -- is
+       still found by the whole-table identity scan after it has left the tree,
+       and is correctly reported absent once it really exits.
+    """
+    print("=== REL-2 census probe self-test ===")
+
+    # A child that spawns a long-lived grandchild and then exits, orphaning it.
+    # The grandchild is reparented (to launchd, pid 1) exactly as `claude` is
+    # when `script` exits, so it leaves the descendant tree while still running.
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,os;"
+            "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+            "print(g.pid,flush=True);"
+            "os._exit(0)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    grandchild_pid = int(child.stdout.readline().strip())
+    time.sleep(0.6)  # let the intermediate exit and the grandchild reparent
+
+    table = snapshot()
+    tree = descendants(os.getpid(), table)
+    tree_pids = {record["pid"] for record in tree}
+
+    grandchild = table.get(grandchild_pid)
+    if grandchild is None:
+        raise SystemExit("SELF-TEST FAILED: orphaned grandchild vanished immediately")
+    grandchild_identity = identity(grandchild)
+
+    reparented = grandchild_pid not in tree_pids
+    print(
+        f"reparent case: grandchild pid {grandchild_pid} ppid {grandchild['ppid']}, "
+        f"in probe's descendant tree = {grandchild_pid in tree_pids} -> "
+        f"{'REPARENTED (tree walk alone would miss it)' if reparented else 'still a descendant'}"
+    )
+
+    live, _ = identity_live(*grandchild_identity, table)
+    print(
+        f"whole-table identity scan finds the reparented orphan alive: {live} -> "
+        f"{'PASS' if live else 'FAIL'}"
+    )
+    if not live:
+        raise SystemExit("SELF-TEST FAILED: whole-table scan missed a live orphan")
+
+    bad_identity_live, _ = identity_live(grandchild_pid, grandchild_identity[1] + 1, table)
+    print(
+        f"pid/start identity: pid {grandchild_pid} start {grandchild_identity[1]} matches, "
+        f"start {grandchild_identity[1] + 1} is rejected -> "
+        f"{'PASS' if not bad_identity_live else 'FAIL'}"
+    )
+    if bad_identity_live:
+        raise SystemExit("SELF-TEST FAILED: a wrong start time was accepted")
+
+    # Recursive discovery: a direct child that spawns its own live grandchild.
+    nested = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time;"
+            "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)']);"
+            "print(g.pid,flush=True);"
+            "time.sleep(20)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    nested_grandchild_pid = int(nested.stdout.readline().strip())
+    time.sleep(0.4)
+    table = snapshot()
+    tree_pids = {record["pid"] for record in descendants(os.getpid(), table)}
+    recursive_ok = nested.pid in tree_pids and nested_grandchild_pid in tree_pids
+    print(
+        f"recursive discovery: child {nested.pid} and grandchild "
+        f"{nested_grandchild_pid} both in tree -> {'PASS' if recursive_ok else 'FAIL'}"
+    )
+    if not recursive_ok:
+        raise SystemExit("SELF-TEST FAILED: recursive descent did not reach a grandchild")
+
+    # Absence: kill both and confirm the recorded identities report gone.
+    os.kill(grandchild_pid, 9)
+    nested.kill()
+    os.kill(nested_grandchild_pid, 9)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            nested.wait(timeout=0.2)
+        except Exception:
+            pass
+        table = snapshot()
+        still = [
+            pid
+            for pid in (grandchild_pid, nested.pid, nested_grandchild_pid)
+            if identity_live(pid, table.get(pid, {}).get("start", -1), table)[0]
+        ]
+        if not still:
+            break
+        time.sleep(0.2)
+    else:
+        raise SystemExit("SELF-TEST FAILED: killed identities never reported absent")
+    print("absence after exit: all three recorded identities report gone -> PASS")
+
+    print(
+        "SELF-TEST PASSED: recursive descent reaches grandchildren, pid/start identity "
+        "rejects reuse, and a reparented orphan is caught by the whole-table scan"
+    )
+
+
+# --------------------------------------------------------------------- census
+
+
+def watch(root_pid, interval, duration, out_path, quiet):
+    """Sample the descendant tree of ``root_pid`` and accumulate every identity."""
+    seen = {}
+    samples = 0
+    started = time.monotonic()
+    root_start = start_abstime(root_pid)
+    if root_start is None:
+        raise SystemExit(f"root pid {root_pid} is not readable")
+    while time.monotonic() - started < duration:
+        table = snapshot()
+        live_root, _ = identity_live(root_pid, root_start, table)
+        if not live_root:
+            break
+        for record in descendants(root_pid, table):
+            key = f"{record['pid']}:{record['start']}"
+            entry = seen.setdefault(
+                key,
+                {
+                    **record,
+                    "first_seen_s": round(time.monotonic() - started, 3),
+                    "samples": 0,
+                },
+            )
+            entry["samples"] += 1
+            entry["last_seen_s"] = round(time.monotonic() - started, 3)
+        samples += 1
+        if not quiet and samples % 20 == 0:
+            print(f"  ... {samples} censuses, {len(seen)} distinct descendants", flush=True)
+        time.sleep(interval)
+    payload = {
+        "root_pid": root_pid,
+        "root_start": root_start,
+        "censuses": samples,
+        "duration_s": round(time.monotonic() - started, 3),
+        "interval_s": interval,
+        "descendants": list(seen.values()),
+    }
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"census: {samples} censuses over {payload['duration_s']}s, "
+        f"{len(seen)} distinct descendant identities -> {out_path}"
+    )
+    for record in sorted(seen.values(), key=lambda r: r["first_seen_s"]):
+        marker = " <-- provider-related" if provider_like(record) else ""
+        print(
+            f"  pid {record['pid']:>7} start {record['start']:>16} pgid {record['pgid']:>7} "
+            f"{record['comm']:<16} {record['path']}{marker}"
+        )
+
+
+def verify(census_path):
+    """Whole-table absence check for every recorded identity."""
+    with open(census_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    table = snapshot()
+    survivors = []
+    for record in payload["descendants"]:
+        live, current = identity_live(record["pid"], record["start"], table)
+        if live:
+            survivors.append((record, current))
+    provider_records = [r for r in payload["descendants"] if provider_like(r)]
+    print(f"recorded descendant identities: {len(payload['descendants'])}")
+    print(f"  of which codex/claude/script-related: {len(provider_records)}")
+    for record in provider_records:
+        live, _ = identity_live(record["pid"], record["start"], table)
+        print(
+            f"    pid {record['pid']:>7} start {record['start']:>16} {record['comm']:<16} "
+            f"{record['path']} -> {'STILL LIVE' if live else 'gone'}"
+        )
+    # Independent belt-and-braces sweep: any live process anywhere whose
+    # executable looks like a provider AND whose pgid matches one the census
+    # recorded, which would catch a survivor the identity list somehow missed.
+    recorded_groups = {r["pgid"] for r in payload["descendants"]}
+    strays = [
+        record
+        for record in table.values()
+        if provider_like(record)
+        and not record["zombie"]
+        and record["pgid"] in recorded_groups
+        and record["pid"] != payload["root_pid"]
+    ]
+    print(f"stray sweep over recorded process groups {sorted(recorded_groups)}: {len(strays)} hit(s)")
+    for record in strays:
+        print(f"    pid {record['pid']} {record['comm']} {record['path']}")
+    if survivors or strays:
+        print("VERIFY FAILED: provider processes outlived the refresh")
+        return 1
+    print("VERIFY PASSED: every recorded descendant identity is absent from the process table")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--root", type=int)
+    parser.add_argument("--interval", type=float, default=0.15)
+    parser.add_argument("--duration", type=float, default=60.0)
+    parser.add_argument("--census")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_test:
+        self_test()
+        return 0
+    if args.watch:
+        if args.root is None or args.census is None:
+            raise SystemExit("--watch needs --root and --census")
+        watch(args.root, args.interval, args.duration, args.census, args.quiet)
+        return 0
+    if args.verify:
+        if args.census is None:
+            raise SystemExit("--verify needs --census")
+        return verify(args.census)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+CENSUS
+python3 "$TMP/census_tree.py" --self-test
+```
+
+**3. The sidebar observer** that produces the elapsed times. It is an ordinary
+`capture-pane` sampler: any sampler implementing the same classification rule —
+`refreshing…` means loading, a leading `stale · ` means the refresh failed over
+an existing snapshot, and windows with neither status line mean fresh —
+reproduces the same figures. It takes each round's dispatch reading before the
+dispatching action, never after:
+
+```console
+cat > "$TMP/observe_usage.py" <<'OBSERVE'
+#!/usr/bin/env python3
+"""REL-2 sidebar observer: per-provider usage refresh outcomes and timings.
+
+Samples the detached tmux pane, parses the USAGE panel into an independent
+state per provider, and timestamps every transition. Freshness is read off the
+panel, which is unambiguous once a snapshot exists: a failed refresh over an
+existing snapshot renders `stale · <message>` (src/Kanban/UI/Reconcile.hs:239),
+a running one renders `refreshing…`, and windows with neither status line mean
+Fresh (src/Kanban/UI/Board.hs:152-160). The notice line is captured alongside as
+corroboration.
+
+Temporary measurement artifact for issue #270. Not part of the repository.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+
+WINDOW_RE = re.compile(r"^(?P<label>\S[^\[]*?)\s+\[(?P<bar>[█░]+)\]\s+(?P<pct>\d+)%$")
+RESET_RE = re.compile(r"^[A-Z][a-z]{2}\s+\d{1,2}:\d{2}$")
+PROVIDERS = ("Codex", "Claude")
+
+
+def capture(session):
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-t", session, "-p"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.splitlines()
+
+
+def usage_panel(lines):
+    """The USAGE panel's interior text lines, in order."""
+    panel = []
+    for line in lines:
+        stripped = line.lstrip("║")
+        if not stripped.startswith("┃"):
+            continue
+        fields = stripped.split("┃")
+        if len(fields) < 2:
+            continue
+        panel.append(fields[1].rstrip())
+    return panel
+
+
+def notice(lines):
+    """The bottom notice line, if the frame has one."""
+    for line in reversed(lines):
+        text = line.strip("║ ").strip()
+        if not text or set(text) <= set("═╚╝ "):
+            continue
+        return text
+    return ""
+
+
+def parse_providers(panel):
+    """Split the panel into a block per provider and classify each block."""
+    blocks = {}
+    current = None
+    for raw in panel:
+        text = raw.strip()
+        if text in PROVIDERS:
+            current = text
+            blocks[current] = []
+            continue
+        if current is None or not text:
+            continue
+        if text.startswith("┏") or text.startswith("┗") or "drain_prs" in text:
+            current = None
+            continue
+        blocks[current].append(text)
+
+    parsed = {}
+    for provider in PROVIDERS:
+        block = blocks.get(provider, [])
+        windows = []
+        pending = None
+        status = None
+        for text in block:
+            match = WINDOW_RE.match(text)
+            if match:
+                pending = {
+                    "label": match.group("label").strip(),
+                    "percent_left": int(match.group("pct")),
+                    "bar": match.group("bar"),
+                    "reset": None,
+                }
+                windows.append(pending)
+                continue
+            if RESET_RE.match(text) and pending is not None:
+                pending["reset"] = text
+                pending = None
+                continue
+            status = text
+        if status == "refreshing…":
+            state = "Loading"
+        elif status and status.startswith("stale · "):
+            state = "Stale"
+        elif windows:
+            state = "Fresh"
+        elif status:
+            state = "NoSnapshot"
+        else:
+            state = "Empty"
+        parsed[provider] = {
+            "state": state,
+            "status": status,
+            "windows": windows,
+            "complete_windows": sum(
+                1 for w in windows if w["reset"] is not None and w["bar"]
+            ),
+        }
+    return parsed
+
+
+def redact(parsed):
+    """Requirement 10: shape without values."""
+    return {
+        provider: {
+            "state": info["state"],
+            "status": (
+                "stale · <message>"
+                if info["state"] == "Stale"
+                else info["status"]
+                if info["state"] in ("Loading", "NoSnapshot")
+                else None
+            ),
+            "windows": [
+                {"label": w["label"], "has_bar": bool(w["bar"]), "has_reset": w["reset"] is not None}
+                for w in info["windows"]
+            ],
+        }
+        for provider, info in parsed.items()
+    }
+
+
+def not_loaded_status(status):
+    """The pre-dispatch 'press <key> to refresh' text of Board.hs's NotLoaded."""
+    return bool(status) and status.startswith("press ") and status.endswith(" to refresh")
+
+
+def observe(session, label, dispatch_at, timeout, interval, out_path, assume_dispatched):
+    """Poll until both providers leave Loading, or until ``timeout`` elapses.
+
+    ``dispatch_at`` is a ``time.monotonic()`` reading taken at the round's real
+    dispatch instant -- immediately before the launch or the keystroke, never
+    after -- so every elapsed figure is measured from that instant. The clock is
+    system-wide, so a reading captured by another process is comparable here.
+
+    A provider is only credited with this round's outcome once this round's
+    Loading has been seen, so a state left over from an earlier round is never
+    mistaken for it. ``assume_dispatched`` relaxes that for the startup round,
+    where ``startAllRefreshes`` has provably already set both providers Loading
+    before the first frame; the NotLoaded text is still never terminal.
+    """
+    timeline = []
+    last = {}
+    terminal_at = {}
+    seen_loading = {}
+    notices = []
+    while time.monotonic() - dispatch_at < timeout:
+        now = time.monotonic()
+        lines = capture(session)
+        parsed = parse_providers(usage_panel(lines))
+        current_notice = notice(lines)
+        if current_notice and (not notices or notices[-1]["text"] != current_notice):
+            notices.append({"t": round(now - dispatch_at, 3), "text": current_notice})
+        for provider, info in parsed.items():
+            signature = (info["state"], info["status"], len(info["windows"]))
+            if last.get(provider) != signature:
+                timeline.append(
+                    {
+                        "t": round(now - dispatch_at, 3),
+                        "provider": provider,
+                        "state": info["state"],
+                        "status": info["status"],
+                        "windows": len(info["windows"]),
+                        "complete_windows": info["complete_windows"],
+                    }
+                )
+                last[provider] = signature
+            if info["state"] == "Loading":
+                seen_loading[provider] = True
+            elif provider not in terminal_at and info["state"] in ("Fresh", "Stale", "NoSnapshot"):
+                dispatched = seen_loading.get(provider) or assume_dispatched
+                if dispatched and not not_loaded_status(info["status"]):
+                    terminal_at[provider] = round(now - dispatch_at, 3)
+        if len(terminal_at) == len(PROVIDERS):
+            break
+        time.sleep(interval)
+
+    lines = capture(session)
+    final = parse_providers(usage_panel(lines))
+    payload = {
+        "round": label,
+        "timeout_s": timeout,
+        "interval_s": interval,
+        "assume_dispatched": assume_dispatched,
+        "first_sample_after_dispatch_s": timeline[0]["t"] if timeline else None,
+        "elapsed_to_terminal_s": terminal_at,
+        "saw_loading": seen_loading,
+        "timeline": timeline,
+        "notices": notices,
+        "final_redacted": redact(final),
+        "final_raw": final,
+    }
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+
+    print(f"--- round {label} ---")
+    print(f"  first sample landed {payload['first_sample_after_dispatch_s']}s after dispatch")
+    for provider in PROVIDERS:
+        info = final[provider]
+        elapsed = terminal_at.get(provider)
+        print(
+            f"  {provider:<6} state={info['state']:<10} "
+            f"windows={len(info['windows'])} complete={info['complete_windows']} "
+            f"saw_loading={seen_loading.get(provider, False)} "
+            f"elapsed={elapsed if elapsed is not None else 'NOT REACHED'}s"
+        )
+        if info["status"]:
+            print(f"          status: {info['status']}")
+    print("  notices:")
+    for entry in notices:
+        print(f"    t={entry['t']:>6}s  {entry['text'][:120]}")
+    return payload
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session", required=True)
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--interval", type=float, default=0.15)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--send-key", help="key to send as this round's dispatch")
+    parser.add_argument(
+        "--dispatch-at",
+        type=float,
+        help="a time.monotonic() reading captured at this round's dispatch instant, "
+        "for a round dispatched by something other than --send-key (the startup "
+        "refresh, whose dispatch is the launch itself)",
+    )
+    parser.add_argument(
+        "--assume-dispatched",
+        action="store_true",
+        help="startup round only: startAllRefreshes has already set both providers "
+        "Loading before the first frame, so a terminal state does not have to wait "
+        "on observing Loading first",
+    )
+    args = parser.parse_args()
+
+    if args.send_key and args.dispatch_at is not None:
+        raise SystemExit("--send-key and --dispatch-at are mutually exclusive")
+
+    if args.send_key:
+        # The clock starts at the dispatch instant, so it is read immediately
+        # BEFORE the keystroke is injected; reading it afterwards would silently
+        # discount however long tmux took to deliver the key.
+        dispatch_at = time.monotonic()
+        subprocess.run(["tmux", "send-keys", "-t", args.session, args.send_key], check=True)
+    elif args.dispatch_at is not None:
+        dispatch_at = args.dispatch_at
+    else:
+        dispatch_at = time.monotonic()
+
+    payload = observe(
+        args.session,
+        args.label,
+        dispatch_at,
+        args.timeout,
+        args.interval,
+        args.out,
+        args.assume_dispatched,
+    )
+    reached = all(
+        payload["final_raw"][provider]["state"] == "Fresh" for provider in PROVIDERS
+    )
+    return 0 if reached else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+OBSERVE
+```
+
+**4. The orchestrator**, which runs both rounds, the census, and the absence
+check in order:
+
+```console
+cat > "$TMP/run_measurement.sh" <<'RUNNER'
+#!/bin/bash
+# REL-2 measured run. Round A observes the startup refresh against a cold usage
+# cache, so a rendered window can only have come from the live refresh; round B
+# observes a later explicit `u`. Each round's clock starts at its own dispatch
+# instant: round A's is read immediately before `tmux new-session` and handed to
+# the observer, round B's immediately before the keystroke. A recursive
+# descendant census runs across both, and its absence check runs after both
+# refreshes finish but before Kanban is quit.
+set -u
+
+REL="$(cd "$(dirname "$0")" && pwd)"
+CHECKOUT="$1"
+SESSION=rel2
+CENSUS="$REL/census.json"
+
+tmux kill-server 2>/dev/null
+sleep 1
+
+echo "=== cache precondition ==="
+if [ -f "$HOME/.cache/kanban/usage.json" ]; then
+  mv "$HOME/.cache/kanban/usage.json" "$REL/usage.json.backup"
+  echo "moved ~/.cache/kanban/usage.json aside -> cold usage cache, no prior snapshot"
+else
+  echo "no ~/.cache/kanban/usage.json present -> already cold"
+fi
+rm -rf "$HOME/.cache/kanban/claude-probe"
+echo "removed the Claude probe scratch directory so the run recreates it"
+
+echo "=== round A: startup refresh (cold cache) ==="
+# The dispatch instant for the startup round is the launch itself, so the clock
+# is read here -- before tmux is asked to create the session -- and passed to the
+# observer. Reading it after launch, or after the pid discovery below, would
+# discount exactly the interval this round is supposed to measure.
+LAUNCHED_AT="$(python3 -c 'import time; print(time.monotonic())')"
+tmux new-session -d -s "$SESSION" -x 200 -y 50 "$REL/launch_kanban.sh $CHECKOUT"
+
+# The observer starts first and in the background, so sampling begins while the
+# pid is still being resolved; Codex turns fresh in well under a second and a
+# serialised start would miss its Loading frame entirely.
+python3 "$REL/observe_usage.py" --session "$SESSION" --label "A-startup" \
+  --dispatch-at "$LAUNCHED_AT" --assume-dispatched \
+  --timeout 90 --interval 0.15 --out "$REL/round-a.json" &
+OBSERVER_PID=$!
+
+# Resolve the Kanban pid from the pane's own process, not by name matching.
+KPID=""
+for _ in $(seq 1 100); do
+  PANE_PID="$(tmux display-message -p -t "$SESSION" '#{pane_pid}' 2>/dev/null)"
+  if [ -n "$PANE_PID" ]; then
+    KPID="$(pgrep -P "$PANE_PID" -f 'bin/kanban' | head -1)"
+    [ -n "$KPID" ] && break
+  fi
+  sleep 0.1
+done
+if [ -z "$KPID" ]; then
+  echo "FAILED to resolve the Kanban pid"; kill "$OBSERVER_PID" 2>/dev/null
+  tmux capture-pane -t "$SESSION" -p | tail -20; exit 1
+fi
+echo "kanban pid: $KPID (tmux pane pid $PANE_PID)"
+
+echo "=== census watcher (recursive descendants, pid+start identity) ==="
+python3 "$REL/census_tree.py" --watch --root "$KPID" --interval 0.15 --duration 150 \
+  --census "$CENSUS" --quiet > "$REL/census.log" 2>&1 &
+CENSUS_PID=$!
+
+wait "$OBSERVER_PID"
+ROUND_A=$?
+
+echo "=== round B: explicit u refresh ==="
+sleep 2
+python3 "$REL/observe_usage.py" --session "$SESSION" --label "B-explicit-u" \
+  --send-key u --timeout 90 --interval 0.15 --out "$REL/round-b.json"
+ROUND_B=$?
+
+echo "=== settle, then stop the census ==="
+sleep 5
+wait "$CENSUS_PID" 2>/dev/null || kill "$CENSUS_PID" 2>/dev/null
+for _ in $(seq 1 200); do [ -f "$CENSUS" ] && break; sleep 1; done
+cat "$REL/census.log"
+
+echo "=== requirement 8: absence check, Kanban still running ==="
+ps -p "$KPID" -o pid=,command= >/dev/null && echo "kanban pid $KPID still alive: yes"
+echo "--- Acceptance 3's immediate-children form, for comparison ---"
+ps -axo pid=,ppid=,command= | awk -v k="$KPID" '$2==k' || true
+echo "--- the census-based recursive form ---"
+python3 "$REL/census_tree.py" --verify --census "$CENSUS"
+VERIFY=$?
+
+echo "=== shutdown ==="
+tmux send-keys -t "$SESSION" q
+sleep 3
+if ps -p "$KPID" >/dev/null 2>&1; then echo "kanban still alive after q: UNCLEAN"; else echo "kanban exited after q: clean"; fi
+tmux kill-server 2>/dev/null
+
+echo "=== result codes ==="
+echo "round A (both Fresh): $ROUND_A   round B (both Fresh): $ROUND_B   census verify: $VERIFY"
+RUNNER
+chmod +x "$TMP/run_measurement.sh"
+"$TMP/run_measurement.sh" "$ROOT"
+```
+
+`$ROOT` is the checkout from Build provenance, and is what Kanban is pointed at
+with `--path`; any checkout of this repository works in its place.
+
+The usage cache is moved aside rather than deleted, and a successful run
+rewrites it; the Claude probe recreates its own scratch directory. The
+nesting-inherited round of the previous section is the same sequence with
+`REL2_KEEP_NESTING=1` exported and only the startup round observed.
+
+Every `console` block in this record was extracted from this document and run as
+published, in a clean directory, to confirm the section is executable top to
+bottom: the four artifacts are created in dependency order, the census
+self-test passes from the source printed above, and the three configuration
+probes emit exactly the three messages quoted earlier.
+
 ## Decisions
 
 ### D-1. First-release evidence includes a real installed-terminal run
