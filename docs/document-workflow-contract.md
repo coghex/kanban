@@ -698,13 +698,15 @@ exact artifact must be approved and matched. Losing the token costs a
 reconciliation, which is the safe direction to fail.
 
 **A confirmed identity is the one its own kind of mutation has, and it must
-agree with itself.** A created issue or epic records its number, a URL naming
-that number *in the owning repository*, and the `[#N]` token the entry will
-carry; a label records its name
+agree with itself.** A created issue or epic records its number, its canonical GitHub
+URL naming that number *in the owning repository*, and the `[#N]` token the
+entry will carry; a label records its name
 and the metadata it was created with; a comment records its comment ID and a URL naming that comment on the
 approved target in the owning repository;
-an edit to an existing artifact records that artifact's identity and the
-verified post-edit fingerprint. Those agreements are checked rather than
+an edit to an existing artifact records that artifact's identity — the
+approved target, not merely some artifact — and the verified post-edit
+fingerprint. A literal marker, which only a disposition that links an artifact
+somebody else made may supply, names that artifact too. Those agreements are checked rather than
 assumed: clearing verifies the document's token, so an identity free to record
 one artifact beside another artifact's token would let a record clear against a
 document naming something the tracker never got. Nothing but a created issue or

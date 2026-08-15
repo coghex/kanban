@@ -155,17 +155,25 @@ def record_json(*, step_overrides=None, **overrides):
 
 
 def label_plan(**overrides):
-    """The EPIC path's first step: a label, whose identity is a name and the
-    metadata it was created with rather than a number and a URL."""
+    """The EPIC path as it really runs: a label, then the epic whose number
+    becomes the marker. A label's identity is a name and the metadata it was
+    created with rather than a number and a URL."""
     body = plan(
-        marker="[#288]",
+        disposition="epic-create",
         steps=[
             {
                 "kind": "label-create",
                 "target": "label agent-workflows in coghex/kanban",
                 "payload_fingerprint": "sha256:label",
                 "postcondition": "the label exists with the approved color",
-            }
+            },
+            {
+                "kind": "epic-create",
+                "target": "new epic in coghex/kanban",
+                "payload_fingerprint": "sha256:epic",
+                "postcondition": "the epic exists with the approved body",
+                "provides_marker": True,
+            },
         ],
     )
     body.update(overrides)
@@ -708,7 +716,7 @@ class TrackerTransactionTests(unittest.TestCase):
                 issue_identity(url="https://github.com/coghex/kanban/issues/999"),
             )
         self.assertEqual(caught.exception.status, "identity-invalid")
-        self.assertIn("does not name issue", caught.exception.message)
+        self.assertIn("is not the GitHub url of issue", caught.exception.message)
 
     def test_an_issue_identity_needs_a_number_and_a_url(self):
         # A refused confirmation leaves the step exactly as it was, so both
@@ -774,9 +782,18 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertIn("never appears in the document", caught.exception.message)
 
     def test_a_non_issue_step_may_not_claim_to_provide_the_marker(self):
-        broken = label_plan()
-        broken["steps"][0]["provides_marker"] = True
-        broken["marker"] = ""
+        broken = plan(
+            disposition="epic-create",
+            steps=[
+                {
+                    "kind": "label-create",
+                    "target": "label agent-workflows in coghex/kanban",
+                    "payload_fingerprint": "sha256:label",
+                    "postcondition": "the label exists",
+                    "provides_marker": True,
+                }
+            ],
+        )
         self.fx.acquire(broken)
         self.fx.begin(0)
         with self.assertRaises(tracker.TransactionError) as caught:
@@ -799,7 +816,9 @@ class TrackerTransactionTests(unittest.TestCase):
                 with self.assertRaises(tracker.TransactionError) as caught:
                     self.fx.confirm(0, issue_identity(url=url))
                 self.assertEqual(caught.exception.status, "identity-invalid")
-                self.assertIn("of coghex/kanban", caught.exception.message)
+                self.assertIn(
+                    "is not the GitHub url of issue", caught.exception.message
+                )
 
     def test_reconciliation_cannot_bind_a_foreign_issue_either(self):
         # The path that actually reaches this: a human approving a candidate for
@@ -837,9 +856,9 @@ class TrackerTransactionTests(unittest.TestCase):
         self.fx.begin(0)
         for url, expected in (
             ("https://github.com/other/repo/issues/288#issuecomment-5303396262",
-             "is not in coghex/kanban"),
+             "is not the GitHub url of comment"),
             ("https://github.com/coghex/kanban/issues/288#issuecomment-999",
-             "does not name comment"),
+             "is not the GitHub url of comment"),
             ("https://github.com/coghex/kanban/issues/999#issuecomment-5303396262",
              "not on the approved target"),
         ):
@@ -848,6 +867,98 @@ class TrackerTransactionTests(unittest.TestCase):
                     self.fx.confirm(0, comment_identity(url=url))
                 self.assertEqual(caught.exception.status, "identity-invalid")
                 self.assertIn(expected, caught.exception.message)
+
+    def test_a_lookalike_host_or_path_is_not_a_github_artifact(self):
+        # The substring test this replaced accepted every one of these as issue
+        # 311 of coghex/kanban, and the document — which carries only `[#311]` —
+        # cannot tell them apart.
+        self.fx.acquire()
+        self.fx.begin(0)
+        for url in (
+            "https://example.test/coghex/kanban/issues/311",
+            "http://github.com/coghex/kanban/issues/311",
+            "https://github.com.evil.test/coghex/kanban/issues/311",
+            "https://github.com/coghex/kanban/pull/311",
+            "https://github.com/coghex/kanban/issues/311/timeline",
+            "https://github.com/coghex/kanban/issues/311#issuecomment-5",
+            "see https://github.com/coghex/kanban/issues/311",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(0, issue_identity(url=url))
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertIn(
+                    "is not the GitHub url of issue", caught.exception.message
+                )
+
+    def test_the_canonical_github_url_is_accepted(self):
+        # And the shape `gh issue create` actually returns still passes, so the
+        # parse is a binding rather than a refusal of everything.
+        self.fx.acquire()
+        self.fx.begin(0)
+        outcome = self.fx.confirm(
+            0, issue_identity(url="https://GitHub.com/CogHex/Kanban/issues/311")
+        )
+        self.assertEqual(outcome["steps"][0]["state"], "confirmed")
+
+    def test_an_edit_must_name_the_approved_target(self):
+        # A plan targeting the umbrella epic #300 could confirm an edit to #999,
+        # publish the child marker, and clear — while the epic it named was
+        # never touched.
+        self.fx.acquire()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        self.fx.begin(1)
+        for identity, expected in (
+            (edit_identity(id="coghex/kanban#999"), "approved target"),
+            (edit_identity(id="other/repo#300"), "is not in coghex/kanban"),
+            (edit_identity(id="the epic"), "approved target"),
+        ):
+            with self.subTest(identity=identity):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    self.fx.confirm(1, identity)
+                self.assertEqual(caught.exception.status, "identity-invalid")
+                self.assertIn(expected, caught.exception.message)
+        self.assertEqual(self.fx.read()[0]["steps"][1]["state"], "intent")
+
+    def test_a_literal_marker_must_name_the_artifact_it_links(self):
+        # The comment confirms against #288 while the ledger entry the record
+        # would clear against is #999 — two different artifacts, one record.
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(comment_plan(marker="[#999]"))
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("names no issue-comment step's approved target",
+                      caught.exception.message)
+        self.assertEqual(self.fx.check()["status"], "clear")
+
+    def test_a_creating_disposition_may_not_supply_a_literal_marker(self):
+        # It takes the marker from what it created, which is the only thing that
+        # ties the entry to the artifact.
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire(
+                plan(marker="[#288]", steps=[dict(plan()["steps"][0],
+                                                  provides_marker=False)])
+            )
+        self.assertEqual(caught.exception.status, "plan-invalid")
+        self.assertIn("not from a literal one", caught.exception.message)
+
+    def test_a_persisted_marker_naming_nothing_is_unreadable(self):
+        # The same rule on read-back, since a record is only ever as good as
+        # what a later run can check about it.
+        broken = json.loads(record_json())
+        broken["marker"] = "[#999]"
+        broken["disposition"] = "existing-issue"
+        broken["steps"] = [{
+            "kind": "issue-comment", "target": "coghex/kanban#288",
+            "payload_fingerprint": "sha256:comment",
+            "postcondition": "the approved comment exists",
+            "provides_marker": False, "state": "planned", "identity": None,
+        }]
+        self.fx.plant_unreadable_record(content=json.dumps(broken))
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.read()
+        self.assertEqual(caught.exception.status, "record-unreadable")
+        self.assertFalse(self.fx.check()["record_readable"])
 
     # -- reconciliation ------------------------------------------------------
 

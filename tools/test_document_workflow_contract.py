@@ -459,8 +459,14 @@ TRANSACTION_CLAUSES = {
     "a-fresh-session-must-reconcile-instead": (
         "a fresh session cannot produce one and must reconcile instead"
     ),
+    "an-identity-is-bound-to-what-was-approved": (
+        "every one of those is bound to what was approved rather than merely "
+        "well-shaped"
+    ),
     "an-identity-names-its-own-repository": (
-        "the repository is part of the identity, not decoration"
+        "the url is parsed as a canonical github url in $doc_repo, an edit names "
+        "its approved target, and a literal marker names the artifact the "
+        "disposition links"
     ),
     "an-identity-must-agree-with-itself": (
         "an identity is the one its own kind of mutation actually has, and it "

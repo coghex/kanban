@@ -498,10 +498,13 @@ number in `$DOC_REPO`, and the `[#N]` token the entry will carry; a label
 records its name and the metadata it was created with; a comment records its
 comment ID and a URL naming that comment on the approved target in `$DOC_REPO`;
 an edit to an existing artifact records that artifact's identity and the
-verified post-edit fingerprint. The repository is part of the identity, not
-decoration: the document carries only `[#N]`, so an identity free to name
-another repository's issue would let a transaction clear against an artifact
-this one never got. Nothing but a created issue or epic contributes a token
+verified post-edit fingerprint. Every one of those is bound to what was
+approved rather than merely well-shaped: the URL is parsed as a canonical GitHub
+URL in `$DOC_REPO`, an edit names its approved target, and a literal marker
+names the artifact the disposition links. The document carries only `[#N]`, so
+an identity free to name another repository's issue, another epic, or another
+number would let a transaction clear against an artifact this run never
+touched. Nothing but a created issue or epic contributes a token
 the document must name.
 
 Not every step returns an issue number and a URL, and the record does not

@@ -143,9 +143,28 @@ MARKER_RE = re.compile(r"^\[#\d+\]$")
 # line per entry — an indented task is a nested list somebody wrote inside it.
 INDEX_ENTRY_RE = re.compile(r"^[-*]\s*\[(?P<box>[ xX])\]\s+(?P<rest>.*)$")
 
-# The trailing `#N` of a step target such as `coghex/kanban#288`, which is the
-# issue a comment or an edit was approved against.
-TARGET_ISSUE_RE = re.compile(r"#(?P<number>\d+)\s*$")
+# The `#N` of a step target such as `coghex/kanban#288`, which is the artifact a
+# comment or an edit was approved against. The last one, so a target that names
+# a repository and an issue resolves to the issue.
+ISSUE_NUMBER_RE = re.compile(r"#(\d+)")
+
+# The canonical GitHub artifact URL, parsed rather than searched for. A
+# substring test accepts `https://example.test/coghex/kanban/issues/311` as
+# issue 311 of coghex/kanban, which then resolves against a document carrying
+# only `[#311]` — so the host and the whole path shape are part of the identity.
+GITHUB_ARTIFACT_URL_RE = re.compile(
+    r"^https://github\.com/(?P<owner>[^/\s#]+)/(?P<repo>[^/\s#]+)/issues/"
+    r"(?P<number>\d+)(?:#issuecomment-(?P<comment>\d+))?$",
+    re.IGNORECASE,
+)
+
+# Which step's approved target a literal marker must name. A disposition that
+# creates its artifact takes the marker from that creation instead, so a literal
+# one belongs only to the two that link an artifact somebody else made.
+MARKER_SOURCE_KIND = {
+    "existing-issue": "issue-comment",
+    "epic-adopt": "epic-adopt-edit",
+}
 
 # The heading of the document's at-a-glance index, whose entry lines are the
 # only place a disposition is applied. The design pair writes the first, the
@@ -358,6 +377,23 @@ def record_fault(
             "it has no single source for the marker the published entry must "
             "carry"
         )
+    if marker:
+        linking = MARKER_SOURCE_KIND.get(record["disposition"])
+        if linking is None:
+            return (
+                f"a {record['disposition']} disposition takes its marker from the "
+                "artifact it creates, not from a literal one"
+            )
+        wanted = artifact_number(marker)
+        if not any(
+            step["kind"] == linking and artifact_number(step["target"]) == wanted
+            for step in steps
+        ):
+            return (
+                f"its marker {marker} names no {linking} step's approved target, "
+                "so the entry it would clear against is not the artifact this "
+                "disposition links"
+            )
     return None
 
 
@@ -922,16 +958,16 @@ def validate_identity(identity, step: dict, index: int, repository: str) -> dict
             raise TransactionError(
                 "identity-invalid", f"step {index} records no url for its issue"
             )
-        # The repository, not just the number. A bare trailing-component check
-        # accepts another repository's issue #311 for a coghex/kanban
-        # transaction, and resolution — which sees only `[#311]` in the
-        # document — could then clear against it.
-        wanted = f"/{repository.lower()}/issues/{confirmed['id']}"
-        if wanted not in confirmed["url"].lower().rstrip("/") + "/":
+        # The whole URL, parsed. The repository and the host are part of the
+        # identity: the document carries only `[#311]`, so anything that merely
+        # ends in 311 would let a transaction clear against an artifact this
+        # repository never got.
+        named = github_artifact(confirmed["url"], repository)
+        if named is None or named[0] != confirmed["id"] or named[1] is not None:
             raise TransactionError(
                 "identity-invalid",
-                f"step {index}'s url {confirmed['url']} does not name issue "
-                f"{confirmed['id']} of {repository}",
+                f"step {index}'s url {confirmed['url']} is not the GitHub url of "
+                f"issue {confirmed['id']} in {repository}",
             )
         if confirmed["document_token"] != f"[#{confirmed['id']}]":
             raise TransactionError(
@@ -954,21 +990,15 @@ def validate_identity(identity, step: dict, index: int, repository: str) -> dict
                 f"step {index} posted a comment, so it records that comment's id "
                 "and url",
             )
-        lowered = confirmed["url"].lower()
-        if f"/{repository.lower()}/" not in lowered:
+        named = github_artifact(confirmed["url"], repository)
+        if named is None or named[1] != confirmed["id"]:
             raise TransactionError(
                 "identity-invalid",
-                f"step {index}'s comment url {confirmed['url']} is not in "
-                f"{repository}",
+                f"step {index}'s comment url {confirmed['url']} is not the GitHub "
+                f"url of comment {confirmed['id']} in {repository}",
             )
-        if f"issuecomment-{confirmed['id'].lower()}" not in lowered:
-            raise TransactionError(
-                "identity-invalid",
-                f"step {index}'s comment url {confirmed['url']} does not name "
-                f"comment {confirmed['id']}",
-            )
-        approved = TARGET_ISSUE_RE.search(step["target"])
-        if approved is not None and f"/{approved.group('number')}#" not in lowered:
+        approved = artifact_number(step["target"])
+        if approved is not None and named[0] != approved:
             raise TransactionError(
                 "identity-invalid",
                 f"step {index}'s comment url {confirmed['url']} is not on the "
@@ -980,6 +1010,34 @@ def validate_identity(identity, step: dict, index: int, repository: str) -> dict
             f"step {index} edited an existing artifact, so it records that "
             "artifact's identity and the verified post-edit fingerprint",
         )
+    else:
+        # And it must be *that* artifact. Without this a plan targeting
+        # coghex/kanban#300 could confirm an edit to #999, publish the child
+        # marker, and clear the transaction while the epic it named was never
+        # touched.
+        approved = artifact_number(step["target"])
+        edited = artifact_number(confirmed["id"])
+        if approved is not None:
+            if edited != approved:
+                raise TransactionError(
+                    "identity-invalid",
+                    f"step {index} records an edit to {confirmed['id']}, but the "
+                    f"approved target is {step['target']}",
+                )
+            if "/" in confirmed["id"] and not confirmed["id"].lower().startswith(
+                f"{repository.lower()}#"
+            ):
+                raise TransactionError(
+                    "identity-invalid",
+                    f"step {index}'s edited artifact {confirmed['id']} is not in "
+                    f"{repository}",
+                )
+        elif confirmed["id"].strip() != step["target"].strip():
+            raise TransactionError(
+                "identity-invalid",
+                f"step {index} records an edit to {confirmed['id']}, which is not "
+                f"the approved target {step['target']}",
+            )
     if kind not in ISSUE_IDENTITY_KINDS and confirmed["document_token"]:
         raise TransactionError(
             "identity-invalid",
@@ -1254,6 +1312,25 @@ def status_index_lines(text: str) -> list[str] | None:
         if collecting:
             lines.append(line)
     return lines if collecting or lines else None
+
+
+def artifact_number(value: str | None) -> str | None:
+    """The `#N` a target, marker, or identity names, or None."""
+    found = ISSUE_NUMBER_RE.findall(value or "")
+    return found[-1] if found else None
+
+
+def github_artifact(url: str, repository: str):
+    """The `(number, comment)` a canonical GitHub URL names in `repository`, or
+    None when it is not one. Case-insensitive on the slug, since GitHub
+    identities are."""
+    match = GITHUB_ARTIFACT_URL_RE.match((url or "").strip())
+    if match is None:
+        return None
+    named = f"{match.group('owner')}/{match.group('repo')}".lower()
+    if named != repository.lower():
+        return None
+    return match.group("number"), match.group("comment")
 
 
 def index_entry(line: str):
