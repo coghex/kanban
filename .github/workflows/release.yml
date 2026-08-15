@@ -233,8 +233,19 @@ jobs:
         env:
           VERSION: ${{ steps.gate.outputs.version }}
           SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
+          NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
         run: |
           set -euo pipefail
+          # coreutils on the runner, BSD on a developer's machine running the
+          # extracted script under tools/test_release_workflow.py.
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
           rm -rf "$SDIST_DIR"
           mkdir -p "$SDIST_DIR"
           cabal sdist all --output-directory "$SDIST_DIR"
@@ -258,6 +269,19 @@ jobs:
             exit 1
           fi
           echo "verified release asset: $(basename "$archive")"
+
+          # The payload crosses a job boundary to reach a publisher, and a
+          # file that is merely non-empty is not an intact one: a truncated or
+          # altered archive would still pass a count, name, and size check.
+          # Record what was verified here so the job that attaches it can
+          # prove it is attaching the same bytes.
+          mkdir -p "$(dirname "$DIGEST_FILE")"
+          {
+            printf '%s  archive\n' "$(digest_of "$archive")"
+            printf '%s  notes\n' "$(digest_of "$NOTES_FILE")"
+          } > "$DIGEST_FILE"
+          echo "recorded payload digest:"
+          cat "$DIGEST_FILE"
 
       - name: Upload the verified release payload
         uses: actions/upload-artifact@v7
@@ -294,8 +318,16 @@ jobs:
           COMMIT: ${{ github.sha }}
           SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
           NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
         run: |
           set -euo pipefail
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
 
           # The archive was verified where it was built, but it crossed a job
           # boundary to get here and this is the job that can write. An asset
@@ -328,6 +360,28 @@ jobs:
             echo "release notes are missing or empty at $NOTES_FILE"
             exit 1
           fi
+
+          # Non-empty is not intact. Compare both payload files against the
+          # digest recorded at the point they were verified.
+          if [ ! -s "$DIGEST_FILE" ]; then
+            echo "the payload carries no integrity digest at $DIGEST_FILE"
+            exit 1
+          fi
+          expected_archive_digest=$(awk '$2 == "archive" { print $1 }' "$DIGEST_FILE")
+          expected_notes_digest=$(awk '$2 == "notes" { print $1 }' "$DIGEST_FILE")
+          if [ -z "$expected_archive_digest" ] || [ -z "$expected_notes_digest" ]; then
+            echo "the payload digest at $DIGEST_FILE does not record both files"
+            exit 1
+          fi
+          if [ "$(digest_of "$archive")" != "$expected_archive_digest" ]; then
+            echo "'$(basename "$archive")' does not match the digest recorded when it was verified"
+            exit 1
+          fi
+          if [ "$(digest_of "$NOTES_FILE")" != "$expected_notes_digest" ]; then
+            echo "the release notes do not match the digest recorded when they were verified"
+            exit 1
+          fi
+
           if [ "$TAG" != "v$VERSION" ]; then
             echo "tag '$TAG' does not name package version '$VERSION'"
             exit 1
@@ -386,8 +440,16 @@ jobs:
           COMMIT: ${{ github.sha }}
           SDIST_DIR: ${{ runner.temp }}/release-payload/sdist
           NOTES_FILE: ${{ runner.temp }}/release-payload/release-notes.md
+          DIGEST_FILE: ${{ runner.temp }}/release-payload/payload.sha256
         run: |
           set -euo pipefail
+          digest_of() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | cut -d' ' -f1
+            else
+              shasum -a 256 "$1" | cut -d' ' -f1
+            fi
+          }
 
           archive_count=0
           archive=""
@@ -414,6 +476,27 @@ jobs:
           fi
           if [ ! -s "$NOTES_FILE" ]; then
             echo "release notes are missing or empty at $NOTES_FILE"
+            exit 1
+          fi
+
+          # Non-empty is not intact. Compare both payload files against the
+          # digest recorded at the point they were verified.
+          if [ ! -s "$DIGEST_FILE" ]; then
+            echo "the payload carries no integrity digest at $DIGEST_FILE"
+            exit 1
+          fi
+          expected_archive_digest=$(awk '$2 == "archive" { print $1 }' "$DIGEST_FILE")
+          expected_notes_digest=$(awk '$2 == "notes" { print $1 }' "$DIGEST_FILE")
+          if [ -z "$expected_archive_digest" ] || [ -z "$expected_notes_digest" ]; then
+            echo "the payload digest at $DIGEST_FILE does not record both files"
+            exit 1
+          fi
+          if [ "$(digest_of "$archive")" != "$expected_archive_digest" ]; then
+            echo "'$(basename "$archive")' does not match the digest recorded when it was verified"
+            exit 1
+          fi
+          if [ "$(digest_of "$NOTES_FILE")" != "$expected_notes_digest" ]; then
+            echo "the release notes do not match the digest recorded when they were verified"
             exit 1
           fi
 

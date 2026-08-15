@@ -30,6 +30,7 @@ loading YAML.
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
+import hashlib
 import os
 import re
 import subprocess
@@ -441,6 +442,14 @@ class ReleaseScriptTestCase(unittest.TestCase):
             if call["args"][:2] == ["release", "create"]
         ]
 
+    def record_digest(self, digest_file, archive, notes):
+        """The digest the build job would have recorded for this payload."""
+        lines = []
+        for path, label in ((archive, "archive"), (notes, "notes")):
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            lines.append(f"{digest}  {label}")
+        Path(digest_file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def assert_nothing_was_created(self):
         self.assertEqual(
             self.release_creations(), [], "the script reached `gh release create`"
@@ -653,8 +662,16 @@ class SdistVerificationTests(ReleaseScriptTestCase):
     produce once something had gone wrong.
     """
 
+    def setUp(self):
+        super().setUp()
+        self.payload = self.root / "payload"
+        self.payload.mkdir(parents=True)
+        self.notes = self.payload / "release-notes.md"
+        self.notes.write_text(EXPECTED_NOTES, encoding="utf-8")
+        self.digest_file = self.payload / "payload.sha256"
+
     def sdist(self, names, *, expect_exit):
-        sdist_dir = self.root / "payload" / "sdist"
+        sdist_dir = self.payload / "sdist"
         stub = self.root / "fake" / "bin" / "cabal"
         drops = "\n".join(
             f'  printf archive > "$OUT/{name}"' for name in names
@@ -671,8 +688,24 @@ class SdistVerificationTests(ReleaseScriptTestCase):
         stub.chmod(0o755)
         return self.run_script(
             step_run_script(BUILD_JOB, SDIST_STEP),
-            {"VERSION": VERSION, "SDIST_DIR": str(sdist_dir)},
+            {
+                "VERSION": VERSION,
+                "SDIST_DIR": str(sdist_dir),
+                "NOTES_FILE": str(self.notes),
+                "DIGEST_FILE": str(self.digest_file),
+            },
             expect_exit=expect_exit,
+        )
+
+    def test_the_verified_payload_is_recorded_as_a_digest(self):
+        # What the publishing job later compares against, so a file that
+        # changed in transit cannot pass as the one that was verified.
+        self.sdist([f"kanban-{VERSION}.tar.gz"], expect_exit=0)
+        recorded = self.digest_file.read_text(encoding="utf-8").split()
+        archive_digest = hashlib.sha256(b"archive").hexdigest()
+        notes_digest = hashlib.sha256(EXPECTED_NOTES.encode()).hexdigest()
+        self.assertEqual(
+            recorded, [archive_digest, "archive", notes_digest, "notes"]
         )
 
     def test_the_expected_single_archive_passes(self):
@@ -703,11 +736,20 @@ class ProductionPublisherTests(ReleaseScriptTestCase):
         self.sdist_dir.mkdir(parents=True)
         self.notes = self.root / "payload" / "release-notes.md"
         self.notes.write_text(EXPECTED_NOTES, encoding="utf-8")
+        self.digest_file = self.root / "payload" / "payload.sha256"
 
     def drop_archive(self, name, contents="archive"):
         (self.sdist_dir / name).write_text(contents, encoding="utf-8")
 
-    def publish(self, *, tag=f"v{VERSION}", expect_exit, release_exists=False):
+    def record_payload_digest(self):
+        """Stand in for the digest the build job recorded, as things are now."""
+        archives = sorted(self.sdist_dir.glob("*.tar.gz"))
+        if len(archives) == 1 and self.notes.exists():
+            self.record_digest(self.digest_file, archives[0], self.notes)
+
+    def publish(self, *, tag=f"v{VERSION}", expect_exit, release_exists=False, record=True):
+        if record:
+            self.record_payload_digest()
         self.script_release_view(exists=release_exists)
         self.fake.script("gh", ["release", "create"], stdout="", exit_code=0)
         return self.run_script(
@@ -718,6 +760,7 @@ class ProductionPublisherTests(ReleaseScriptTestCase):
                 "COMMIT": self.commit,
                 "SDIST_DIR": str(self.sdist_dir),
                 "NOTES_FILE": str(self.notes),
+                "DIGEST_FILE": str(self.digest_file),
             },
             expect_exit=expect_exit,
         )
@@ -775,11 +818,57 @@ class ProductionPublisherTests(ReleaseScriptTestCase):
         self.assertIn("found 2", output)
         self.assert_nothing_was_created()
 
-    def test_an_asset_truncated_in_the_handoff_is_refused(self):
+    def test_an_asset_emptied_in_the_handoff_is_refused(self):
         self.push_tag(f"v{VERSION}")
         self.drop_archive(f"kanban-{VERSION}.tar.gz", contents="")
         output = self.publish(expect_exit=1)
         self.assertIn("arrived empty", output)
+        self.assert_nothing_was_created()
+
+    def test_an_asset_truncated_but_still_non_empty_is_refused(self):
+        # The count, name, and size checks all pass here: the archive is
+        # present, correctly named, and not empty. Only the digest recorded
+        # when it was verified can tell that these are not those bytes.
+        self.push_tag(f"v{VERSION}")
+        self.drop_archive(f"kanban-{VERSION}.tar.gz", contents="archive")
+        self.record_payload_digest()
+        self.drop_archive(f"kanban-{VERSION}.tar.gz", contents="archi")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("does not match the digest", output)
+        self.assert_nothing_was_created()
+
+    def test_an_asset_altered_in_the_handoff_is_refused(self):
+        self.push_tag(f"v{VERSION}")
+        self.drop_archive(f"kanban-{VERSION}.tar.gz", contents="archive")
+        self.record_payload_digest()
+        self.drop_archive(f"kanban-{VERSION}.tar.gz", contents="tampered!")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("does not match the digest", output)
+        self.assert_nothing_was_created()
+
+    def test_notes_altered_in_the_handoff_are_refused(self):
+        self.push_tag(f"v{VERSION}")
+        self.drop_archive(f"kanban-{VERSION}.tar.gz")
+        self.record_payload_digest()
+        self.notes.write_text("Substituted release notes.\n", encoding="utf-8")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("release notes do not match the digest", output)
+        self.assert_nothing_was_created()
+
+    def test_a_payload_carrying_no_digest_is_refused(self):
+        self.push_tag(f"v{VERSION}")
+        self.drop_archive(f"kanban-{VERSION}.tar.gz")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("no integrity digest", output)
+        self.assert_nothing_was_created()
+
+    def test_a_digest_missing_one_of_the_two_files_is_refused(self):
+        self.push_tag(f"v{VERSION}")
+        self.drop_archive(f"kanban-{VERSION}.tar.gz")
+        digest = hashlib.sha256(b"archive").hexdigest()
+        self.digest_file.write_text(f"{digest}  archive\n", encoding="utf-8")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("does not record both files", output)
         self.assert_nothing_was_created()
 
     def test_missing_notes_are_refused(self):
@@ -810,8 +899,19 @@ class DryRunPublisherTests(ReleaseScriptTestCase):
         )
         self.notes = self.root / "payload" / "release-notes.md"
         self.notes.write_text(EXPECTED_NOTES, encoding="utf-8")
+        self.digest_file = self.root / "payload" / "payload.sha256"
+        self.archive = self.sdist_dir / f"kanban-{VERSION}.tar.gz"
 
-    def publish(self, *, tag="release-dry-run-20260815", expect_exit, release_exists=False):
+    def publish(
+        self,
+        *,
+        tag="release-dry-run-20260815",
+        expect_exit,
+        release_exists=False,
+        record=True,
+    ):
+        if record:
+            self.record_digest(self.digest_file, self.archive, self.notes)
         self.script_release_view(exists=release_exists)
         self.fake.script("gh", ["release", "create"], stdout="", exit_code=0)
         return self.run_script(
@@ -822,9 +922,24 @@ class DryRunPublisherTests(ReleaseScriptTestCase):
                 "COMMIT": self.commit,
                 "SDIST_DIR": str(self.sdist_dir),
                 "NOTES_FILE": str(self.notes),
+                "DIGEST_FILE": str(self.digest_file),
             },
             expect_exit=expect_exit,
         )
+
+    def test_an_asset_truncated_but_still_non_empty_is_refused(self):
+        # The rehearsal has to fail on exactly what production fails on, or it
+        # rehearses something else.
+        self.record_digest(self.digest_file, self.archive, self.notes)
+        self.archive.write_text("archi", encoding="utf-8")
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("does not match the digest", output)
+        self.assert_nothing_was_created()
+
+    def test_a_payload_carrying_no_digest_is_refused(self):
+        output = self.publish(expect_exit=1, record=False)
+        self.assertIn("no integrity digest", output)
+        self.assert_nothing_was_created()
 
     def test_the_draft_is_created_against_the_commit_and_never_published(self):
         self.publish(expect_exit=0)
