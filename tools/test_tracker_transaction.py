@@ -592,6 +592,110 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, "record-changed")
         self.assertEqual(self.fx.read()[0], winner)
 
+    def test_a_losing_acquisition_reports_the_record_it_lost_to(self):
+        # The losing run is the one that most needs the report: another run owns
+        # the transaction, and this one has to say what is outstanding rather
+        # than that a reference refused it. Empty tracker fields here would read
+        # as "no transaction" on the one path where there certainly is one.
+        self.fx.acquire()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire()
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "transaction-outstanding")
+        self.assertTrue(detail["acquired"])
+        self.assertTrue(detail["record_readable"])
+        self.assertEqual(detail["transaction_state"], "tracker-pending")
+        self.assertEqual(detail["entry_key"], "DW-3")
+        self.assertEqual([step["index"] for step in detail["completed_steps"]], [0])
+        self.assertEqual(detail["confirmed_identities"][0]["id"], "311")
+        self.assertEqual([step["index"] for step in detail["remaining_steps"]], [1])
+
+    def test_a_losing_acquisition_reports_an_unreadable_record_as_unreadable(self):
+        # And when it cannot be read, it says so. Reporting it as absent would
+        # let the losing run conclude it may proceed.
+        self.fx.acquire()
+        self.plant_unreadable_record()
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.acquire()
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "transaction-outstanding")
+        self.assertIsNone(detail["acquired"])
+        self.assertFalse(detail["record_readable"])
+        self.assertIn("could not be read", detail["next_action"])
+        self.assertIn("resolved by hand", detail["next_action"])
+
+    def test_a_losing_transition_reports_the_record_that_won(self):
+        self.fx.acquire()
+        _, stale_value = self.fx.read()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        stale_record, _ = self.fx.read()
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.write_record(
+                self.fx.docs, self.fx.ref(), stale_record, stale_value
+            )
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "record-changed")
+        self.assertEqual(detail["expected_commit"], stale_value)
+        self.assertEqual(detail["transaction_state"], "tracker-pending")
+        self.assertEqual(detail["confirmed_identities"][0]["id"], "311")
+
+    def test_the_command_line_reports_the_winner_when_its_transition_loses(self):
+        # The same race through the command line the assets actually run, with
+        # this invocation reading the record a moment before another run
+        # advanced it.
+        self.fx.acquire()
+        _, stale_value = self.fx.read()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        current, _ = self.fx.read()
+
+        def stale_read(root, ref):
+            return json.loads(json.dumps(current)), stale_value
+
+        with unittest.mock.patch.object(tracker, "read_record", stale_read):
+            code, payload = self.fx.cli("--begin-step", "1", "--approved")
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "record-changed")
+        self.assertTrue(payload["acquired"])
+        self.assertEqual(payload["transaction_state"], "tracker-pending")
+        self.assertEqual([step["index"] for step in payload["completed_steps"]], [0])
+        self.assertEqual(payload["confirmed_identities"][0]["id"], "311")
+        self.assertEqual([step["index"] for step in payload["remaining_steps"]], [1])
+        # And the winner's record is untouched by the losing invocation.
+        self.assertEqual(self.fx.read()[0], current)
+
+    def test_a_record_that_could_not_be_cleared_reports_what_is_still_there(self):
+        self.fx.acquire()
+        _, stale_value = self.fx.read()
+        self.fx.begin(0)
+        self.fx.confirm(0, issue_identity())
+        self.fx.begin(1)
+        self.fx.confirm(1, edit_identity())
+        _, observed = self.fx.read()
+        with self.assertRaises(tracker.TransactionError) as caught:
+            tracker.clear_record(self.fx.docs, self.fx.ref(), stale_value)
+        detail = caught.exception.detail
+        self.assertEqual(caught.exception.status, "record-retained")
+        self.assertEqual(detail["transaction_state"], "mutation-confirmed")
+        self.assertEqual(len(detail["confirmed_identities"]), 2)
+        self.assertEqual(self.fx.read()[1], observed)
+
+    def test_clearing_refuses_the_null_object_name_as_well_as_the_empty_one(self):
+        # Both spellings of an unbound delete. `git update-ref -d <ref> <zeros>`
+        # removes the reference unconditionally, so accepting the null name
+        # would be exactly the unconditional delete this signature exists to
+        # make unrepresentable.
+        self.fx.acquire()
+        for unbound in ("", "0" * 40, "0" * 64):
+            with self.subTest(old_value=unbound):
+                with self.assertRaises(tracker.TransactionError) as caught:
+                    tracker.clear_record(self.fx.docs, self.fx.ref(), unbound)
+                self.assertEqual(caught.exception.status, "clear-unbound")
+                self.assertIsNotNone(self.fx.read()[0])
+
     def test_a_transition_that_would_erase_a_confirmation_is_refused(self):
         self.fx.acquire()
         self.fx.begin(0)
@@ -603,8 +707,10 @@ class TrackerTransactionTests(unittest.TestCase):
             tracker.require_preserved_confirmations(before, after)
         self.assertEqual(caught.exception.status, "confirmation-erased")
 
-    def test_an_unreadable_record_fails_closed_rather_than_reading_clear(self):
-        self.fx.acquire()
+    def plant_unreadable_record(self):
+        """Leave the reference standing over content no version of this module
+        can interpret — the shape a partially written or hand-edited record
+        takes."""
         ref = self.fx.ref()
         blob = run(
             ["git", "hash-object", "-w", "-t", "blob", "--stdin"],
@@ -615,6 +721,10 @@ class TrackerTransactionTests(unittest.TestCase):
         )
         commit = run(["git", "commit-tree", tree, "-m", "broken"], self.fx.docs)
         run(["git", "update-ref", ref, commit], self.fx.docs)
+
+    def test_an_unreadable_record_fails_closed_rather_than_reading_clear(self):
+        self.fx.acquire()
+        self.plant_unreadable_record()
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.read()
         self.assertEqual(caught.exception.status, "record-unreadable")

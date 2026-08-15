@@ -114,6 +114,11 @@ DISPOSITIONS = ("new-issue", "existing-issue", "epic-create", "epic-adopt")
 
 MARKER_RE = re.compile(r"^\[#\d+\]$")
 
+# Git's "no old value" object name, in both hash lengths. Passed to a delete it
+# disables the binding rather than asserting it, so it is refused where a bound
+# value is required.
+NULL_OID_RE = re.compile(r"^0{40,64}$")
+
 
 class TransactionError(Exception):
     """A reported outcome rather than a traceback. `status` is the
@@ -294,6 +299,43 @@ def require_preserved_confirmations(old: dict | None, new: dict) -> None:
         )
 
 
+def observed_report(root: Path, ref: str) -> dict:
+    """What is durably recorded right now, for a report that has to say so.
+
+    A losing create-only acquisition and a losing compare-and-swap both fail
+    because somebody else's record is there, and that record — not this run's
+    rejected candidate — is the recovery state the run has to report and resume
+    from. Reading it can itself fail, and that answer travels too, as an
+    explicitly unreadable record rather than an absent one: the report is
+    consumed by a caller deciding whether it may mutate anything, and "no
+    transaction" is the one conclusion it must never be able to draw here.
+
+    Never raises. It runs while a failure is already on its way out, and an
+    exception from the reporting would replace the refusal it was describing.
+    """
+    try:
+        record, observed = read_record(root, ref)
+    except Exception as error:  # noqa: BLE001 - reporting may not fail
+        message = getattr(error, "message", str(error))
+        return {
+            "acquired": None,
+            "transaction_ref": ref,
+            "transaction_state": None,
+            "record_readable": False,
+            "steps": [],
+            "completed_steps": [],
+            "confirmed_identities": [],
+            "ambiguous_step": None,
+            "remaining_steps": [],
+            "next_action": (
+                f"the tracker transaction at {ref} exists but could not be read "
+                f"({message}). Stop: no tracker mutation, publication, or "
+                "clearing is permitted until it is resolved by hand"
+            ),
+        }
+    return {"record_readable": True} | transaction_report(record, ref, observed)
+
+
 def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
     """Store `record` and move `ref` to it, only while `ref` still holds
     `old_value`.
@@ -315,19 +357,25 @@ def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
     commit = git_out(["commit-tree", tree, "-m", RECORD_SUBJECT], cwd=root)
     proc = git(["update-ref", ref, commit, old_value], cwd=root, check=False)
     if proc.returncode != 0:
+        # Losing here is the moment the durable record matters most, so the
+        # refusal carries what is actually recorded rather than the name of the
+        # reference that refused. Whoever lost has to report the transaction
+        # state, its confirmed steps and its permitted next action — and on this
+        # path there certainly is one, so answering with empty fields would read
+        # as "no transaction" precisely where that is false.
         if not old_value:
             raise TransactionError(
                 "transaction-outstanding",
                 "a tracker transaction is already recorded for this document; "
                 "resolve it before approving another disposition",
-                transaction_ref=ref,
+                **observed_report(root, ref),
             )
         raise TransactionError(
             "record-changed",
             "the tracker transaction changed while this transition was being "
             "applied; the earlier record was left exactly as it was",
-            transaction_ref=ref,
             expected_commit=old_value,
+            **observed_report(root, ref),
         )
     return commit
 
@@ -335,8 +383,16 @@ def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
 def clear_record(root: Path, ref: str, old_value: str) -> None:
     """Remove the record, and only ever the exact value this run inspected.
     An unbound delete would remove whatever record happened to be there,
-    including one a later run acquired after this one's had already gone."""
-    if not old_value:
+    including one a later run acquired after this one's had already gone.
+
+    The all-zero object name is refused alongside the empty one, because it is
+    the second spelling of the same mistake: `git update-ref -d <ref> <zeros>`
+    deletes unconditionally rather than requiring the ref to hold that value.
+    `rev-parse --verify` never produces it for a ref that exists, so this is a
+    guard against a future caller rather than a live path — which is exactly
+    when an unbound delete would be hardest to notice.
+    """
+    if not old_value or NULL_OID_RE.match(old_value):
         raise TransactionError(
             "clear-unbound",
             f"clearing {ref} requires the value this run read it at",
@@ -347,7 +403,10 @@ def clear_record(root: Path, ref: str, old_value: str) -> None:
             "record-retained",
             f"the tracker transaction at {ref} could not be cleared; the next "
             "run's preflight will stop until it is resolved",
-            transaction_ref=ref,
+            # A record still standing stops every later disposition for this
+            # document, so the run that could not remove it says what is still
+            # there rather than only that removal failed.
+            **observed_report(root, ref),
         )
 
 
