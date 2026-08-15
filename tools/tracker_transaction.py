@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -1332,6 +1333,68 @@ def action_publication_pending(root, ref, record, observed) -> dict:
     return {"status": "publication-pending"} | transaction_report(record, ref, commit)
 
 
+def publication_module():
+    """tools/publish_coordination_doc.py, loaded from beside this file.
+
+    That module loads this one to report both records from a single preflight,
+    and this one loads it to ask the single question only it can answer: whether
+    this document has a direct-publication lane at all. Neither call path calls
+    back into the other, so the two loads do not recur — and asking is strictly
+    better than restating §7's classification parser here, where the copy could
+    disagree with the module that actually publishes.
+    """
+    source = Path(__file__).resolve().parent / "publish_coordination_doc.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_kanban_publish_for_tracker", source
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {source}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        raise TransactionError(
+            "publication-module-unavailable",
+            f"the publication module at {source} could not be loaded ({error}), "
+            "so whether this document publishes to the branch cannot be decided",
+        ) from error
+    return module
+
+
+def local_resolution_permitted(root: Path, record: dict, branch: str):
+    """Whether this document may be resolved against the working tree, and why
+    not when it may not.
+
+    `--source local` exists for the helper's ordinary `not-published` outcome: a
+    `pr-atomic`, unmatched, or not-yet-tracked document is never published, so
+    the applied local document is the only evidence there will ever be. A
+    document that *does* have a coordination lane is a different matter — its
+    disposition belongs on the branch, and clearing from a locally edited cursor
+    would leave the next preflight clear while the entry never landed, which is
+    exactly the duplicate tracker work this record exists to prevent.
+
+    So the permission is derived rather than asserted: the caller says which
+    source it wants, and this decides whether that source is admissible, from
+    the same classification the publication module itself uses.
+    """
+    publisher = publication_module()
+    git(["fetch", "origin", branch], cwd=root)
+    tip = git_out(["rev-parse", f"origin/{branch}"], cwd=root)
+    publishable, why_not = publisher.eligibility(
+        root, record["repository"], tip, record["document"]
+    )
+    if publishable and publisher.blob_at(root, tip, record["document"]) is None:
+        publishable, why_not = False, (
+            f"{record['document']} is absent from the publication tip"
+        )
+    if not publishable:
+        return True, why_not
+    return False, (
+        f"{record['document']} publishes directly to {branch}, so its disposition "
+        "is verified there rather than in the working tree"
+    )
+
+
 def published_document(root: Path, record: dict, source: str, branch: str) -> str:
     """The bytes resolution is verified against.
 
@@ -1543,6 +1606,16 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
             "resolved; resume them or abandon the transaction deliberately",
             **transaction_report(record, ref, observed),
         )
+    if source == "local":
+        permitted, why = local_resolution_permitted(root, record, branch)
+        if not permitted:
+            raise TransactionError(
+                "local-resolution-refused",
+                f"{why}; the record is kept until the recorded entry is verified "
+                "on the publication branch",
+                source=source,
+                **transaction_report(record, ref, observed),
+            )
     text = published_document(root, record, source, branch)
     tokens = required_document_tokens(record)
     entry_key = record["entry_key"]
@@ -1807,8 +1880,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.publication_pending:
             outcome = action_publication_pending(root, ref, record, observed)
         elif args.resolve:
-            if args.source == "branch" and not args.branch:
-                parser.error("--resolve --source branch requires --branch")
+            # Required for both sources: deciding whether the working tree is an
+            # admissible source at all means classifying the document as the
+            # publication branch itself carries it.
+            if not args.branch:
+                parser.error("--resolve requires --branch")
             outcome = action_resolve(
                 root, ref, record, observed, args.source, args.branch
             )

@@ -787,8 +787,12 @@ acquire no transaction. Where the module reports `not-published` with
 the approved content applied locally — the ordinary outcome for a `pr-atomic`,
 unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
 verification runs against the applied local document, which is the only evidence
-there is and a legitimate terminal state for such a document; where it reports
-`not-published` without having written the document, the record stays
+there is and a legitimate terminal state for such a document. That the document
+is one of those is *derived*, from the same classification the publication
+module itself applies, rather than taken from the caller: a document that does
+have a coordination lane belongs on the branch, and clearing it from a locally
+edited cursor would leave the next preflight clear while the entry never landed.
+Where the module reports `not-published` without having written the document, the record stays
 outstanding and the run reports it. Explicitly approved abandonment may clear an
 `intent-only` or `tracker-pending` record without publication, but only against
 authoritative read-only evidence that none of its unconfirmed mutations landed,

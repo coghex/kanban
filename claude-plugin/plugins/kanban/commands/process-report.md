@@ -645,8 +645,13 @@ refused: the first is the interrupted run's own signature, the second is not the
 cursor at all, and the third is a different disposition from the recorded one. On a `not-published`
 result with `document_written` true — the ordinary outcome for a `pr-atomic`,
 unmatched, or not-yet-tracked document — run the same verification against the
-applied local document with `--source local`, which is the only evidence there
-is and a legitimate terminal state for such a document. When `document_written`
+applied local document with `--source local --branch "$DOC_BRANCH"`, which is
+the only evidence there is and a legitimate terminal state for such a document.
+Whether the working tree is admissible at all is the module's decision, not
+yours: it classifies the document itself and refuses a local resolution for one
+that publishes to the branch, because clearing such a record from a locally
+edited cursor would leave the next preflight clear while the entry never
+landed. When `document_written`
 is false, nothing carries the disposition anywhere: the record stays
 outstanding, and this run reports it.
 

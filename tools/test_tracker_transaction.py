@@ -282,21 +282,22 @@ class Fixture:
     def check(self, *, root=None, document="docs/ui-bugs.md"):
         return tracker.check(root or self.docs, "coghex/kanban", document)
 
-    def begin(self, index, *, root=None):
-        record, observed = self.read(root=root)
+    def begin(self, index, *, root=None, document="docs/ui-bugs.md"):
+        record, observed = self.read(root=root, document=document)
         outcome = tracker.action_begin(
-            root or self.docs, self.ref(), record, observed, index
+            root or self.docs, self.ref(document), record, observed, index
         )
         # The token exists only in this result, which is exactly what the run
         # that performed the mutation is holding when it comes to confirm.
         self.tokens[index] = outcome["begin_token"]
         return outcome
 
-    def confirm(self, index, identity, *, root=None, token=None):
-        record, observed = self.read(root=root)
+    def confirm(self, index, identity, *, root=None, token=None,
+                document="docs/ui-bugs.md"):
+        record, observed = self.read(root=root, document=document)
         return tracker.action_confirm(
-            root or self.docs, self.ref(), record, observed, index, identity,
-            self.tokens.get(index) if token is None else token,
+            root or self.docs, self.ref(document), record, observed, index,
+            identity, self.tokens.get(index) if token is None else token,
         )
 
     def reconcile(self, index, identity, candidates=1, *, root=None):
@@ -306,10 +307,11 @@ class Fixture:
             candidates,
         )
 
-    def resolve(self, *, source="branch", branch="master", root=None):
-        record, observed = self.read(root=root)
+    def resolve(self, *, source="branch", branch="master", root=None,
+                document="docs/ui-bugs.md"):
+        record, observed = self.read(root=root, document=document)
         return tracker.action_resolve(
-            root or self.docs, self.ref(), record, observed, source, branch
+            root or self.docs, self.ref(document), record, observed, source, branch
         )
 
     def cli(self, *args, stdin=""):
@@ -1713,29 +1715,92 @@ class TrackerTransactionTests(unittest.TestCase):
             self.fx.resolve()
         self.assertEqual(caught.exception.status, "resolution-unverified")
 
+    def confirmed_pr_atomic_transaction(self, document="docs/design.md"):
+        """A transaction on a document §7 classifies `pr-atomic`, which the
+        publication helper declines to publish and applies locally instead."""
+        self.fx.acquire(document=document)
+        self.fx.begin(0, document=document)
+        self.fx.confirm(0, issue_identity(), document=document)
+        self.fx.begin(1, document=document)
+        self.fx.confirm(1, edit_identity(), document=document)
+
     def test_a_not_published_document_resolves_against_the_applied_local_file(self):
         # The `not-published` outcome is a successful return, not a failure: the
         # helper declines a pr-atomic or not-yet-tracked document and applies the
         # approved content locally. Without this the record would stay
         # outstanding forever and block every later disposition for it.
-        self.confirmed_transaction()
-        applied = DOCUMENT.replace(
-            "- [ ] DW-3. Checkpoint tracker mutations",
-            "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+        self.confirmed_pr_atomic_transaction()
+        (self.fx.docs / "docs" / "design.md").write_text(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            encoding="utf-8",
         )
-        (self.fx.docs / "docs" / "ui-bugs.md").write_text(applied, encoding="utf-8")
-        outcome = self.fx.resolve(source="local")
+        outcome = self.fx.resolve(source="local", document="docs/design.md")
         self.assertEqual(outcome["status"], "resolved")
         self.assertEqual(outcome["source"], "local")
-        self.assertIsNone(self.fx.read()[0])
+        self.assertIsNone(self.fx.read(document="docs/design.md")[0])
 
     def test_a_not_published_document_that_was_not_written_stays_outstanding(self):
+        self.confirmed_pr_atomic_transaction()
+        (self.fx.docs / "docs" / "design.md").unlink()
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(caught.exception.status, "document-unreadable")
+        self.assertEqual(
+            self.fx.check(document="docs/design.md")["status"], "outstanding"
+        )
+
+    def test_a_publishable_document_may_not_be_resolved_from_the_working_tree(self):
+        # The hole this closes: `--source local` was a caller's assertion with
+        # nothing behind it, so a coordination document could be cleared from a
+        # locally edited cursor before its disposition ever reached the branch —
+        # leaving the next preflight clear and the tracker work repeatable.
         self.confirmed_transaction()
-        (self.fx.docs / "docs" / "ui-bugs.md").unlink()
+        (self.fx.docs / "docs" / "ui-bugs.md").write_text(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            encoding="utf-8",
+        )
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.resolve(source="local")
-        self.assertEqual(caught.exception.status, "document-unreadable")
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("publishes directly to master", caught.exception.message)
         self.assertEqual(self.fx.check()["status"], "outstanding")
+        # And the branch remains the way it does resolve. (Restore the baseline
+        # first: the helper is the document's only writer, and it refuses a
+        # working tree somebody else edited — which is what the test just did.)
+        (self.fx.docs / "docs" / "ui-bugs.md").write_text(DOCUMENT, encoding="utf-8")
+        self.fx.publish_document(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            )
+        )
+        self.assertEqual(self.fx.resolve()["status"], "resolved")
+
+    def test_a_document_absent_from_the_tip_resolves_locally(self):
+        # A novel document is legitimately local and unpublished until a
+        # separate pull request adds it and its classification, so the working
+        # tree is the only evidence there is.
+        novel = "docs/new_design.md"
+        self.fx.acquire(document=novel)
+        self.fx.begin(0, document=novel)
+        self.fx.confirm(0, issue_identity(), document=novel)
+        self.fx.begin(1, document=novel)
+        self.fx.confirm(1, edit_identity(), document=novel)
+        (self.fx.docs / novel).write_text(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            encoding="utf-8",
+        )
+        outcome = self.fx.resolve(source="local", document=novel)
+        self.assertEqual(outcome["status"], "resolved")
 
     # -- abandonment ---------------------------------------------------------
 
