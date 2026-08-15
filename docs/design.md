@@ -4826,8 +4826,8 @@ three independent checks, and no mutating binding was pressed.
 | 6 | Five continuous idle minutes, observed as content churn | **pass** |
 | 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
 
-The observation spanned **623.2 s (10 min 23 s)**, of which step 6's untouched
-window was **420.1 s (7 min)** — both above the ten-minute total and
+The observation spanned **622.0 s (10 min 22 s)**, of which step 6's untouched
+window was **420.2 s (7 min)** — both above the ten-minute total and
 five-minute idle floors the issue sets.
 
 #### Build provenance
@@ -4913,7 +4913,7 @@ queries status, and the record shows that querying is all that happened.
 
 #### Step 1 — launch and settle
 
-The startup refresh settled **1.31 s** after the driver's first sample, with the
+The startup refresh settled **0.99 s** after the driver's first sample, with the
 footer reading `board: updated now` and all four column headers present. The
 board loaded from the live repository rather than a fixture, so its column
 occupancy is whatever the repository held at the time: `ISSUES` 8, `ACTIVE` 1,
@@ -5013,25 +5013,25 @@ Both refreshes then settled back to `board: updated now`.
 
 #### Step 6 — five continuous idle minutes
 
-The application was left untouched for **420.1 s**, sampled **1660 times** at a
+The application was left untouched for **420.2 s**, sampled **1661 times** at a
 **0.23 s** cadence. The cadence is deliberately non-commensurate with the
 spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
 event processing, so its live period is near one second without being exactly
 one, and a 1 Hz sample would return a near-identical glyph every time and make a
 running animation look frozen.
 
-Seven of the 1660 frames differed from their predecessor. Every one is
+Seven of the 1661 frames differed from their predecessor. Every one is
 accounted for by a change in underlying state:
 
 | At | Rows changed | What changed | Underlying state |
 | --- | --- | --- | --- |
-| 4.8 s | 3 | a Claude usage window row updated, the sidebar's `refreshing…` line cleared, and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
-| 62.6 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
-| 123.7 s | 1 | `updated 1m ago` → `2m ago` | as above |
-| 184.3 s | 1 | `updated 2m ago` → `3m ago` | as above |
-| 245.2 s | 1 | `updated 3m ago` → `4m ago` | as above |
-| 306.1 s | 1 | `updated 4m ago` → `5m ago` | as above |
-| 366.8 s | 1 | `updated 5m ago` → `6m ago` | as above |
+| 5.0 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 64.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
+| 124.8 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 185.5 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 246.4 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 307.2 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 368.1 s | 1 | `updated 5m ago` → `6m ago` | as above |
 
 **Observable content churn: none.** D-9 defines churn as the screen changing
 when no underlying state changed, and no such frame occurred: six changes are
@@ -5066,7 +5066,7 @@ inside a shell in the pane, letting the pty outlive it and be inspected:
 | --- | --- | --- |
 | Terminal restored | `stty -g` captured in the same pty before launch and after exit | **identical**, 220 bytes both times — line discipline fully restored |
 | Process exited | the wrapping shell echoed Kanban's status, and the captured pid was checked afterwards | `KANBAN_EXIT=0`; `ps -p <pid>` reports it gone |
-| Session gone | `tmux has-session -t rel3` | absent |
+| Session gone | `tmux -L rel3-smoke-<pid> has-session -t rel3`, against the driver's own server rather than the default one | absent |
 
 The pane after quitting shows the normal screen restored with `KANBAN_EXIT=0`
 and the shell's own marker visible, so the alternate screen was exited rather
@@ -5102,18 +5102,18 @@ applicable item provided the record says what could not be exercised.
 #### Conclusion
 
 **The script passes.** All seven steps completed, the observation spanned
-10 min 23 s including 7 continuous idle minutes, no interaction failed or hung,
+10 min 22 s including 7 continuous idle minutes, no interaction failed or hung,
 refresh responsiveness was demonstrated rather than asserted, the safety
 invariant was verified by identical before/after drainer queries and by a key
 log containing no mutating binding, and shutdown was clean by three independent
 checks. Nothing here blocks REL-4.
 
-Four earlier runs were discarded rather than reinterpreted, and none was
-discarded for its result — all four passed all seven steps. Each was superseded
+Five earlier runs were discarded rather than reinterpreted, and none was
+discarded for its result — all five passed all seven steps. Each was superseded
 because the *driver* had a defect worth fixing before publishing it, and since
 every fix changes the artifact this record publishes, the exercise was re-run
 rather than the source corrected after the fact. The run recorded here is the
-fifth, and the driver printed below is the one that produced its numbers rather
+sixth, and the driver printed below is the one that produced its numbers rather
 than a tidied variant:
 
 1. **534.1 s** — under the ten-minute floor, because the interactive steps
@@ -5128,11 +5128,14 @@ than a tidied variant:
    step 7 report a pass without checking that the terminal had actually been
    restored, which is precisely the failure the shutdown requirement exists to
    catch.
-4. **621.6 s** — detected the details overlay by a pattern that only matches
-   when the selected card's title is long enough to leave no border stroke
-   before its number. It worked on this board, where the title nearly fills the
-   panel, but a shorter title renders the same overlay centred and would have
-   hung step 2. Generalised to match either shape.
+4. **621.6 s** and **623.2 s** — the first detected the details overlay by a
+   pattern that only matches when the selected card's title is long enough to
+   leave no border stroke before its number, and the second still matched only
+   the *issue* heading form, so selecting a pull request would have hung step 2
+   even though the overlay had opened. Both worked on this board and neither
+   would survive a different one. The second of the two also computed whether
+   the tracker re-collapsed and then left that out of its pass predicate, so
+   step 2 could have passed with a tracker left expanded.
 
 No threshold, step, or method was altered to obtain a pass. The board's column
 occupancy did change between those runs and this one — a pull request entered
@@ -5230,11 +5233,18 @@ PANEL_RE = re.compile(r"━ ([A-Z][A-Z ]*[A-Z]) ━")
 
 # Every overlay is drawn with Brick's `borderWithLabel`, which CENTRES its label
 # (src/Kanban/UI/Overlay.hs). The details overlay labels itself with the card's
-# own title, so how much border stroke precedes the `#` depends entirely on how
-# long that title is: a title nearly as wide as the panel leaves none at all
-# (`┏ #321 …`), a short one leaves a run of them (`┏━━━━ #99 …`). Anchoring on
-# the corner and allowing any stroke between it and the number matches both.
-DETAILS_RE = re.compile(r"┏[━]*\s*#(\d+)")
+# own heading, so two things vary and both have to be tolerated.
+#
+# How much border stroke precedes the heading depends on how long it is: a
+# heading nearly as wide as the panel leaves none at all (`┏ #321 …`), a short
+# one leaves a run of them (`┏━━━━ #99 …`).
+#
+# The heading itself has three forms, from `Kanban.UI.Util.itemHeading`: an
+# issue is `#<n>`, a pull request is `PR #<n>`, and a draft pull request is
+# `DRAFT #<n>` -- note the draft prefix replaces `PR ` rather than extending it.
+# Selecting a pull request and matching only the issue form would hang step 2
+# even though the overlay had opened.
+DETAILS_RE = re.compile(r"┏[━]*\s*(?:DRAFT\s+|PR\s+)?#(\d+)")
 SELECTION_RE = re.compile(r"▌.*?#(\d+)")
 
 log_lines = []
@@ -5450,11 +5460,12 @@ def main():
             60,
             what="the startup refresh to settle",
         )
+        columns = [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in frame]
         return {
-            "verdict": "pass",
+            "verdict": "pass" if len(columns) == 4 and "updated" in footer(frame) else "fail",
             "geometry": pane_size(),
             "footer": footer(frame),
-            "columns_seen": [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in frame],
+            "columns_seen": columns,
             "initial_selection": selection(frame),
         }
 
@@ -5476,6 +5487,13 @@ def main():
             f = capture()
             traversal.append({"column": selected_column(f), "selection": selection(f)})
         detail["traversal"] = traversal
+        # The focus must come back to where it started after three `l` and three
+        # `h`. A column holding no cards shows no marker at all, so the return
+        # path is what evidences having crossed the empty ones.
+        detail["columns_traversed"] = (
+            traversal[-1]["column"] == detail["start_column"]
+            and traversal[-1]["selection"] == selection(frame)
+        )
 
         keyed("G")
         time.sleep(0.6)
@@ -5517,9 +5535,22 @@ def main():
         detail["epic_recollapsed"] = ("▾" in recollapsed) is False or (
             recollapsed.count("▾") < after.count("▾")
         )
+        # Every observation this step makes is required for its verdict. An
+        # earlier version computed `epic_recollapsed` and then omitted it, which
+        # would have let the step pass with a tracker left expanded -- exactly
+        # the half of D-6 step 2 the second `e` exists to cover.
         detail["verdict"] = (
             "pass"
-            if detail["g_G_moved"] and detail["details_opened"] and detail["epic_expanded"]
+            if all(
+                (
+                    detail["g_G_moved"],
+                    detail["details_opened"],
+                    detail["details_closed"],
+                    detail["epic_expanded"],
+                    detail["epic_recollapsed"],
+                    detail["columns_traversed"],
+                )
+            )
             else "fail"
         )
         return detail
@@ -5536,7 +5567,10 @@ def main():
             wait_for(lambda f, e=expect: e not in panels(f), 10, what=f"{expect} to close")
             overlays[expect] = {"key": key, "opened": True, "closed": True, "header": body[:1]}
             log(f"    {expect}: opened with {key!r}, closed with Esc")
-        return {"verdict": "pass", "overlays": overlays}
+        every_overlay = all(
+            o["opened"] and o["closed"] for o in overlays.values()
+        ) and len(overlays) == 4
+        return {"verdict": "pass" if every_overlay else "fail", "overlays": overlays}
 
     # ---------------------------------------------------------------- step 4
     def step4():
@@ -5777,9 +5811,19 @@ python3 -u "$TMP/smoke_script.py" \
   --out "$TMP/smoke.json" \
   --stty-before "$TMP/stty_before.txt" --stty-after "$TMP/stty_after.txt" \
   --refresh-gap 180 --idle 420 --idle-interval 0.23
-diff "$TMP/stty_before.txt" "$TMP/stty_after.txt" && echo "terminal restored"
-tmux has-session -t rel3 2>/dev/null && echo "STILL RUNNING (fail)" || echo "session gone"
+echo "script result: $?"    # 0 only if every gate below held
 ```
+
+The driver's **exit status is the result of the script**, and it is the only
+thing worth checking afterwards. It is zero only when every step passed, the
+Kanban pid is gone, the tmux session is gone, the terminal's line discipline was
+restored, and the drainer's loaded state was unchanged; on anything else it logs
+which of those failed and exits non-zero. Re-checking the session from the shell
+afterwards would be worse than redundant — the driver runs on its own
+`-L rel3-smoke-<pid>` server, so a `tmux has-session` against the default server
+would answer about a different server entirely and print `session gone` no
+matter what the tested session was doing. The same applies to the `stty`
+comparison, which the driver performs against the pty that actually ran Kanban.
 
 #### Suites
 
