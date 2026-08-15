@@ -278,13 +278,32 @@ Present the full draft or adoption edit verbatim and **stop for explicit
 approval**. Do not create a label, create an epic, edit an existing epic, or
 update the document while presenting or revising the proposal.
 
-After approval:
+After approval, apply this entry through section 6 and publish it through
+section 7, exactly as a child disposition is applied and published. The `EPIC`
+entry is not a shortcut past them: it mutates the tracker and it moves the
+document's cursor, so it takes the same preflight, the same tracker
+transaction, and the same publication. In particular it never writes or stages
+the document itself — a pre-edited document is refused as no longer matching
+the publication tip, and the publication helper is the document's only writer.
 
-1. Create any approved new label, then create the epic with a temporary body
-   file; or apply the approved adoption edit.
-2. Confirm the epic number, title, body, labels, state, and URL.
-3. Update only the `EPIC` ledger line to checked `[#N]` with the `Edit` tool.
-4. Verify the ledger edit and stop. Do not draft the first child.
+Its ordered tracker steps are these, in this order, and only the ones that were
+approved:
+
+1. **EPIC label creation.** Creating the approved new arc label is its own
+   checkpointed step: begin it before `gh label create -R "$DOC_REPO"` runs,
+   and confirm it with the exact label name and metadata that call created.
+2. **Epic creation.** Creating the umbrella epic is its own checkpointed step:
+   begin it before `gh issue create -R "$DOC_REPO"` runs, and confirm it with
+   the epic number and URL, which is also the `[#N]` marker the `EPIC` ledger
+   line will carry.
+3. **Epic adoption edit.** Adopting an existing epic instead is its own
+   checkpointed step: begin it before the approved body edit, and confirm it
+   with the target issue identity and the verified post-edit fingerprint.
+   Adoption replaces creation; never plan both.
+
+Then update only the `EPIC` ledger line to checked `[#N]`, compose the complete
+updated document as text, and hand it to section 7. Verify the ledger edit
+against what section 7 published and stop. Do not draft the first child.
 
 ## 5. Process one child entry
 
@@ -344,9 +363,13 @@ If the selected slice no longer fits one PR, stop and return it to
 `/design-epic` for an approved split. Do not expand one processing run into
 multiple drafts.
 
-## 6. Apply one approved child disposition
+## 6. Apply one approved disposition
 
-**First, before any tracker mutation, check for an outstanding publication.**
+Use this section for the approved `EPIC` entry and for an approved child
+disposition alike. Both mutate the tracker, so both take every step below.
+
+**First, before any tracker mutation, check for an outstanding publication or
+tracker transaction.**
 
 ```bash
 PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
@@ -367,27 +390,130 @@ it, so publication must be refused if the branch has moved on since — a second
 run doing the same thing would otherwise drop this one's disposition while
 changing exactly the one path a correct publication changes.
 
-A `"pending"` result means an earlier approved mutation of this document has
-not reached the branch. **Stop here.** Do not create or link a tracker item and
-do not apply this disposition: the helper will refuse to publish a different
-mutation while that record stands, and by then the new issue would already
-exist for a disposition the document never receives. Report what the record
-names and the resolution the helper suggests, and let the user decide. This
-check is read-only and takes no lock — it is asked here, before the first
+A `"pending"` result means an earlier approved mutation of this document is
+outstanding — its publication, its tracker mutations, or both, and
+`pending_kinds` says which. **Stop here.** Do not create or link a tracker item
+and do not apply this disposition: the helper will refuse to publish a different
+mutation while a publication record stands, and by then the new issue would
+already exist for a disposition the document never receives. Report what the
+record names and the resolution the helper suggests, and let the user decide.
+This check is read-only and takes no lock — it is asked here, before the first
 irreversible step, precisely because asking afterwards is too late.
 
-Only after explicit approval, and a `"clear"` preflight:
+When `pending_kinds` names `tracker-transaction`, the preflight's
+`tracker_transaction` block is the whole report: the document, the selected
+key, the disposition, the transaction state, the completed steps, the ambiguous
+step if there is one, and the steps that remain. Resume that recorded
+disposition rather than selecting new work. Its confirmed steps are verified
+and never repeated; a `mutation-confirmed` or `publication-pending` record
+offers only the completion of that disposition's document mutation and
+publication; and a missing, mismatched, or conflicting recorded artifact stops
+the run rather than adopting a similarly titled one. Re-present each remaining
+step's exact recorded target and payload and stop for explicit approval before
+executing it — a resuming invocation has no conversation history and no
+in-session approval, and the recorded payload fingerprint bounds what may be
+approved rather than standing in for the approval. Use `prepared_publication_tip`
+only to report how far the branch has moved: the binding this run publishes with
+is the `publication_tip` this preflight just reported, never the recorded one.
 
-- **New issue:** create the approved body with `gh issue create -R "$DOC_REPO" --body-file` and
-  confirm its number and URL.
-- **Existing issue:** post only an explicitly approved comment, if any, and
-  confirm the target still exists.
-- **No separate issue / Deferred:** make no issue mutation.
+An `ambiguous_step` is a mutation that began and was never confirmed. It may
+have landed. Never retry it, adopt a candidate for it, advance past it,
+publish, or clear the record. Verify read-only whether its exact recorded
+postcondition holds, present what you found, and let the user bind it to one
+exact artifact or authorize a retry — one whose repository, target, immutable
+identity or URL, approved payload, and observable postcondition all match what
+was recorded. Absent, mismatched, conflicting, or more than one plausible
+candidate leaves the record unresolved and stops the run. A similarly titled
+artifact is never sufficient evidence.
 
-For a linked or newly created issue, update the umbrella epic's child checklist
-with the actual `#N`. For `[no-issue]`, apply the approved removal or folding
-note. A deferral does not change the epic checklist. Never make an unshown epic
-edit.
+### Acquire the tracker transaction before the first mutation
+
+Only after explicit approval, and a `"clear"` preflight, acquire the record that
+makes this disposition's tracker mutations recoverable. It is acquired **before
+the first one runs**, because a run that dies afterwards leaves an unchanged
+document, a clear preflight, and issues that already exist:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --acquire --approved --publication-tip "$PREFLIGHT_TIP" --plan - <<'PLAN'
+{"entry_key": "<EPIC or the stable slice ID>",
+ "disposition": "<the approved disposition kind>",
+ "steps": [{"kind": "issue-create",
+            "target": "<the exact approved target>",
+            "payload_fingerprint": "<digest of the approved body>",
+            "postcondition": "<what is observably true once it lands>",
+            "provides_marker": true}]}
+PLAN
+```
+
+Acquisition is create-only and atomic, so two runs that both saw a clear
+preflight cannot both proceed; the loser stops rather than mutating GitHub
+beside the winner. The record is shared across every linked worktree of this
+repository, so a later invocation resolving a different `$DOCS_WT` still sees
+it. `tools/tracker_transaction.py` is the whole mechanism — acquisition, every
+transition, and the resolution check — and it is resolved from the
+already-resolved `$DOC_ROOT` exactly as the publication helper is. Do not
+reimplement any part of it, and never edit a transaction reference by hand. If
+it cannot be resolved, created, read, or updated, stop before the first
+irreversible action and report that; an unreadable transaction is never read as
+no transaction.
+
+**A disposition that mutates no tracker acquires nothing.** `[no-issue]` and
+`[deferred]` make no tracker mutation, so they plan no steps and leave no
+transaction outstanding. Acquiring one for them would block every later entry in
+this document behind a record nothing could ever clear.
+
+### Walk the ordered steps
+
+Every approved tracker mutation is its own ordered step. Begin a step before its
+external mutation runs and confirm it with the exact identity that mutation
+returned before the next step starts; that gap is the only window in which a
+mutation can be unaccounted for, and closing it is what this record is for.
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --begin-step 0 --approved
+# ... run exactly that one approved mutation ...
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --confirm-step 0 --identity - <<'IDENTITY'
+{"kind": "issue", "id": "<number>", "url": "<url>",
+ "document_token": "[#<number>]", "postcondition_verified": true}
+IDENTITY
+```
+
+Not every step returns an issue number and a URL, and the record does not
+pretend otherwise: a label records its name and metadata, an issue its number
+and URL, a comment its comment ID and URL, and an edit to an existing issue that
+issue's identity plus the verified post-edit fingerprint. Each branch below is a
+step of its own:
+
+- **EPIC label creation.** The approved new arc label is a checkpointed step:
+  begin it before `gh label create -R "$DOC_REPO"` and confirm it with the
+  exact label name and metadata it created.
+- **Epic creation.** Creating the umbrella epic is a checkpointed step:
+  begin it before `gh issue create -R "$DOC_REPO"` and confirm it with the
+  epic number and URL, which is the marker the `EPIC` ledger line carries.
+- **Epic adoption edit.** Adopting an existing epic is a checkpointed step:
+  begin it before the approved body edit and confirm it with the target issue
+  identity and the verified post-edit fingerprint.
+- **Child issue creation.** Creating the approved body with `gh issue create -R "$DOC_REPO" --body-file`
+  is a checkpointed step: begin it before that call and confirm it with the
+  number and URL it returned.
+- **Child issue linking.** Linking an issue that already exists mutates nothing
+  by itself, so the transaction plans only the mutations it really performs and
+  records the `[#N]` marker the ledger line will carry.
+- **Approved comment.** Posting an explicitly approved comment is a checkpointed
+  step: begin it before the comment is posted and confirm it with the comment ID
+  and URL, then confirm the target still exists.
+- **Umbrella epic checklist edit.** Updating the epic's child checklist with the
+  actual `#N` is a checkpointed step: begin it before the edit and confirm it
+  with the epic's identity and the verified post-edit fingerprint.
+
+For `[no-issue]`, apply the approved removal or folding note. A deferral does not
+change the epic checklist. Never make an unshown epic edit.
 
 Then update exactly the selected ledger line in the design document:
 
@@ -403,10 +529,14 @@ do not write it to the file and do not stage it, since the publication step belo
 hands that text to the helper, which is the only writer of the document. Verify the selected key,
 ledger checkbox/marker, unchecked count, epic checklist, and tracker metadata.
 
-If issue creation succeeds but epic or document synchronization fails, do not
-create anything else. Record the confirmed issue number in the design document
-with a concise processing note when possible, report the partial state, and
-reconcile it before the next item.
+If a tracker mutation succeeds but a later step or the document mutation fails,
+do not create anything else. The durable transaction record is where that state
+lives — never the document, which this workflow does not write and the
+publication helper alone owns. Report the tracker states beside the three
+document states section 7 requires: whether acquisition succeeded, the
+transaction state, each planned step and whether it is planned, ambiguous, or
+confirmed, every confirmed tracker identity, and the one recovery action that is
+permitted next. Reconcile it before the next entry.
 
 ## 7. Publish the approved mutation
 
@@ -415,6 +545,16 @@ cursor, and a cursor that only ever exists in one checkout is resumable only
 from that checkout. Publication is one more step of the disposition that was
 already approved; it carries no second one, and it is never batched or deferred
 merely to reduce commit or push frequency.
+
+When a tracker transaction is open, record that it is being handed to
+publication before you hand it over, so an interruption inside publication is
+distinguishable from one before it:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --publication-pending
+```
 
 **Render the complete approved document and hand it over — do not write it
 yourself.** `tools/publish_coordination_doc.py` is the only writer of the
@@ -473,6 +613,36 @@ on the one structured result it returns:
   path, whether a local publication commit exists and its ID, and whether the
   remote publication branch contains it — and say plainly which one applies.
   Leave the document as the helper left it.
+
+### Resolve the tracker transaction
+
+A tracker transaction is cleared by the published entry itself, never by the
+fact that a commit landed. Reachability proves a commit reached the branch; it
+proves nothing about whether that commit carried this disposition:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --resolve --source branch --branch "$DOC_BRANCH"
+```
+
+The module verifies that the recorded entry key on `$DOC_BRANCH` carries the
+recorded disposition and every exact tracker identity that disposition requires
+the document to name, and clears the record only then. On a `not-published`
+result with `document_written` true — the ordinary outcome for a `pr-atomic`,
+unmatched, or not-yet-tracked document — run the same verification against the
+applied local document with `--source local`, which is the only evidence there
+is and a legitimate terminal state for such a document. When `document_written`
+is false, nothing carries the disposition anywhere: the record stays
+outstanding, and this run reports it.
+
+A record this run could not resolve stops the next one, which is what it is for.
+Report it rather than clearing it, and never clear a transaction reference by
+hand. Where nothing landed at all, the user may explicitly approve abandoning an
+`intent-only` or `tracker-pending` transaction against authoritative read-only
+evidence that none of its unconfirmed mutations reached GitHub — and this run
+still names every mutation that was already confirmed, because those exist and
+the document never recorded them.
 
 **A recorded publication is resolved before any new disposition.** When the
 helper reports `pending-unresolved` or `pending-differs-from-approved`, an

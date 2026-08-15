@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -910,13 +911,55 @@ def _resume(
     }
 
 
+def tracker_transaction_module():
+    """tools/tracker_transaction.py, loaded from beside this file.
+
+    A plain `import` would need `tools/` on `sys.path`, which it is when this
+    module runs as a script and is not when a test loads it by path. The
+    dependency is one-way by construction — that module never loads this one —
+    so two independently invocable command-line tools do not become mutually
+    dependent, at the cost of each keeping its own copy of four small identity
+    helpers. tools/test_tracker_transaction.py pins the pair that matters, the
+    (repository, document) key, so the copies cannot drift apart unseen.
+    """
+    source = Path(__file__).resolve().parent / "tracker_transaction.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_kanban_tracker_transaction", source
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {source}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+        # Fail closed rather than reporting a clear preflight: an outstanding
+        # tracker transaction that cannot be read is exactly the state in which
+        # proceeding repeats a mutation GitHub has already accepted.
+        raise PublishError(
+            "tracker-transaction-unavailable",
+            f"the tracker transaction module at {source} could not be loaded "
+            f"({error}); the preflight cannot report whether one is outstanding",
+        ) from error
+    return module
+
+
 def check_pending(root: Path, repository: str, branch: str, document: str) -> dict:
-    """Whether an earlier approved mutation of this document is outstanding.
+    """Whether an earlier approved mutation of this document is outstanding —
+    its publication, its tracker mutations, or both.
 
     Callers mutate the tracker before they publish, so this has to be askable
     *before* they do: learning about an unresolved record afterwards means a
-    second issue already exists for a disposition that cannot be applied. This
-    only reads — no lock, no write, no fetch of anything it does not need.
+    second issue already exists for a disposition that cannot be applied. Issue
+    #327 added the other half of the same question, because a run can equally
+    have created the issue and then died before recording anything — so one
+    preflight answers for both records rather than leaving the newer one to a
+    check the assets might not make. This only reads — no lock, no write, no
+    fetch of anything it does not need.
+
+    `status` stays exactly `clear` or `pending`, and `publication_tip` stays
+    where it was: the assets branch on those, and a preflight that reported a
+    third state or moved the binding would be a silent caller-contract change.
+    `pending_kinds` says which record is outstanding when one is.
     """
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
@@ -924,25 +967,30 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
     recorded = git(
         ["rev-parse", "--verify", "--quiet", pending], cwd=resolved, check=False
     ).stdout.decode().strip()
+    tracker = tracker_transaction_module().check(resolved, repository, document)
     # Not check=False: the tip this returns becomes the caller's binding, and a
     # binding minted from a stale cached ref is worse than no preflight at all
     # — it reads as current and licenses a publication against a document that
     # has already moved.
     git(["fetch", "origin", branch], cwd=resolved)
     observed_tip = git_out(["rev-parse", f"origin/{branch}"], cwd=resolved)
-    if not recorded:
-        return {
-            "status": "clear",
-            "document": document,
-            "pending_ref": pending,
-            "publication_tip": observed_tip,
-        }
-    landed = is_ancestor(resolved, recorded, f"origin/{branch}")
-    return {
-        "status": "pending",
+    kinds = []
+    if recorded:
+        kinds.append("publication")
+    if tracker["status"] != "clear":
+        kinds.append("tracker-transaction")
+    outcome = {
+        "status": "pending" if kinds else "clear",
         "document": document,
         "pending_ref": pending,
         "publication_tip": observed_tip,
+        "pending_kinds": kinds,
+        "tracker_transaction": tracker,
+    }
+    if not recorded:
+        return outcome
+    landed = is_ancestor(resolved, recorded, f"origin/{branch}")
+    return outcome | {
         "pending_commit": recorded,
         "recorded_blob": blob_at(resolved, recorded, document),
         "already_landed": landed,

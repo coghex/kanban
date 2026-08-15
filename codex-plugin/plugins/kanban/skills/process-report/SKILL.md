@@ -336,7 +336,8 @@ through `process-design-doc`. Do not force epic-sized work into one issue.
 
 ## 5. Apply the approved disposition
 
-**First, before any tracker mutation, check for an outstanding publication.**
+**First, before any tracker mutation, check for an outstanding publication or
+tracker transaction.**
 
 ```bash
 PREFLIGHT="$(python3 "$DOC_ROOT/tools/publish_coordination_doc.py" \
@@ -357,25 +358,125 @@ it, so publication must be refused if the branch has moved on since — a second
 run doing the same thing would otherwise drop this one's disposition while
 changing exactly the one path a correct publication changes.
 
-A `"pending"` result means an earlier approved mutation of this document has
-not reached the branch. **Stop here.** Do not create or link a tracker item and
-do not apply this disposition: the helper will refuse to publish a different
-mutation while that record stands, and by then the new issue would already
-exist for a disposition the document never receives. Report what the record
-names and the resolution the helper suggests, and let the user decide. This
-check is read-only and takes no lock — it is asked here, before the first
+A `"pending"` result means an earlier approved mutation of this document is
+outstanding — its publication, its tracker mutations, or both, and
+`pending_kinds` says which. **Stop here.** Do not create or link a tracker item
+and do not apply this disposition: the helper will refuse to publish a different
+mutation while a publication record stands, and by then the new issue would
+already exist for a disposition the document never receives. Report what the
+record names and the resolution the helper suggests, and let the user decide.
+This check is read-only and takes no lock — it is asked here, before the first
 irreversible step, precisely because asking afterwards is too late.
 
-Only after explicit approval, and a `"clear"` preflight:
+When `pending_kinds` names `tracker-transaction`, the preflight's
+`tracker_transaction` block is the whole report: the document, the selected
+key, the disposition, the transaction state, the completed steps, the ambiguous
+step if there is one, and the steps that remain. Resume that recorded
+disposition rather than selecting new work. Its confirmed steps are verified
+and never repeated; a `mutation-confirmed` or `publication-pending` record
+offers only the completion of that disposition's document mutation and
+publication; and a missing, mismatched, or conflicting recorded artifact stops
+the run rather than adopting a similarly titled one. Re-present each remaining
+step's exact recorded target and payload and stop for explicit approval before
+executing it — a resuming invocation has no conversation history and no
+in-session approval, and the recorded payload fingerprint bounds what may be
+approved rather than standing in for the approval. Use `prepared_publication_tip`
+only to report how far the branch has moved: the binding this run publishes with
+is the `publication_tip` this preflight just reported, never the recorded one.
 
-- **New issue:** create the approved body with `gh issue create -R "$DOC_REPO" --body-file`
-  using a temporary file and approved existing labels. Confirm the returned
-  issue number before editing the report.
-- **Existing issue:** optionally post only an explicitly approved comment, then
-  confirm the target issue still exists.
+An `ambiguous_step` is a mutation that began and was never confirmed. It may
+have landed. Never retry it, adopt a candidate for it, advance past it,
+publish, or clear the record. Verify read-only whether its exact recorded
+postcondition holds, present what you found, and let the user bind it to one
+exact artifact or authorize a retry — one whose repository, target, immutable
+identity or URL, approved payload, and observable postcondition all match what
+was recorded. Absent, mismatched, conflicting, or more than one plausible
+candidate leaves the record unresolved and stops the run. A similarly titled
+artifact is never sufficient evidence.
+
+### Acquire the tracker transaction before the first mutation
+
+Only after explicit approval, and a `"clear"` preflight, acquire the record that
+makes this disposition's tracker mutations recoverable. It is acquired **before
+the first one runs**, because a run that dies afterwards leaves an unchanged
+report, a clear preflight, and issues that already exist:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --acquire --approved --publication-tip "$PREFLIGHT_TIP" --plan - <<'PLAN'
+{"entry_key": "<the selected finding key>",
+ "disposition": "<the approved disposition kind>",
+ "steps": [{"kind": "issue-create",
+            "target": "<the exact approved target>",
+            "payload_fingerprint": "<digest of the approved body>",
+            "postcondition": "<what is observably true once it lands>",
+            "provides_marker": true}]}
+PLAN
+```
+
+Acquisition is create-only and atomic, so two runs that both saw a clear
+preflight cannot both proceed; the loser stops rather than mutating GitHub
+beside the winner. The record is shared across every linked worktree of this
+repository, so a later invocation resolving a different `$DOCS_WT` still sees
+it. `tools/tracker_transaction.py` is the whole mechanism — acquisition, every
+transition, and the resolution check — and it is resolved from the
+already-resolved `$DOC_ROOT` exactly as the publication helper is. Do not
+reimplement any part of it, and never edit a transaction reference by hand. If
+it cannot be resolved, created, read, or updated, stop before the first
+irreversible action and report that; an unreadable transaction is never read as
+no transaction.
+
+**A disposition that mutates no tracker acquires nothing.** `[no-issue]`,
+`[deferred]`, and `Epic` make no tracker mutation here — the arc goes to
+`design-epic`, and its epic is created later inside `process-design-doc`'s own
+transaction for the design document — so they plan no steps and leave no
+transaction outstanding. Acquiring one for them would block every later finding
+in this report behind a record nothing could ever clear, and an `Epic`
+disposition's would stay open across a separate human-led drafting workflow.
+
+### Walk the ordered steps
+
+Every approved tracker mutation is its own ordered step. Begin a step before its
+external mutation runs and confirm it with the exact identity that mutation
+returned before the next step starts; that gap is the only window in which a
+mutation can be unaccounted for, and closing it is what this record is for.
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --begin-step 0 --approved
+# ... run exactly that one approved mutation ...
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --confirm-step 0 --identity - <<'IDENTITY'
+{"kind": "issue", "id": "<number>", "url": "<url>",
+ "document_token": "[#<number>]", "postcondition_verified": true}
+IDENTITY
+```
+
+Not every step returns an issue number and a URL, and the record does not
+pretend otherwise: an issue records its number and URL, a comment its comment ID
+and URL, and an edit to an existing issue that issue's identity plus the
+verified post-edit fingerprint.
+
+Then, only after explicit approval and a `"clear"` preflight:
+
+- **Child issue creation.** Creating the approved body with `gh issue create -R "$DOC_REPO" --body-file`,
+  using a temporary file and approved existing labels, is a checkpointed step:
+  begin it before that call and confirm it with the number and URL it returned
+  before editing the report.
+- **Child issue linking.** Linking an issue that already exists mutates nothing
+  by itself, so the transaction plans only the mutations it really performs and
+  records the `[#N]` marker the checklist line will carry; confirm the target
+  issue still exists.
+- **Approved comment.** Posting an explicitly approved comment on that issue is
+  a checkpointed step: begin it before the comment is posted and confirm it with
+  the comment ID and URL.
 - **Epic:** capture the approved arc in a design document with the
   `design-epic` workflow, then process its `EPIC` entry through
-  `process-design-doc` and obtain the created tracker number.
+  `process-design-doc` and obtain the created tracker number. No tracker
+  mutation happens here, so no transaction is acquired.
 - **No issue:** make no external mutation.
 - **Deferred:** make no external mutation.
 
@@ -404,6 +505,15 @@ Verify heading and checklist agree, and that the run changed exactly one finding
 with `rg -n '<item-key>' <report>` and `git diff --stat -- <report>`. For a
 created or linked issue, also verify its title, state, labels, and URL.
 
+If a tracker mutation succeeds but a later step or the document mutation fails,
+do not create anything else. The durable transaction record is where that state
+lives — never the report, which this workflow does not write and the publication
+helper alone owns. Report the tracker states beside the three document states
+section 6 requires: whether acquisition succeeded, the transaction state, each
+planned step and whether it is planned, ambiguous, or confirmed, every confirmed
+tracker identity, and the one recovery action that is permitted next. Reconcile
+it before the next finding.
+
 ## 6. Publish the approved mutation
 
 Publish the approved mutation in this same run. The document is a durable
@@ -411,6 +521,16 @@ cursor, and a cursor that only ever exists in one checkout is resumable only
 from that checkout. Publication is one more step of the disposition that was
 already approved; it carries no second one, and it is never batched or deferred
 merely to reduce commit or push frequency.
+
+When a tracker transaction is open, record that it is being handed to
+publication before you hand it over, so an interruption inside publication is
+distinguishable from one before it:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --publication-pending
+```
 
 **Render the complete approved document and hand it over — do not write it
 yourself.** `tools/publish_coordination_doc.py` is the only writer of the
@@ -469,6 +589,36 @@ on the one structured result it returns:
   path, whether a local publication commit exists and its ID, and whether the
   remote publication branch contains it — and say plainly which one applies.
   Leave the document as the helper left it.
+
+### Resolve the tracker transaction
+
+A tracker transaction is cleared by the published entry itself, never by the
+fact that a commit landed. Reachability proves a commit reached the branch; it
+proves nothing about whether that commit carried this disposition:
+
+```bash
+python3 "$DOC_ROOT/tools/tracker_transaction.py" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --resolve --source branch --branch "$DOC_BRANCH"
+```
+
+The module verifies that the recorded entry key on `$DOC_BRANCH` carries the
+recorded disposition and every exact tracker identity that disposition requires
+the document to name, and clears the record only then. On a `not-published`
+result with `document_written` true — the ordinary outcome for a `pr-atomic`,
+unmatched, or not-yet-tracked document — run the same verification against the
+applied local document with `--source local`, which is the only evidence there
+is and a legitimate terminal state for such a document. When `document_written`
+is false, nothing carries the disposition anywhere: the record stays
+outstanding, and this run reports it.
+
+A record this run could not resolve stops the next one, which is what it is for.
+Report it rather than clearing it, and never clear a transaction reference by
+hand. Where nothing landed at all, the user may explicitly approve abandoning an
+`intent-only` or `tracker-pending` transaction against authoritative read-only
+evidence that none of its unconfirmed mutations reached GitHub — and this run
+still names every mutation that was already confirmed, because those exist and
+the document never recorded them.
 
 **A recorded publication is resolved before any new disposition.** When the
 helper reports `pending-unresolved` or `pending-differs-from-approved`, an

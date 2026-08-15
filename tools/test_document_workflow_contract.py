@@ -232,6 +232,75 @@ CONTRACT_STATEMENTS = {
     "publication-failure-has-three-states": (
         "reported with all three states rather than collapsed into one"
     ),
+    # Issue #327: §9.6's tracker transaction, and §9.5's extension. What is
+    # pinned here is the contract the four processing assets are held to below;
+    # the mechanism's behavior is executed by tools/test_tracker_transaction.py
+    # against temporary repositories, for the same reason §9.4's is.
+    "transaction-covers-every-mutating-branch": (
+        "Every tracker-mutating branch of those four publishes this way, the "
+        "design pair's EPIC path included"
+    ),
+    "transaction-epic-path-hands-the-document-over": (
+        "that path renders the complete approved document and hands it to "
+        "tools/publish_coordination_doc.py in the same run, and never writes or "
+        "stages the document itself"
+    ),
+    "transaction-every-mutation-is-a-step": (
+        "Every approved tracker mutation is a checkpointed step, and a "
+        "disposition is not one operation"
+    ),
+    "transaction-identity-is-not-an-issue-number": (
+        "what a step records is the identity appropriate to its own kind of "
+        "mutation, never an assumed issue number"
+    ),
+    "transaction-no-mutation-acquires-nothing": (
+        "A disposition that mutates no tracker acquires no transaction"
+    ),
+    "transaction-acquisition-is-create-only": (
+        "Acquisition is atomic and create-only"
+    ),
+    "transaction-record-is-repository-shared": (
+        "The record is repository-shared, not worktree-local"
+    ),
+    "transaction-record-is-what-resumes": (
+        "The record is what a fresh invocation resumes from"
+    ),
+    "transaction-states-are-durable": (
+        "intent-only — the record and its ordered plan exist and no step is "
+        "confirmed"
+    ),
+    "transaction-transitions-are-compare-and-swap": (
+        "Every transition is a compare-and-swap, and confirmations are never "
+        "erased"
+    ),
+    "transaction-preflight-reports-both": (
+        "The pre-mutation preflight reports both records"
+    ),
+    "transaction-preflight-keeps-its-caller-contract": (
+        "the same clear and pending status vocabulary, and the same "
+        "publication-tip binding the assets extract from it"
+    ),
+    "transaction-resumption-re-approves": (
+        "A resuming run re-presents and re-approves; it does not replay"
+    ),
+    "transaction-ambiguity-is-never-automatic": (
+        "An interrupted mutation is ambiguous, and ambiguity is never resolved "
+        "automatically"
+    ),
+    "transaction-clearing-is-bound-to-the-entry": (
+        "Clearing is bound to the published entry, not to reachability"
+    ),
+    "transaction-mechanism-is-one-module": (
+        "tools/tracker_transaction.py owns acquisition, every transition, and "
+        "the resolution check"
+    ),
+    "transaction-fails-closed": (
+        "There is no path on which an unreadable transaction reads as no "
+        "transaction"
+    ),
+    "transaction-failure-report-adds-tracker-state": (
+        "Tracker state is reported beside those three, never instead of them"
+    ),
 }
 
 # Issue #315: what each processing asset must state about publication. These
@@ -329,6 +398,179 @@ PUBLICATION_FORBIDDEN_COMMANDS = (
     "hash-object",
     "push origin",
 )
+
+# Issue #327: the tracker-transaction policy every processing asset states.
+# Policy and delegation again, not mechanism — acquisition, the transitions and
+# the resolution check live in tools/tracker_transaction.py and are executed by
+# tools/test_tracker_transaction.py.
+TRANSACTION_CLAUSES = {
+    "acquires-before-the-first-mutation": (
+        "it is acquired before the first one runs"
+    ),
+    "acquisition-is-create-only": (
+        "acquisition is create-only and atomic, so two runs that both saw a "
+        "clear preflight cannot both proceed"
+    ),
+    "record-is-shared-across-worktrees": (
+        "the record is shared across every linked worktree of this repository"
+    ),
+    "mechanism-is-the-module": (
+        "tools/tracker_transaction.py is the whole mechanism"
+    ),
+    "does-not-reimplement-the-transaction": (
+        "do not reimplement any part of it, and never edit a transaction "
+        "reference by hand"
+    ),
+    "transaction-fails-closed": (
+        "an unreadable transaction is never read as no transaction"
+    ),
+    "no-tracker-mutation-acquires-nothing": (
+        "a disposition that mutates no tracker acquires nothing"
+    ),
+    "steps-are-begun-then-confirmed": (
+        "begin a step before its external mutation runs and confirm it with the "
+        "exact identity that mutation returned before the next step starts"
+    ),
+    "identity-is-not-always-an-issue-number": (
+        "not every step returns an issue number and a url, and the record does "
+        "not pretend otherwise"
+    ),
+    "resumption-never-repeats-a-confirmed-step": (
+        "its confirmed steps are verified and never repeated"
+    ),
+    "resumption-re-approves-each-remaining-step": (
+        "re-present each remaining step's exact recorded target and payload and "
+        "stop for explicit approval before executing it"
+    ),
+    "resumption-rebinds-to-the-fresh-tip": (
+        "the binding this run publishes with is the publication_tip this "
+        "preflight just reported, never the recorded one"
+    ),
+    "ambiguity-is-never-resolved-automatically": (
+        "never retry it, adopt a candidate for it, advance past it, publish, or "
+        "clear the record"
+    ),
+    "ambiguity-needs-one-exact-artifact": (
+        "absent, mismatched, conflicting, or more than one plausible candidate "
+        "leaves the record unresolved and stops the run"
+    ),
+    "a-similar-title-is-not-evidence": (
+        "a similarly titled artifact is never sufficient evidence"
+    ),
+    "clearing-is-not-reachability": (
+        "reachability proves a commit reached the branch; it proves nothing "
+        "about whether that commit carried this disposition"
+    ),
+    "not-published-resolves-against-the-local-document": (
+        "run the same verification against the applied local document with "
+        "--source local"
+    ),
+    "an-unwritten-document-stays-outstanding": (
+        "when document_written is false, nothing carries the disposition "
+        "anywhere: the record stays outstanding"
+    ),
+    "recovery-state-lives-in-the-record": (
+        "the durable transaction record is where that state lives"
+    ),
+    "failure-reports-tracker-state-too": (
+        "whether acquisition succeeded, the transaction state, each planned step "
+        "and whether it is planned, ambiguous, or confirmed, every confirmed "
+        "tracker identity, and the one recovery action that is permitted next"
+    ),
+}
+
+# Requirement 16 of issue #327, and the reason it is a map rather than one
+# phrase per asset: proving that a file mentions checkpointing somewhere proves
+# nothing about the branch that skipped it. Every tracker-mutating branch gets
+# its own clause, so deleting any single branch's checkpoint fails with that
+# branch named.
+#
+# These three branches exist in all four processing assets.
+TRANSACTION_BRANCH_CLAUSES = {
+    "child-issue-creation": (
+        "begin it before that call and confirm it with the number and url it "
+        "returned"
+    ),
+    "child-issue-linking": (
+        "linking an issue that already exists mutates nothing by itself"
+    ),
+    "approved-comment": (
+        "begin it before the comment is posted and confirm it with the comment "
+        "id and url"
+    ),
+}
+
+# And these four only in the design pair, which is the only pair with an epic to
+# create, adopt, label, or keep a checklist in. `process-report` reaches an epic
+# by handing the arc to the design workflows, which mutates no tracker of its
+# own — so requiring these of it would pin a branch it does not have.
+TRANSACTION_EPIC_BRANCH_CLAUSES = {
+    "epic-label-creation": (
+        "begin it before gh label create -r \"$doc_repo\" and confirm it with "
+        "the exact label name and metadata it created"
+    ),
+    "epic-creation": (
+        "begin it before gh issue create -r \"$doc_repo\" and confirm it with "
+        "the epic number and url"
+    ),
+    "epic-adoption-edit": (
+        "confirm it with the target issue identity and the verified post-edit "
+        "fingerprint"
+    ),
+    "umbrella-epic-checklist-edit": (
+        "updating the epic's child checklist with the actual #n is a "
+        "checkpointed step"
+    ),
+}
+
+DESIGN_PROCESSING_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/process-design-doc.md",
+    "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+)
+
+# The transaction commands the assets carry. Anything beyond invoking the module
+# would be mechanism, exactly as it would be for publication.
+TRANSACTION_INVOCATIONS = (
+    '--acquire --approved --publication-tip "$PREFLIGHT_TIP" --plan -',
+    '--begin-step 0 --approved',
+    '--confirm-step 0 --identity -',
+    '--publication-pending',
+    '--resolve --source branch --branch "$DOC_BRANCH"',
+)
+
+TRANSACTION_MODULE_INVOCATION = (
+    'python3 "$DOC_ROOT/tools/tracker_transaction.py" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+)
+
+# Requirement 14: both process-design-doc variants used to direct a partially
+# failed run to write the confirmed issue number into the design document,
+# which contradicts the publication module being that document's only writer.
+# Pinned as forbidden prose so it cannot come back beside the record that
+# replaced it.
+FORBIDDEN_RECOVERY_PROSE = (
+    "record the confirmed issue number in the design document",
+    # The EPIC path's own direct write, which is why that path could never reach
+    # a resolved transaction: a document the asset pre-edited is refused by the
+    # publication module as no longer matching the tip.
+    "update only the epic ledger line to checked [#n] with",
+)
+
+# Requirement 1 of issue #327 as its amendment states it: the EPIC path takes
+# the same preflight, transaction, and publication as a child disposition, and
+# hands the document over rather than writing it.
+EPIC_PATH_CLAUSES = {
+    "routes-through-the-shared-sections": (
+        "apply this entry through section 6 and publish it through section 7"
+    ),
+    "takes-the-same-preflight-and-transaction": (
+        "it takes the same preflight, the same tracker transaction, and the "
+        "same publication"
+    ),
+    "never-writes-the-document-itself": (
+        "it never writes or stages the document itself"
+    ),
+}
 
 BOOTSTRAP_CLAUSES = {
     "novel-document-is-local": (
@@ -644,6 +886,43 @@ def missing_bootstrap_clauses(text):
     return sorted(
         key for key, clause in BOOTSTRAP_CLAUSES.items() if clause not in asset
     )
+
+
+def missing_transaction_clauses(text):
+    """The §9.6 tracker-transaction clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in TRANSACTION_CLAUSES.items() if clause not in asset
+    )
+
+
+def expected_branch_clauses(path):
+    """The tracker-mutating branches `path` actually has. The design pair adds
+    the four epic branches; `process-report` reaches an epic by handing the arc
+    to those workflows, which mutates no tracker of its own."""
+    clauses = dict(TRANSACTION_BRANCH_CLAUSES)
+    if path in DESIGN_PROCESSING_ASSETS:
+        clauses.update(TRANSACTION_EPIC_BRANCH_CLAUSES)
+    return clauses
+
+
+def missing_branch_clauses(text, path):
+    """The tracker-mutating branches of `path` that `text` no longer
+    checkpoints, by branch."""
+    asset = canonical(text)
+    return sorted(
+        key
+        for key, clause in expected_branch_clauses(path).items()
+        if clause not in asset
+    )
+
+
+def reintroduced_recovery_prose(text):
+    """Partial-failure guidance that has come back into an asset. Requirement 14
+    of issue #327 replaced it with the durable record precisely because the
+    publication module is the document's only writer."""
+    asset = canonical(text)
+    return [prose for prose in FORBIDDEN_RECOVERY_PROSE if prose in asset]
 
 
 def reintroduced_mechanism(text):
@@ -1008,7 +1287,10 @@ class OwningRepositoryTests(unittest.TestCase):
     def test_the_ten_scoped_tracker_operations_are_all_present(self):
         # Pins what the scan above actually recovers. Without this, deleting
         # every `gh issue` command would leave the check with nothing to find
-        # and still pass.
+        # and still pass. The design pair names two more than it did before
+        # issue #327: its EPIC path states the epic-creation call where the
+        # ordered steps are listed and again where that branch's checkpoint
+        # is stated, and both spellings are owner-bound.
         recovered = {}
         for path in sorted(self.declared):
             recovered[path] = len(
@@ -1018,11 +1300,11 @@ class OwningRepositoryTests(unittest.TestCase):
             recovered,
             {
                 "claude-plugin/plugins/kanban/commands/design-epic.md": 0,
-                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 2,
+                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 4,
                 "claude-plugin/plugins/kanban/commands/process-report.md": 3,
                 "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
-                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 2,
+                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 4,
                 "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 3,
             },
         )
@@ -1223,6 +1505,154 @@ class PublicationTests(unittest.TestCase):
         self.assertIn(
             "tools/test_publish_coordination_doc.py", contract_text()
         )
+
+
+class TrackerTransactionContractTests(unittest.TestCase):
+    """Issue #327. The four processing assets checkpoint every tracker mutation
+    of an approved disposition and delegate the mechanism to
+    tools/tracker_transaction.py, exactly as issue #315 made them delegate the
+    publication sequence.
+
+    The per-branch map is the load-bearing part. A check that merely found one
+    record-step phrase per file would pass an asset whose EPIC path mutated the
+    tracker with no transaction at all — which is precisely the hole this issue
+    was filed for.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_every_processing_asset_states_the_transaction_policy(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_transaction_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states the tracker-transaction policy "
+                    f"docs/document-workflow-contract.md §9.6 pins: {missing}",
+                )
+
+    def test_removing_a_transaction_clause_from_an_asset_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in TRANSACTION_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_transaction_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_every_processing_asset_checkpoints_every_branch_it_has(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_branch_clauses(self.asset_text(path), path)
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} performs these tracker-mutating branches without a "
+                    f"checkpointed step: {missing}",
+                )
+
+    def test_removing_any_single_branchs_checkpoint_is_reported(self):
+        # The delete-one-at-a-time pass: each branch is named by its own key, so
+        # a regression says which mutation stopped being checkpointed rather
+        # than that the file changed.
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in expected_branch_clauses(path).items():
+                with self.subTest(path=path, branch=key):
+                    self.assertEqual(
+                        missing_branch_clauses(asset.replace(clause, ""), path), [key]
+                    )
+
+    def test_the_epic_branches_belong_to_the_design_pair_alone(self):
+        # The other half of the map: `process-report` must not be held to
+        # branches it does not have, and the design pair must not quietly lose
+        # them by being reclassified.
+        self.assertEqual(set(DESIGN_PROCESSING_ASSETS) - set(PROCESSING_ASSETS), set())
+        self.assertEqual(
+            set(TRANSACTION_BRANCH_CLAUSES) & set(TRANSACTION_EPIC_BRANCH_CLAUSES),
+            set(),
+        )
+        for path in set(PROCESSING_ASSETS) - set(DESIGN_PROCESSING_ASSETS):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    set(expected_branch_clauses(path)),
+                    set(TRANSACTION_BRANCH_CLAUSES),
+                    path,
+                )
+
+    def test_the_design_pairs_epic_path_takes_the_shared_apply_and_publish(self):
+        # Requirement 1 and its amendment: the EPIC path mutates the tracker
+        # before the child path's preflight was ever reached, so it needs the
+        # same preflight, the same transaction, and the same publication — and
+        # it cannot write the document itself and still reach a resolved record.
+        for path in DESIGN_PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in EPIC_PATH_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertIn(clause, asset, f"{path}: {key}")
+
+    def test_every_processing_asset_invokes_the_transaction_module(self):
+        for path in PROCESSING_ASSETS:
+            body = normalized(self.asset_text(path))
+            with self.subTest(path=path):
+                self.assertIn(
+                    TRANSACTION_MODULE_INVOCATION,
+                    body,
+                    f"{path} must invoke tools/tracker_transaction.py, resolved "
+                    "from the owning repository's own write root",
+                )
+            for invocation in TRANSACTION_INVOCATIONS:
+                with self.subTest(path=path, invocation=invocation):
+                    self.assertIn(invocation, body, path)
+
+    def test_no_drafting_asset_touches_the_transaction(self):
+        # The counterpart of the publication split: the three drafting assets
+        # create no tracker items, so a transaction in one of them would be a
+        # record nothing could ever resolve.
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "tracker_transaction.py", self.asset_text(path), path
+                )
+
+    def test_no_asset_writes_recovery_state_into_the_document(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                reintroduced = reintroduced_recovery_prose(self.asset_text(path))
+                self.assertEqual(
+                    reintroduced,
+                    [],
+                    f"{path} directs a partially failed run to write recovery "
+                    "state into the document, which the publication module alone "
+                    f"writes: {reintroduced}",
+                )
+
+    def test_reintroducing_the_document_recovery_prose_is_reported(self):
+        for prose in FORBIDDEN_RECOVERY_PROSE:
+            with self.subTest(prose=prose):
+                self.assertEqual(
+                    reintroduced_recovery_prose(f"then {prose} and stop"), [prose]
+                )
+
+    def test_the_contract_states_the_transaction_policy(self):
+        document = normalized(contract_text())
+        for key in sorted(
+            key for key in CONTRACT_STATEMENTS if key.startswith("transaction-")
+        ):
+            with self.subTest(statement=key):
+                self.assertIn(CONTRACT_STATEMENTS[key], document)
+                self.assertEqual(
+                    missing_contract_statements(
+                        document.replace(CONTRACT_STATEMENTS[key], "")
+                    ),
+                    [key],
+                )
+
+    def test_the_contract_names_the_module_that_owns_the_transaction(self):
+        self.assertIn("tools/tracker_transaction.py", contract_text())
+        self.assertIn("tools/test_tracker_transaction.py", contract_text())
 
 
 class SharedStatusVocabularyTests(unittest.TestCase):
