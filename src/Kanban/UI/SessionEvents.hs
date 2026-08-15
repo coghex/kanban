@@ -43,7 +43,10 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Kanban.Domain (ItemId (..))
 import Kanban.UI.Types
+import Kanban.UI.Filter (readOnlyHistoryRefusalFor)
+import Kanban.UI.State (setNotice)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session
 import Kanban.UI.Transcript
@@ -243,7 +246,10 @@ cycleSession ops current = do
 data SessionInputHooks = SessionInputHooks
   { sessionHookSubmit :: Int -> EventM Name AppState (),
     sessionHookInterrupt :: Int -> EventM Name AppState (),
-    sessionHookChoice :: Int -> Int -> EventM Name AppState ()
+    sessionHookChoice :: Int -> Int -> EventM Name AppState (),
+    -- | The board work this kind's key names, so the shared table can ask
+    -- whether it is still live before letting a press advance it.
+    sessionHookSubject :: Int -> ItemId
   }
 
 noSessionInputHooks :: SessionInputHooks
@@ -251,7 +257,8 @@ noSessionInputHooks =
   SessionInputHooks
     { sessionHookSubmit = \_ -> pure (),
       sessionHookInterrupt = \_ -> pure (),
-      sessionHookChoice = \_ _ -> pure ()
+      sessionHookChoice = \_ _ -> pure (),
+      sessionHookSubject = IssueId
     }
 
 -- | The whole key table every session overlay answers, dispatched once.
@@ -275,7 +282,26 @@ handleSessionInputEvent ops hooks key = \case
   SessionInputScroll amount -> scrollTranscript (ops.sessionOpsTranscript key) amount
   SessionInputBackspace -> modifySession ops key removeSessionInputCharacter
   SessionInputInsert character -> modifySession ops key (insertSessionInput character)
-  SessionInputSubmit -> hooks.sessionHookSubmit key
+  SessionInputSubmit -> whenWorkIsLive (hooks.sessionHookSubmit key)
   SessionInputCycle -> cycleSession ops key
-  SessionInputInterrupt -> hooks.sessionHookInterrupt key
-  SessionInputChoice choiceIndex -> hooks.sessionHookChoice key choiceIndex
+  SessionInputInterrupt -> whenWorkIsLive (hooks.sessionHookInterrupt key)
+  SessionInputChoice choiceIndex -> whenWorkIsLive (hooks.sessionHookChoice key choiceIndex)
+  where
+    -- The launch and termination boundary for a session left open across a
+    -- refresh. A session can sit on screen for as long as the user leaves the
+    -- overlay up, so the answer it is about to resume with — or the Ctrl-C
+    -- about to stop its turn — may be aimed at work that has since closed or
+    -- merged. Asked here rather than in each kind's own hook so no overlay can
+    -- act on settled history, and asked before the hook runs so nothing is
+    -- appended to a transcript that will not be sent.
+    --
+    -- Interrupting is guarded alongside the rest because §8 refuses every
+    -- termination boundary, not only the board's kill binding. A process still
+    -- running against work that settled underneath it is stopped the way any
+    -- other stray agent process is, rather than through a card that is now
+    -- history.
+    whenWorkIsLive action = do
+      state <- get
+      case readOnlyHistoryRefusalFor state (hooks.sessionHookSubject key) of
+        Just notice -> setNotice notice
+        Nothing -> action

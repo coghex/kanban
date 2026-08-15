@@ -62,6 +62,8 @@ import Kanban.Workflow (deriveBoard )
 import Kanban.Worker
   ( discoverWorkers
     )
+import Kanban.Filter (defaultFilterCriteria)
+import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -95,6 +97,13 @@ runDashboard options config repository = do
         AppState
           { appRepository = repository,
             appBoard = startupBoard config.resolvedWorkflow now,
+            -- Set here so the record is complete, and settled by the
+            -- 'refreshVisibleBoard' below, which is what admits a seeded
+            -- history under criteria that ask for one.
+            appVisibleBoard = startupBoard config.resolvedWorkflow now,
+            -- Criteria are process-lifetime state: every launch starts at the
+            -- defaults, and nothing restores a previous session's.
+            appFilterCriteria = defaultFilterCriteria,
             appUsage = initialUsage,
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
@@ -167,7 +176,8 @@ runDashboard options config repository = do
             appOptions = options,
             appConfig = config
           }
-  (finalState, finalVty) <- customMainWithDefaultVty (Just eventChannel) application initialState
+  (finalState, finalVty) <-
+    customMainWithDefaultVty (Just eventChannel) application (refreshVisibleBoard initialState)
   case finalState.appReviewBackend of
     ReviewBackendReady client -> stopReviewClient client
     _ -> pure ()

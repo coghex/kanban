@@ -71,6 +71,7 @@ import Kanban.Worker
     launchPullRequestWorker,
     pendingTerminationDiagnosticPrefix
     )
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -136,8 +137,20 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
         when showOverlay presentTranscriptTail
         launchPullRequestFlow pullRequest.pullRequestNumber origin action brand Nothing ResumeAnswer ""
 
+-- | The one place a pull-request worker is spawned, from a fresh review,
+-- revision, rereview or repair and from a resumed answer alike. The
+-- read-only-history refusal is re-asked here for the reason it is re-asked at
+-- 'Kanban.UI.Solve.launchSolveInvocation': this is the boundary a process
+-- actually crosses.
 launchPullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
-launchPullRequestFlow number origin action _brand existingSession provenance input = do
+launchPullRequestFlow number origin action brand existingSession provenance input = do
+  refusal <- flip readOnlyHistoryRefusalFor (PullRequestId number) <$> get
+  case refusal of
+    Just notice -> setNotice notice
+    Nothing -> launchLivePullRequestFlow number origin action brand existingSession provenance input
+
+launchLivePullRequestFlow :: Int -> PullRequestOrigin -> PullRequestAction -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchLivePullRequestFlow number origin action _brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup number state.appPullRequestReviewSessions >>= (.sessionLogPath)
       parent = autoSolveWorkerParent state number
@@ -402,8 +415,20 @@ mergeItemDoneCard = mergeDoneCard . Just
 -- The run is forked, so the interface keeps redrawing while it works, and
 -- 'appDirectMergePending' is set before the fork so a second @m@ finds it and
 -- refuses rather than starting a second process against the same repository.
+-- | The selection is re-read against the newest completed generation before
+-- 'directMergeDecision' is asked at all, because a details overlay can be
+-- holding a pull request that merged since it opened. The decision refuses a
+-- settled item on its own too, so a stale card cannot reach the drainer by
+-- either door.
 mergeDoneCard :: Maybe BoardItem -> EventM Name AppState ()
 mergeDoneCard selection = do
+  state <- get
+  case selection >>= readOnlyHistoryRefusal state of
+    Just notice -> setNotice (sanitizeText ("Not merging: " <> notice))
+    Nothing -> runMergeDecision selection
+
+runMergeDecision :: Maybe BoardItem -> EventM Name AppState ()
+runMergeDecision selection = do
   state <- get
   case directMergeDecision state.appConfig.resolvedWorkflow state.appDirectMergePending state.appDrainerStatus selection of
     RefuseDirectMerge refusal -> setNotice (sanitizeText ("Not merging: " <> refusal))

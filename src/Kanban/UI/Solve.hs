@@ -48,6 +48,7 @@ import Kanban.Worker
     launchSolveWorker,
     pendingTerminationDiagnosticPrefix
     )
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -64,20 +65,31 @@ import Kanban.UI.Refresh
 openSelectedSolveChooser :: SolveWorkflow -> EventM Name AppState ()
 openSelectedSolveChooser workflow = do
   state <- get
-  case selectedReviewIssue state of
-    Nothing -> setNotice ("Select an issue before pressing " <> workflowKey workflow)
-    Just issue -> openIssueSolveChooser workflow issue
+  case (selectedReviewItem state >>= readOnlyHistoryRefusal state, selectedReviewIssue state) of
+    (Just notice, _) -> setNotice notice
+    (Nothing, Nothing) -> setNotice ("Select an issue before pressing " <> workflowKey workflow)
+    (Nothing, Just issue) -> openIssueSolveChooser workflow issue
 
+-- | Lifecycle outranks the wrong-kind refusal: a merged pull request is
+-- read-only history whether or not this key wanted a pull request at all.
 openItemSolveChooser :: SolveWorkflow -> BoardItem -> EventM Name AppState ()
-openItemSolveChooser workflow (IssueItem issue) = openIssueSolveChooser workflow issue
-openItemSolveChooser workflow (PullRequestItem _) = setNotice ("Select an issue before pressing " <> workflowKey workflow)
+openItemSolveChooser workflow item = do
+  state <- get
+  case (readOnlyHistoryRefusal state item, item) of
+    (Just notice, _) -> setNotice notice
+    (Nothing, IssueItem issue) -> openIssueSolveChooser workflow issue
+    (Nothing, PullRequestItem _) -> setNotice ("Select an issue before pressing " <> workflowKey workflow)
 
+-- | The refusal precedes reopening a reusable session, so a solve overlay left
+-- behind by work that has since closed cannot be brought back to act on it.
 openIssueSolveChooser :: SolveWorkflow -> Issue -> EventM Name AppState ()
 openIssueSolveChooser workflow issue = do
   state <- get
-  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
-    Just _ -> openExistingSolveOverlay issue.issueNumber
-    Nothing -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
+  case readOnlyHistoryRefusal state (IssueItem issue) of
+    Just notice -> setNotice notice
+    Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+      Just _ -> openExistingSolveOverlay issue.issueNumber
+      Nothing -> modify (\current -> current {appOverlay = Just (SolveChooser workflow issue), appNotice = Nothing})
 
 openExistingSolveOverlay :: Int -> EventM Name AppState ()
 openExistingSolveOverlay issueNumber = do
@@ -90,12 +102,18 @@ workflowKey :: SolveWorkflow -> Text
 workflowKey SolveOnly = actionKeyText SolveSelection
 workflowKey AutoSolve = actionKeyText AutoSolveSelection
 
+-- | The launch boundary, reached by picking an agent in the chooser. The
+-- refusal is asked again here rather than trusted from the press that opened
+-- the chooser: the issue the overlay holds was live when it opened, and a
+-- refresh in between can have settled it.
 startIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startIssueSolve issue workflow brand = do
   state <- get
-  case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
-    Just _ -> openExistingSolveOverlay issue.issueNumber
-    Nothing -> startFreshIssueSolve issue workflow brand
+  case readOnlyHistoryRefusal state (IssueItem issue) of
+    Just notice -> modify (\current -> current {appOverlay = Nothing, appNotice = Just notice})
+    Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
+      Just _ -> openExistingSolveOverlay issue.issueNumber
+      Nothing -> startFreshIssueSolve issue workflow brand
 
 startFreshIssueSolve :: Issue -> SolveWorkflow -> SolverBrand -> EventM Name AppState ()
 startFreshIssueSolve issue workflow brand = do
@@ -137,8 +155,22 @@ startFreshIssueSolve issue workflow brand = do
   presentTranscriptTail
   launchSolveInvocation issue.issueNumber workflow brand Nothing ResumeAnswer ""
 
+-- | The one place a solve worker is spawned, from a fresh start, a resumed
+-- answer, or an automated revision alike.
+--
+-- The read-only-history refusal is re-asked here as well as at each of those
+-- entry points, because this is the boundary a process actually crosses: an
+-- entry point decided minutes ago against work a refresh has since settled
+-- must not reach it.
 launchSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
 launchSolveInvocation issueNumber workflow brand existingSession provenance input = do
+  refusal <- flip readOnlyHistoryRefusalFor (IssueId issueNumber) <$> get
+  case refusal of
+    Just notice -> setNotice notice
+    Nothing -> launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input
+
+launchLiveSolveInvocation :: Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> ResumeProvenance -> Text -> EventM Name AppState ()
+launchLiveSolveInvocation issueNumber workflow brand existingSession provenance input = do
   state <- get
   let existingLogPath = Map.lookup issueNumber state.appSolveSessions >>= (.sessionLogPath)
       eventChannel = state.appEventChannel

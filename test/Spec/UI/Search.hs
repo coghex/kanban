@@ -26,6 +26,7 @@ import Kanban.Domain
 import Kanban.Drainer (DrainerController (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Workflow (entryItem)
 import Kanban.UI.Events (BoardMouseAction (..), applyCardClick, applyRunningProcessClick, boardMouseAction, boardMousePress)
+import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Keys (BindingScope (..), BoardAction (..), boardAction)
 import Kanban.UI.Search
 import Kanban.UI.Selection (openSearchResult, selectedEntry)
@@ -243,7 +244,7 @@ viewSpec = describe "one visible view" $ do
   it "would open a different card if a row were resolved against the raw column" $ do
     searching <- searchingFor "cache"
     let drawn = map entryNumber (entriesFor searching Issues)
-        raw = map entryNumber (entriesForBoard searching.appBoard Issues)
+        raw = map entryNumber (entriesForBoard searching.appVisibleBoard Issues)
     drawn `shouldBe` [Just 712, Just 901]
     take (length drawn) raw `shouldBe` [Just 711, Just 712]
     drawn `shouldSatisfy` (/= take (length drawn) raw)
@@ -251,11 +252,11 @@ viewSpec = describe "one visible view" $ do
   it "leaves every other column unfiltered while one column is searched" $ do
     filtered <- searchingFor "envelope"
     sequence_
-      [ entriesFor filtered column `shouldBe` entriesForBoard filtered.appBoard column
+      [ entriesFor filtered column `shouldBe` entriesForBoard filtered.appVisibleBoard column
       | column <- [Active, Reviewing, Done]
       ]
 
-  it "keeps the raw board reachable, so selection normalization and the autosolve loop still see it" $ do
+  it "keeps the open board reachable, so selection normalization and the autosolve loop still see it" $ do
     filtered <- searchingFor "envelope"
     length (entriesForBoard filtered.appBoard Issues) `shouldBe` 5
     length (entriesFor filtered Issues) `shouldBe` 1
@@ -393,7 +394,7 @@ transitionSpec = describe "transitions" $ do
 
   it "re-runs the query against a refreshed board and keeps a still-matching item selected" $ do
     searching <- searchingFor "cache"
-    let moved = searching {appBoard = boardWithout 712}
+    let moved = refreshVisibleBoard searching {appBoard = boardWithout 712}
         reseated = reseatSearch (selectedAnchorIn searching Issues) moved
     -- #712 left the column, so the query's remaining match takes the
     -- selection rather than whatever moved into row 0.
@@ -403,7 +404,7 @@ transitionSpec = describe "transitions" $ do
   it "keeps the searched column selected even when the item moved to another column" $ do
     searching <- searchingFor "terrain"
     identityOf searching `shouldBe` Just "#712  Migrate the terrain cache reader"
-    let relocated = searching {appBoard = boardMoving712ToActive}
+    let relocated = refreshVisibleBoard searching {appBoard = boardMoving712ToActive}
         reseated = reseatSearch (selectedAnchorIn searching Issues) relocated
     reseated.appSelectedColumn `shouldBe` Issues
     entriesFor reseated Issues `shouldBe` []
@@ -469,7 +470,7 @@ transitionSpec = describe "transitions" $ do
         searching = withQuery "persistence contract" (openSearch selected)
         -- The refresh drops the child the header row sat on; the epic and its
         -- other child remain, so the header must survive.
-        refreshed = searching {appBoard = laterGroupBoardWithout 711}
+        refreshed = refreshVisibleBoard searching {appBoard = laterGroupBoardWithout 711}
         reseated = reseatSearch (selectedAnchorIn searching Issues) refreshed
     selectedAnchorIn reseated Issues `shouldBe` Just (AnchorTracker 700)
     selectedRow reseated Issues `shouldBe` 0
@@ -907,7 +908,7 @@ mouseSpec = describe "mouse precedence" $ do
     searching <- searchingFor "cache"
     -- Row 1 of the filtered view is #901; row 1 of the raw column is #712.
     (entryNumber <$> safeIndex 1 (entriesFor searching Issues)) `shouldBe` Just (Just 901)
-    (entryNumber <$> safeIndex 1 (entriesForBoard searching.appBoard Issues)) `shouldBe` Just (Just 712)
+    (entryNumber <$> safeIndex 1 (entriesForBoard searching.appVisibleBoard Issues)) `shouldBe` Just (Just 712)
     let clicked = applyCardClick Issues 1 (applyCardClick Issues 1 searching)
     clicked.appOverlay `shouldBe` Just (DetailsOverlay (IssueItem (titledIssue 901 "Add repository snapshot cache")))
 
