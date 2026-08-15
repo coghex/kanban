@@ -9,7 +9,10 @@ reviewer routing, ...) is already covered by `approve_issues.py --self-test`.
 """
 
 import argparse
+import contextlib
+import io
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -899,6 +902,905 @@ class ConfiguredLabelsTests(unittest.TestCase):
             approve_issues.set_verdict_label(ctx, 7, "APPROVE")
         self.assertIn("custom:approve", calls[0])
         self.assertNotIn("reviewed:approve", calls[0])
+
+
+ORIGIN_BODY = "Background\n\n<!-- issue-origin:claude -->\n"
+
+
+def make_issue(number: int, *, created_at: str, body: str = ORIGIN_BODY) -> dict:
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "body": body,
+        "url": f"https://github.com/acme/example/issues/{number}",
+        "state": "OPEN",
+        "labels": [],
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "author": {"login": "coghex"},
+    }
+
+
+class QueueOpenIssuesTests(unittest.TestCase):
+    """The review queue's inventory: numeric order, and provably complete."""
+
+    def setUp(self):
+        self.ctx = make_ctx(Path("/tmp"))
+
+    def _fetch(self, issues):
+        with mock.patch.object(approve_issues, "run_json", return_value=issues) as call:
+            fetched = approve_issues.queue_open_issues(self.ctx)
+        return fetched, call.call_args.args[0]
+
+    def test_orders_by_issue_number_rather_than_creation_date(self):
+        issues = [
+            make_issue(3, created_at="2026-02-01T00:00:00Z"),
+            make_issue(12, created_at="2025-11-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        fetched, _ = self._fetch(issues)
+        self.assertEqual([item["number"] for item in fetched], [3, 7, 12])
+        # The legacy daemon's order is the opposite one, and stays that way.
+        legacy = sorted(issues, key=lambda item: (item["createdAt"], item["number"]))
+        self.assertEqual([item["number"] for item in legacy], [12, 7, 3])
+
+    def test_returns_every_entry_of_an_inventory_larger_than_the_legacy_cap(self):
+        issues = [
+            make_issue(number, created_at="2026-01-01T00:00:00Z")
+            for number in range(1, 601)
+        ]
+        fetched, args = self._fetch(issues)
+        self.assertEqual(len(fetched), 600)
+        self.assertEqual([item["number"] for item in fetched], list(range(1, 601)))
+        # The legacy 500-entry cap would have truncated this backlog.
+        self.assertIn(str(approve_issues.REVIEW_QUEUE_INVENTORY_LIMIT), args)
+        self.assertNotIn("500", args)
+
+    def test_fails_rather_than_report_a_possibly_truncated_inventory(self):
+        issues = [
+            make_issue(number, created_at="2026-01-01T00:00:00Z")
+            for number in range(1, approve_issues.REVIEW_QUEUE_INVENTORY_LIMIT + 1)
+        ]
+        with self.assertRaisesRegex(approve_issues.ApproveError, "fetch ceiling"):
+            self._fetch(issues)
+
+    def test_excludes_a_pull_request_that_reached_the_inventory(self):
+        issues = [make_issue(3, created_at="2026-01-01T00:00:00Z")]
+        pull = make_issue(4, created_at="2026-01-01T00:00:00Z")
+        pull["url"] = "https://github.com/acme/example/pull/4"
+        issues.append(pull)
+        fetched, _ = self._fetch(issues)
+        self.assertEqual([item["number"] for item in fetched], [3])
+
+    def test_rejects_a_response_that_is_not_a_list(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "Unexpected open-issue inventory"
+        ):
+            self._fetch({"issues": []})
+
+
+class ReviewQueueHarness(unittest.TestCase):
+    """Drives review_queue over a fake backlog and records an exact event list.
+
+    Follows OrderedReviewBatchTests: acquire_lock, release_lock and the locked
+    single-issue review are patched to append events, so the event list is what
+    proves ordering, the one-review-per-invocation bound, and that nothing
+    above a barrier was even read.
+
+    Only the classification inputs are faked. The scan's own control flow --
+    inventory ordering, the incident check, the INVALID refusal, the
+    approved skip, the barrier, and the candidate choice -- is the real code.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ctx = make_ctx(Path(self.tmp.name))
+        self.lock = object()
+        self.events: list[tuple] = []
+        self.inventory: list[dict] = []
+        self.incidents: list[dict] = []
+        # One state table per scan; the last one repeats. Two entries model a
+        # backlog that changes between the pre-scan and the locked re-scan.
+        self.states: list[dict[int, str]] = [{}]
+        self.review_results: dict[int, dict] = {}
+        self.review_errors: dict[int, Exception] = {}
+        self.model_calls: dict[int, bool] = {}
+        self.scan = -1
+
+    def _state(self, number: int) -> str:
+        table = self.states[min(max(self.scan, 0), len(self.states) - 1)]
+        return table.get(number, "needs")
+
+    def status(self, number, *, approved=False, barrier=False, spec_sha=None):
+        reasons = []
+        marker = None
+        if approved:
+            marker = {"verdict": "APPROVE"}
+        elif barrier:
+            marker = {"verdict": "CHANGES_REQUESTED"}
+            reasons.append(approve_issues.CURRENT_CHANGES_REASON)
+        else:
+            reasons.append(
+                "no current opposite-agent v2 review marker matches this spec"
+            )
+        return {
+            "approved": approved,
+            "issue": number,
+            "labels": [],
+            "pipeline_incident": None,
+            "reasons": reasons,
+            "review_marker": marker,
+            "spec_sha": spec_sha or f"spec-{number}",
+        }
+
+    def run_queue(self, *, contended=False, legacy_policy="dual"):
+        events = self.events
+
+        def fake_run_json(args, *, cwd):
+            if args[:3] == ["gh", "issue", "list"]:
+                self.scan += 1
+                events.append(("inventory", None))
+                return list(self.inventory)
+            raise AssertionError(f"unexpected run_json call: {args}")
+
+        def fake_get_comments(ctx, number):
+            events.append(("comments", number))
+            return [{"issue": number}]
+
+        def fake_marker(comments):
+            state = self._state(comments[0]["issue"])
+            if state == "invalid":
+                return {"verdict": "INVALID", "comment_url": "https://example/c"}
+            if state == "barrier":
+                return {"verdict": "CHANGES_REQUESTED"}
+            if state == "approved":
+                return {"verdict": "APPROVE"}
+            return None
+
+        def fake_gate(issue, comments, *, legacy_policy):
+            state = self._state(issue["number"])
+            return self.status(
+                issue["number"],
+                approved=state == "approved",
+                barrier=state == "barrier",
+            )
+
+        def acquire(*args, **kwargs):
+            events.append(("acquire", kwargs))
+            if contended:
+                raise approve_issues.LockContentionError(
+                    "Approval queue lock is held by the background approval "
+                    "daemon (PID 4321)",
+                    "the background approval daemon (PID 4321)",
+                )
+            return self.lock
+
+        def release(handle):
+            self.assertIs(handle, self.lock)
+            events.append(("release", None))
+
+        def review(ctx, number, *, legacy_policy):
+            events.append(("review", number))
+            if self.model_calls.get(number, True):
+                approve_issues.note_model_invocation()
+            if number in self.review_errors:
+                raise self.review_errors[number]
+            return self.review_results[number]
+
+        with (
+            mock.patch.object(approve_issues, "log"),
+            mock.patch.object(approve_issues, "run_json", side_effect=fake_run_json),
+            mock.patch.object(
+                approve_issues, "open_pipeline_incidents",
+                side_effect=lambda path: list(self.incidents),
+            ),
+            mock.patch.object(
+                approve_issues, "get_comments", side_effect=fake_get_comments
+            ),
+            mock.patch.object(
+                approve_issues, "latest_review_marker", side_effect=fake_marker
+            ),
+            mock.patch.object(
+                approve_issues, "current_gate_status", side_effect=fake_gate
+            ),
+            mock.patch.object(approve_issues, "acquire_lock", side_effect=acquire),
+            mock.patch.object(approve_issues, "release_lock", side_effect=release),
+            mock.patch.object(approve_issues, "ensure_verdict_labels") as ensure,
+            mock.patch.object(
+                approve_issues, "_review_one_locked", side_effect=review
+            ),
+        ):
+            result = approve_issues.review_queue(
+                self.ctx, legacy_policy=legacy_policy
+            )
+        self.ensure = ensure
+        return result
+
+    def reviewed(self):
+        return [event[1] for event in self.events if event[0] == "review"]
+
+    def read(self):
+        return [event[1] for event in self.events if event[0] == "comments"]
+
+    def kinds(self):
+        return [event[0] for event in self.events]
+
+
+class ReviewQueueOrderingTests(ReviewQueueHarness):
+    def _backlog(self, *numbers):
+        # createdAt runs opposite to issue number, so any pass that inherited
+        # the legacy (createdAt, number) order would reach them backwards.
+        self.inventory = [
+            make_issue(number, created_at=f"2026-01-{40 - number:02d}T00:00:00Z")
+            for number in numbers
+        ]
+
+    def test_reviews_the_lowest_numbered_issue_needing_review(self):
+        self._backlog(12, 3, 7)
+        self.states = [{3: "approved"}]
+        self.review_results = {7: self.status(7, approved=True)}
+        result = self.run_queue()
+        self.assertEqual(self.read(), [3, 7, 3, 7])
+        self.assertEqual(self.reviewed(), [7])
+        self.assertEqual(result["outcome"], "advanced")
+        self.assertEqual(result["issue"], 7)
+
+    def test_a_current_approval_is_skipped_with_no_model_call(self):
+        self._backlog(3, 7)
+        self.states = [{3: "approved", 7: "approved"}]
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [])
+        self.assertNotIn("acquire", self.kinds())
+        self.assertEqual(result["outcome"], "idle")
+        self.assertFalse(result["model_called"])
+
+    def test_a_pre_existing_barrier_stops_the_pass_before_any_lock(self):
+        self._backlog(3, 7, 12)
+        self.states = [{7: "barrier"}]
+        # 3 is approved-complete, 7 is the barrier, 12 needs review and must
+        # never be read.
+        self.states[0][3] = "approved"
+        result = self.run_queue()
+        self.assertEqual(self.read(), [3, 7])
+        self.assertEqual(self.events, [
+            ("inventory", None),
+            ("comments", 3),
+            ("comments", 7),
+        ])
+        self.assertEqual(result["outcome"], "changes_requested")
+        self.assertEqual(result["issue"], 7)
+        self.assertFalse(result["model_called"])
+
+    def test_a_newly_published_changes_requested_stops_the_pass(self):
+        self._backlog(7, 12)
+        self.review_results = {7: self.status(7, barrier=True)}
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [7])
+        self.assertEqual(result["outcome"], "changes_requested")
+        self.assertEqual(result["issue"], 7)
+        self.assertTrue(result["model_called"])
+        # Nothing above the new barrier was reviewed.
+        self.assertNotIn(12, self.reviewed())
+
+    def test_only_one_issue_receives_model_work_per_invocation(self):
+        self._backlog(3, 7, 12)
+        self.review_results = {3: self.status(3, approved=True)}
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [3])
+        self.assertEqual(result["outcome"], "advanced")
+
+    def test_idle_on_an_empty_queue(self):
+        self.inventory = []
+        result = self.run_queue()
+        self.assertEqual(self.events, [("inventory", None)])
+        self.assertEqual(result["outcome"], "idle")
+        self.assertIsNone(result["issue"])
+        self.assertFalse(result["model_called"])
+
+    def test_skips_an_unmarked_legacy_issue_when_legacy_review_is_disabled(self):
+        self.inventory = [
+            make_issue(3, created_at="2026-01-01T00:00:00Z", body="no marker"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        self.review_results = {7: self.status(7, approved=True)}
+        result = self.run_queue(legacy_policy="hold")
+        self.assertEqual(self.reviewed(), [7])
+        self.assertEqual(result["outcome"], "advanced")
+
+
+class ReviewQueueLockTests(ReviewQueueHarness):
+    def test_busy_on_lock_contention_performs_no_work(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        result = self.run_queue(contended=True)
+        self.assertEqual(self.reviewed(), [])
+        self.assertNotIn("release", self.kinds())
+        self.ensure.assert_not_called()
+        self.assertEqual(result["outcome"], "busy")
+        self.assertIsNone(result["issue"])
+        self.assertFalse(result["model_called"])
+        self.assertIn("the background approval daemon (PID 4321)", result["message"])
+
+    def test_the_lock_names_the_one_issue_it_was_taken_for(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        self.review_results = {7: self.status(7, approved=True)}
+        self.run_queue()
+        acquire = next(event for event in self.events if event[0] == "acquire")
+        self.assertEqual(acquire[1], {"mode": "queue", "issue_number": 7})
+        self.assertEqual(self.kinds()[-1], "release")
+
+    def test_the_lock_is_released_when_the_review_fails(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        self.review_errors = {7: approve_issues.ApproveError("model outage")}
+        with self.assertRaisesRegex(approve_issues.ApproveError, "model outage"):
+            self.run_queue()
+        self.assertEqual(self.kinds()[-1], "release")
+
+    def test_no_label_is_created_before_the_lock_is_held(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        self.review_results = {7: self.status(7, approved=True)}
+        self.run_queue()
+        kinds = self.kinds()
+        self.assertLess(kinds.index("acquire"), kinds.index("review"))
+        self.ensure.assert_called_once_with(self.ctx)
+
+    def test_the_locked_rescan_replaces_the_pre_scan_candidate(self):
+        self.inventory = [
+            make_issue(3, created_at="2026-01-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        # #3 was the pre-scan candidate; an interactive review approved it in
+        # the window before the lock, so the locked pass advances #7 instead.
+        self.states = [{}, {3: "approved"}]
+        self.review_results = {7: self.status(7, approved=True)}
+        result = self.run_queue()
+        acquire = next(event for event in self.events if event[0] == "acquire")
+        self.assertEqual(acquire[1]["issue_number"], 3)
+        self.assertEqual(self.reviewed(), [7])
+        self.assertEqual(result["issue"], 7)
+
+    def test_a_barrier_appearing_under_the_lock_stops_the_pass(self):
+        self.inventory = [
+            make_issue(3, created_at="2026-01-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        self.states = [{3: "approved"}, {3: "barrier"}]
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [])
+        self.ensure.assert_not_called()
+        self.assertEqual(self.kinds()[-1], "release")
+        self.assertEqual(result["outcome"], "changes_requested")
+        self.assertEqual(result["issue"], 3)
+
+
+class ReviewQueuePostReviewTests(ReviewQueueHarness):
+    def setUp(self):
+        super().setUp()
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+
+    def test_advanced_only_after_the_reread_confirms_a_current_approval(self):
+        self.review_results = {7: self.status(7, approved=True)}
+        result = self.run_queue()
+        self.assertEqual(result["outcome"], "advanced")
+        self.assertEqual(result["issue"], 7)
+        self.assertTrue(result["model_called"])
+
+    def test_label_only_reconciliation_advances_without_a_model_call(self):
+        # A current APPROVE marker whose approval label had drifted: the
+        # locked pass reconciles the label and re-reads, and no model runs.
+        self.model_calls = {7: False}
+        self.review_results = {7: self.status(7, approved=True)}
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [7])
+        self.assertEqual(result["outcome"], "advanced")
+        self.assertFalse(result["model_called"])
+
+    def test_retry_when_the_specification_changed_under_review(self):
+        self.review_results = {7: self.status(7, spec_sha="spec-7-edited")}
+        result = self.run_queue()
+        self.assertEqual(result["outcome"], "retry")
+        self.assertEqual(result["issue"], 7)
+        self.assertTrue(result["model_called"])
+        self.assertIn("changed while it was being reviewed", result["message"])
+
+    def test_an_indeterminate_post_review_state_is_a_failure(self):
+        # Neither approved, nor a current changes-requested marker, nor
+        # verified specification drift.
+        self.review_results = {7: self.status(7)}
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "no determinate review-queue state"
+        ):
+            self.run_queue()
+
+    def test_an_incident_opened_during_the_review_is_a_failure(self):
+        status = self.status(7, approved=True)
+        status["pipeline_incident"] = {"incident_id": "inc-1", "issue": 7}
+        self.review_results = {7: status}
+        with self.assertRaisesRegex(approve_issues.ApproveError, "halted for issue #7"):
+            self.run_queue()
+
+
+class ReviewQueueRefusalTests(ReviewQueueHarness):
+    def test_an_invalid_marker_stops_the_pass_before_any_lock(self):
+        self.inventory = [
+            make_issue(3, created_at="2026-01-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        self.states = [{3: "invalid"}]
+        with self.assertRaises(approve_issues.InvalidIssueError):
+            self.run_queue()
+        self.assertNotIn("acquire", self.kinds())
+        self.assertEqual(self.read(), [3])
+
+    def test_an_issue_scoped_incident_stops_the_pass_when_the_scan_reaches_it(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        self.incidents = [{"incident_id": "inc-9", "issue": 7}]
+        with self.assertRaisesRegex(approve_issues.ApproveError, "halted for issue #7"):
+            self.run_queue()
+        self.assertNotIn("acquire", self.kinds())
+
+    def test_a_scoped_incident_above_the_candidate_does_not_block_it(self):
+        self.inventory = [
+            make_issue(3, created_at="2026-01-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        self.incidents = [{"incident_id": "inc-9", "issue": 7}]
+        self.review_results = {3: self.status(3, approved=True)}
+        result = self.run_queue()
+        self.assertEqual(self.reviewed(), [3])
+        self.assertEqual(result["outcome"], "advanced")
+
+    def test_a_repository_wide_incident_stops_the_pass_before_the_inventory(self):
+        self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
+        self.incidents = [{"incident_id": "inc-9", "issue": None}]
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "halted for this repository"
+        ):
+            self.run_queue()
+        self.assertEqual(self.events, [])
+
+
+class ReviewQueueResultValidationTests(unittest.TestCase):
+    """The result document is refused rather than printed when malformed.
+
+    A controller reads an outcome it does not recognize as a failure as
+    progress, so every one of these is a hard refusal and a non-zero exit.
+    """
+
+    def valid(self, **overrides):
+        result = approve_issues.review_queue_result(
+            "advanced", issue=7, model_called=True, message="Issue #7 is approved."
+        )
+        result.update(overrides)
+        return result
+
+    def check(self, result, *, approved=True, model_ran=True):
+        return approve_issues.validate_review_queue_result(
+            result, approved=approved, model_ran=model_ran
+        )
+
+    def test_a_well_formed_document_survives(self):
+        self.assertEqual(self.check(self.valid())["outcome"], "advanced")
+
+    def test_the_document_carries_exactly_the_pinned_fields(self):
+        self.assertEqual(
+            set(self.valid()),
+            {"schema", "version", "outcome", "issue", "model_called", "message"},
+        )
+        self.assertEqual(self.valid()["schema"], "approve-issues-review-queue")
+        self.assertEqual(self.valid()["version"], 1)
+
+    def test_rejects_a_non_object(self):
+        with self.assertRaisesRegex(approve_issues.ApproveError, "not a JSON object"):
+            self.check(["advanced"])
+
+    def test_rejects_a_missing_field(self):
+        result = self.valid()
+        del result["message"]
+        with self.assertRaisesRegex(approve_issues.ApproveError, "missing message"):
+            self.check(result)
+
+    def test_rejects_an_additional_field(self):
+        with self.assertRaisesRegex(approve_issues.ApproveError, "unexpected stopped_at"):
+            self.check(self.valid(stopped_at=7))
+
+    def test_rejects_an_unknown_schema(self):
+        with self.assertRaisesRegex(approve_issues.ApproveError, "unknown schema"):
+            self.check(self.valid(schema="drain-prs-single-pr"))
+
+    def test_rejects_an_unknown_version(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "unknown schema version"
+        ):
+            self.check(self.valid(version=2))
+
+    def test_rejects_a_boolean_masquerading_as_version_one(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "unknown schema version"
+        ):
+            self.check(self.valid(version=True))
+
+    def test_rejects_a_stringly_typed_version(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "unknown schema version"
+        ):
+            self.check(self.valid(version="1"))
+
+    def test_rejects_a_json_float_that_compares_equal_to_version_one(self):
+        # json.loads("1.0") is a float, and 1.0 == 1 in Python, so equality
+        # alone would let a mistyped version through.
+        for version in (1.0, json.loads("1.0")):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "unknown schema version"
+                ):
+                    self.check(self.valid(version=version))
+
+    def test_rejects_an_unknown_outcome(self):
+        with self.assertRaisesRegex(approve_issues.ApproveError, "unknown outcome"):
+            self.check(self.valid(outcome="stalled"))
+
+    def test_rejects_an_empty_message(self):
+        for message in ("", "   ", None):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "no displayable message"
+                ):
+                    self.check(self.valid(message=message))
+
+    def test_rejects_a_non_boolean_model_call_claim(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "model_called is not a Boolean"
+        ):
+            self.check(self.valid(model_called=1))
+
+    def test_rejects_a_model_call_claim_that_disagrees_with_what_ran(self):
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "no reviewer model ran"
+        ):
+            self.check(self.valid(model_called=True), model_ran=False)
+        with self.assertRaisesRegex(
+            approve_issues.ApproveError, "a reviewer model ran"
+        ):
+            self.check(self.valid(model_called=False), model_ran=True)
+
+    def test_rejects_an_issue_bearing_idle_or_busy(self):
+        for outcome in ("idle", "busy"):
+            with self.subTest(outcome=outcome):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "must carry no issue number"
+                ):
+                    self.check(
+                        self.valid(outcome=outcome, issue=7, model_called=False),
+                        model_ran=False,
+                    )
+
+    def test_rejects_a_non_positive_issue_number(self):
+        for number, model_ran in ((None, True), (0, True), (-3, True), (True, True)):
+            with self.subTest(number=number):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "requires a positive issue number"
+                ):
+                    self.check(self.valid(issue=number), model_ran=model_ran)
+
+    def test_rejects_advanced_without_a_confirmed_current_approval(self):
+        for approved in (False, None):
+            with self.subTest(approved=approved):
+                with self.assertRaisesRegex(
+                    approve_issues.ApproveError, "confirmed a current approval"
+                ):
+                    self.check(self.valid(), approved=approved)
+
+    def test_changes_requested_and_retry_do_not_need_an_approval(self):
+        for outcome in ("changes_requested", "retry"):
+            with self.subTest(outcome=outcome):
+                self.check(self.valid(outcome=outcome), approved=False)
+
+
+class ReviewQueueArgumentTests(unittest.TestCase):
+    """--review-queue refuses before any GitHub call."""
+
+    def _main(self, argv, *, expect_exit=True):
+        with (
+            mock.patch("sys.argv", ["approve_issues.py", *argv]),
+            mock.patch.object(
+                approve_issues,
+                "get_repo_context",
+                side_effect=AssertionError("reached GitHub"),
+            ),
+            mock.patch.object(approve_issues, "self_test") as self_test,
+            mock.patch.object(approve_issues, "append_log_line"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            if expect_exit:
+                with self.assertRaises(SystemExit) as raised:
+                    approve_issues.main()
+                code = raised.exception.code
+            else:
+                approve_issues.main()
+                code = 0
+        self.self_test = self_test
+        self.stdout = stdout.getvalue()
+        return code, stderr.getvalue()
+
+    def test_the_flag_parses_as_its_own_mode(self):
+        with mock.patch("sys.argv", ["approve_issues.py", "--review-queue", "--json"]):
+            args = approve_issues.parse_args()
+        self.assertTrue(args.review_queue)
+        self.assertIsNone(args.check)
+        self.assertIsNone(args.review)
+        self.assertIsNone(args.rereview)
+
+    def test_it_joins_the_existing_mutual_exclusion_diagnostic(self):
+        for other in (["--check", "1"], ["--review", "1"], ["--rereview", "1"]):
+            with self.subTest(other=other):
+                code, stderr = self._main(
+                    ["--path", ".", "--review-queue", "--json", *other]
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("mutually exclusive", stderr)
+                # One diagnostic, naming all four modes.
+                self.assertEqual(stderr.count("mutually exclusive"), 1)
+                self.assertIn("--review-queue", stderr)
+
+    def test_it_requires_json(self):
+        code, stderr = self._main(["--path", ".", "--review-queue"])
+        self.assertEqual(code, 1)
+        self.assertIn("--review-queue requires --json", stderr)
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_cannot_short_circuit_the_json_requirement(self):
+        # --self-test returns early and exits zero, so reaching it first would
+        # both skip the --json refusal and print non-JSON text on the stdout
+        # a controller parses.
+        code, stderr = self._main(["--path", ".", "--review-queue", "--self-test"])
+        self.assertEqual(code, 1)
+        self.assertIn("--review-queue and --self-test are mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_cannot_replace_the_result_document(self):
+        code, stderr = self._main(
+            ["--path", ".", "--review-queue", "--json", "--self-test"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--review-queue and --self-test are mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_another_mode_combined_with_self_test_is_still_refused_first(self):
+        code, stderr = self._main(
+            ["--path", ".", "--review-queue", "--json", "--check", "1", "--self-test"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("mutually exclusive", stderr)
+        self.self_test.assert_not_called()
+        self.assertEqual(self.stdout, "")
+
+    def test_self_test_alone_is_untouched(self):
+        code, _ = self._main(["--self-test"], expect_exit=False)
+        self.assertEqual(code, 0)
+        self.self_test.assert_called_once_with()
+
+
+class ReviewQueueMainTests(unittest.TestCase):
+    """--review-queue's exit status and stdout, driven through main().
+
+    An interrupt is a failure for this mode wherever in the run it lands, so
+    each test injects one at a different seam: configuration, repository
+    resolution, the pass, and the write. Guarding a step at a time would leave
+    the next one open, which is why the refusal lives at the single handler
+    every interrupt inside the run reaches.
+    """
+
+    QUEUE_ARGV = ("--path", ".", "--review-queue", "--json")
+    DAEMON_ARGV = ("--path", ".", "--once")
+
+    def _main(
+        self,
+        *,
+        argv=QUEUE_ARGV,
+        config=None,
+        context=None,
+        queue=None,
+        emit=None,
+        daemon=None,
+    ):
+        raw = mock.MagicMock()
+        raw.remote_name = "origin"
+        resolved = mock.MagicMock()
+        resolved.workflow.approval_label = "reviewed:approve"
+        resolved.workflow.changes_requested_label = "reviewed:changes"
+        self.document = approve_issues.review_queue_result(
+            "idle", issue=None, model_called=False, message="Nothing to review."
+        )
+
+        def raise_or(injected, value):
+            if injected is not None:
+                raise injected
+            return value
+
+        with (
+            mock.patch("sys.argv", ["approve_issues.py", *argv]),
+            # Restored on exit, so main()'s global assignments cannot leak
+            # into another test.
+            mock.patch.object(approve_issues, "APPROVE_LABEL", "reviewed:approve"),
+            mock.patch.object(approve_issues, "CHANGES_LABEL", "reviewed:changes"),
+            mock.patch.object(approve_issues, "VERDICT_LABEL_SPECS", {}),
+            mock.patch.object(approve_issues, "LOG_DIR", None),
+            mock.patch.object(approve_issues, "PIPELINE_INCIDENT_DIR", Path("/tmp")),
+            mock.patch.object(approve_issues, "log"),
+            mock.patch.object(approve_issues, "append_log_line"),
+            mock.patch.object(
+                approve_issues, "resolve_effective_config_path", return_value=None
+            ),
+            mock.patch.object(
+                approve_issues.kanban_config,
+                "load_raw_config",
+                side_effect=lambda path: raise_or(config, (raw, [])),
+            ),
+            mock.patch.object(
+                approve_issues.kanban_config, "resolve_config", return_value=resolved
+            ),
+            mock.patch.object(
+                approve_issues,
+                "get_repo_context",
+                side_effect=lambda *a, **k: raise_or(context, make_ctx(Path("/tmp"))),
+            ),
+            mock.patch.object(
+                approve_issues,
+                "blocking_pipeline_incident",
+                return_value=None,
+            ),
+            mock.patch.object(
+                approve_issues,
+                "review_queue",
+                side_effect=lambda ctx, **k: raise_or(queue, self.document),
+            ),
+            mock.patch.object(
+                approve_issues,
+                "daemon_loop",
+                side_effect=lambda ctx, **k: raise_or(daemon, None),
+            ),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            with contextlib.ExitStack() as stack:
+                if emit is not None:
+                    stack.enter_context(
+                        mock.patch.object(
+                            approve_issues,
+                            "emit_review_queue_result",
+                            side_effect=emit,
+                        )
+                    )
+                try:
+                    approve_issues.main()
+                    code = 0
+                except SystemExit as exit_code:
+                    code = exit_code.code
+            return code, stdout.getvalue(), stderr.getvalue()
+
+    def assertInterrupted(self, code, stdout, stderr):
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("interrupted before it produced a complete result", stderr)
+
+    def test_a_completed_pass_prints_one_document_and_exits_zero(self):
+        code, stdout, _ = self._main()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout), self.document)
+
+    def test_an_interrupt_loading_configuration_is_a_failure(self):
+        self.assertInterrupted(*self._main(config=KeyboardInterrupt))
+
+    def test_an_interrupt_resolving_the_repository_is_a_failure(self):
+        # get_repo_context makes a GitHub call, so this is the longest
+        # pre-queue window an operator can actually interrupt.
+        self.assertInterrupted(*self._main(context=KeyboardInterrupt))
+
+    def test_an_interrupt_during_the_pass_is_a_failure(self):
+        self.assertInterrupted(*self._main(queue=KeyboardInterrupt))
+
+    def test_an_interrupt_reaching_emission_is_a_failure(self):
+        self.assertInterrupted(*self._main(emit=KeyboardInterrupt))
+
+    def test_the_daemon_keeps_its_zero_exit_on_interrupt(self):
+        # The shared handler still returns for every other mode; only
+        # --review-queue converts an interrupt into a failure.
+        code, stdout, stderr = self._main(
+            argv=self.DAEMON_ARGV, daemon=KeyboardInterrupt
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertNotIn("interrupted", stderr)
+
+    def test_the_document_reaches_stdout_in_a_single_write(self):
+        # A signal cannot land part-way through one write, so this is what
+        # makes a truncated document unreachable. print() would write the
+        # terminator separately and reopen that window.
+        writes: list[str] = []
+
+        class Recorder(io.StringIO):
+            def write(self, text):
+                writes.append(text)
+                return super().write(text)
+
+        document = approve_issues.review_queue_result(
+            "idle", issue=None, model_called=False, message="Nothing to review."
+        )
+        with mock.patch("sys.stdout", new=Recorder()):
+            approve_issues.emit_review_queue_result(document)
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0].endswith("\n"))
+        self.assertEqual(json.loads(writes[0]), document)
+
+    def test_a_failed_pass_exits_non_zero_with_no_document(self):
+        code, stdout, stderr = self._main(
+            queue=approve_issues.ApproveError("inventory fetch ceiling")
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("inventory fetch ceiling", stderr)
+
+    def test_an_invalid_issue_exits_non_zero_with_no_document(self):
+        with mock.patch.dict(os.environ, {"APPROVE_ISSUES_MANAGED": "1"}):
+            code, stdout, stderr = self._main(
+                queue=approve_issues.InvalidIssueError(7, "issue #7 remains INVALID")
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("INVALID", stderr)
+
+
+class LegacyDaemonUnchangedTests(unittest.TestCase):
+    """The review queue adds a mode; it does not retune the legacy daemon."""
+
+    def setUp(self):
+        self.ctx = make_ctx(Path("/tmp"))
+
+    def test_get_open_issues_still_orders_by_creation_date_then_number(self):
+        issues = [
+            make_issue(3, created_at="2026-02-01T00:00:00Z"),
+            make_issue(12, created_at="2025-11-01T00:00:00Z"),
+            make_issue(7, created_at="2026-01-01T00:00:00Z"),
+        ]
+        with mock.patch.object(approve_issues, "run_json", return_value=issues) as call:
+            ordered = approve_issues.get_open_issues(self.ctx)
+        self.assertEqual([item["number"] for item in ordered], [12, 7, 3])
+        self.assertIn("500", call.call_args.args[0])
+
+    def test_select_candidate_still_skips_a_changes_requested_issue(self):
+        issues = [
+            make_issue(7, created_at="2025-11-01T00:00:00Z"),
+            make_issue(3, created_at="2026-01-01T00:00:00Z"),
+        ]
+        markers = {7: {"verdict": "CHANGES_REQUESTED"}, 3: None}
+
+        def fake_record(comments):
+            marker = markers[comments[0]["issue"]]
+            return None if marker is None else ({}, marker)
+
+        with (
+            mock.patch.object(approve_issues, "log"),
+            mock.patch.object(approve_issues, "open_pipeline_incidents", return_value=[]),
+            mock.patch.object(approve_issues, "get_open_issues", return_value=issues),
+            mock.patch.object(
+                approve_issues,
+                "get_comments",
+                side_effect=lambda ctx, number: [{"issue": number}],
+            ),
+            mock.patch.object(
+                approve_issues, "latest_review_record", side_effect=fake_record
+            ),
+            mock.patch.object(
+                approve_issues, "review_record_matches", return_value=False
+            ),
+        ):
+            selected = approve_issues.select_candidate(self.ctx, legacy_policy="dual")
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[0]["number"], 3)
 
 
 if __name__ == "__main__":
