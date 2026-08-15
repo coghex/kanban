@@ -4826,8 +4826,8 @@ three independent checks, and no mutating binding was pressed.
 | 6 | Five continuous idle minutes, observed as content churn | **pass** |
 | 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
 
-The observation spanned **621.6 s (10 min 22 s)**, of which step 6's untouched
-window was **420.0 s (7 min)** — both above the ten-minute total and
+The observation spanned **623.2 s (10 min 23 s)**, of which step 6's untouched
+window was **420.1 s (7 min)** — both above the ten-minute total and
 five-minute idle floors the issue sets.
 
 #### Build provenance
@@ -4913,7 +4913,7 @@ queries status, and the record shows that querying is all that happened.
 
 #### Step 1 — launch and settle
 
-The startup refresh settled **1.00 s** after the driver's first sample, with the
+The startup refresh settled **1.31 s** after the driver's first sample, with the
 footer reading `board: updated now` and all four column headers present. The
 board loaded from the live repository rather than a fixture, so its column
 occupancy is whatever the repository held at the time: `ISSUES` 8, `ACTIVE` 1,
@@ -4951,8 +4951,19 @@ back.
 
 `G` moved the selection to the column's last item, the standalone card `#321`,
 and `g` returned it to the first, the epic `#282`. `Enter` on `#321` opened its
-details overlay — whose panel header is the card's own title rather than a
-fixed label — and `Esc` closed it. `e` on `#282` expanded the epic, turning its
+details overlay and `Esc` closed it.
+
+Detecting that overlay needs one caveat worth recording, because it is the kind
+of thing a rerun on a different board would trip over. Every overlay is drawn
+with Brick's `borderWithLabel`, which **centres** its label
+(`src/Kanban/UI/Overlay.hs:64-71`), and the details overlay labels itself with
+the selected card's own title rather than a fixed word. How much border stroke
+sits between the corner and the card number therefore depends on how long that
+title is: `#321`'s title nearly fills the panel, so it renders as `┏ #321 …`
+with no stroke at all, while a short title would render centred as
+`┏━━━━ #99 … ━━━━┓`. The driver anchors on the corner and allows any stroke
+between it and the number so both shapes are recognised, and the fixed-label
+overlays of step 3 are matched separately by their uppercase names. `e` on `#282` expanded the epic, turning its
 `▸` glyph to `▾` and revealing its children, and a second `e` collapsed it
 again.
 
@@ -5002,25 +5013,25 @@ Both refreshes then settled back to `board: updated now`.
 
 #### Step 6 — five continuous idle minutes
 
-The application was left untouched for **420.0 s**, sampled **1661 times** at a
+The application was left untouched for **420.1 s**, sampled **1660 times** at a
 **0.23 s** cadence. The cadence is deliberately non-commensurate with the
 spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
 event processing, so its live period is near one second without being exactly
 one, and a 1 Hz sample would return a near-identical glyph every time and make a
 running animation look frozen.
 
-Seven of the 1661 frames differed from their predecessor. Every one is
+Seven of the 1660 frames differed from their predecessor. Every one is
 accounted for by a change in underlying state:
 
 | At | Rows changed | What changed | Underlying state |
 | --- | --- | --- | --- |
-| 5.0 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
-| 64.2 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
-| 125.0 s | 1 | `updated 1m ago` → `2m ago` | as above |
-| 185.8 s | 1 | `updated 2m ago` → `3m ago` | as above |
-| 246.7 s | 1 | `updated 3m ago` → `4m ago` | as above |
-| 307.5 s | 1 | `updated 4m ago` → `5m ago` | as above |
-| 368.4 s | 1 | `updated 5m ago` → `6m ago` | as above |
+| 4.8 s | 3 | a Claude usage window row updated, the sidebar's `refreshing…` line cleared, and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 62.6 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
+| 123.7 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 184.3 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 245.2 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 306.1 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 366.8 s | 1 | `updated 5m ago` → `6m ago` | as above |
 
 **Observable content churn: none.** D-9 defines churn as the screen changing
 when no underlying state changed, and no such frame occurred: six changes are
@@ -5091,35 +5102,37 @@ applicable item provided the record says what could not be exercised.
 #### Conclusion
 
 **The script passes.** All seven steps completed, the observation spanned
-10 min 22 s including 7 continuous idle minutes, no interaction failed or hung,
+10 min 23 s including 7 continuous idle minutes, no interaction failed or hung,
 refresh responsiveness was demonstrated rather than asserted, the safety
 invariant was verified by identical before/after drainer queries and by a key
 log containing no mutating binding, and shutdown was clean by three independent
 checks. Nothing here blocks REL-4.
 
-Three earlier runs were discarded rather than reinterpreted, and none was
-discarded for its result — all three passed all seven steps. The run recorded
-here is the fourth:
+Four earlier runs were discarded rather than reinterpreted, and none was
+discarded for its result — all four passed all seven steps. Each was superseded
+because the *driver* had a defect worth fixing before publishing it, and since
+every fix changes the artifact this record publishes, the exercise was re-run
+rather than the source corrected after the fact. The run recorded here is the
+fifth, and the driver printed below is the one that produced its numbers rather
+than a tidied variant:
 
-1. The first spanned only 534.1 s, under the ten-minute floor, because the
-   interactive steps finished far faster than budgeted. It was repeated with a
-   longer refresh separation and a longer idle window rather than the floor
-   being reasoned away.
-2. The second, at 623.7 s, was driven by a version of the driver that reset
-   tmux on the **default** socket. That is unsafe to publish: an operator
-   reproducing this record would lose whatever unrelated tmux sessions they had
-   running.
-3. The third, at 624.8 s, moved to a private socket but used a **fixed** name
-   for it, which is only safe if nothing else already owns that name — the
-   driver neither created nor proved ownership of that server before clearing
-   it. That run also let step 7 report a pass without checking that the
-   terminal had actually been restored, which is precisely the failure the
-   shutdown requirement exists to catch.
-
-Each fix changed the artifact this record publishes, so in each case the
-exercise was re-run rather than the source corrected after the fact. The driver
-printed below is therefore the one that produced the numbers recorded above, not
-a tidied variant of it.
+1. **534.1 s** — under the ten-minute floor, because the interactive steps
+   finished far faster than budgeted. Repeated with a longer refresh separation
+   and a longer idle window rather than the floor being reasoned away.
+2. **623.7 s** — the driver reset tmux on the **default** socket. Unsafe to
+   publish: an operator reproducing this record would lose whatever unrelated
+   tmux sessions they had running.
+3. **624.8 s** — moved to a private socket, but a **fixed**-name one, which is
+   only safe if nothing else already owns that name; the driver neither created
+   nor proved ownership of that server before clearing it. That run also let
+   step 7 report a pass without checking that the terminal had actually been
+   restored, which is precisely the failure the shutdown requirement exists to
+   catch.
+4. **621.6 s** — detected the details overlay by a pattern that only matches
+   when the selected card's title is long enough to leave no border stroke
+   before its number. It worked on this board, where the title nearly fills the
+   panel, but a shorter title renders the same overlay centred and would have
+   hung step 2. Generalised to match either shape.
 
 No threshold, step, or method was altered to obtain a pass. The board's column
 occupancy did change between those runs and this one — a pull request entered
@@ -5214,7 +5227,14 @@ SOCKET = f"rel3-smoke-{os.getpid()}"
 
 FORBIDDEN = {"r", "S", "A", "m", "x", "d"}
 PANEL_RE = re.compile(r"━ ([A-Z][A-Z ]*[A-Z]) ━")
-DETAILS_RE = re.compile(r"┏ #(\d+)")
+
+# Every overlay is drawn with Brick's `borderWithLabel`, which CENTRES its label
+# (src/Kanban/UI/Overlay.hs). The details overlay labels itself with the card's
+# own title, so how much border stroke precedes the `#` depends entirely on how
+# long that title is: a title nearly as wide as the panel leaves none at all
+# (`┏ #321 …`), a short one leaves a run of them (`┏━━━━ #99 …`). Anchoring on
+# the corner and allowing any stroke between it and the number matches both.
+DETAILS_RE = re.compile(r"┏[━]*\s*#(\d+)")
 SELECTION_RE = re.compile(r"▌.*?#(\d+)")
 
 log_lines = []
