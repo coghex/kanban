@@ -20,8 +20,8 @@ concrete precondition
 
 - [x] EPIC. Make Kanban and its optional components run on Linux — [#290]
 - [x] LNX-1. Extract a service-manager backend seam in the drainer tools — [#291]
-- [ ] LNX-2. Add the systemd user-unit backend and lift the darwin gate
-- [ ] LNX-3. Make the Claude probe and process snapshot Linux-correct
+- [x] LNX-2. Add the systemd user-unit backend and lift the darwin gate — [#329]
+- [x] LNX-3. Make the Claude probe and process snapshot Linux-correct — [#331]
 - [x] LNX-4. Resolve managed install and log paths per platform — [no-issue]: split into the managed-paths arc (`docs/managed_paths_design.md`)
 - [ ] LNX-5. State the new platform support in the docs and contracts
 
@@ -258,7 +258,7 @@ Resolved by D-3.
 - **Out of scope:** any systemd code; any WF-11/12/13 behavior.
 - **Open questions:** None
 
-### LNX-2. Add the systemd user-unit backend and lift the darwin gate
+### [#329] LNX-2. Add the systemd user-unit backend and lift the darwin gate
 
 - **Outcome:** per-repo systemd user units install, start, kick, report
   status, and uninstall through the seam with the same durable records;
@@ -277,7 +277,7 @@ Resolved by D-3.
 - **Out of scope:** changing what the drainer does once running.
 - **Open questions:** None
 
-### LNX-3. Make the Claude probe and process snapshot Linux-correct
+### [#331] LNX-3. Make the Claude probe and process snapshot Linux-correct
 
 - **Outcome:** the Claude probe runs the flavor-correct `script` argv per
   platform; the `ps` parse has a procps fixture; failures name the flavor.
