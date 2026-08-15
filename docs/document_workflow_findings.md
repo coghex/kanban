@@ -44,7 +44,7 @@ concrete precondition. A cross-repository issue qualifies the marker as
 
 - [x] DW-1. Coordination-document mutations stop at the local worktree — [#237]
 - [x] DW-2. Document editing and drainer fast-forwarding share an uncoordinated checkout — [#223]
-- [ ] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [deferred]: #237 must merge first
+- [x] DW-3. Tracker mutations and ledger publication are not one recoverable transaction — [#327]
 
 ### Cursor integrity and ownership
 
@@ -159,21 +159,7 @@ The resulting contract should define which component owns the checkout at each m
 
 The appropriate mechanism—such as a shared short-lived lock, an isolated worktree, or publication that avoids the drainer checkout—requires design work. The finding establishes the missing coordination contract rather than selecting that implementation.
 
-### [deferred] DW-3. Tracker mutations and ledger publication are not one recoverable transaction
-
-> **Deferred:** #237 reserves this work by name — its Out of scope reads
-> "Making the tracker mutation, document edit, local commit, and remote
-> publication one recoverable transaction; that remains DW-3." Two of those four
-> steps do not exist until #237 lands, so Acceptance written now would target an
-> absent mechanism, and the fix edits the same §6 partial-failure paragraph
-> (`codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md:304-307`)
-> that #237 requirement 6 rewrites.
->
-> **Prior precondition met.** #229 (PR #231) landed the four workflows as §2 rows
-> with files present; the Evidence below cites the retired personal copy, and the
-> tracked equivalent is `:277-307`. Clears when #237 merges — which needs DW-10
-> filed and its ownership contract landed first, per #237's own blocking
-> prerequisite.
+### [#327] DW-3. Tracker mutations and ledger publication are not one recoverable transaction
 
 #### Observation
 
