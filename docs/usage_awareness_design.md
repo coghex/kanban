@@ -16,7 +16,7 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Make provider quota state visible, quick, and deliberately triggerable
+- [x] EPIC. Make provider quota state visible, quick, and deliberately triggerable — [#332]
 - [ ] USE-1. Add kanban --usage printing cached windows with reset countdowns
 - [ ] USE-2. Show reset countdowns and snapshot age in the usage sidebar
 - [ ] USE-3. Add a deliberate per-brand window-starting ping action
