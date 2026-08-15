@@ -80,11 +80,37 @@ INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 NTFY_URL = os.environ.get("KANBAN_ISSUE_REVIEW_NTFY_URL")
 MAX_CONSECUTIVE_QUEUE_FAILURES = 3
 PIPELINE_INCIDENT_DIR = DEFAULT_INCIDENT_DIR
+
+# The one bounded document --review-queue writes to stdout, versioned the same
+# way tools/drain_prs.py versions its single-PR result so a controller can
+# refuse a document it was not built to read.
+REVIEW_QUEUE_SCHEMA = "approve-issues-review-queue"
+REVIEW_QUEUE_SCHEMA_VERSION = 1
+REVIEW_QUEUE_RESULT_FIELDS = frozenset(
+    {"schema", "version", "outcome", "issue", "model_called", "message"}
+)
+REVIEW_QUEUE_OUTCOMES = frozenset(
+    {"idle", "advanced", "changes_requested", "retry", "busy"}
+)
+# The outcomes that name the issue they are about. `idle` and `busy` are about
+# the queue rather than any one issue and carry no number.
+REVIEW_QUEUE_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
+# A ceiling, not a page size: `gh issue list` paginates internally up to this
+# many entries. Reaching it means the inventory may be truncated, which the
+# queue treats as a failure rather than as the whole backlog -- see
+# queue_open_issues.
+REVIEW_QUEUE_INVENTORY_LIMIT = 5000
+# current_gate_status's wording for a changes-requested verdict that is bound
+# to the specification as it stands right now. Named once because both the
+# ordered batch and the review queue key their barrier on exactly this reason.
+CURRENT_CHANGES_REASON = "latest current review verdict is CHANGES_REQUESTED"
 ORIGIN_RE = re.compile(r"<!--\s*issue-origin:(claude|codex)\s*-->", re.IGNORECASE)
 REVIEW_MARKER_RE = re.compile(r"<!--\s*issue-review:v2\s+([^>]*?)\s*-->", re.IGNORECASE)
 AUTOMATED_REVIEW_COMMENT_RE = re.compile(r"<!--\s*issue-review:v2\b", re.IGNORECASE)
 LOG_DIR: Path | None = None
 LOG_TO_STDERR = False
+# Incremented by note_model_invocation at the single reviewer-model funnel.
+MODEL_INVOCATIONS = 0
 
 
 class ApproveError(RuntimeError):
@@ -95,6 +121,22 @@ class InvalidIssueError(ApproveError):
     def __init__(self, issue_number: int, message: str) -> None:
         super().__init__(message)
         self.issue_number = issue_number
+
+
+class LockContentionError(ApproveError):
+    """Another owner already holds the canonical approval lock.
+
+    A subclass rather than a new error so every existing caller keeps treating
+    contention exactly as it always has -- same base class, same message. What
+    it adds is a way to tell ordinary contention apart from a real failure
+    without matching on message text: the review queue reports it as its own
+    normal `busy` outcome so a polling controller backs off instead of
+    recording a pipeline error.
+    """
+
+    def __init__(self, message: str, owner_description: str) -> None:
+        super().__init__(message)
+        self.owner_description = owner_description
 
 
 @dataclass(frozen=True)
@@ -375,6 +417,59 @@ def issue_is_pull_request(issue: dict[str, Any]) -> bool:
     url = issue.get("url") or ""
     segments = [part for part in urllib.parse.urlsplit(url).path.split("/") if part]
     return len(segments) >= 2 and segments[-2] == "pull"
+
+
+def queue_open_issues(ctx: RepoContext) -> list[dict[str, Any]]:
+    """Every open issue in this repository, ascending by issue number.
+
+    Deliberately separate from get_open_issues, which the legacy daemon owns
+    and which keeps its `(createdAt, number)` order. The review queue needs two
+    guarantees that helper does not make.
+
+    Order is numeric, because the queue's barrier is positional: "no
+    higher-numbered issue is reviewed" is only meaningful against issue number.
+
+    The inventory must be COMPLETE. A barrier that stops the pass is only
+    trustworthy if no lower-numbered issue was silently omitted, and an empty
+    remainder is only `idle` if the fetch really saw the whole backlog. A
+    truncated page would let the queue cross an omitted barrier or report a
+    backlog as drained, so a fetch that reaches its own ceiling fails instead
+    of returning a subset. Pull requests are filtered rather than refused --
+    `gh issue list` already excludes them, and the queue must skip one that
+    slipped through rather than wedge the whole backlog behind it.
+    """
+    fields = "number,title,body,url,state,labels,createdAt,updatedAt,author"
+    issues = run_json(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            ctx.repo_slug,
+            "--state",
+            "open",
+            "--limit",
+            str(REVIEW_QUEUE_INVENTORY_LIMIT),
+            "--json",
+            fields,
+        ],
+        cwd=ctx.path,
+    )
+    if not isinstance(issues, list):
+        raise ApproveError(
+            f"Unexpected open-issue inventory response for {ctx.repo_slug}"
+        )
+    if len(issues) >= REVIEW_QUEUE_INVENTORY_LIMIT:
+        raise ApproveError(
+            f"Open-issue inventory for {ctx.repo_slug} reached the "
+            f"{REVIEW_QUEUE_INVENTORY_LIMIT}-entry fetch ceiling, so the review "
+            "queue cannot prove it saw every open issue or that no "
+            "lower-numbered barrier was omitted"
+        )
+    return sorted(
+        (issue for issue in issues if not issue_is_pull_request(issue)),
+        key=lambda item: item["number"],
+    )
 
 
 def get_issue(ctx: RepoContext, number: int) -> dict[str, Any]:
@@ -1246,7 +1341,30 @@ def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
     return validate_review(parse_claude_output(proc.stdout), reviewer)
 
 
+def note_model_invocation() -> None:
+    """Record that a reviewer model was actually launched.
+
+    The review queue's `model_called` claim is OBSERVED here rather than
+    predicted from the classification that picked the candidate. The two can
+    legitimately disagree: a candidate chosen because its approval label had
+    drifted is reconciled under the lock with no model call at all, and a
+    candidate whose specification changes between the pre-scan and the lock is
+    reclassified before anything runs. The result contract requires the claim
+    to match what ran, so it is counted at the single funnel both reviewer
+    backends pass through.
+    """
+    global MODEL_INVOCATIONS
+    MODEL_INVOCATIONS += 1
+
+
+def model_invocation_count() -> int:
+    return MODEL_INVOCATIONS
+
+
 def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
+    # Counted before the call, not after: a model that ran and then failed,
+    # timed out, or returned unparseable output still ran.
+    note_model_invocation()
     if reviewer.key == "codex":
         return invoke_codex(reviewer, prompt, cwd)
     return invoke_claude(reviewer, prompt, cwd)
@@ -1522,6 +1640,8 @@ def describe_lock_owner(owner: dict[str, Any] | None) -> str:
         return f"single-issue review #{owner['issue']}{suffix}"
     if owner.get("mode") == "rereview" and isinstance(owner.get("issue"), int):
         return f"single-issue rereview #{owner['issue']}{suffix}"
+    if owner.get("mode") == "queue" and isinstance(owner.get("issue"), int):
+        return f"the issue review queue at #{owner['issue']}{suffix}"
     issues = owner.get("issues")
     if owner.get("mode") == "batch" and isinstance(issues, list) and issues:
         rendered = ", ".join(
@@ -1550,8 +1670,9 @@ def acquire_lock(
     except BlockingIOError as exc:
         owner = read_lock_owner(handle)
         handle.close()
-        raise ApproveError(
-            f"Approval queue lock is held by {describe_lock_owner(owner)}"
+        description = describe_lock_owner(owner)
+        raise LockContentionError(
+            f"Approval queue lock is held by {description}", description
         ) from exc
     owner = {
         "pid": os.getpid(),
@@ -1720,12 +1841,9 @@ def review_batch(
                 continue
             marker = status.get("review_marker")
             verdict = marker.get("verdict") if isinstance(marker, dict) else None
-            current_changes_reason = (
-                "latest current review verdict is CHANGES_REQUESTED"
-            )
             if (
                 verdict != "CHANGES_REQUESTED"
-                or current_changes_reason not in status["reasons"]
+                or CURRENT_CHANGES_REASON not in status["reasons"]
             ):
                 reasons = "; ".join(status["reasons"])
                 raise ApproveError(
@@ -1807,6 +1925,306 @@ def rereview_one(
         )
     finally:
         release_lock(lock)
+
+
+def review_queue_scan(
+    ctx: RepoContext,
+    *,
+    legacy_policy: str,
+) -> dict[str, Any]:
+    """Walk the complete open backlog numerically and return its first decision.
+
+    Read-only by construction: it fetches and classifies, and mutates nothing.
+    That is what lets the queue run it twice -- once as a pre-scan that decides
+    whether a lock is even needed, and once again under the lock, where its
+    verdict is the one acted on.
+
+    Every issue reached is classified before the scan can move past it, so the
+    result is one of three things: the pass is idle, it stopped at an ordered
+    barrier, or it found the one issue to review. `select_candidate`'s
+    deliberate skip past a changes-requested issue is exactly what the queue
+    must NOT do -- that skip keeps the background daemon from racing an
+    interactive repair, while here the changes-requested issue IS the barrier.
+    """
+    # Read once per pass rather than per issue, as select_candidate does: a
+    # scan must not cost a directory listing per open issue.
+    incidents = open_pipeline_incidents(ctx.path)
+    for issue in queue_open_issues(ctx):
+        number = issue["number"]
+        # An issue-scoped incident stops the pass at the issue it names
+        # instead of being skipped past. Confining it any further would let
+        # the queue cross an issue whose canonical state is known to be
+        # untrustworthy; a scoped incident on a HIGHER-numbered issue still
+        # costs nothing, because the scan returns before it reaches it.
+        halted_by = blocking_incident(incidents, number)
+        if halted_by is not None:
+            raise pipeline_halt_error(halted_by)
+        comments = get_comments(ctx, number)
+        marker = latest_review_marker(comments)
+        # The LATEST marker, current fingerprint or not: an INVALID verdict
+        # says the specification cannot be reviewed at all, so editing the
+        # issue does not clear it. A newer marker of any other verdict does.
+        if marker is not None and marker.get("verdict") == "INVALID":
+            raise InvalidIssueError(
+                number,
+                f"Issue #{number} remains INVALID at {marker.get('comment_url')}",
+            )
+        status = current_gate_status(issue, comments, legacy_policy=legacy_policy)
+        # The COMPLETE gate, not the marker alone: an issue whose approval
+        # marker is current but whose approval label has drifted is not
+        # finished, and the queue reconciles it under the lock.
+        if status["approved"]:
+            continue
+        if CURRENT_CHANGES_REASON in status["reasons"]:
+            return {"decision": "barrier", "issue": number, "status": status}
+        origin = issue_origin(issue.get("body") or "")
+        if not reviewers_for_origin(origin, legacy_policy):
+            # Ungated by policy rather than pending, exactly as
+            # select_candidate treats it. Stopping here instead would wedge
+            # the whole backlog behind an issue no policy can ever approve.
+            log(
+                f"Skipping issue #{number}: legacy provenance is unmarked and "
+                "legacy review is disabled"
+            )
+            continue
+        return {"decision": "review", "issue": number, "status": status}
+    return {"decision": "idle", "issue": None, "status": None}
+
+
+def review_queue_result(
+    outcome: str,
+    *,
+    issue: int | None,
+    model_called: bool,
+    message: str,
+) -> dict[str, Any]:
+    """The one JSON document a --review-queue pass writes to stdout."""
+    return {
+        "schema": REVIEW_QUEUE_SCHEMA,
+        "version": REVIEW_QUEUE_SCHEMA_VERSION,
+        "outcome": outcome,
+        "issue": issue,
+        "model_called": model_called,
+        "message": message,
+    }
+
+
+def validate_review_queue_result(
+    result: Any,
+    *,
+    approved: bool | None,
+    model_ran: bool,
+) -> dict[str, Any]:
+    """Refuse to print a document a controller could act on wrongly.
+
+    The controller's whole policy hangs off these fields, so a malformed one is
+    worse than none at all: an outcome it cannot read as a failure is one it
+    reads as progress. Every check below is therefore a hard refusal, and a
+    refusal is a non-zero exit with nothing on stdout.
+
+    `approved` and `model_ran` are what the invocation actually observed, and
+    are passed in rather than re-derived: they are the two claims the document
+    cannot check against itself.
+    """
+    if not isinstance(result, dict):
+        raise ApproveError(f"Review-queue result is not a JSON object: {result!r}")
+    keys = set(result)
+    missing = sorted(REVIEW_QUEUE_RESULT_FIELDS - keys)
+    unexpected = sorted(keys - REVIEW_QUEUE_RESULT_FIELDS)
+    if missing or unexpected:
+        detail = "; ".join(
+            part
+            for part in (
+                f"missing {', '.join(missing)}" if missing else "",
+                f"unexpected {', '.join(unexpected)}" if unexpected else "",
+            )
+            if part
+        )
+        raise ApproveError(f"Review-queue result has the wrong fields: {detail}")
+    if result["schema"] != REVIEW_QUEUE_SCHEMA:
+        raise ApproveError(
+            f"Review-queue result has unknown schema {result['schema']!r}"
+        )
+    version = result["version"]
+    # `bool` is an `int` in Python and True == 1, so an accidental Boolean
+    # would pass a bare equality check against version 1.
+    if isinstance(version, bool) or version != REVIEW_QUEUE_SCHEMA_VERSION:
+        raise ApproveError(
+            f"Review-queue result has unknown schema version {version!r}"
+        )
+    outcome = result["outcome"]
+    if outcome not in REVIEW_QUEUE_OUTCOMES:
+        raise ApproveError(f"Review-queue result has unknown outcome {outcome!r}")
+    message = result["message"]
+    if not isinstance(message, str) or not message.strip():
+        raise ApproveError("Review-queue result carries no displayable message")
+    model_called = result["model_called"]
+    if not isinstance(model_called, bool):
+        raise ApproveError(
+            f"Review-queue result model_called is not a Boolean: {model_called!r}"
+        )
+    if model_called != model_ran:
+        raise ApproveError(
+            f"Review-queue result claims model_called={model_called} but "
+            + ("a reviewer model ran" if model_ran else "no reviewer model ran")
+        )
+    number = result["issue"]
+    if outcome in REVIEW_QUEUE_ISSUE_OUTCOMES:
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise ApproveError(
+                f"Review-queue outcome {outcome!r} requires a positive issue "
+                f"number, got {number!r}"
+            )
+    elif number is not None:
+        raise ApproveError(
+            f"Review-queue outcome {outcome!r} must carry no issue number, "
+            f"got {number!r}"
+        )
+    if outcome == "advanced" and approved is not True:
+        raise ApproveError(
+            "Review-queue 'advanced' requires a re-read that confirmed a "
+            "current approval"
+        )
+    return result
+
+
+def emit_review_queue_result(result: dict[str, Any]) -> None:
+    # stdout carries this document and nothing else; --review-queue requires
+    # --json, which is what routes every diagnostic to stderr and the log file.
+    print(json.dumps(result, sort_keys=True), flush=True)
+
+
+def review_queue_idle_result() -> dict[str, Any]:
+    return validate_review_queue_result(
+        review_queue_result(
+            "idle",
+            issue=None,
+            model_called=False,
+            message="No open issue needs canonical review.",
+        ),
+        approved=None,
+        model_ran=False,
+    )
+
+
+def review_queue_barrier_result(number: int, *, model_called: bool) -> dict[str, Any]:
+    return validate_review_queue_result(
+        review_queue_result(
+            "changes_requested",
+            issue=number,
+            model_called=model_called,
+            message=(
+                f"Issue #{number} requests changes; the queue stops at that "
+                "barrier and reviews nothing above it."
+            ),
+        ),
+        approved=None,
+        model_ran=model_called,
+    )
+
+
+def review_queue(ctx: RepoContext, *, legacy_policy: str) -> dict[str, Any]:
+    """One bounded review-queue pass, returning its validated result document.
+
+    At most one issue receives model work, and the canonical lock is held for
+    that one issue rather than for the backlog. The pre-scan exists to answer
+    "is there anything to do?" without taking the lock at all, so an idle or
+    barriered queue never contends with an interactive review.
+
+    Whatever the pre-scan found is then re-established under the lock before
+    anything is written. Between the two scans a review can publish, a label
+    can move, and a specification can be edited, so the pre-scan's candidate is
+    a hint and the locked scan's candidate is the decision.
+    """
+    # The repository-wide question first, and before the inventory: a
+    # scope-less incident halts every issue, so there is nothing to enumerate.
+    incident = blocking_pipeline_incident(ctx.path, None)
+    if incident is not None:
+        raise pipeline_halt_error(incident)
+
+    scan = review_queue_scan(ctx, legacy_policy=legacy_policy)
+    if scan["decision"] == "idle":
+        return review_queue_idle_result()
+    if scan["decision"] == "barrier":
+        return review_queue_barrier_result(scan["issue"], model_called=False)
+
+    try:
+        lock = acquire_lock(ctx, mode="queue", issue_number=scan["issue"])
+    except LockContentionError as exc:
+        # Ordinary contention, not a pipeline error: nothing was read under a
+        # stale assumption and nothing was written, so the controller should
+        # back off and ask again rather than record a failure.
+        return validate_review_queue_result(
+            review_queue_result(
+                "busy",
+                issue=None,
+                model_called=False,
+                message=(
+                    f"Approval queue lock is held by {exc.owner_description}; "
+                    "this pass did no work."
+                ),
+            ),
+            approved=None,
+            model_ran=False,
+        )
+
+    before = model_invocation_count()
+    try:
+        locked = review_queue_scan(ctx, legacy_policy=legacy_policy)
+        if locked["decision"] == "idle":
+            return review_queue_idle_result()
+        if locked["decision"] == "barrier":
+            return review_queue_barrier_result(locked["issue"], model_called=False)
+        number = locked["issue"]
+        spec_sha = locked["status"]["spec_sha"]
+        ensure_verdict_labels(ctx)
+        status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
+    finally:
+        release_lock(lock)
+
+    # Observed, never predicted: _review_one_locked reconciles a current
+    # marker's labels without calling a model at all.
+    model_ran = model_invocation_count() > before
+    if status.get("pipeline_incident") is not None:
+        raise pipeline_halt_error(status["pipeline_incident"])
+    marker = status.get("review_marker")
+    verdict = marker.get("verdict") if isinstance(marker, dict) else None
+    if status["approved"]:
+        return validate_review_queue_result(
+            review_queue_result(
+                "advanced",
+                issue=number,
+                model_called=model_ran,
+                message=f"Issue #{number} holds a current canonical approval.",
+            ),
+            approved=True,
+            model_ran=model_ran,
+        )
+    if verdict == "CHANGES_REQUESTED" and CURRENT_CHANGES_REASON in status["reasons"]:
+        return review_queue_barrier_result(number, model_called=model_ran)
+    if status["spec_sha"] != spec_sha:
+        # Verified drift, not an inference from a missing marker: the
+        # specification this pass reviewed is no longer the one on GitHub, so
+        # process_issue discarded its result rather than publishing a verdict
+        # about text nobody wrote.
+        return validate_review_queue_result(
+            review_queue_result(
+                "retry",
+                issue=number,
+                model_called=model_ran,
+                message=(
+                    f"Issue #{number} changed while it was being reviewed "
+                    f"({spec_sha[:12]} -> {status['spec_sha'][:12]}); no verdict "
+                    "was published."
+                ),
+            ),
+            approved=False,
+            model_ran=model_ran,
+        )
+    raise ApproveError(
+        f"Issue #{number} reached no determinate review-queue state: "
+        + "; ".join(status["reasons"])
+    )
 
 
 def notify_incident(ctx: RepoContext, incident: dict[str, Any]) -> None:
@@ -2318,6 +2736,15 @@ def parse_args() -> argparse.Namespace:
             "changes-requesting reviewer."
         ),
     )
+    parser.add_argument(
+        "--review-queue",
+        action="store_true",
+        help=(
+            "Advance the open backlog by one issue in ascending issue-number "
+            "order, stopping at the first changes-requested barrier, and print "
+            "one JSON result document (requires --json)."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print check output as JSON.")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks.")
     parser.add_argument(
@@ -2361,11 +2788,18 @@ def main() -> None:
         fail("approve-issues.py error: --path is required unless --self-test is used")
     selected_actions = sum(
         value is not None for value in (args.check, args.review, args.rereview)
-    )
+    ) + int(args.review_queue)
     if selected_actions > 1:
         fail(
-            "approve-issues.py error: --check, --review, and --rereview are mutually exclusive"
+            "approve-issues.py error: --check, --review, --rereview, and "
+            "--review-queue are mutually exclusive"
         )
+    # Refused here, before the repository context and therefore before any
+    # GitHub call: --review-queue's result is a document a controller parses,
+    # and LOG_TO_STDERR is bound to --json below, so this is what guarantees no
+    # log line can ever share stdout with it.
+    if args.review_queue and not args.json:
+        fail("approve-issues.py error: --review-queue requires --json")
     global LOG_DIR, LOG_TO_STDERR, PIPELINE_INCIDENT_DIR
     global APPROVE_LABEL, CHANGES_LABEL, VERDICT_LABEL_SPECS
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
@@ -2432,6 +2866,11 @@ def main() -> None:
                 print("approved" if status["approved"] else "not approved")
                 for reason in status["reasons"]:
                     print(f"- {reason}")
+            return
+        if args.review_queue:
+            emit_review_queue_result(
+                review_queue(ctx, legacy_policy=args.legacy_policy)
+            )
             return
         if args.rereview is not None:
             status = rereview_one(

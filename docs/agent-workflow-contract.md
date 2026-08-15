@@ -255,6 +255,22 @@ arithmetic, which §2.3 owns.
     to cross the affected issue. One issue retains the original result shape;
     a batch returns ordered per-issue results plus the processed, remaining,
     and stopped-at issue numbers.
+  - The backend's `--review-queue` form advances the live open backlog by one
+    issue per invocation. It is mutually exclusive with `--check`, `--review`,
+    and `--rereview`, shares their single mutual-exclusion diagnostic, and
+    **requires `--json`**; without it the command exits non-zero with a usage
+    error before any GitHub call, so no log line can share stdout with the
+    result document. It considers open issues in ascending **issue number**
+    (not the legacy daemon's `(createdAt, number)`), over an inventory it has
+    proven complete, skips an issue whose complete canonical gate is already
+    approved, and stops at the first issue holding a current
+    `CHANGES_REQUESTED` verdict — whether that verdict predated the invocation
+    or was published by it. No higher-numbered issue is read or reviewed past
+    that barrier. At most one issue receives model work per invocation, and it
+    is re-read from GitHub and reclassified afterwards rather than trusted from
+    the in-process result. Every `issue-review:v2` publication detail is the
+    single-issue path's; this mode adds ordering, bounded scope, and a result
+    document.
   - The solve readiness gate is a separate, **read-only** invocation that
     Kanban's Haskell code does not run itself. The solve prompt
     (`src/Kanban/Solve.hs:251`) explicitly forbids the spawned solving agent
@@ -267,21 +283,53 @@ arithmetic, which §2.3 owns.
     (`tools/approve_issues.py --help`: "`--check ISSUE` Check one issue
     gate.").
 - **Inputs:** issue number or explicit ordered initial-review list, review stage
-  or gate check, repository root.
+  or gate check, repository root. `--review-queue` takes no issue number: the
+  live backlog is its input.
 - **Outputs:** for `--review`/`--rereview`, an `issue-review:v2` comment
   with the verdict and updated `reviewed:*` labels; a multi-issue `--review`
   additionally returns one ordered batch JSON result; for `--check`, a
-  structured JSON approval decision with no GitHub mutation.
+  structured JSON approval decision with no GitHub mutation. `--review-queue`
+  writes exactly one bounded JSON document to stdout, versioned the way
+  `tools/drain_prs.py` versions its single-PR result, carrying exactly the
+  fields `schema` (`"approve-issues-review-queue"`), `version` (`1`),
+  `outcome`, `issue`, `model_called`, and `message` (a non-empty
+  caller-displayable string):
+
+  | `outcome` | `issue` | meaning |
+  | --- | --- | --- |
+  | `idle` | `null` | no open issue needs review and no barrier was found |
+  | `advanced` | issue number | that issue was reviewed and a re-read confirmed it holds a current approval |
+  | `changes_requested` | issue number | the pass stopped at that ordered barrier |
+  | `retry` | issue number | the specification changed during review, so no verdict was published |
+  | `busy` | `null` | the canonical lock was held by another owner; `message` names it as `describe_lock_owner` does |
+
+  All five are ordinary completions and **exit zero**; a `busy` invocation
+  makes no GitHub mutation. The document is validated before it is printed —
+  an unknown schema or version, a missing or additional field, a mistyped or
+  Boolean-as-integer value, an issue number on `idle`/`busy`, a non-positive
+  one on the other three, an `advanced` without a confirmed current approval,
+  or a `model_called` claim disagreeing with whether a model actually ran are
+  all refused rather than emitted.
 - **Failure semantics:** `"Canonical issue reviewer was not found at
   <path>. Run \`python3 tools/install_issue_review.py\` from the Kanban
   checkout to install it."` if the resolved install location is absent;
   `"python3 was not found on PATH"`; a malformed response surfaces the
-  backend's own error text.
+  backend's own error text. For `--review-queue`, an `INVALID` latest marker
+  (whatever its fingerprint), a repository-wide **or** reached issue-scoped
+  pipeline incident, a GitHub or model failure, an inventory it cannot prove
+  complete, and any indeterminate post-review state are failures: a non-zero
+  exit with diagnostics on stderr and **no** document on stdout that a caller
+  could read as `idle`, `advanced`, `retry`, or `busy`.
 - **Required authority:** the same GitHub write scope as PR review for
-  `--review`/`--rereview` (`--check` performs no GitHub write); local read
+  `--review`/`--rereview` and for the one issue `--review-queue` reviews
+  (`--check` performs no GitHub write); local read
   access to the canonical backend script.
 - **Durable state:** none Kanban owns beyond the GitHub comment/labels; the
   backend may keep additional state outside Kanban's tracking.
+  `--review-queue` takes the canonical `.git/approve_issues.lock` for the one
+  issue it reviews and releases it before the process exits on every outcome,
+  failures included. It never holds that lock across issues, and never takes
+  it at all for a pass that turns out to be idle or barriered.
 - **Mandatory/optional:** optional at the Kanban-action level (the `r` key),
   but a solve session refuses to claim an issue that has not passed the
   read-only gate check.
@@ -636,8 +684,9 @@ arithmetic, which §2.3 owns.
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
-CLI flags (`--path`, `--review ISSUE [ISSUE ...]`/`--rereview`/`--check`,
-`--legacy-policy dual`, `--json`), its JSON/comment/label output contract, its
+CLI flags (`--path`, `--review ISSUE [ISSUE ...]`/`--rereview`/`--check`/
+`--review-queue`, `--legacy-policy dual`, `--json`), its JSON/comment/label
+output contract, its
 role as the
 sole source of truth for both the interactive review workflow and the solve
 readiness gate, and — since the vendoring migration this section now
@@ -645,7 +694,8 @@ describes — its implementation and every runtime component its supported
 commands need.
 
 - **`tools/approve_issues.py`** is the tracked source of truth. A fresh
-  checkout can run its `--self-test`, `--check`, `--review`, and `--rereview`
+  checkout can run its `--self-test`, `--check`, `--review`, `--rereview`, and
+  `--review-queue`
   paths directly, with no file beneath `~/work` or
   `~/.codex/skills/approve-issues/`. Its portable runtime locations —
   `~/Library/Application Support/kanban/issue-review/` (install links),
@@ -698,7 +748,12 @@ commands need.
   issue its `issue` field names — `--check`, `--review` and `--rereview`
   for that number, and that number alone in the polling daemon's queue —
   while every other issue in the repository keeps its ordinary verdict and
-  the daemon keeps running and approving them. An incident whose scope is
+  the daemon keeps running and approving them. `--review-queue` is the one
+  exception, and deliberately so: its ordering is positional, so it fails the
+  whole pass when its ascending scan *reaches* the named issue rather than
+  skipping past an issue whose canonical state is known to be untrustworthy.
+  A scoped incident on a higher-numbered issue still costs it nothing, because
+  the scan returns a decision before it gets there. An incident whose scope is
   indeterminate — the field absent, null, or anything but a positive
   integer, which is every record written before incidents carried a scope —
   instead halts the whole repository and refuses the daemon's start, as all
