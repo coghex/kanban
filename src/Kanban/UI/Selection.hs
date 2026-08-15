@@ -160,7 +160,7 @@ toggleTrackerState column row trackerNumber state
             appSelectedRows =
               normalizeSelectedRowsAfterToggle
                 expandedTrackers
-                state.appBoard
+                state.appVisibleBoard
                 (Map.insert column row state.appSelectedRows),
             appEnsureSelectionVisible = True,
             appNotice = Just notice

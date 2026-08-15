@@ -37,6 +37,7 @@ import Kanban.CLI (BorderPolicy (..), Options (..))
 import Kanban.Card (displayWidth)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
+import Kanban.Filter (defaultFilterCriteria)
 import Kanban.Fixture (fixtureBoard, fixtureUsage)
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
 import Kanban.Settings (defaultSettings)
@@ -584,6 +585,10 @@ restingState channel refreshCoordinator historyTraversal =
   AppState
     { appRepository = Repository "/fixture/kanban" "coghex" "kanban",
       appBoard = fixtureBoard,
+      -- The default criteria admit the open board unchanged, so every golden
+      -- frame is drawn from exactly the board it always was.
+      appVisibleBoard = fixtureBoard,
+      appFilterCriteria = defaultFilterCriteria,
       appUsage = fixtureUsage,
       appUsageFreshness = Map.map (Fresh . (.usageFetchedAt)) fixtureUsage,
       appSelectedColumn = Issues,

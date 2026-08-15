@@ -12,6 +12,7 @@ module Kanban.UI.Review
     canonicalReviewActivity,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
+    deferredRevisionLaunches,
     chooseReviewOption,
     epicReviewRefusalNotice,
     resolveReviewCancelAction,
@@ -29,6 +30,7 @@ import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO)
 import Control.Monad (unless, void )
 import Control.Monad.IO.Class (liftIO)
+import Data.List (partition)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -74,6 +76,7 @@ import Kanban.Settings
   ( ChatVerbosity (..)
     )
 import Kanban.Text (sanitizeText)
+import Kanban.UI.Filter (readOnlyHistoryRefusal)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -359,7 +362,12 @@ startSelectedReview = do
   state <- get
   case selectedReviewTarget state of
     ReviewTargetNone -> setNotice ("Select an issue or PR before pressing " <> actionKeyText ReviewSelection)
-    ReviewTargetRefused refusal -> setNotice (epicReviewRefusalNotice refusal)
+    -- Lifecycle outranks the structural refusal: a closed epic's header is
+    -- read-only history first and board structure second, and saying only the
+    -- second would invite expanding it to find reviewable work that is not
+    -- there.
+    ReviewTargetRefused refusal ->
+      setNotice (fromMaybe (epicReviewRefusalNotice refusal) (selectedReadOnlyHistoryRefusal state))
     ReviewTargetItem item -> startItemReview item
 
 -- | The details overlay presses the review key against the item it already
@@ -367,14 +375,29 @@ startSelectedReview = do
 -- paths therefore meet here, and the refusal is a plain notice: the overlay
 -- stays open and 'appReviewSessions' is left exactly as it was, so no badge
 -- appears on the header and no unrelated session is disturbed.
+--
+-- The read-only-history refusal is asked first, ahead of the structural one
+-- and ahead of everything 'startIssueReview' and 'startPullRequestReview' go
+-- on to decide — the review stage, the action, and whether a session already
+-- open may be reused. An overlay or a reusable session can have been opened
+-- while the work was live, so this is also the launch boundary that stops one
+-- acting after a refresh settled the item beneath it.
 startItemReview :: BoardItem -> EventM Name AppState ()
 startItemReview item = do
   state <- get
-  case itemReviewRefusal state item of
-    Just refusal -> setNotice (epicReviewRefusalNotice refusal)
-    Nothing -> case item of
+  case (readOnlyHistoryRefusal state item, itemReviewRefusal state item) of
+    (Just notice, _) -> setNotice notice
+    (Nothing, Just refusal) -> setNotice (epicReviewRefusalNotice refusal)
+    (Nothing, Nothing) -> case item of
       IssueItem issue -> startIssueReview issue
       PullRequestItem pullRequest -> startPullRequestReview pullRequest
+
+-- | The read-only-history refusal for whatever the board has selected, which
+-- is the one the structural refusals above have to be checked against: a
+-- collapsed or childless epic never becomes a 'ReviewTargetItem', so its own
+-- lifecycle has to be asked for here.
+selectedReadOnlyHistoryRefusal :: AppState -> Maybe Text
+selectedReadOnlyHistoryRefusal state = selectedReviewItem state >>= readOnlyHistoryRefusal state
 
 -- | Why the review key did nothing, in the shape 'openSelectedDetails' set
 -- for the same headers: name the reason, and name the key that reaches the
@@ -444,8 +467,19 @@ newReviewSession issue stage priorGeneration =
         reviewSessionUndelivered = []
       }
 
+-- | The canonical review's spawn boundary. The refusal is re-asked here as
+-- well as at the press that reached it, for the reason every other launch
+-- re-asks: what a session was created for can settle before the process it
+-- needs is started.
 launchCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
 launchCanonicalIssueReview issue stage = do
+  state <- get
+  case readOnlyHistoryRefusal state (IssueItem issue) of
+    Just notice -> refuseStartedReview issue.issueNumber notice
+    Nothing -> launchLiveCanonicalIssueReview issue stage
+
+launchLiveCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
+launchLiveCanonicalIssueReview issue stage = do
   state <- get
   let channel = state.appEventChannel
       issueNumber = issue.issueNumber
@@ -529,8 +563,19 @@ startReviewBackend = do
 -- already running for an earlier issue is reused as-is, so this is the only
 -- door a Claude-origin revision passes through when the coordinator was
 -- started for a Codex-origin one.
+-- | The deferred spawn boundary. A revision session is created while the
+-- backend is still starting, so this runs an arbitrary time after the press
+-- that asked for it — long enough for a refresh to have settled the issue
+-- underneath it, which is exactly why the refusal is asked again here.
 launchIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
 launchIssueReview client issue = do
+  state <- get
+  case readOnlyHistoryRefusal state (IssueItem issue) of
+    Just notice -> refuseStartedReview issue.issueNumber notice
+    Nothing -> launchLiveIssueReview client issue
+
+launchLiveIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
+launchLiveIssueReview client issue = do
   state <- get
   let eventChannel = state.appEventChannel
       issueNumber = issue.issueNumber
@@ -549,6 +594,43 @@ launchIssueReview client issue = do
 issueRevisionPreflightAction :: Issue -> PreflightAction
 issueRevisionPreflightAction issue = ActionIssueRevision (issueOriginFromBody issue.issueBody)
 
+-- | What a just-ready review backend owes the revision sessions waiting on
+-- it: the ones whose turn it must start, and the ones it must refuse instead.
+--
+-- Both halves have to be acted on. A session created while the backend was
+-- starting has been sitting in 'ReviewStarting' ever since, so one whose issue
+-- settled in the meantime cannot simply be skipped — it would wait for a turn
+-- that must never be started. Total, and a pure function of the state, so the
+-- deferred boundary is decided in one place rather than inside the arm that
+-- reaches it.
+deferredRevisionLaunches :: AppState -> ([Issue], [(Int, Text)])
+deferredRevisionLaunches state = (map fst live, map refusal settled)
+  where
+    waiting =
+      [ (session.sessionDetail.reviewSessionIssue, readOnlyHistoryRefusal state (IssueItem session.sessionDetail.reviewSessionIssue))
+        | session <- Map.elems state.appReviewSessions,
+          session.sessionDetail.reviewSessionStage == IssueRevision,
+          session.sessionPhase == ReviewStarting,
+          session.sessionDetail.reviewSessionThreadId == Nothing
+      ]
+    (settled, live) = partition (isJust . snd) waiting
+    refusal (issue, notice) = (issue.issueNumber, fromMaybe "" notice)
+
+-- | A review session a launch boundary turned away. It never started, so it
+-- leaves 'ReviewStarting' rather than waiting for a turn that will not come,
+-- and the refusal is what its activity, transcript and the notice all say.
+refuseStartedReview :: Int -> Text -> EventM Name AppState ()
+refuseStartedReview issueNumber notice = do
+  appendToReviewSession issueNumber
+    ( \session ->
+        session
+          { sessionPhase = ReviewFailed,
+            sessionActivity = "read-only history",
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> notice <> "\n")
+          }
+    )
+  setNotice notice
+
 applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
 applyReviewBackendStarted result = case result of
   Left message -> do
@@ -563,14 +645,10 @@ applyReviewBackendStarted result = case result of
     tailDisplayedTranscript
   Right client -> do
     modify (\state -> state {appReviewBackend = ReviewBackendReady client})
-    sessions <- Map.elems . (.appReviewSessions) <$> get
-    mapM_
-      ( \session ->
-          if session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase == ReviewStarting && session.sessionDetail.reviewSessionThreadId == Nothing
-            then launchIssueReview client session.sessionDetail.reviewSessionIssue
-            else pure ()
-      )
-      sessions
+    started <- get
+    let (live, settled) = deferredRevisionLaunches started
+    mapM_ (uncurry refuseStartedReview) settled
+    mapM_ (launchIssueReview client) live
   where
     failStartingSession message session
       | session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase == ReviewStarting =

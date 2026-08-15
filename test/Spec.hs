@@ -29,6 +29,7 @@ import qualified Spec.Repository.State as RepositoryState
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.CompletedHistory as CompletedHistory
+import qualified Spec.UI.Filter as Filter
 import qualified Spec.UI.Golden as Golden
 import qualified Spec.UI.Incidents as Incidents
 import qualified Spec.UI.Keys as Keys
@@ -84,6 +85,7 @@ suite = do
   Layout.spec
   OpenData.spec
   CompletedHistory.spec
+  Filter.spec
   Golden.spec
   Incidents.spec
   Keys.spec

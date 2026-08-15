@@ -54,6 +54,7 @@ import Kanban.Drainer
     DrainerObservation (..),
     DrainerStatus (..)
     )
+import Kanban.Filter (FilterCriteria)
 import Kanban.GitHub
   ( CompletedGeneration,
     GhCleanupFailure (..),
@@ -494,7 +495,28 @@ data AppEvent
 
 data AppState = AppState
   { appRepository :: Repository,
+    -- | The board derived from the open generation alone.
+    --
+    -- This is the open-only authority, and the distinction from
+    -- 'appVisibleBoard' is load-bearing: the autosolve baseline and worker and
+    -- session item resolution read live work whatever the filter criteria say,
+    -- so a completed item can never enter a solve, review, or worker decision.
+    -- Nothing view-facing reads it — see 'Kanban.UI.Search.entriesFor'.
     appBoard :: Board,
+    -- | The board the current 'appFilterCriteria' admit, which is what every
+    -- row the user can see is an index into. Under the default criteria it is
+    -- 'appBoard' itself.
+    --
+    -- Kept beside the criteria rather than recomputed per read because a
+    -- column's entries are asked for once per card drawn, and re-deriving a
+    -- whole repository's history that often would cost more than holding it.
+    -- 'Kanban.UI.Filter.refreshVisibleBoard' is the one place it is set.
+    appVisibleBoard :: Board,
+    -- | Which cards the board is showing, as four independent facets
+    -- ("Kanban.Filter"). Process-lifetime state: it starts at
+    -- 'Kanban.Filter.defaultFilterCriteria' every launch, survives every
+    -- refresh, overlay and dismissal, and is never serialized.
+    appFilterCriteria :: FilterCriteria,
     appUsage :: Map UsageProvider UsageSnapshot,
     appUsageFreshness :: Map UsageProvider Freshness,
     appSelectedColumn :: BoardColumn,

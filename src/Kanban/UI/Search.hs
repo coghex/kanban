@@ -9,10 +9,12 @@
 -- visible view — 'entriesFor' — and drawing, keyboard selection, mouse target
 -- resolution, boundary movement, and the column heading count all read it.
 --
--- The raw board stays reachable through 'Kanban.UI.Util.entriesForBoard',
--- which is what selection normalization, the autosolve loop, and session
--- reconciliation keep using: they are about the board, not about what one
--- column is showing.
+-- The view this filters is 'Kanban.UI.Types.appVisibleBoard' — what the filter
+-- criteria admit — rather than the open board beneath it. The open board stays
+-- reachable through 'Kanban.UI.Util.entriesForBoard', which is what the
+-- autosolve loop and session and worker reconciliation keep using: they are
+-- about live work, not about what one column is showing, and no criteria may
+-- change what they decide.
 --
 -- Everything here is presentation state. 'Kanban.UI.Types.AppState' has no
 -- serialization instances, so a query can reach neither the snapshot cache nor
@@ -149,14 +151,15 @@ filterEntries query entries
               | otherwise = []
          in kept <> keep after
 
--- | What @column@ is showing: the board's entries, filtered when a live query
--- targets that column. This is the single view every consumer reads.
+-- | What @column@ is showing: the entries the filter criteria admit, narrowed
+-- again when a live query targets that column. This is the single view every
+-- consumer reads.
 entriesFor :: AppState -> BoardColumn -> [ColumnEntry]
 entriesFor state column = case activeQueryFor state column of
   Nothing -> raw
   Just query -> filterEntries query raw
   where
-    raw = entriesForBoard state.appBoard column
+    raw = entriesForBoard state.appVisibleBoard column
 
 -- | The trackers drawing and selection treat as expanded in @column@.
 --
@@ -198,14 +201,18 @@ selectableRows state column = visibleRowsIn (expandedTrackersFor state column) (
 --
 -- While a query is live the heading shows the visible result count over the
 -- column's full total. Both are exact: a board is only ever drawn from a
--- generation that followed both open connections to their end, so no total
--- here stands for more than it says (§13).
+-- generation that followed its connections to their end, so no total here
+-- stands for more than it says (§13).
+--
+-- The total is counted over what the criteria admit rather than over every
+-- card in memory, which is what keeps a loaded completed history from turning
+-- the default heading into a ratio of a history nothing is showing.
 columnCountText :: AppState -> BoardColumn -> Text
 columnCountText state column = case activeQueryFor state column of
   Nothing -> total
   Just _ -> showText (length (entriesFor state column)) <> "/" <> total
   where
-    total = showText (length (entriesForBoard state.appBoard column))
+    total = showText (length (entriesForBoard state.appVisibleBoard column))
 
 -- | What a selected row is, for the purpose of finding it again once the view
 -- has changed.

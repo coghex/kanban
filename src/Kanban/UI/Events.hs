@@ -11,8 +11,11 @@ module Kanban.UI.Events
     handleEvent,
     incidentsAction,
     killSelectionNotice,
+    mutatesSelectedWork,
+    settledSessionRefusal,
     overlayMouseAction,
     quitDecision,
+    readOnlyHistoryGate,
     stoppingGitHubWorkNotice,
   )
 where
@@ -57,6 +60,7 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
 import Kanban.UI.Keys
 import Kanban.UI.SessionCore
 import Kanban.UI.State
@@ -254,7 +258,69 @@ applyBoardMouseAction action = do
 -- selection is in front of the user, and that is exactly what the open
 -- overlay says.
 applyBoardAction :: BoardAction -> EventM Name AppState ()
-applyBoardAction = \case
+applyBoardAction action = do
+  state <- get
+  case readOnlyHistoryGate state action of
+    Just notice -> setNotice notice
+    Nothing -> dispatchBoardAction action
+
+-- | Whether the card in front of the user puts this action out of reach, and
+-- what to say instead.
+--
+-- One decision covering every mutating binding, taken before any of them
+-- resolves a target, so a completed card refuses ahead of the wrong-kind,
+-- approval, drainer-state, structural, reusable-session and process-presence
+-- errors each arm would otherwise report. Each arm re-asks it at its own
+-- launch or termination boundary, which is what a chooser, an overlay, or a
+-- session opened before a refresh needs; this is what makes the key press
+-- itself refuse.
+readOnlyHistoryGate :: AppState -> BoardAction -> Maybe Text
+readOnlyHistoryGate state action
+  | mutatesSelectedWork action = subject >>= readOnlyHistoryRefusal state
+  | otherwise = Nothing
+  where
+    -- Exactly what the arms below act on: the item a details overlay is open
+    -- for, and otherwise the board's own selection, promoted to the epic a
+    -- collapsed group draws.
+    subject = case state.appOverlay of
+      Just (DetailsOverlay item) -> Just item
+      _ -> selectedReviewItem state
+
+-- | Which bindings act on the work a card stands for rather than only reading
+-- it or moving around it.
+--
+-- Total in 'BoardAction' on purpose: a binding added to the table in
+-- "Kanban.UI.Keys" cannot reach the board without a decision here about
+-- whether settled history is allowed to reach it.
+mutatesSelectedWork :: BoardAction -> Bool
+mutatesSelectedWork = \case
+  ReviewSelection -> True
+  SolveSelection -> True
+  AutoSolveSelection -> True
+  MergeDoneCard -> True
+  KillWorking -> True
+  NextCard -> False
+  PreviousCard -> False
+  PreviousColumn -> False
+  NextColumn -> False
+  FirstItem -> False
+  LastItem -> False
+  OpenSearch -> False
+  ToggleEpic -> False
+  ShowDetails -> False
+  DismissOrClose -> False
+  ShowProcesses -> False
+  ShowIncidents -> False
+  RefreshAll -> False
+  ToggleDrainer -> False
+  ToggleSidebar -> False
+  ShowSettings -> False
+  ShowHelp -> False
+  RepaintTerminal -> False
+  QuitDashboard -> False
+
+dispatchBoardAction :: BoardAction -> EventM Name AppState ()
+dispatchBoardAction = \case
   NextCard -> moveCard 1
   PreviousCard -> moveCard (-1)
   KillWorking -> onSelection killItemWorkingProcess killSelectedWorkingProcess
@@ -505,7 +571,9 @@ applyIncidentsAction action state = case action of
        in IncidentSelection (incidentEntryRef <$> safeIndex nextIndex entries) nextIndex
 
     activate Nothing = state {appNotice = Just "No incident is selected"}
-    activate (Just reference) = case resolveIncidentActivation state.appBoard entries reference of
+    -- Resolved against the visible view: activation moves the selection to a
+    -- row, and a row is an index into what the criteria are showing.
+    activate (Just reference) = case resolveIncidentActivation state.appVisibleBoard entries reference of
       -- The row went away between the last render and this key press. The
       -- panel stays open with nothing acted on, rather than sending the user
       -- to whichever incident took its place.
@@ -621,6 +689,12 @@ killSelectedAgentSession = do
   case safeIndex resolved.processSelectionRow entries of
     Nothing -> setNotice "No agent session is selected"
     Just entry
+      -- The processes overlay reaches every kill route without going through
+      -- a card, so the read-only-history refusal has to be asked here too, and
+      -- ahead of the process-presence answer below: a session left over from
+      -- work that has since closed or merged is history, whatever it still
+      -- holds open.
+      | Just notice <- settledSessionRefusal state entry.agentSessionRef -> setNotice notice
       | not entry.agentSessionLive -> setNotice (entry.agentSessionLabel <> " has no live process to kill")
       | otherwise -> case entry.agentSessionRef of
           SolveAgent issueNumber -> killSolveAgent issueNumber
@@ -640,6 +714,17 @@ killSelectedAgentSession = do
                 )
               void . liftIO . forkIO $ terminateWorker descriptor
               setNotice ("Killing " <> entry.agentSessionLabel <> " and its process tree…")
+
+-- | Whether one agent session names work the completed generation has
+-- settled, and what to say instead of acting on it.
+--
+-- The processes overlay is keyed by session rather than by card, so this is
+-- how a row reaches the same refusal every board and overlay route already
+-- asks for. A worker whose descriptor is gone names no work at all, which is
+-- the one case there is nothing left to refuse.
+settledSessionRefusal :: AppState -> AgentSessionRef -> Maybe Text
+settledSessionRefusal state reference =
+  agentSessionSubject state reference >>= readOnlyHistoryRefusalFor state
 
 killSolveAgent :: Int -> EventM Name AppState ()
 killSolveAgent issueNumber = do
@@ -708,8 +793,19 @@ killSelectedWorkingProcess = do
 killSelectionNotice :: Text
 killSelectionNotice = "Select a working issue or PR before pressing " <> actionKeyText KillWorking
 
+-- | The termination boundary. Read-only history is refused ahead of the
+-- process-presence check, so a settled card reports what it is rather than
+-- that it has no live process — and a session left running against work that
+-- has since closed is stopped through its own row, not through history.
 killItemWorkingProcess :: BoardItem -> EventM Name AppState ()
-killItemWorkingProcess (PullRequestItem pullRequest) = do
+killItemWorkingProcess item = do
+  state <- get
+  case readOnlyHistoryRefusal state item of
+    Just notice -> setNotice notice
+    Nothing -> killLiveItemWorkingProcess item
+
+killLiveItemWorkingProcess :: BoardItem -> EventM Name AppState ()
+killLiveItemWorkingProcess (PullRequestItem pullRequest) = do
   state <- get
   let number = pullRequest.pullRequestNumber
   case (pullRequestWorkerFor state number, Map.lookup number state.appPullRequestProcesses) of
@@ -727,7 +823,7 @@ killItemWorkingProcess (PullRequestItem pullRequest) = do
         Just descriptor -> terminateWorker descriptor
         Nothing -> mapM_ killManagedProcess process
       setNotice ("Killing PR workflow #" <> showText number <> " and its process tree…")
-killItemWorkingProcess (IssueItem issue) = do
+killLiveItemWorkingProcess (IssueItem issue) = do
   state <- get
   let issueNumber = issue.issueNumber
       solveProcess = Map.lookup issueNumber state.appSolveProcesses
@@ -791,14 +887,16 @@ solveInputHooks :: SessionInputHooks
 solveInputHooks =
   noSessionInputHooks
     { sessionHookSubmit = submitSolveInput,
-      sessionHookInterrupt = interruptSolveSession
+      sessionHookInterrupt = interruptSolveSession,
+      sessionHookSubject = IssueId
     }
 
 pullRequestInputHooks :: SessionInputHooks
 pullRequestInputHooks =
   noSessionInputHooks
     { sessionHookSubmit = submitPullRequestInput,
-      sessionHookInterrupt = interruptPullRequestSession
+      sessionHookInterrupt = interruptPullRequestSession,
+      sessionHookSubject = PullRequestId
     }
 
 reviewInputHooks :: SessionInputHooks
@@ -806,7 +904,8 @@ reviewInputHooks =
   SessionInputHooks
     { sessionHookSubmit = submitReviewInput,
       sessionHookInterrupt = cancelReviewSession,
-      sessionHookChoice = chooseReviewOption
+      sessionHookChoice = chooseReviewOption,
+      sessionHookSubject = IssueId
     }
 
 -- | What a left click on a board card does. A click that only selects leaves a

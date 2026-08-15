@@ -3,11 +3,16 @@ module Kanban.Workflow
     classifyPullRequest,
     deriveBoard,
     entryItem,
+    hasChangesRequestedLabel,
     isApproved,
     isProblem,
     isStatusLabel,
+    itemCompleted,
+    itemLifecycleBadge,
     orderCardLabels,
+    pruneOffBoardChildren,
     pullRequestStatus,
+    readOnlyHistoryNotice,
     rereviewLabel,
   )
 where
@@ -15,6 +20,7 @@ where
 import Data.List (partition, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
+import Data.Ord (Down (..))
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -91,15 +97,63 @@ deriveBoard config snapshot =
         | pullRequest <- snapshot.snapshotPullRequests
       ]
     entries = trackerHeaderEntries <> issueEntries <> pullRequestEntries
-    sortedEntries column = sortColumnEntries config [entry | (entryColumn, entry) <- entries, entryColumn == column]
+    sortedEntries column =
+      sortColumnEntries config groupLifecycles [entry | (entryColumn, entry) <- entries, entryColumn == column]
+    -- Decided over every column at once, because a group's membership is not
+    -- confined to one: an epic whose implementation issue is closed in Issues
+    -- and whose pull request merged into Done is wholly completed, and asking
+    -- one column would answer for a fragment of it.
+    groupLifecycles = groupLifecyclesFor (map snd entries) trackers
+
+-- | Whether a whole tracker group is settled history, and how recently
+-- anything in it moved.
+--
+-- Both are read off the tracker issue together with every entry grouped under
+-- it, so the answer is a property of the group rather than of the column the
+-- sorter happens to be looking at.
+data GroupLifecycle = GroupLifecycle
+  { groupWhollyCompleted :: Bool,
+    groupRecency :: UTCTime
+  }
+  deriving stock (Eq, Show)
+
+groupLifecyclesFor :: [ColumnEntry] -> [Tracker] -> Map.Map Int GroupLifecycle
+groupLifecyclesFor entries trackers =
+  Map.fromList [(number, lifecycleFor number tracker) | (number, tracker) <- numberedTrackers]
+  where
+    numberedTrackers = [(tracker.trackerIssue.issueNumber, tracker) | tracker <- trackers]
+    membersByTracker =
+      Map.fromListWith
+        (<>)
+        [ (number, [entryItem entry])
+          | entry@(Tracked _ _) <- entries,
+            Just number <- [entryPrimaryTracker entry]
+        ]
+    lifecycleFor number tracker =
+      let trackerItem = IssueItem tracker.trackerIssue
+          members = Map.findWithDefault [] number membersByTracker
+       in GroupLifecycle
+            { groupWhollyCompleted = all itemCompleted (trackerItem : members),
+              groupRecency = maximum (map itemUpdatedAt (trackerItem : members))
+            }
+
+entryPrimaryTracker :: ColumnEntry -> Maybe Int
+entryPrimaryTracker (Tracked context _) = Just (primaryTrackerNumber context)
+entryPrimaryTracker (TrackerHeader tracker) = Just tracker.trackerIssue.issueNumber
+entryPrimaryTracker (Standalone _) = Nothing
 
 -- | Only an issue GitHub positively reported as having no assignees belongs in
 -- the backlog column. A truncated connection means there are assignees this
 -- board did not receive, and an 'AssigneesUnavailable' gap means it received
 -- nothing at all -- neither is evidence of nobody working on it, so both stay
 -- out of the column that presents an issue as unclaimed.
+--
+-- Lifecycle outranks that question entirely (§8). A closed issue is history,
+-- and the assignees it carried while it was worked say nothing about where it
+-- belongs now, so it lands in Issues however many of them it kept.
 issueColumn :: Issue -> BoardColumn
 issueColumn issue
+  | issue.issueState == IssueClosed = Issues
   | null issue.issueAssignees
       && issue.issueAssigneeOverflow == 0
       && AssigneesUnavailable `notElem` issue.issueDataGaps =
@@ -120,6 +174,11 @@ issueColumn issue
 -- there; adding it again here would drift the displayed progress above the
 -- number GitHub reported. Both sources still lose their non-visible children
 -- from 'trackerChildren', so neither renders a card it cannot reach.
+--
+-- Exported because the filter criteria reach the same situation by a second
+-- door: a child the criteria hide is as unreachable as one that never made
+-- the dataset, and its group's header must say so the same way rather than
+-- keeping a count of rows nothing is drawing (§12).
 pruneOffBoardChildren :: Set.Set Int -> Tracker -> Tracker
 pruneOffBoardChildren visibleChildNumbers tracker =
   tracker
@@ -150,12 +209,24 @@ uniqueMemberships =
     . Map.fromList
     . map (\membership -> ((membership.membershipTracker.trackerIssue.issueNumber, membership.membershipChild.trackerChildIssueNumber), membership))
 
-sortColumnEntries :: WorkflowConfig -> [ColumnEntry] -> [ColumnEntry]
-sortColumnEntries config entries =
+-- | §12's order for one column, over a board that may hold settled history
+-- alongside live work.
+--
+-- Completed cards are attention-neutral: they never enter the rereview tier
+-- and never carry a problem or an approval into an ordering decision, so
+-- turning history on cannot reorder the live board underneath it. What they do
+-- instead is form a block of their own at the tail of each partition —
+-- completed groups after every group holding open work, completed standalone
+-- cards after every open standalone card — ordered by what moved most
+-- recently, because recency is the only useful order over work that is done.
+sortColumnEntries :: WorkflowConfig -> Map.Map Int GroupLifecycle -> [ColumnEntry] -> [ColumnEntry]
+sortColumnEntries config groupLifecycles entries =
   concatMap snd rereviewGroups
     <> rereviewStandalone
-    <> concatMap snd ordinaryGroups
-    <> ordinaryStandalone
+    <> concatMap snd openGroups
+    <> concatMap snd completedGroups
+    <> openStandalone
+    <> completedStandalone
   where
     (tracked, trackerHeaders, standalone) = partitionEntries entries
     grouped =
@@ -167,16 +238,37 @@ sortColumnEntries config entries =
                  | tracker <- trackerHeaders
                ]
         )
-    sortedGroups =
-      sortOn (\(tracker, groupEntries) -> trackerGroupKey config tracker groupEntries)
-        [ (tracker, sortOn trackedChildKey groupEntries)
-          | (tracker, groupEntries) <- Map.elems grouped
-        ]
-    rereviewGroups = filter (uncurry groupNeedsRereview) sortedGroups
-    ordinaryGroups = filter (not . uncurry groupNeedsRereview) sortedGroups
-    rereviewStandalone = sortOn (attentionKey config . entryItem) (filter (needsRereview . entryItem) standalone)
-    ordinaryStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) standalone)
+    orderedGroups =
+      [ (tracker, sortOn trackedChildKey groupEntries)
+        | (tracker, groupEntries) <- Map.elems grouped
+      ]
+    (settledGroups, liveGroups) = partition (whollyCompletedGroup . fst) orderedGroups
+    sortedLiveGroups = sortOn (\(tracker, groupEntries) -> trackerGroupKey config tracker groupEntries) liveGroups
+    rereviewGroups = filter (uncurry groupNeedsRereview) sortedLiveGroups
+    openGroups = filter (not . uncurry groupNeedsRereview) sortedLiveGroups
+    completedGroups = sortOn (completedGroupKey . fst) settledGroups
+    (settledStandalone, liveStandalone) = partition (itemCompleted . entryItem) standalone
+    rereviewStandalone = sortOn (attentionKey config . entryItem) (filter (needsRereview . entryItem) liveStandalone)
+    openStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) liveStandalone)
+    completedStandalone = sortOn (completedCardKey . entryItem) settledStandalone
     combineGroup (_, newEntries) (tracker, existingEntries) = (tracker, newEntries <> existingEntries)
+    -- A tracker with no lifecycle recorded is one this board did not derive
+    -- the group for, which cannot happen for a group it is now sorting; it
+    -- reads as live, which is the answer that leaves the live order alone.
+    whollyCompletedGroup tracker =
+      maybe False (.groupWhollyCompleted) (Map.lookup tracker.trackerIssue.issueNumber groupLifecycles)
+    completedGroupKey tracker =
+      ( Down (maybe tracker.trackerIssue.issueUpdatedAt (.groupRecency) (Map.lookup number groupLifecycles)),
+        number
+      )
+      where
+        number = tracker.trackerIssue.issueNumber
+
+-- | Settled cards in the standalone block: newest-updated first, with the
+-- item's own identity as the tie-break so two cards updated in the same second
+-- keep a stable order across refreshes.
+completedCardKey :: BoardItem -> (Down UTCTime, ItemId)
+completedCardKey item = (Down (itemUpdatedAt item), itemId item)
 
 partitionEntries :: [ColumnEntry] -> ([ColumnEntry], [Tracker], [ColumnEntry])
 partitionEntries = foldr split ([], [], [])
@@ -200,16 +292,28 @@ trackedChildKey entry@(Tracked context _) =
 trackedChildKey (Standalone _) = (1, 1, "", 0, 0)
 trackedChildKey (TrackerHeader _) = (1, 1, "", 0, 0)
 
+-- | A group's attention state, read off the work in it that is still live.
+-- A completed member keeps whatever status treatment its labels and checks
+-- earned on its own card, but it can no longer promote the group it sits in:
+-- a closed blocked issue is not an outstanding problem.
 trackerGroupKey :: WorkflowConfig -> Tracker -> [ColumnEntry] -> (Int, Int, UTCTime, Int)
 trackerGroupKey config tracker entries =
-  ( if any (isProblem config . entryItem) entries then 0 else 1,
-    if any (isApproved config . entryItem) entries then 0 else 1,
+  ( if any (liveItem (isProblem config)) entries then 0 else 1,
+    if any (liveItem (isApproved config)) entries then 0 else 1,
     tracker.trackerIssue.issueCreatedAt,
     tracker.trackerIssue.issueNumber
   )
+  where
+    liveItem predicate entry =
+      let item = entryItem entry in not (itemCompleted item) && predicate item
 
+-- | Lifecycle outranks the approval predicate (§8). A merged pull request is
+-- the outcome Done exists to reach, and a closed one ended there too; neither
+-- is under review, so neither may appear in Reviewing whatever its draft flag
+-- or approval state says.
 classifyPullRequest :: WorkflowConfig -> PullRequest -> BoardColumn
 classifyPullRequest config pullRequest
+  | pullRequest.pullRequestState /= PullRequestOpen = Done
   | pullRequest.pullRequestDraft = Reviewing
   | approvedPullRequest config pullRequest = Done
   | otherwise = Reviewing
@@ -259,12 +363,61 @@ attentionKey config item =
     itemCreatedAt item
   )
 
+-- | The strongest attention tier, which settled work never enters. A closed
+-- issue still carrying @reviewed:revised@ has nothing left to rereview, so it
+-- promotes neither itself nor the group it belongs to (§12).
 needsRereview :: BoardItem -> Bool
+needsRereview item | itemCompleted item = False
 needsRereview (IssueItem issue) = hasLabel rereviewLabel issue.issueLabels
 needsRereview (PullRequestItem _) = False
 
 rereviewLabel :: Text
 rereviewLabel = "reviewed:revised"
+
+-- | Whether an item is settled history rather than live work: a closed issue,
+-- or a pull request that merged or was closed unmerged.
+--
+-- Read off the item's own decoded lifecycle rather than inferred from which
+-- generation delivered it, so a card is answered for the same way whether it
+-- arrived from GitHub, from the completed cache, or from an overlay that has
+-- been holding it since before it settled.
+itemCompleted :: BoardItem -> Bool
+itemCompleted (IssueItem issue) = issue.issueState == IssueClosed
+itemCompleted (PullRequestItem pullRequest) = pullRequest.pullRequestState /= PullRequestOpen
+
+-- | The lifecycle badge a settled card carries (§11), or 'Nothing' for live
+-- work, which carries none. @MERGED@ and @CLOSED@ are kept apart because they
+-- are different outcomes: one landed the work and one abandoned it.
+itemLifecycleBadge :: BoardItem -> Maybe Text
+itemLifecycleBadge (IssueItem issue) = case issue.issueState of
+  IssueOpen -> Nothing
+  IssueClosed -> Just "CLOSED"
+itemLifecycleBadge (PullRequestItem pullRequest) = case pullRequest.pullRequestState of
+  PullRequestOpen -> Nothing
+  PullRequestClosed -> Just "CLOSED"
+  PullRequestMerged -> Just "MERGED"
+
+-- | Why a mutating action declined a settled card. It names the item and the
+-- outcome that settled it, so the refusal reads as a fact about the card
+-- rather than as a failure of the key that was pressed.
+readOnlyHistoryNotice :: BoardItem -> Text
+readOnlyHistoryNotice item = subject <> " is " <> outcome <> "; completed history is read-only"
+  where
+    subject = case item of
+      IssueItem issue -> "Issue #" <> showNumber issue.issueNumber
+      PullRequestItem pullRequest -> "PR #" <> showNumber pullRequest.pullRequestNumber
+    outcome = case item of
+      IssueItem _ -> "closed"
+      PullRequestItem pullRequest -> case pullRequest.pullRequestState of
+        PullRequestMerged -> "merged"
+        _ -> "closed"
+    showNumber = Text.pack . show
+
+-- | Whether an item carries the configured changes-requested label, which is
+-- the strongest workflow category a filter can select on and is therefore
+-- asked separately from the broader 'isProblem'.
+hasChangesRequestedLabel :: WorkflowConfig -> BoardItem -> Bool
+hasChangesRequestedLabel config item = hasLabel config.changesRequestedLabel (itemLabels item)
 
 -- | Whether a label name carries workflow status: the approval,
 -- changes-requested, blocked, and rereview names 'isApproved', 'isProblem',

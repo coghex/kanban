@@ -42,6 +42,7 @@ import Kanban.Solve
     )
 import Kanban.Text (sanitizeText)
 import Kanban.Workflow (deriveBoard )
+import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.SessionCore
@@ -110,23 +111,35 @@ applyCurrentBoardRefresh outcome = do
         }
     BoardRefreshCompleted (Right githubResult) ->
       let snapshot = githubResult.githubSnapshot
-          refreshedBoard = deriveBoard state.appConfig.resolvedWorkflow snapshot
-          (selectedColumn, selectedRows) = preserveSelection state refreshedBoard
-          (refreshedOverlay, overlayNotice) = refreshOverlay refreshedBoard state.appOverlay
+          -- The datasets first, then the view they admit: the completed
+          -- history is reconciled against this generation before the criteria
+          -- are applied, so a reopened item is never briefly admitted as
+          -- history and as live work at once.
+          --
+          -- This generation published second, so it answers for every item it
+          -- lists: one GitHub has just reported open leaves the completed set
+          -- rather than standing in both. The open board is derived from the
+          -- snapshot untouched, which is what keeps a reopened item from
+          -- waiting for the next completed generation before it can appear as
+          -- open work.
+          refreshed =
+            refreshVisibleBoard
+              state
+                { appBoard = deriveBoard state.appConfig.resolvedWorkflow snapshot,
+                  appOpenSnapshot = Just snapshot,
+                  appCompletedHistory = historyWithoutOpen snapshot <$> state.appCompletedHistory
+                }
+          -- Both are decided against what the criteria admit, because both
+          -- resolve a row the user is looking at: the selection is an index
+          -- into the visible view, and a details overlay held open on a card
+          -- that view still shows must not be closed as absent.
+          (selectedColumn, selectedRows) = preserveSelection state refreshed.appVisibleBoard
+          (refreshedOverlay, overlayNotice) = refreshOverlay refreshed.appVisibleBoard state.appOverlay
           refreshedReviewSessions = reconcileReviewSessions state.appConfig.resolvedWorkflow snapshot.snapshotIssues state.appReviewSessions
           refreshedPullRequestSessions = reconcilePullRequestSessions snapshot.snapshotPullRequests state.appPullRequestReviewSessions
           successNotice = refreshSuccessNotice snapshot githubResult.githubWarnings
-       in state
-            { appBoard = refreshedBoard,
-              appOpenSnapshot = Just snapshot,
-              -- This generation published second, so it answers for every item
-              -- it lists: one GitHub has just reported open leaves the
-              -- completed set rather than standing in both. The board itself is
-              -- derived from the snapshot untouched, which is what keeps a
-              -- reopened item from waiting for the next completed generation
-              -- before it can appear as open work.
-              appCompletedHistory = historyWithoutOpen snapshot <$> state.appCompletedHistory,
-              appSelectedColumn = selectedColumn,
+       in refreshed
+            { appSelectedColumn = selectedColumn,
               appSelectedRows = selectedRows,
               appOverlay = refreshedOverlay,
               appReviewSessions = refreshedReviewSessions,
@@ -202,19 +215,23 @@ publishCompletedHistory history = do
     if cacheEnabled state.appOptions state.appConfig
       then either Just (const Nothing) <$> liftIO (writeCompletedCache state.appRepository history)
       else pure Nothing
-  modify
-    ( \current ->
-        current
+  publishBoardData $ \current ->
+    -- This generation published second, so an open card it proves settled is
+    -- stale and leaves the open set (§15). With no overlap the reconciled
+    -- snapshot is the one already stored and the open board is never
+    -- re-derived at all.
+    let reconciledSnapshot = openWithoutHistory history <$> current.appOpenSnapshot
+     in current
           { appCompletedHistory = Just history,
             appCompletedFailure = Nothing,
-            appCompletedProgress = completedHistoryProgress history
+            appCompletedProgress = completedHistoryProgress history,
+            appOpenSnapshot = reconciledSnapshot,
+            appBoard = case reconciledSnapshot of
+              Just reconciled
+                | Just reconciled /= current.appOpenSnapshot ->
+                    deriveBoard current.appConfig.resolvedWorkflow reconciled
+              _ -> current.appBoard
           }
-    )
-  -- This generation published second, so an open card it proves settled is
-  -- stale and leaves the open set (requirement 8). Nothing else about the
-  -- board moves: with no overlap the reconciled snapshot is the one already
-  -- stored, and the columns are never re-derived at all.
-  mapM_ reconcileOpenBoard (openWithoutHistory history <$> state.appOpenSnapshot)
   mapM_ (setNotice . ("Completed history cached with a warning · " <>)) cacheWarning
 
 -- | What a published generation reports as its progress: complete, with the
@@ -231,26 +248,27 @@ completedHistoryProgress history =
     issues = length history.historyIssues
     pullRequests = length history.historyPullRequests
 
--- | Re-derives the open board from a snapshot the completed generation
--- corrected, and only when it actually corrected one.
+-- | Applies a change to the board's datasets, recomputes the view the filter
+-- criteria admit, and re-seats everything that indexes that view — but only
+-- when the view actually moved.
 --
--- The guard is what keeps requirement 10 true. Deriving unconditionally would
--- produce the identical board in the overwhelmingly common case, but it would
--- also re-run selection, search, and overlay reconciliation on every completed
--- publication — behavior this slice is supposed to leave exactly alone.
-reconcileOpenBoard :: RepoSnapshot -> EventM Name AppState ()
-reconcileOpenBoard reconciled = do
+-- The guard is what keeps a completed publication invisible under the default
+-- criteria. Reconciling unconditionally would reach the identical answer in
+-- the overwhelmingly common case, and would also re-run selection, search, and
+-- overlay reconciliation every time a background generation published —
+-- behavior a hidden history must not have.
+publishBoardData :: (AppState -> AppState) -> EventM Name AppState ()
+publishBoardData change = do
   before <- get
-  when (before.appOpenSnapshot /= Just reconciled) $ do
+  put (refreshVisibleBoard (change before))
+  after <- get
+  when (after.appVisibleBoard /= before.appVisibleBoard) $ do
     let searchAnchor = ((.searchColumn) <$> before.appSearch) >>= selectedAnchorIn before
     modify $ \state ->
-      let reconciledBoard = deriveBoard state.appConfig.resolvedWorkflow reconciled
-          (selectedColumn, selectedRows) = preserveSelection state reconciledBoard
-          (reconciledOverlay, overlayNotice) = refreshOverlay reconciledBoard state.appOverlay
+      let (selectedColumn, selectedRows) = preserveSelection before state.appVisibleBoard
+          (reconciledOverlay, overlayNotice) = refreshOverlay state.appVisibleBoard state.appOverlay
        in state
-            { appBoard = reconciledBoard,
-              appOpenSnapshot = Just reconciled,
-              appSelectedColumn = selectedColumn,
+            { appSelectedColumn = selectedColumn,
               appSelectedRows = selectedRows,
               appOverlay = reconciledOverlay,
               -- Only when an overlay actually closed under the user. Nothing
