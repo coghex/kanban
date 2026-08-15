@@ -4826,7 +4826,7 @@ three independent checks, and no mutating binding was pressed.
 | 6 | Five continuous idle minutes, observed as content churn | **pass** |
 | 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
 
-The observation spanned **622.0 s (10 min 22 s)**, of which step 6's untouched
+The observation spanned **622.3 s (10 min 22 s)**, of which step 6's untouched
 window was **420.2 s (7 min)** — both above the ten-minute total and
 five-minute idle floors the issue sets.
 
@@ -4913,7 +4913,7 @@ queries status, and the record shows that querying is all that happened.
 
 #### Step 1 — launch and settle
 
-The startup refresh settled **0.99 s** after the driver's first sample, with the
+The startup refresh settled **0.98 s** after the driver's first sample, with the
 footer reading `board: updated now` and all four column headers present. The
 board loaded from the live repository rather than a fixture, so its column
 occupancy is whatever the repository held at the time: `ISSUES` 8, `ACTIVE` 1,
@@ -4994,6 +4994,12 @@ exactly one board column, `ISSUES`, was visible; at `200x50` all four were. That
 matches section 6: the restored 28-cell sidebar plus a two-cell gutter leaves a
 single 32-cell column inside 62 cells, and four columns need 134.
 
+The step's gate names those two counts exactly — one column narrow, four
+restored — rather than merely requiring the narrow layout to show fewer than the
+wide one, which would also accept a two- or three-column narrow layout that is
+not the single-column behaviour D-6 asks for. It also requires both geometries
+to read back as the sizes requested and the sidebar to have gone and returned.
+
 #### Step 5 — two refreshes, board navigable during each
 
 Two explicit `u` refreshes were run **180 s apart**, comfortably over the
@@ -5013,25 +5019,25 @@ Both refreshes then settled back to `board: updated now`.
 
 #### Step 6 — five continuous idle minutes
 
-The application was left untouched for **420.2 s**, sampled **1661 times** at a
+The application was left untouched for **420.2 s**, sampled **1634 times** at a
 **0.23 s** cadence. The cadence is deliberately non-commensurate with the
 spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
 event processing, so its live period is near one second without being exactly
 one, and a 1 Hz sample would return a near-identical glyph every time and make a
 running animation look frozen.
 
-Seven of the 1661 frames differed from their predecessor. Every one is
+Seven of the 1634 frames differed from their predecessor. Every one is
 accounted for by a change in underlying state:
 
 | At | Rows changed | What changed | Underlying state |
 | --- | --- | --- | --- |
-| 5.0 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 4.8 s | 6 | both Claude usage window rows and their reset rows updated, the sidebar's `refreshing…` line cleared, and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
 | 64.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
-| 124.8 s | 1 | `updated 1m ago` → `2m ago` | as above |
-| 185.5 s | 1 | `updated 2m ago` → `3m ago` | as above |
-| 246.4 s | 1 | `updated 3m ago` → `4m ago` | as above |
-| 307.2 s | 1 | `updated 4m ago` → `5m ago` | as above |
-| 368.1 s | 1 | `updated 5m ago` → `6m ago` | as above |
+| 125.0 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 185.8 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 246.7 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 307.6 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 368.5 s | 1 | `updated 5m ago` → `6m ago` | as above |
 
 **Observable content churn: none.** D-9 defines churn as the screen changing
 when no underlying state changed, and no such frame occurred: six changes are
@@ -5108,12 +5114,12 @@ invariant was verified by identical before/after drainer queries and by a key
 log containing no mutating binding, and shutdown was clean by three independent
 checks. Nothing here blocks REL-4.
 
-Five earlier runs were discarded rather than reinterpreted, and none was
-discarded for its result — all five passed all seven steps. Each was superseded
+Six earlier runs were discarded rather than reinterpreted, and none was
+discarded for its result — all six passed all seven steps. Each was superseded
 because the *driver* had a defect worth fixing before publishing it, and since
 every fix changes the artifact this record publishes, the exercise was re-run
 rather than the source corrected after the fact. The run recorded here is the
-sixth, and the driver printed below is the one that produced its numbers rather
+seventh, and the driver printed below is the one that produced its numbers rather
 than a tidied variant:
 
 1. **534.1 s** — under the ten-minute floor, because the interactive steps
@@ -5136,6 +5142,9 @@ than a tidied variant:
    would survive a different one. The second of the two also computed whether
    the tracker re-collapsed and then left that out of its pass predicate, so
    step 2 could have passed with a tracker left expanded.
+5. **622.0 s** — gated step 4 on the narrow layout showing merely *fewer*
+   columns than the wide one, which would also accept a two- or three-column
+   narrow layout rather than the single-column one D-6 asks for.
 
 No threshold, step, or method was altered to obtain a pass. The board's column
 occupancy did change between those runs and this one — a pull request entered
@@ -5593,13 +5602,23 @@ def main():
         back = capture()
         back_columns = [c for c in ("ISSUES", "ACTIVE", "REVIEWING", "DONE") if c in back]
 
+        # D-6 step 4 asks for a *single-column* narrow layout and a restored wide
+        # one, so the gate names both counts exactly. Merely requiring the narrow
+        # layout to show fewer columns than the wide one would also accept two or
+        # three of them, which is not the layout being verified.
+        narrow_is_single_column = len(narrow_columns) == 1
+        wide_shows_all_columns = len(back_columns) == 4
         return {
             "verdict": "pass"
             if (not sidebar_present(collapsed))
             and sidebar_present(restored)
-            and len(narrow_columns) < len(back_columns)
+            and narrow_is_single_column
+            and wide_shows_all_columns
+            and narrow_size == "62x40"
             and back_size == wide
             else "fail",
+            "narrow_is_single_column": narrow_is_single_column,
+            "wide_shows_all_columns": wide_shows_all_columns,
             "wide_geometry": wide,
             "narrow_geometry": narrow_size,
             "restored_geometry": back_size,
