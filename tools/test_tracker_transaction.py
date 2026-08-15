@@ -328,7 +328,7 @@ class Fixture:
 
     # -- the document, as the publication branch carries it -------------------
 
-    def publish_document(self, text):
+    def publish_document(self, text, path="docs/ui-bugs.md"):
         """Land `text` on the publication branch the way a real publication
         would, so resolution is checked against a branch rather than a fake."""
         blob = self.dir / "approved.md"
@@ -336,7 +336,7 @@ class Fixture:
         try:
             return publisher.publish(
                 repository="coghex/kanban", branch="master", root=self.docs,
-                document="docs/ui-bugs.md", content=blob.read_bytes(),
+                document=path, content=blob.read_bytes(),
                 message="docs: approved mutation",
             )
         finally:
@@ -1724,30 +1724,74 @@ class TrackerTransactionTests(unittest.TestCase):
         self.fx.begin(1, document=document)
         self.fx.confirm(1, edit_identity(), document=document)
 
+    APPLIED = DOCUMENT.replace(
+        "- [ ] DW-3. Checkpoint tracker mutations",
+        "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+    )
+
+    def apply_through_the_helper(self, document="docs/design.md", content=None):
+        """Hand the approved content to the publication module and let it
+        decline. That is the only way the local document ever legitimately
+        carries a disposition, so it is how these tests produce one."""
+        (self.fx.docs / document).write_text(DOCUMENT, encoding="utf-8")
+        run(["git", "add", "-A"], self.fx.docs)
+        run(["git", "commit", "-qm", "baseline"], self.fx.docs)
+        run(["git", "push", "-q", "origin", "HEAD:master"], self.fx.docs)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        outcome = self.fx.publish_document(
+            self.APPLIED if content is None else content, path=document
+        )
+        self.assertEqual(outcome["status"], "not-published")
+        self.assertTrue(outcome["document_written"])
+        return outcome
+
     def test_a_not_published_document_resolves_against_the_applied_local_file(self):
         # The `not-published` outcome is a successful return, not a failure: the
         # helper declines a pr-atomic or not-yet-tracked document and applies the
         # approved content locally. Without this the record would stay
         # outstanding forever and block every later disposition for it.
+        self.apply_through_the_helper()
         self.confirmed_pr_atomic_transaction()
-        (self.fx.docs / "docs" / "design.md").write_text(
-            DOCUMENT.replace(
-                "- [ ] DW-3. Checkpoint tracker mutations",
-                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
-            ),
-            encoding="utf-8",
-        )
         outcome = self.fx.resolve(source="local", document="docs/design.md")
         self.assertEqual(outcome["status"], "resolved")
         self.assertEqual(outcome["source"], "local")
         self.assertIsNone(self.fx.read(document="docs/design.md")[0])
 
+    def test_a_hand_edited_document_does_not_resolve_locally(self):
+        # The hole this closes: classification says the module *would* decline
+        # to publish, which is not the same as the module having applied
+        # anything. A file somebody edited looks identical from here, so what
+        # tells them apart is the reference the module writes when its own write
+        # succeeded.
+        self.confirmed_pr_atomic_transaction()
+        (self.fx.docs / "docs" / "design.md").write_text(
+            self.APPLIED, encoding="utf-8"
+        )
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("never applied a disposition", caught.exception.message)
+        self.assertEqual(
+            self.fx.check(document="docs/design.md")["status"], "outstanding"
+        )
+
+    def test_a_document_changed_after_the_module_applied_it_does_not_resolve(self):
+        self.apply_through_the_helper()
+        self.confirmed_pr_atomic_transaction()
+        target = self.fx.docs / "docs" / "design.md"
+        target.write_text(target.read_text() + "\n- [x] DW-9. Extra — [#1]\n")
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("has been changed since", caught.exception.message)
+
     def test_a_not_published_document_that_was_not_written_stays_outstanding(self):
+        self.apply_through_the_helper()
         self.confirmed_pr_atomic_transaction()
         (self.fx.docs / "docs" / "design.md").unlink()
         with self.assertRaises(tracker.TransactionError) as caught:
             self.fx.resolve(source="local", document="docs/design.md")
-        self.assertEqual(caught.exception.status, "document-unreadable")
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
         self.assertEqual(
             self.fx.check(document="docs/design.md")["status"], "outstanding"
         )

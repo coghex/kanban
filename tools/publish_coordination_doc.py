@@ -77,6 +77,14 @@ CLASSIFICATION_ROW_RE = re.compile(
 LOCK_NAMESPACE = "refs/kanban/publish-lock"
 PENDING_NAMESPACE = "refs/kanban/pending-publication"
 
+# What this module applied to a document it declined to publish. A `not-published`
+# outcome is the end of the line for a `pr-atomic` or unmatched document, so the
+# working tree is the only evidence its disposition was ever applied — and a
+# working tree is equally what a hand edit produces. This reference is the
+# difference: it names the exact content *this module* wrote, so a later
+# consumer can tell the two apart instead of trusting the file.
+APPLIED_NAMESPACE = "refs/kanban/applied-locally"
+
 
 class PublishError(Exception):
     """A reported outcome rather than a traceback. `status` is the
@@ -180,6 +188,10 @@ def lock_ref(repository: str, document: str) -> str:
 
 def pending_ref(repository: str, document: str) -> str:
     return f"{PENDING_NAMESPACE}/{_key(repository, document)}"
+
+
+def applied_ref(repository: str, document: str) -> str:
+    return f"{APPLIED_NAMESPACE}/{_key(repository, document)}"
 
 
 def common_git_dir(root: Path) -> Path:
@@ -1288,8 +1300,18 @@ def _publish_locked(*, root, owner, branch, tip, document, content, message, pen
         if baseline is not None and working_blob(root, document) == baseline:
             verify_and_write(root, document, baseline, content)
             applied = True
+            # Recorded only once the write succeeded, and pointing at the exact
+            # content: this is what lets a consumer of an unpublishable
+            # document's cursor distinguish "the module applied the approved
+            # disposition" from "somebody edited the file".
+            git(
+                ["update-ref", applied_ref(owner, document), preserved],
+                cwd=root,
+                check=False,
+            )
         return {
             "status": "not-published",
+            "applied_ref": applied_ref(owner, document) if applied else None,
             "reason": why_not,
             "repository": owner,
             "branch": branch,

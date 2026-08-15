@@ -789,8 +789,14 @@ the approved content applied locally — the ordinary outcome for a `pr-atomic`,
 unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
 verification runs against the applied local document, which is the only evidence
 there is and a legitimate terminal state for such a document. That the document
-is one of those is *derived*, from the same classification the publication
-module itself applies, rather than taken from the caller: a document that does
+is one of those is *derived* rather than taken from the caller, and derivation
+takes two things: the same classification the publication module itself applies,
+and that module's own record of what it applied. Classification says only that
+it *would* decline to publish; a document somebody edited by hand looks
+identical from there. So the module records the exact content it wrote whenever
+it applies a disposition to a document it declined to publish, and a local
+resolution verifies the document against that record. A document it never wrote,
+or one changed since, resolves nothing. Otherwise: a document that does
 have a coordination lane belongs on the branch, and clearing it from a locally
 edited cursor would leave the next preflight clear while the entry never landed.
 Where the module reports `not-published` without having written the document, the record stays

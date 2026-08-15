@@ -672,10 +672,13 @@ unmatched, or not-yet-tracked document — run the same verification against the
 applied local document with `--source local --branch "$DOC_BRANCH"`, which is
 the only evidence there is and a legitimate terminal state for such a document.
 Whether the working tree is admissible at all is the module's decision, not
-yours: it classifies the document itself and refuses a local resolution for one
+yours. It classifies the document itself and refuses a local resolution for one
 that publishes to the branch, because clearing such a record from a locally
-edited cursor would leave the next preflight clear while the entry never
-landed. When `document_written`
+edited cursor would leave the next preflight clear while the entry never landed.
+It also checks the document against the publication module's own record of what
+that module applied, since classification says only that publication *would* be
+declined — a file somebody edited by hand looks the same from there. A document
+the module never wrote, or one changed since it did, resolves nothing. When `document_written`
 is false, nothing carries the disposition anywhere: the record stays
 outstanding, and this run reports it.
 

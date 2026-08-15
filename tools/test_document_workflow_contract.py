@@ -306,10 +306,13 @@ CONTRACT_STATEMENTS = {
         "An interrupted mutation is ambiguous, and ambiguity is never resolved "
         "automatically"
     ),
+    "transaction-local-resolution-checks-the-applied-record": (
+        "the module records the exact content it wrote whenever it applies a "
+        "disposition to a document it declined to publish"
+    ),
     "transaction-local-resolution-is-derived": (
-        "That the document is one of those is derived, from the same "
-        "classification the publication module itself applies, rather than "
-        "taken from the caller"
+        "That the document is one of those is derived rather than taken from "
+        "the caller"
     ),
     "transaction-clearing-needs-a-terminal-entry": (
         "the recorded entry key's own terminal index entry on the publication "
@@ -550,6 +553,10 @@ TRANSACTION_CLAUSES = {
     "local-resolution-is-the-modules-decision": (
         "whether the working tree is admissible at all is the module's "
         "decision, not yours"
+    ),
+    "local-resolution-checks-what-was-applied": (
+        "a document the module never wrote, or one changed since it did, "
+        "resolves nothing"
     ),
     "an-unwritten-document-stays-outstanding": (
         "when document_written is false, nothing carries the disposition "

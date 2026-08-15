@@ -1402,6 +1402,27 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
             f"{document} publishes directly to {branch}, so its disposition is "
             "verified there rather than in the working tree"
         )
+    # Classification says the module *would* decline to publish it. That is not
+    # the same as the module having applied anything: a hand-edited document
+    # carrying a terminal entry looks identical from here. What tells them apart
+    # is the reference the module writes when — and only when — its own write
+    # succeeded, naming the exact content it wrote.
+    applied = publisher.applied_ref(record["repository"], document)
+    recorded = git(
+        ["rev-parse", "--verify", "--quiet", applied], cwd=root, check=False
+    ).stdout.decode().strip()
+    if not recorded:
+        return False, (
+            f"the publication module never applied a disposition to {document} "
+            f"locally ({applied} does not exist), so the working tree is somebody "
+            "else's edit rather than an approved mutation"
+        )
+    present = publisher.working_blob(root, document)
+    if present != recorded:
+        return False, (
+            f"{document} is not the content the publication module applied "
+            f"({present} rather than {recorded}), so it has been changed since"
+        )
     return True, why_not
 
 
