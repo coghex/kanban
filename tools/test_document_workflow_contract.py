@@ -294,6 +294,13 @@ CONTRACT_STATEMENTS = {
         "An interrupted mutation is ambiguous, and ambiguity is never resolved "
         "automatically"
     ),
+    "transaction-clearing-needs-a-terminal-entry": (
+        "the recorded entry key's own terminal index entry on the publication "
+        "branch"
+    ),
+    "transaction-entry-is-the-one-section-4-defines": (
+        "a task-list line marked exactly - [x]"
+    ),
     "transaction-clearing-is-bound-to-the-entry": (
         "Clearing is bound to the published entry, not to reachability"
     ),
@@ -478,6 +485,13 @@ TRANSACTION_CLAUSES = {
     ),
     "a-similar-title-is-not-evidence": (
         "a similarly titled artifact is never sufficient evidence"
+    ),
+    "clearing-needs-the-terminal-entry": (
+        "the recorded entry key's own terminal - [x] index entry on $doc_branch"
+    ),
+    "an-unmarked-or-contradicted-entry-is-refused": (
+        "an entry still - [ ], an incidental mention in prose, and a terminal "
+        "entry carrying [no-issue] or [deferred] beside the link are each refused"
     ),
     "clearing-is-not-reachability": (
         "reachability proves a commit reached the branch; it proves nothing "

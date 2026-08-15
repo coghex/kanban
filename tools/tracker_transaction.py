@@ -138,6 +138,16 @@ ISSUE_IDENTITY_KINDS = ("issue-create", "epic-create")
 
 MARKER_RE = re.compile(r"^\[#\d+\]$")
 
+# §4's terminal checklist entry, which is what a resolved disposition looks like
+# in every document these workflows own. `- [ ]` is an entry the document still
+# owes, and a line that is no checklist entry at all is prose.
+TERMINAL_ENTRY_RE = re.compile(r"^\s*[-*]\s*\[[xX]\]\s")
+
+# §4's other two markers. Both are terminal-or-not dispositions that mutate no
+# tracker and therefore acquire no transaction, so either one appearing on the
+# entry a transaction is resolving against contradicts the record.
+CONTRADICTORY_MARKERS = ("[no-issue]", "[deferred]")
+
 # Git's "no old value" object name, in both hash lengths. Passed to a delete it
 # disables the binding rather than asserting it, so it is refused where a bound
 # value is required.
@@ -243,20 +253,51 @@ def transaction_ref(repository: str, document: str) -> str:
 # ------------------------------------------------------------------ record --
 
 
-def record_fault(record: dict) -> str | None:
+def record_fault(
+    record: dict, *, repository: str | None = None, document: str | None = None
+) -> str | None:
     """What stops `record` being usable, or None when nothing does.
 
-    Checked once, here, rather than defended against at each reader: the readers
-    index these fields directly because a record that reached the reference was
-    written by this module, and the one case that breaks that assumption — a
-    document that is valid JSON but is not a record — has to be caught while it
-    can still be reported as an unreadable transaction.
+    The whole persisted plan, not merely the presence of its keys. A record is
+    the only thing a resuming session has: it re-presents each remaining step's
+    recorded target and payload for approval and checks a candidate artifact
+    against its fingerprint and postcondition, so a step whose target is the
+    empty string is not a step that can be resumed — it is a corrupt record that
+    must stop the run rather than authorize a mutation nobody can check.
+
+    Validated in one place, and by the writer too: `validate_plan` runs this
+    over the record it just built, so what may be acquired and what may be read
+    back cannot drift apart.
+
+    The `(repository, document)` binding is checked when the caller knows what
+    it asked for. The reference name is a digest of that pair, so a record
+    naming a different one is corrupt however it got there.
     """
     missing = [field for field in RECORD_FIELDS if field not in record]
     if missing:
         return f"it is missing {missing}"
+    for field in ("repository", "document", "entry_key", "publication_tip"):
+        if not isinstance(record.get(field), str) or not record[field].strip():
+            return f"its {field} is not a non-empty string"
+    if repository is not None and record["repository"] != repository:
+        return (
+            f"it belongs to {record['repository']!r}, not the {repository!r} it "
+            "was read for"
+        )
+    if document is not None and record["document"] != document:
+        return (
+            f"it records {record['document']!r}, not the {document!r} it was read "
+            "for"
+        )
     if record["state"] not in RECORD_STATES:
         return f"its state {record['state']!r} is not a known transaction state"
+    if record["disposition"] not in DISPOSITIONS:
+        return f"its disposition {record['disposition']!r} is not a known one"
+    marker = record.get("marker")
+    if marker is not None and (
+        not isinstance(marker, str) or not MARKER_RE.match(marker)
+    ):
+        return f"its marker {marker!r} is not of the exact form [#N]"
     steps = record["steps"]
     if not isinstance(steps, list) or not steps:
         return "its steps are not a non-empty list"
@@ -266,14 +307,38 @@ def record_fault(record: dict) -> str | None:
         absent = [field for field in RECORD_STEP_FIELDS if field not in step]
         if absent:
             return f"step {position} is missing {absent}"
+        for field in STEP_PLAN_FIELDS:
+            if not isinstance(step.get(field), str) or not step[field].strip():
+                return f"step {position} has no {field}"
+        if step["kind"] not in STEP_KINDS:
+            return f"step {position} has unknown kind {step['kind']!r}"
+        if not isinstance(step.get("provides_marker", False), bool):
+            return f"step {position} has a non-boolean provides_marker"
         if step["state"] not in (STEP_PLANNED, STEP_INTENT, STEP_CONFIRMED):
             return f"step {position} has unknown state {step['state']!r}"
         if step["state"] == STEP_CONFIRMED and not isinstance(step["identity"], dict):
             return f"step {position} is confirmed but records no identity"
+        if step["state"] != STEP_CONFIRMED and step["identity"] is not None:
+            return f"step {position} is {step['state']} but records an identity"
+    providers = [
+        position
+        for position, step in enumerate(steps)
+        if step.get("provides_marker")
+    ]
+    if len(providers) > 1:
+        return f"steps {providers} each claim to provide the document marker"
+    if bool(marker) == bool(providers):
+        return (
+            "it has no single source for the marker the published entry must "
+            "carry"
+        )
     return None
 
 
-def read_record(root: Path, ref: str):
+def read_record(
+    root: Path, ref: str, *, repository: str | None = None,
+    document: str | None = None,
+):
     """The durable record and the exact reference value it was read from.
 
     The value is what every later compare-and-swap binds to, so it travels with
@@ -315,7 +380,7 @@ def read_record(root: Path, ref: str):
             transaction_ref=ref,
             transaction_commit=observed,
         )
-    fault = record_fault(record)
+    fault = record_fault(record, repository=repository, document=document)
     if fault is not None:
         # Parsing as JSON is not the same as being a record. Every reader below
         # indexes these fields directly, so a well-formed-but-incomplete
@@ -368,7 +433,10 @@ def require_preserved_confirmations(old: dict | None, new: dict) -> None:
         )
 
 
-def observed_report(root: Path, ref: str) -> dict:
+def observed_report(
+    root: Path, ref: str, *, repository: str | None = None,
+    document: str | None = None,
+) -> dict:
     """What is durably recorded right now, for a report that has to say so.
 
     A losing create-only acquisition and a losing compare-and-swap both fail
@@ -383,7 +451,9 @@ def observed_report(root: Path, ref: str) -> dict:
     exception from the reporting would replace the refusal it was describing.
     """
     try:
-        record, observed = read_record(root, ref)
+        record, observed = read_record(
+            root, ref, repository=repository, document=document
+        )
         return {"record_readable": True} | transaction_report(record, ref, observed)
     except Exception as error:  # noqa: BLE001 - reporting may not fail
         message = getattr(error, "message", str(error))
@@ -403,6 +473,15 @@ def observed_report(root: Path, ref: str) -> dict:
                 "clearing is permitted until it is resolved by hand"
             ),
         }
+
+
+def _binding(record: dict) -> dict:
+    """The `(repository, document)` a record claims, for the reader that is
+    about to check the record actually at the reference against it."""
+    return {
+        "repository": record.get("repository"),
+        "document": record.get("document"),
+    }
 
 
 def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
@@ -437,19 +516,21 @@ def write_record(root: Path, ref: str, record: dict, old_value: str) -> str:
                 "transaction-outstanding",
                 "a tracker transaction is already recorded for this document; "
                 "resolve it before approving another disposition",
-                **observed_report(root, ref),
+                **observed_report(root, ref, **_binding(record)),
             )
         raise TransactionError(
             "record-changed",
             "the tracker transaction changed while this transition was being "
             "applied; the earlier record was left exactly as it was",
             expected_commit=old_value,
-            **observed_report(root, ref),
+            **observed_report(root, ref, **_binding(record)),
         )
     return commit
 
 
-def clear_record(root: Path, ref: str, old_value: str) -> None:
+def clear_record(
+    root: Path, ref: str, old_value: str, binding: dict | None = None
+) -> None:
     """Remove the record, and only ever the exact value this run inspected.
     An unbound delete would remove whatever record happened to be there,
     including one a later run acquired after this one's had already gone.
@@ -475,7 +556,7 @@ def clear_record(root: Path, ref: str, old_value: str) -> None:
             # A record still standing stops every later disposition for this
             # document, so the run that could not remove it says what is still
             # there rather than only that removal failed.
-            **observed_report(root, ref),
+            **observed_report(root, ref, **(binding or {})),
         )
 
 
@@ -726,7 +807,7 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
         raise TransactionError(
             "plan-invalid", f"marker {marker!r} is not of the exact form [#N]"
         )
-    return {
+    built = {
         "version": RECORD_VERSION,
         "repository": repository,
         "document": document,
@@ -738,6 +819,15 @@ def validate_plan(plan, repository: str, document: str, publication_tip: str) ->
         "acquired_by": {"host": socket.gethostname(), "pid": os.getpid()},
         "steps": steps,
     }
+    # The writer holds itself to what the reader will demand, so a plan that
+    # would produce a record no later run could interpret is refused now rather
+    # than becoming an outstanding transaction nobody can resolve.
+    fault = record_fault(built, repository=repository, document=document)
+    if fault is not None:
+        raise TransactionError(
+            "plan-invalid", f"the plan would record an unusable transaction ({fault})"
+        )
+    return built
 
 
 def validate_identity(identity, step: dict, index: int) -> dict:
@@ -1073,14 +1163,74 @@ def published_document(root: Path, record: dict, source: str, branch: str) -> st
     return proc.stdout.decode(errors="replace")
 
 
+def resolution_fault(record: dict, text: str) -> tuple[str | None, list[str]]:
+    """Why the published document does not yet carry this disposition, and the
+    entry lines that were considered.
+
+    Derived from §4's vocabulary rather than from "some line mentions both
+    things". The at-a-glance index is a task list with one line per entry, and
+    exactly `- [x]` marks a terminal disposition — so the entry this
+    transaction resolves against is a *terminal checklist line* naming the key.
+    Requiring that is what distinguishes the three cases a substring search
+    cannot tell apart:
+
+    - the entry is still `- [ ]`, so the run that was interrupted never marked
+      it and the disposition has not been applied;
+    - the mention is incidental prose, a `Related` pointer or a code fence that
+      happens to name the key and the number; and
+    - the entry is terminal but carries `[no-issue]` or `[deferred]`, which is
+      a different disposition from the one this transaction recorded.
+
+    Every tracker transaction's disposition is a linked one — `[no-issue]` and
+    `[deferred]` mutate nothing and acquire no transaction — so a terminal entry
+    carrying either of those markers contradicts the record rather than
+    completing it.
+    """
+    entry_key = record["entry_key"]
+    tokens = required_document_tokens(record)
+    naming = [line for line in text.splitlines() if entry_key in line]
+    if not naming:
+        return f"no line in the document names {entry_key!r}", naming
+    terminal = [line for line in naming if TERMINAL_ENTRY_RE.match(line)]
+    if not terminal:
+        return (
+            f"no terminal '- [x]' entry names {entry_key!r}; the disposition was "
+            "not applied to the document's index",
+            naming,
+        )
+    carrying = [
+        line for line in terminal if all(token in line for token in tokens)
+    ]
+    if not carrying:
+        return (
+            f"the terminal entry for {entry_key!r} does not carry every required "
+            f"identity {tokens}",
+            terminal,
+        )
+    uncontradicted = [
+        line
+        for line in carrying
+        if not any(marker in line for marker in CONTRADICTORY_MARKERS)
+    ]
+    if not uncontradicted:
+        return (
+            f"the terminal entry for {entry_key!r} carries {list(CONTRADICTORY_MARKERS)} "
+            "beside the tracker link, which is a different disposition from the "
+            "one this transaction recorded",
+            carrying,
+        )
+    return None, uncontradicted
+
+
 def action_resolve(root, ref, record, observed, source, branch) -> dict:
     """Clear the record, but only against the published entry itself.
 
     Reachability of a commit says a commit landed, not that it carried this
-    disposition. So what is checked is the recorded entry key's own line: it
-    must carry the disposition's marker and every tracker identity this
-    disposition requires the document to name. Anything less leaves the record
-    outstanding, which is what stops the next run.
+    disposition. So what is checked is the recorded entry key's own terminal
+    entry: it must be marked terminal, carry the disposition's marker and every
+    tracker identity this disposition requires the document to name, and carry
+    no marker contradicting it. Anything less leaves the record outstanding,
+    which is what stops the next run.
     """
     state = derived_state(record)
     if state not in (STATE_MUTATION_CONFIRMED, STATE_PUBLICATION_PENDING):
@@ -1093,19 +1243,18 @@ def action_resolve(root, ref, record, observed, source, branch) -> dict:
     text = published_document(root, record, source, branch)
     tokens = required_document_tokens(record)
     entry_key = record["entry_key"]
-    lines = [line for line in text.splitlines() if entry_key in line]
-    if not any(all(token in line for token in tokens) for line in lines):
+    fault, lines = resolution_fault(record, text)
+    if fault is not None:
         raise TransactionError(
             "resolution-unverified",
-            f"no line naming {entry_key!r} carries every required identity "
-            f"{tokens}; commit reachability alone does not resolve a tracker "
+            f"{fault}; commit reachability alone does not resolve a tracker "
             "transaction, so the record is kept",
             source=source,
             required_tokens=tokens,
             entry_lines=lines,
             **transaction_report(record, ref, observed),
         )
-    clear_record(root, ref, observed)
+    clear_record(root, ref, observed, _binding(record))
     return {
         "status": STATE_RESOLVED,
         "source": source,
@@ -1137,7 +1286,7 @@ def action_abandon(root, ref, record, observed) -> dict:
     confirmed = [
         step["identity"] for step in record["steps"] if step["state"] == STEP_CONFIRMED
     ]
-    clear_record(root, ref, observed)
+    clear_record(root, ref, observed, _binding(record))
     return {
         "status": "abandoned",
         "repository": record["repository"],
@@ -1174,7 +1323,7 @@ def check(root: Path, repository: str, document: str) -> dict:
     resolved = resolve_write_root(root)
     owner = verify_owner(resolved, repository)
     ref = transaction_ref(owner, document)
-    report = observed_report(resolved, ref)
+    report = observed_report(resolved, ref, repository=owner, document=document)
     # `acquired` is False only for a record that is genuinely absent and
     # readable. An unreadable one reports None, and reading that as clear is the
     # single conclusion this check must never license.
@@ -1283,7 +1432,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
             return 0
 
-        record, observed = read_record(root, ref)
+        record, observed = read_record(
+            root, ref, repository=owner, document=args.path
+        )
         if record is None:
             raise TransactionError(
                 "no-transaction",

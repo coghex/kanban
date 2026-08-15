@@ -126,6 +126,34 @@ def issue_identity(number=311, **overrides):
     return body
 
 
+def record_json(*, step_overrides=None, **overrides):
+    """A persisted record that is valid except for what `overrides` breaks, so
+    each case below isolates exactly one fault."""
+    step = {
+        "kind": "issue-create",
+        "target": "new issue in coghex/kanban",
+        "payload_fingerprint": "sha256:body",
+        "postcondition": "the issue exists with the approved body",
+        "provides_marker": True,
+        "state": "planned",
+        "identity": None,
+    }
+    step.update(step_overrides or {})
+    body = {
+        "version": 1,
+        "repository": "coghex/kanban",
+        "document": "docs/ui-bugs.md",
+        "entry_key": "DW-3",
+        "disposition": "new-issue",
+        "marker": None,
+        "publication_tip": PREPARED_TIP,
+        "state": "intent-only",
+        "steps": [step],
+    }
+    body.update(overrides)
+    return json.dumps(body)
+
+
 def label_plan(**overrides):
     """The EPIC path's first step: a label, whose identity is a name and the
     metadata it was created with rather than a number and a URL."""
@@ -912,7 +940,7 @@ class TrackerTransactionTests(unittest.TestCase):
         self.fx.confirm(0, issue_identity())
         current, _ = self.fx.read()
 
-        def stale_read(root, ref):
+        def stale_read(root, ref, **kwargs):
             return json.loads(json.dumps(current)), stale_value
 
         with unittest.mock.patch.object(tracker, "read_record", stale_read):
@@ -981,25 +1009,26 @@ class TrackerTransactionTests(unittest.TestCase):
         # KeyError — escaping the structured refusal entirely.
         malformed = (
             ('{"version": 1}', "missing"),
-            (json.dumps({"version": 1, "repository": "coghex/kanban",
-                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
-                         "disposition": "new-issue", "state": "intent-only",
-                         "steps": []}), "non-empty list"),
-            (json.dumps({"version": 1, "repository": "coghex/kanban",
-                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
-                         "disposition": "new-issue", "state": "intent-only",
-                         "steps": [{"kind": "issue-create"}]}), "is missing"),
-            (json.dumps({"version": 1, "repository": "coghex/kanban",
-                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
-                         "disposition": "new-issue", "state": "wat",
-                         "steps": [{}]}), "not a known transaction state"),
-            (json.dumps({"version": 1, "repository": "coghex/kanban",
-                         "document": "docs/ui-bugs.md", "entry_key": "DW-3",
-                         "disposition": "new-issue", "state": "tracker-pending",
-                         "steps": [{"kind": "issue-create", "target": "t",
-                                    "payload_fingerprint": "f",
-                                    "postcondition": "p", "state": "confirmed",
-                                    "identity": None}]}), "records no identity"),
+            (record_json(publication_tip=""), "publication_tip"),
+            (record_json(steps=[]), "non-empty list"),
+            (record_json(steps=[{"kind": "issue-create"}]), "is missing"),
+            (record_json(state="wat"), "not a known transaction state"),
+            (record_json(disposition="wat"), "not a known one"),
+            (record_json(marker="311"), "form [#N]"),
+            (record_json(step_overrides={"target": ""}), "has no target"),
+            (record_json(step_overrides={"payload_fingerprint": "  "}),
+             "has no payload_fingerprint"),
+            (record_json(step_overrides={"postcondition": ""}),
+             "has no postcondition"),
+            (record_json(step_overrides={"kind": "delete-everything"}),
+             "unknown kind"),
+            (record_json(step_overrides={"state": "wat"}), "unknown state"),
+            (record_json(step_overrides={"state": "confirmed", "identity": None}),
+             "records no identity"),
+            (record_json(step_overrides={"identity": {"id": "1"}}),
+             "records an identity"),
+            (record_json(step_overrides={"provides_marker": False}),
+             "no single source for the marker"),
         )
         for content, expected in malformed:
             with self.subTest(content=content[:48]):
@@ -1012,6 +1041,23 @@ class TrackerTransactionTests(unittest.TestCase):
                 outcome = self.fx.check()
                 self.assertEqual(outcome["status"], "outstanding")
                 self.assertFalse(outcome["record_readable"])
+
+    def test_a_record_naming_another_document_is_not_this_document_s(self):
+        # The reference name is a digest of the (repository, document) pair, so
+        # a record naming a different one is corrupt however it got there —
+        # and it must not be reported as this document's outstanding work.
+        for content in (
+            record_json(repository="someone/else"),
+            record_json(document="docs/design.md"),
+        ):
+            with self.subTest(content=content[:56]):
+                self.fx.plant_unreadable_record(content=content)
+                outcome = self.fx.check()
+                self.assertEqual(outcome["status"], "outstanding")
+                self.assertFalse(outcome["record_readable"])
+                code, payload = self.fx.cli("--check")
+                self.assertEqual(code, 1)
+                self.assertFalse(payload["record_readable"])
 
     def test_a_malformed_record_reaches_both_command_lines_as_tracker_state(self):
         self.fx.plant_unreadable_record(content='{"version": 1}')
@@ -1106,6 +1152,88 @@ class TrackerTransactionTests(unittest.TestCase):
         self.assertEqual(outcome["required_tokens"], ["[#311]"])
         self.assertIsNone(self.fx.read()[0])
         self.assertEqual(self.fx.check()["status"], "clear")
+
+    def resolution_refused(self, published, expected):
+        """Publish `published` and assert the transaction stays outstanding."""
+        self.fx.publish_document(published)
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve()
+        self.assertEqual(caught.exception.status, "resolution-unverified")
+        self.assertIn(expected, caught.exception.message)
+        self.assertEqual(self.fx.check()["status"], "outstanding")
+
+    def test_an_unchecked_entry_carrying_the_link_does_not_resolve(self):
+        # The interrupted run's own signature: the issue exists and the number
+        # reached the line, but the box was never checked, so the disposition
+        # was not applied and the document still owes this entry.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [ ] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            "no terminal '- [x]' entry names",
+        )
+
+    def test_incidental_prose_naming_the_key_and_the_link_does_not_resolve(self):
+        # A Related pointer, a sentence, a code fence — anything that is not the
+        # cursor entry itself. Under a plain substring search every one of these
+        # cleared the record.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT + "\nSee DW-3, which became [#311] last week.\n",
+            "no terminal '- [x]' entry names",
+        )
+
+    def test_a_terminal_entry_with_a_contradictory_marker_does_not_resolve(self):
+        # `[no-issue]` and `[deferred]` mutate no tracker and acquire no
+        # transaction, so either one beside the link is a different disposition
+        # from the one this record holds.
+        for marker in ("[no-issue]", "[deferred]"):
+            with self.subTest(marker=marker):
+                self.setUp()
+                self.confirmed_transaction()
+                self.resolution_refused(
+                    DOCUMENT.replace(
+                        "- [ ] DW-3. Checkpoint tracker mutations",
+                        f"- [x] DW-3. Checkpoint tracker mutations — [#311] {marker}",
+                    ),
+                    "a different disposition",
+                )
+
+    def test_an_entry_the_document_never_names_does_not_resolve(self):
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace("DW-3", "DW-9"), "no line in the document names"
+        )
+
+    def test_the_terminal_forms_the_documents_actually_use_are_accepted(self):
+        # `- [X]` and `* [x]` are the same terminal entry to every Markdown
+        # renderer, so a predicate that only knew `- [x]` would refuse a
+        # correctly published document.
+        for bullet, box in (("-", "X"), ("*", "x")):
+            with self.subTest(bullet=bullet, box=box):
+                self.setUp()
+                self.confirmed_transaction()
+                self.fx.publish_document(
+                    DOCUMENT.replace(
+                        "- [ ] DW-3. Checkpoint tracker mutations",
+                        f"{bullet} [{box}] DW-3. Checkpoint tracker mutations — [#311]",
+                    )
+                )
+                self.assertEqual(self.fx.resolve()["status"], "resolved")
+
+    def test_a_terminal_entry_elsewhere_does_not_resolve_this_one(self):
+        # Two entries, one terminal: the transaction resolves against its own
+        # key's entry and nothing else.
+        self.confirmed_transaction()
+        self.resolution_refused(
+            DOCUMENT.replace(
+                "- [ ] DW-4. Something else",
+                "- [x] DW-4. Something else — [#311]",
+            ),
+            "no terminal '- [x]' entry names",
+        )
 
     def test_reachability_alone_does_not_clear_the_record(self):
         # Requirement 11 and its acceptance bullet: the publication landed, and

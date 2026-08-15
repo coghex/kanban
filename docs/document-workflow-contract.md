@@ -751,10 +751,18 @@ than one plausible candidate leaves the record unresolved and stops the run. A
 similarly titled artifact is never sufficient evidence.
 
 **Clearing is bound to the published entry, not to reachability.** A record
-resolves only once the recorded entry key on the publication branch carries the
-recorded disposition and every exact tracker identity that disposition requires
-the document to name. A commit reaching the branch proves a commit landed, not
-that it carried this disposition. Where the module reports `not-published` with
+resolves only once the recorded entry key's own **terminal index entry** on the
+publication branch carries the recorded disposition and every exact tracker
+identity that disposition requires the document to name. A commit reaching the
+branch proves a commit landed, not that it carried this disposition. The entry
+is the one §4 defines — a task-list line marked exactly `- [x]` — because that
+is what distinguishes the three states a search for the key and the number
+cannot tell apart: an entry still `- [ ]`, which the interrupted run never
+marked; an incidental mention in prose, a `Related` pointer, or a code fence;
+and a terminal entry carrying `[no-issue]` or `[deferred]` beside the link,
+which is a different disposition from the one the record holds. Every
+transaction's disposition is a linked one, since the two that mutate no tracker
+acquire no transaction. Where the module reports `not-published` with
 the approved content applied locally — the ordinary outcome for a `pr-atomic`,
 unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
 verification runs against the applied local document, which is the only evidence
