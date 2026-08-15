@@ -4826,8 +4826,8 @@ three independent checks, and no mutating binding was pressed.
 | 6 | Five continuous idle minutes, observed as content churn | **pass** |
 | 7 | `Ctrl-L` repaint, then quit with `q` | **pass** |
 
-The observation spanned **624.8 s (10 min 25 s)**, of which step 6's untouched
-window was **420.1 s (7 min)** — both above the ten-minute total and
+The observation spanned **621.6 s (10 min 22 s)**, of which step 6's untouched
+window was **420.0 s (7 min)** — both above the ten-minute total and
 five-minute idle floors the issue sets.
 
 #### Build provenance
@@ -4913,7 +4913,7 @@ queries status, and the record shows that querying is all that happened.
 
 #### Step 1 — launch and settle
 
-The startup refresh settled **0.99 s** after the driver's first sample, with the
+The startup refresh settled **1.00 s** after the driver's first sample, with the
 footer reading `board: updated now` and all four column headers present. The
 board loaded from the live repository rather than a fixture, so its column
 occupancy is whatever the repository held at the time: `ISSUES` 8, `ACTIVE` 1,
@@ -5002,7 +5002,7 @@ Both refreshes then settled back to `board: updated now`.
 
 #### Step 6 — five continuous idle minutes
 
-The application was left untouched for **420.1 s**, sampled **1661 times** at a
+The application was left untouched for **420.0 s**, sampled **1661 times** at a
 **0.23 s** cadence. The cadence is deliberately non-commensurate with the
 spinner: the spinner advances on a nominal 100 ms minimum delay scheduled after
 event processing, so its live period is near one second without being exactly
@@ -5014,21 +5014,21 @@ accounted for by a change in underlying state:
 
 | At | Rows changed | What changed | Underlying state |
 | --- | --- | --- | --- |
-| 5.3 s | 5 | the sidebar's Claude window rows updated, its `refreshing…` line cleared, and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
-| 64.0 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
-| 124.9 s | 1 | `updated 1m ago` → `2m ago` | as above |
-| 185.7 s | 1 | `updated 2m ago` → `3m ago` | as above |
-| 246.5 s | 1 | `updated 3m ago` → `4m ago` | as above |
-| 307.4 s | 1 | `updated 4m ago` → `5m ago` | as above |
-| 368.0 s | 1 | `updated 5m ago` → `6m ago` | as above |
+| 5.0 s | 2 | the sidebar's `refreshing…` line cleared and the notice moved to `Claude usage refreshed` | step 5's second `u` completing its Claude usage refresh |
+| 64.2 s | 1 | `board: updated now` → `updated 1m ago` | relative-age text advancing |
+| 125.0 s | 1 | `updated 1m ago` → `2m ago` | as above |
+| 185.8 s | 1 | `updated 2m ago` → `3m ago` | as above |
+| 246.7 s | 1 | `updated 3m ago` → `4m ago` | as above |
+| 307.5 s | 1 | `updated 4m ago` → `5m ago` | as above |
+| 368.4 s | 1 | `updated 5m ago` → `6m ago` | as above |
 
 **Observable content churn: none.** D-9 defines churn as the screen changing
 when no underlying state changed, and no such frame occurred: six changes are
 the relative-age footer ticking over one minute at a time, and the seventh is a
 provider refresh dispatched before the idle window began finishing inside it.
-That first change is the only one that touched the board area at all, and every
-row it touched belongs to the usage sidebar or the notice line. After it, no
-line outside the footer's two rows changed for the remaining 415 s.
+Every row that changed at any point belongs to the usage sidebar or the two
+footer lines; no board row changed once, and after the first 5 s nothing outside
+the footer changed for the remaining 415 s.
 
 As D-9 requires this to be said plainly: **true flicker is not measured at
 1.0.** `capture-pane` returns content, not repaints, so a redraw that rewrites
@@ -5061,6 +5061,15 @@ The pane after quitting shows the normal screen restored with `KANBAN_EXIT=0`
 and the shell's own marker visible, so the alternate screen was exited rather
 than merely overwritten.
 
+All three checks are performed **by the driver itself and gate its result**,
+which matters because an unrestored terminal is exactly the kind of failure a
+record could otherwise report a pass over. The driver waits for the post-exit
+`stty -g` to be written, compares it against the pre-launch capture, and marks
+step 7 `fail` unless the two match *and* the shell's marker is on screen; its
+overall exit status additionally requires the pid to be gone, the session to be
+absent, and the drainer state to be unchanged. A run that left the terminal in
+raw mode could not produce a passing script here.
+
 #### What could not be exercised
 
 Per Requirement 8, named rather than omitted:
@@ -5082,14 +5091,15 @@ applicable item provided the record says what could not be exercised.
 #### Conclusion
 
 **The script passes.** All seven steps completed, the observation spanned
-10 min 25 s including 7 continuous idle minutes, no interaction failed or hung,
+10 min 22 s including 7 continuous idle minutes, no interaction failed or hung,
 refresh responsiveness was demonstrated rather than asserted, the safety
 invariant was verified by identical before/after drainer queries and by a key
 log containing no mutating binding, and shutdown was clean by three independent
 checks. Nothing here blocks REL-4.
 
-Two earlier runs were discarded rather than reinterpreted, and neither was
-discarded for its result — both passed all seven steps:
+Three earlier runs were discarded rather than reinterpreted, and none was
+discarded for its result — all three passed all seven steps. The run recorded
+here is the fourth:
 
 1. The first spanned only 534.1 s, under the ten-minute floor, because the
    interactive steps finished far faster than budgeted. It was repeated with a
@@ -5098,9 +5108,18 @@ discarded for its result — both passed all seven steps:
 2. The second, at 623.7 s, was driven by a version of the driver that reset
    tmux on the **default** socket. That is unsafe to publish: an operator
    reproducing this record would lose whatever unrelated tmux sessions they had
-   running. The driver was confined to its own socket and the exercise repeated,
-   so the source published below is the one that produced the numbers recorded
-   above rather than a corrected variant of it.
+   running.
+3. The third, at 624.8 s, moved to a private socket but used a **fixed** name
+   for it, which is only safe if nothing else already owns that name — the
+   driver neither created nor proved ownership of that server before clearing
+   it. That run also let step 7 report a pass without checking that the
+   terminal had actually been restored, which is precisely the failure the
+   shutdown requirement exists to catch.
+
+Each fix changed the artifact this record publishes, so in each case the
+exercise was re-run rather than the source corrected after the fact. The driver
+printed below is therefore the one that produced the numbers recorded above, not
+a tidied variant of it.
 
 No threshold, step, or method was altered to obtain a pass. The board's column
 occupancy did change between those runs and this one — a pull request entered
@@ -5139,13 +5158,20 @@ chmod +x "$TMP/session.sh"
 ```
 
 The second is the driver, which sends the keys, classifies each frame, times the
-idle window, and refuses every mutating binding. It confines **every** tmux call
-to a private socket, `tmux -L rel3-smoke`, so running it cannot disturb whatever
-tmux sessions the operator already has: the driver needs to start from a clean
-server, and on the default socket that reset would tear down unrelated work,
-whereas on its own socket the worst it can reach is the server it created. This
-was verified rather than assumed — an unrelated session on the default socket
-survives the driver's teardown untouched.
+idle window, refuses every mutating binding, and enforces the shutdown checks
+described above.
+
+It cannot disturb tmux work that is not its own. Every tmux call goes to a
+socket named for the driver's own process, `tmux -L rel3-smoke-<pid>`, so two
+runs cannot collide and the name cannot be one the operator already uses; the
+driver then **refuses to start at all** if a server is already listening there,
+rather than clearing it. `kill-server` appears nowhere in the driver, because no
+fixed socket name can be made safe by naming alone — any name might already
+belong to someone. The only thing it ever tears down is the single session it
+created, with `kill-session`. Both halves were verified rather than assumed: an
+unrelated session placed on the driver's own socket survives, and the driver
+exits with `REFUSED: a tmux server is already listening on socket …` instead of
+touching it.
 
 ```console
 cat > "$TMP/smoke_script.py" <<'SMOKE'
@@ -5170,6 +5196,7 @@ Temporary measurement artifact for issue #273. Not part of the repository.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -5177,11 +5204,13 @@ import time
 
 SESSION = "rel3"
 
-# Every tmux call goes to a PRIVATE server on its own socket. The driver has to
-# be able to start from a clean slate, but doing that on the default socket
-# would tear down whatever unrelated tmux work the operator has running; with a
-# dedicated socket the worst it can reach is its own server.
-SOCKET = "rel3-smoke"
+# Every tmux call goes to a private server on a socket named for THIS process,
+# so two runs cannot collide and the name cannot be one the operator already
+# uses. The driver additionally refuses to start if a server is already
+# listening on it (see `claim_socket`), so it never destroys a server it did
+# not create -- it has no `kill-server` at all, and tears down only the single
+# session it made.
+SOCKET = f"rel3-smoke-{os.getpid()}"
 
 FORBIDDEN = {"r", "S", "A", "m", "x", "d"}
 PANEL_RE = re.compile(r"━ ([A-Z][A-Z ]*[A-Z]) ━")
@@ -5305,6 +5334,28 @@ def wait_for(predicate, timeout, poll=0.15, what=""):
     raise SystemExit(f"TIMEOUT after {timeout}s waiting for {what}")
 
 
+def claim_socket():
+    """Refuse to run against a tmux server this driver did not create.
+
+    `kill-server` appears nowhere in this driver precisely because it cannot be
+    made safe by naming alone: any fixed socket name might already belong to
+    someone. Instead the socket is per-process and its emptiness is checked, so
+    the only thing ever torn down is the one session created below.
+    """
+    probe = tmux("list-sessions")
+    if probe.returncode == 0:
+        raise SystemExit(
+            f"REFUSED: a tmux server is already listening on socket {SOCKET!r}; "
+            "this driver only ever runs against a server it created itself"
+        )
+
+
+def drop_session():
+    """Tear down only the session this driver created, if it still exists."""
+    if tmux("has-session", "-t", SESSION).returncode == 0:
+        tmux("kill-session", "-t", SESSION)
+
+
 def drainer_state():
     out = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
     return sorted(l for l in out.splitlines() if "drain-prs" in l)
@@ -5330,8 +5381,8 @@ def main():
     results["drainer_before"] = drainer_before
     results["drainer_query"] = "launchctl list | grep drain-prs"
 
-    tmux("kill-server")
-    time.sleep(1)
+    claim_socket()
+    log(f"claimed a private tmux socket {SOCKET!r} with no server on it")
 
     # The session command is a script that wraps Kanban in a shell so the PTY
     # outlives it: the same terminal can then be inspected for restored line
@@ -5598,13 +5649,40 @@ def main():
             if b != a
         ]
         keyed("q")
-        time.sleep(3.0)
+
+        # The wrapping shell writes the post-exit line discipline once Kanban
+        # has returned; wait for it rather than assuming 3 seconds was enough.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if os.path.exists(args.stty_after) and os.path.getsize(args.stty_after) > 0:
+                break
+            time.sleep(0.2)
+
         post = capture()
+        marker_seen = "TERMINAL_RESTORED_MARKER" in post
+
+        # Terminal restoration is verified HERE, by this driver, and gates the
+        # step: a run that leaves the terminal unrestored must not be able to
+        # report a passing script.
+        try:
+            before_state = open(args.stty_before, encoding="utf-8").read().strip()
+        except OSError:
+            before_state = ""
+        try:
+            after_state = open(args.stty_after, encoding="utf-8").read().strip()
+        except OSError:
+            after_state = ""
+        restored = bool(before_state) and before_state == after_state
+
         return {
-            "verdict": "pass",
+            "verdict": "pass" if (restored and marker_seen) else "fail",
             "repaint_content_identical": repaint_identical,
             "repaint_diff": repaint_diff,
-            "post_quit_pane_has_marker": "TERMINAL_RESTORED_MARKER" in post,
+            "terminal_restored": restored,
+            "stty_before_present": bool(before_state),
+            "stty_after_present": bool(after_state),
+            "stty_bytes": len(before_state),
+            "post_quit_pane_has_marker": marker_seen,
             "post_quit_pane_tail": [l for l in post.splitlines() if l.strip()][-6:],
         }
 
@@ -5625,11 +5703,17 @@ def main():
     has_session = subprocess.run(
         ["tmux", "-L", SOCKET, "has-session", "-t", SESSION], capture_output=True
     ).returncode == 0
+    restored = results["steps"]["7-repaint-and-quit"].get("terminal_restored", False)
     results["shutdown"] = {
         "kanban_pid_alive": alive,
         "tmux_session_present": has_session,
+        "terminal_restored": restored,
     }
-    log(f"shutdown: pid alive={alive}, session present={has_session}")
+    log(
+        f"shutdown: pid alive={alive}, session present={has_session}, "
+        f"terminal restored={restored}"
+    )
+    drop_session()
 
     drainer_after = drainer_state()
     results["drainer_after"] = drainer_after
@@ -5642,7 +5726,20 @@ def main():
     log(f"wrote {args.out}")
 
     failed = [n for n, s in results["steps"].items() if s.get("verdict") != "pass"]
-    return 1 if failed or alive or has_session or not results["drainer_unchanged"] else 0
+    ok = (
+        not failed
+        and not alive
+        and not has_session
+        and restored
+        and results["drainer_unchanged"]
+    )
+    if not ok:
+        log(
+            f"SCRIPT FAILED: failed steps={failed}, pid alive={alive}, "
+            f"session present={has_session}, terminal restored={restored}, "
+            f"drainer unchanged={results['drainer_unchanged']}"
+        )
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
