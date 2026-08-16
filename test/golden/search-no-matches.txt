@@ -1,15 +1,15 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━ ISSUES  0/5 ━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
-║┃ Codex                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ 5 hour  [██████░░░░] 63% ┃┃ ┌─────────────── SEARCH ───────────────┐ ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃         Thu 16:05        ┃┃ │ no such card                         │ ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃ │ no such card                         │ ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃ week    [████░░░░░░] 41% ┃┃ └──────────────────────────────────────┘ ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃         Tue 09:00        ┃┃                                          ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃ Claude                   ┃┃                                          ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃                                          ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃                                          ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
 ║┃ 5 hour  [████████░░] 78% ┃┃ No matches                               ┃     │ #712 Migrate the terrain cache  │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃         Thu 17:30        ┃┃                                          ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃                                          ┃     │ reader                          │ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃                                          ┃     │  code-health                    │ ┃  │ Moves per-domain dispatch into     │ ┃  │ Updates the branch after the       │ ┃║
-║┃         Sat 09:10        ┃┃                                          ┃     │ @codex-agent · updated 4h ago   │ ┃  │ small modules while preserving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃                                          ┃     │ @codex-agent · updated 4h ago   │ ┃  │ small modules while preserving the │ ┃  │ persistence registry changed on    │ ┃║
 ║┃                          ┃┃                                          ┃     │ Read through the envelope and   │ ┃  │ public facade.                     │ ┃  │ master.                            │ ┃║
 ║┃                          ┃┃                                          ┃     │ reject a payload whose recorded │ ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
 ║┃                          ┃┃                                          ┃     │ length disagrees with the file. │ ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║

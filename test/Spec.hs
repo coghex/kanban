@@ -42,6 +42,7 @@ import qualified Spec.UI.Search as Search
 import qualified Spec.UI.SessionCore as SessionCore
 import qualified Spec.UI.SolveChooser as SolveChooser
 import qualified Spec.UI.Text as UIText
+import qualified Spec.UI.Usage as UIUsage
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import System.Environment (lookupEnv)
 import Test.Hspec (Spec, hspec)
@@ -91,6 +92,7 @@ suite = do
   Filter.spec
   Golden.spec
   Incidents.spec
+  UIUsage.spec
   Keys.spec
   Search.spec
   Ping.spec

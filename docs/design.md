@@ -314,24 +314,24 @@ The normal wide-screen layout is a 28-column usage sidebar plus a horizontally
 scrollable four-column board.
 
 ```text
-╔═ USAGE ═════════════╦═ ISSUES ═════╦═ ACTIVE ═════╦═ REVIEWING ══╦═ DONE ═══════╗
-║                     ║              ║              ║              ║              ║
-║ Codex               ║ cards        ║ cards        ║ cards        ║ cards        ║
-║ 5 hour   63% left   ║              ║              ║              ║              ║
-║  resets  14:32      ║              ║              ║              ║              ║
-║ week     41% left   ║              ║              ║              ║              ║
-║  resets  Tue 09:00  ║              ║              ║              ║              ║
-║                     ║              ║              ║              ║              ║
-║ Claude              ║              ║              ║              ║              ║
-║ 5 hour   78% left   ║              ║              ║              ║              ║
-║  resets  16:05      ║              ║              ║              ║              ║
-║ week     22% left   ║              ║              ║              ║              ║
-║  resets  Fri 09:10  ║              ║              ║              ║              ║
-║                     ║              ║              ║              ║              ║
-║ ┏━━━━━━━━━━━━━━┓    ║              ║              ║              ║              ║
-║ ┃ drain_prs.py ┃    ║              ║              ║              ║              ║
-║ ┗━━━━━━━━━━━━━━┛    ║              ║              ║              ║              ║
-╚═════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
+╔═ USAGE ══════════════════╦═ ISSUES ═════╦═ ACTIVE ═════╦═ REVIEWING ══╦═ DONE ═══════╗
+║                          ║              ║              ║              ║              ║
+║ Codex          3h 0m old ║ cards        ║ cards        ║ cards        ║ cards        ║
+║ 5 hour  [██████░░░░] 63% ║              ║              ║              ║              ║
+║ in 1h 5m · Thu 16:05     ║              ║              ║              ║              ║
+║ week    [████░░░░░░] 41% ║              ║              ║              ║              ║
+║ in 4d 18h · Tue 09:00    ║              ║              ║              ║              ║
+║                          ║              ║              ║              ║              ║
+║ Claude         3h 0m old ║              ║              ║              ║              ║
+║ 5 hour  [████████░░] 78% ║              ║              ║              ║              ║
+║ in 2h 30m · Thu 17:30    ║              ║              ║              ║              ║
+║ week    [██░░░░░░░░] 22% ║              ║              ║              ║              ║
+║ in 1d 18h · Sat 09:10    ║              ║              ║              ║              ║
+║                          ║              ║              ║              ║              ║
+║ ┏━━━━━━━━━━━━━━┓         ║              ║              ║              ║              ║
+║ ┃ drain_prs.py ┃         ║              ║              ║              ║              ║
+║ ┗━━━━━━━━━━━━━━┛         ║              ║              ║              ║              ║
+╚══════════════════════════╩══════════════╩══════════════╩══════════════╩══════════════╝
  j/Down next  k/Up previous  x kill  h/l column  s search  e epic  enter  r review/revise  S solve  A autosolve  p processes  u update  d drainer  c sidebar  o options  ? help  q/Ctrl-C quit
 ```
 
@@ -1613,23 +1613,35 @@ keeps users unblocked when a client update breaks a built-in parser.
 ### Sidebar display
 
 ```text
-Codex
-5 hour  [██████░░░░] 63% left
-        resets 14:32
-week    [████░░░░░░] 41% left
-        resets Tue 09:00
+Codex          3h 0m old
+5 hour  [██████░░░░] 63%
+in 1h 5m · Thu 16:05
+week    [████░░░░░░] 41%
+in 4d 18h · Tue 09:00
 
-Claude
-5 hour  [████████░░] 78% left
-        resets 16:05
-week    [██░░░░░░░░] 22% left
-        resets Fri 09:10
+Claude         3h 0m old
+5 hour  [████████░░] 78%
+in 2h 30m · Thu 17:30
+week    [██░░░░░░░░] 22%
+in 1d 18h · Sat 09:10
 ```
 
 Each window shows its own reset time; five-hour and weekly windows reset
-independently. Reset and relative times are recomputed whenever a redraw
-happens for another reason; the application never wakes on a timer to maintain
-a countdown.
+independently. A window's second row states both how long until that window
+resets and the local wall clock it resets at, and the countdown takes that
+row's former indent rather than a row of its own: the percentage row above it
+already spends the sidebar's whole interior, and a provider's block is a fixed
+height.
+
+A provider's name shares its row with the age of the snapshot on screen. That
+age is drawn for every snapshot rather than only for a stale one, because a
+snapshot restored from the cache at startup is labelled fresh at the instant it
+was written -- so a board opened on numbers days old is exactly the case the
+age exists to report.
+
+Reset and relative times are recomputed whenever a redraw happens for another
+reason, from the instant that redraw carries; the application never wakes on a
+timer to maintain a countdown.
 
 ### The `--usage` command-line surface
 
@@ -1650,10 +1662,18 @@ Claude
 
 Both the window countdowns and the snapshot-age line are computed by one pure
 function of the snapshot, an explicitly supplied current time, and the zone
-the reset wall clock is stated in. The sidebar renders through that same
-function rather than a second copy of the arithmetic, and every duration is
-clamped at zero, so a reset instant already past and a snapshot stamped ahead
-of the clock read as `0s` rather than as a negative interval.
+the reset wall clock is stated in. The sidebar states the same countdown and
+the same age through those same functions rather than a second copy of the
+arithmetic; it only arranges them into its own narrower rows.
+
+Every duration is clamped at zero and bounded above. A snapshot stamped ahead
+of the clock reads `0s old` rather than as a negative interval, and a reset
+instant already past is named `resets due now` rather than counted down to,
+since `resets in 0s` would be a countdown to an instant that has gone. Nothing
+restricts how distant a decoded `resets_at` may be, so past 99 days a duration
+reports `>99d` instead of counting out days without limit -- which is what
+keeps the sidebar's reset row inside its fixed interior for any instant a
+provider reports.
 
 Which process a provider runs is decided by the one routing path the board
 uses, so a configured `[usage.codex]` or `[usage.claude]` command replaces the

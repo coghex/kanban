@@ -1,15 +1,15 @@
 +-------------------------------------------------------------------------- coghex/kanban -------------------------------------------------------------------------+
 |+---------- USAGE ---------++---------- ISSUES  1/5 ----------+----------- ACTIVE  3 ----------+--------- REVIEWING  2 ---------+------------ DONE  3 -----------+|
-|| Codex                    ||                                 |                                |                                |                                ||
+|| Codex          3h 0m old ||                                 |                                |                                |                                ||
 || 5 hour  [######....] 63% || +----------- SEARCH ----------+ |                                |  STANDALONE                    |  STANDALONE                    ||
-||         Thu 16:05        || | envelope                    | |  v #700  Persistence contract  |  +---------------------------+ |  +---------------------------+ ||
+|| in 1h 5m · Thu 16:05     || | envelope                    | |  v #700  Persistence contract  |  +---------------------------+ |  +---------------------------+ ||
 || week    [####......] 41% || +-----------------------------+ |  rollout  1/2 complete         |  | PR #841 Split the input   | |  | PR #851 Resolve save      | ||
-||         Tue 09:00        ||                                 |  `- +------------------------+ |  | dispatch facade           | |  | envelope conflict         | ||
-|| Claude                   ||                                 |     | A2 · tracker #700      | |  |  refactor                 | |  |  reviewed:approve         | ||
+|| in 4d 18h · Tue 09:00    ||                                 |  `- +------------------------+ |  | dispatch facade           | |  | envelope conflict         | ||
+|| Claude         3h 0m old ||                                 |     | A2 · tracker #700      | |  |  refactor                 | |  |  reviewed:approve         | ||
 || 5 hour  [########..] 78% ||  v #700  Persistence contract   |     | #712 Migrate the       | |  | #833 · agent-name →       | |  | UNLINKED · agent-name →   | ||
-||         Thu 17:30        ||  rollout  1/2 complete          |     | terrain cache reader   | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
+|| in 2h 30m · Thu 17:30    ||  rollout  1/2 complete          |     | terrain cache reader   | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
 || week    [##........] 22% || >`- +-------------------------+ |     |  code-health           | |  | Moves per-domain dispatch | |  | Updates the branch after  | ||
-||         Sat 09:10        ||     | A1 · tracker #700       | |     | @codex-agent · updated | |  | into small modules while  | |  | the persistence registry  | ||
+|| in 1d 18h · Sat 09:10    ||     | A1 · tracker #700       | |     | @codex-agent · updated | |  | into small modules while  | |  | the persistence registry  | ||
 ||                          ||     | #711 Adopt the          | |     | 4h ago                 | |  | preserving the public…    | |  | changed on master.        | ||
 ||                          ||     | versioned save envelope | |     | Read through the       | |  | ◐ CI 12/14 · behind       | |  | ✓ CI 12/12 · merge        | ||
 ||                          ||     |  feature                | |     | envelope and reject a  | |  +---------------------------+ |  | conflict                  | ||

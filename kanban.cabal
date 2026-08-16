@@ -256,6 +256,7 @@ test-suite kanban-test
     Spec.UI.SessionCore
     Spec.UI.SolveChooser
     Spec.UI.Text
+    Spec.UI.Usage
   ghc-options: -threaded -with-rtsopts=-N1
   build-depends:
     aeson,
