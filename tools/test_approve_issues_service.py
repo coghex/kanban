@@ -2677,7 +2677,8 @@ class CommandLineTests(ApprovalFixture):
 
 
 class ControllerBoundaryTests(unittest.TestCase):
-    """This slice installs nothing and shares nothing.
+    """The controller shares no state with the drainer and speaks no service
+    manager of its own.
 
     Asserted against what the module imports and what it names, rather than
     against its prose: the docstrings deliberately discuss both boundaries, and
@@ -2716,8 +2717,16 @@ class ControllerBoundaryTests(unittest.TestCase):
                     docstrings.add(doc)
         return [value for value in self.literals() if value not in docstrings]
 
-    def test_the_controller_depends_on_no_service_manager(self):
-        self.assertNotIn("service_manager", self.imported())
+    def test_the_controller_reaches_its_service_manager_only_through_the_seam(self):
+        # IAQ-3 gave this controller a managed job, so it now depends on the
+        # boundary — and on nothing else about a service manager. Both halves
+        # are asserted: dropping the import would mean the job was being driven
+        # from somewhere new, and any launchd or systemd spelling appearing in
+        # its own code would mean the seam had been reached around rather than
+        # through. `tools/test_agent_workflow_contract.py` holds the same rule
+        # against the whole tools/ surface; this keeps it legible here, where
+        # the job is actually installed.
+        self.assertIn("service_manager", self.imported())
         for value in self.code_literals():
             for token in ("launchctl", "launchd", "systemctl", "plist", "LaunchAgent"):
                 self.assertNotIn(token, value)

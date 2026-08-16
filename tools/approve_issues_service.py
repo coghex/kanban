@@ -6,8 +6,14 @@
 one issue per invocation and then exits, releasing the canonical approval lock
 between issues. Something has to repeat those bounded passes, decide how long
 to wait between them, and leave a durable trace of what happened. This module
-is that something: a foreground `run` that supervises repeated passes, and a
-read-only `status` that reports what the last run left behind.
+is that something: a foreground `run` that supervises repeated passes, a
+read-only `status` that reports what the last run left behind, and the
+`install`, `start`, `stop`, and `uninstall` operations that make that run a
+managed job rather than a terminal someone has to keep open.
+`tools/install_issue_approval.py` owns installation *safety* — the stable
+managed links and the canonical backend it refuses to install a second copy
+of — and drives those four operations through the installed copy of this
+module.
 
 Three boundaries are deliberate.
 
@@ -23,12 +29,13 @@ mirrored constants equal to the backend's.
 It never shares `tools/drain_prs_service.py`'s state, and does not import it
 either. That module is the pattern for every convention here -- identity
 normalization, per-repository runtime and log directories, atomic document
-replacement, process-group supervision -- but the two services are distinct
-jobs whose incidents mean different things, so this one keeps its own
-`issue-approval` namespace, its own lock, and its own status and incident
-types. Importing the drainer's controller would also drag in a service-manager
-selection this slice deliberately does not need: `run` is a foreground process
-and installs no job.
+replacement, serialized discovery records, process-group supervision -- but the
+two services are distinct jobs whose incidents mean different things, so this
+one keeps its own `issue-approval` namespace, its own lock, its own discovery
+record, and its own status and incident types. Both now install a job, and both
+reach a service manager through `tools/service_manager.py`; each does so for
+its own `ServiceNamespace`, which is what keeps one service from ever naming,
+loading, or unloading the other's.
 
 It never decides anything the backend owns. Which issue is next, which
 reviewer runs, what a verdict means, and every GitHub mutation stay in the
@@ -56,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 import kanban_config
+import service_manager
 
 # Guarded rather than imported outright so a host without it gets the
 # diagnostic `require_supported_host` writes instead of an ImportError
@@ -88,6 +96,24 @@ BACKEND_OUTCOMES = frozenset(
 # the queue and carry no number.
 BACKEND_ISSUE_OUTCOMES = frozenset({"advanced", "changes_requested", "retry"})
 BACKEND_NAME = "approve_issues.py"
+
+# Identity marker for this tracked asset, in the same form and for the same
+# reason `approve_issues.py` and `kanban_config.py` carry theirs: an installer
+# recognizes the copy it manages by content rather than by path, so a link
+# pointing at somebody else's similarly named file is never replaced or
+# removed. `tools/install_issue_approval.py` is the reader.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-approval/approve_issues_service.py"
+# This controller's own file name, used to name its installed link. Spelled
+# once so the installer and the definition it writes cannot disagree.
+CONTROLLER_NAME = "approve_issues_service.py"
+# Where a custom installation puts the script links. Only ever consulted by a
+# process that has it; the durable answer for one that does not is the
+# `install_dir` each repository's discovery-record entry carries.
+INSTALL_DIR_ENV = "KANBAN_ISSUE_APPROVAL_INSTALL_DIR"
+# The key every installed repository's record is filed under in the shared
+# discovery document, matching the drainer's shape so one reader convention
+# serves both services.
+RECORD_REPOSITORIES_KEY = "repositories"
 # The canonical approval lock's file name, inside the repository's shared Git
 # directory. Mirrored from `approve_issues.APPROVAL_LOCK_NAME` for the reason
 # the module docstring gives, and held equal to it by a test -- as is the
@@ -158,6 +184,17 @@ SLEEP_SLICE_SECONDS = 0.05
 # How long an intentional stop waits for the backend's process group to go away
 # after SIGINT before escalating to SIGKILL.
 STOP_GRACE_SECONDS = 10.0
+# How long `start` waits for the started job to record a live state, and how
+# long `stop` waits for it to stop recording one. A start only has to reach the
+# controller's first status write; a stop has to wait out the pass it landed
+# in, so it is the more patient of the two.
+START_TIMEOUT_SECONDS = 15.0
+STOP_TIMEOUT_SECONDS = 30.0
+# How often each of those waits looks. Coarser than the run loop's own slice:
+# these poll a document another process writes, and a tighter loop would only
+# read the same answer more times.
+START_POLL_SECONDS = 0.25
+STOP_POLL_SECONDS = 0.25
 # How much of a failed pass's stderr is kept in its incident.
 CAPTURED_STDERR_LINES = 60
 
@@ -245,11 +282,55 @@ def service_root() -> Path:
 def runtime_root() -> Path:
     """Where each identity's status, barrier, and incidents live.
 
-    IAQ-3 owns installation and may one day let an installer relocate this.
-    `run_lock_path` is deliberately not written against it, so that a movable
-    runtime could never move the lock with it.
+    Deliberately not relocatable, even though installation is now this
+    module's too: `--install-dir` moves the script links, not the state a
+    dashboard that inherits no environment has to find. `run_lock_path` is
+    likewise not written against it, so that a movable runtime could never
+    move the lock with it.
     """
     return service_root() / "runtime"
+
+
+def discovery_record_path() -> Path:
+    """The one document Kanban reads to find this service's installed jobs.
+
+    Fixed rather than `--install-dir`-relative, exactly as the drainer's and
+    the issue-review backend's records are, and for the same reason: a
+    dashboard that never inherits `KANBAN_ISSUE_APPROVAL_INSTALL_DIR` still has
+    to discover an installation made anywhere, so the record's own path is the
+    one thing that cannot move.
+    """
+    return service_root() / "config.json"
+
+
+def default_install_dir() -> Path:
+    """Where the script links go when nothing selects otherwise: beside the
+    record, which is the drainer's arrangement too."""
+    return service_root()
+
+
+def selected_install_dir() -> Path:
+    """The install directory this process was pointed at, or the default.
+
+    Only the environment is consulted, because that is all a process starting
+    from nothing has. Which directory one *repository's* job was installed
+    into is a different and more specific question, answered by
+    `job_install_dir` once an identity is known.
+    """
+    override = os.environ.get(INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return default_install_dir()
+
+
+def controller_path(install_dir: Path) -> Path:
+    """The installed controller a service definition names.
+
+    Named from the install directory rather than from `__file__`: the
+    definition has to name the stable installed link, so that repointing the
+    link is how a moved checkout is repaired without rewriting every job.
+    """
+    return install_dir / CONTROLLER_NAME
 
 
 def run_lock_path(slug: str) -> Path:
@@ -434,8 +515,28 @@ def repository_identity(repo_path: Path, remote_name: str) -> str:
         ) from exc
 
 
+def discovery_remote_name() -> str:
+    """The remote this service's *identity* is resolved through.
+
+    Always the shared Kanban configuration's, never a repository's own
+    `--config`, and that is load-bearing in two directions. It is the remote
+    Kanban itself resolves its repository through, so both sides name the same
+    identity and agree on which record describes this repository's job. And it
+    breaks a circularity that would otherwise be unresolvable: a repository's
+    `--config` is stored in the record its identity selects, so a `--config`
+    naming a different remote would decide an identity that had already been
+    used to find it -- an install and a later uninstall of one checkout would
+    resolve two different repositories.
+
+    A repository's `--config` still decides what its controller runs with,
+    including the labels and overrides the backend reads. It decides which
+    repository the service is *for* only through this shared configuration.
+    """
+    return configured_remote_name(None)
+
+
 def resolve_job(repo_path: Path, *, config_path: str | None = None) -> ApprovalJob:
-    identity = repository_identity(repo_path, configured_remote_name(config_path))
+    identity = repository_identity(repo_path, discovery_remote_name())
     return job_for_identity(repo_path, identity, config_path=config_path)
 
 
@@ -1233,6 +1334,13 @@ def status_snapshot(job: ApprovalJob) -> dict[str, Any]:
         "reason": reason,
         "repository": job.identity,
         "repo": str(job.repo_path),
+        # The checkout a *live* run is actually being supervised from, which is
+        # not necessarily this job's: two clones of one GitHub repository
+        # resolve to one identity and one runtime, and the only place their
+        # difference is visible is the checkout the running controller
+        # recorded. Null unless something is running, because a finished run's
+        # checkout is history rather than a conflict.
+        "active_repo": stored.get("repo") if state in LIVE_STATES else None,
         "runner_pid": stored.get("runner_pid") if state in LIVE_STATES else None,
         # Only while it is really there: a pass that has finished leaves its
         # PID recorded until the next write, and reporting that as a live
@@ -1985,6 +2093,583 @@ class Controller:
         )
 
 
+# ---------------------------------------------------------------------------
+# The discovery record
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def document_lock(path: Path) -> Iterator[None]:
+    """Serialize read-modify-write on the shared discovery document.
+
+    One document carries every installed repository's entry, and an install
+    for one repository must never drop another's. Without this, two installs
+    can both read the table and whichever writes last silently deletes the
+    other's entry -- leaving a repository whose job is loaded with no record
+    for Kanban to find it through. The lock lives beside the document rather
+    than on it, because the document is replaced atomically and a lock held on
+    the old inode would guard nothing.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ServiceError(f"Refusing unsafe discovery lock path: {lock_path}") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def update_json_document(
+    path: Path, transform: Callable[[dict[str, Any]], dict[str, Any]]
+) -> Path:
+    """Replace the private JSON object at `path` with `transform` applied to
+    it, reading and writing under one exclusive lock so a concurrent writer
+    cannot lose either party's change."""
+    with document_lock(path):
+        if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+            raise ServiceError(f"Refusing unsafe discovery record path: {path}")
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            loaded = _read_json_document(path)
+            if isinstance(loaded, dict):
+                existing = loaded
+        updated = transform(existing)
+        fd, temporary_name = tempfile.mkstemp(prefix=".config.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(updated, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.chmod(0o600)
+            os.replace(temporary, path)
+        finally:
+            if os.path.lexists(temporary):
+                temporary.unlink()
+    return path
+
+
+def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
+    """Merge `updates` into one repository's entry, leaving every sibling entry
+    and every top-level key untouched.
+
+    Two levels of merge, not one: replacing the value of each key given would
+    hand over a `repositories` table built from `updates` alone, deleting every
+    other installed repository. The entry itself is merged one level down for
+    the same reason -- the installer persists `config_path` and the install
+    performs the service-manager keys, and either may run without the other.
+
+    The read that computes the merge happens inside `update_json_document`'s
+    lock, so a repository installed between another writer's read and its write
+    cannot be dropped.
+    """
+
+    def merged(document: dict[str, Any]) -> dict[str, Any]:
+        records = document.get(RECORD_REPOSITORIES_KEY)
+        records = dict(records) if isinstance(records, dict) else {}
+        existing = records.get(identity)
+        entry = dict(existing) if isinstance(existing, dict) else {}
+        entry.update(updates)
+        records[identity] = entry
+        return {**document, RECORD_REPOSITORIES_KEY: records}
+
+    return update_json_document(discovery_record_path(), merged)
+
+
+def remove_repository_record(identity: str) -> Path:
+    """Drop one repository's entry, leaving every sibling entry and every
+    top-level key exactly as they are -- the same two-level discipline in the
+    other direction, under the same lock."""
+
+    def without(document: dict[str, Any]) -> dict[str, Any]:
+        records = document.get(RECORD_REPOSITORIES_KEY)
+        if not isinstance(records, dict) or identity not in records:
+            return document
+        remaining = {key: value for key, value in records.items() if key != identity}
+        return {**document, RECORD_REPOSITORIES_KEY: remaining}
+
+    return update_json_document(discovery_record_path(), without)
+
+
+def installed_repository_records() -> dict[str, dict[str, Any]]:
+    """Every installed repository's record, keyed by normalized identity.
+
+    Read without the lock: a reader that observes the document either before or
+    after a writer's atomic replacement observes a complete document either
+    way, and holding the lock to read would let a status poll block an install.
+    """
+    document = _read_json_document(discovery_record_path())
+    if not isinstance(document, dict):
+        return {}
+    records = document.get(RECORD_REPOSITORIES_KEY)
+    if not isinstance(records, dict):
+        return {}
+    return {
+        identity: record
+        for identity, record in records.items()
+        if isinstance(identity, str) and isinstance(record, dict)
+    }
+
+
+def installed_repository_record(identity: str) -> dict[str, Any]:
+    return installed_repository_records().get(identity, {})
+
+
+def _recorded_string(identity: str, key: str) -> str | None:
+    value = installed_repository_record(identity).get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def installed_install_dir(identity: str) -> str | None:
+    """Where this repository's job was installed from, as recorded.
+
+    Requirement 11's whole point: a later process that inherits no environment
+    -- Kanban, or a second installer run -- rediscovers a custom
+    `--install-dir` by reading it rather than by being told.
+    """
+    return _recorded_string(identity, "install_dir")
+
+
+def job_install_dir(job: ApprovalJob) -> Path:
+    """Which installation this repository's job belongs to.
+
+    The environment override first, so a controller launched out of a custom
+    installation acts on that one. Then what this repository's own record says,
+    which is how a reinstall or a start from a process holding no environment
+    converges on the installation the job is already in rather than silently
+    moving it to the default. The default last, for a repository that has never
+    been installed.
+    """
+    override = os.environ.get(INSTALL_DIR_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    recorded = installed_install_dir(job.identity)
+    if recorded:
+        return Path(recorded)
+    return default_install_dir()
+
+
+def installed_config_path(identity: str) -> str | None:
+    """The kanban `config.toml` this repository's service was installed with.
+
+    Read only out of that repository's own entry. A second repository's
+    `--config` must never change what the first one's controller runs with,
+    which is why there is no shared scalar to fall back to.
+    """
+    return _recorded_string(identity, "config_path")
+
+
+# ---------------------------------------------------------------------------
+# The managed job
+# ---------------------------------------------------------------------------
+
+
+def service_backend() -> service_manager.ServiceManagerBackend:
+    """The service manager this host's approval jobs are managed by.
+
+    Resolved for this service's own namespace, so every identifier derived
+    through it belongs to `issue-approval` and none of them can name a
+    drainer's job. Resolved per call rather than held, exactly as the drainer's
+    is, so a test may replace either this function or the selection under it.
+
+    This is also where a host with no service manager is refused, which is the
+    only platform question installation asks: `sys.platform` decides nothing,
+    since a Linux host with a live user session installs here as a macOS host
+    does. `run` and `status` deliberately never reach it -- a foreground run
+    and a read of what it left behind need no manager at all.
+    """
+    try:
+        return service_manager.select_backend(
+            run_command, service_manager.ISSUE_APPROVAL_NAMESPACE
+        )
+    except service_manager.NoServiceManagerError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def service_label(job: ApprovalJob) -> str:
+    """This repository's one job identifier, derived through the backend.
+
+    A function of the identity alone, by way of the slug every runtime path is
+    partitioned by, so the job, its runtime directory, and its logs can never
+    name different repositories.
+    """
+    return service_backend().service_identifier(job.slug)
+
+
+def service_definition(
+    job: ApprovalJob, install_dir: Path
+) -> service_manager.ServiceDefinition:
+    """What the service manager must run for this job.
+
+    Every value here is this controller's own -- which interpreter runs which
+    installed script against which checkout, where its output goes, and what
+    environment it needs -- and none of it is any service manager's spelling of
+    that. Rendering it into a definition on disk is the backend's work.
+    """
+    # Absolute, so the job runs on the interpreter this installation was made
+    # with rather than on whatever `python3` a service manager's PATH resolves
+    # to. A bare name -- what an embedded interpreter reporting none falls back
+    # to -- is left for that PATH to resolve, because anchoring it to this
+    # process's working directory would name nothing at all.
+    interpreter = python_executable()
+    python = (
+        str(Path(interpreter).resolve()) if os.path.isabs(interpreter) else interpreter
+    )
+    environment = {
+        "HOME": str(account_home()),
+        "PATH": ":".join(
+            [
+                str(account_home() / ".local" / "bin"),
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
+        ),
+        "PYTHONUNBUFFERED": "1",
+        INSTALL_DIR_ENV: str(install_dir),
+    }
+    # Carried across only when this install actually selected one. The
+    # installer verifies the canonical backend it resolved, and a job that
+    # resolved a different one would run a reviewer nobody checked; a job
+    # installed with no override resolves through the fixed issue-review
+    # record, which is the durable answer and needs no environment at all.
+    override = os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
+    if override and override.strip():
+        environment[kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV] = override
+    arguments = [
+        python,
+        str(controller_path(install_dir)),
+        "--path",
+        str(job.repo_path),
+        # The identity every path beside this job was derived from, recorded
+        # here because the definition outlives the configuration it was written
+        # from. Without it the runner would re-resolve the identity at launch,
+        # and a `remote_name` changed after installation would silently point
+        # this job at another repository's status, incidents, and logs.
+        "--repo",
+        job.identity,
+    ]
+    if job.config_path:
+        # In the definition rather than only in the record: the definition is
+        # what a service manager actually executes, and a job launched at boot
+        # inherits nothing else.
+        arguments.extend(["--config", job.config_path])
+    # `--interval` and `--legacy-policy` are deliberately absent. The
+    # definition carries what the job *is*; both of those are the run's own
+    # defaults, which a later release may change without every installed job
+    # having to be rewritten first.
+    arguments.append("run")
+    return service_manager.ServiceDefinition(
+        identifier=service_label(job),
+        program_arguments=arguments,
+        working_directory=str(job.repo_path),
+        environment=environment,
+        stdout_path=str(job.log_dir / "service.out"),
+        stderr_path=str(job.log_dir / "service.err"),
+    )
+
+
+def same_checkout(left: str, right: str) -> bool:
+    """Whether two recorded paths name one checkout.
+
+    Compared after resolution rather than as strings: one directory has many
+    spellings -- a symlinked parent, a relative path, a trailing slash -- and
+    reporting the checkout that is running as a *different* one would refuse an
+    install nothing is actually conflicting with.
+    """
+    return os.path.realpath(left) == os.path.realpath(right)
+
+
+def another_checkout_running(job: ApprovalJob, snapshot: dict[str, Any]) -> str | None:
+    """The other checkout of this same GitHub repository whose controller is
+    already running, if there is one.
+
+    Neither run lock can answer this from here: they are held by the running
+    process, and this is a different process asking. The status document is
+    what it left behind, and the checkout it recorded is the one thing that
+    distinguishes two clones of one identity.
+    """
+    active_repo = snapshot.get("active_repo")
+    if snapshot.get("state") not in LIVE_STATES:
+        return None
+    if not isinstance(active_repo, str) or same_checkout(
+        active_repo, str(job.repo_path)
+    ):
+        return None
+    return active_repo
+
+
+def require_installable(job: ApprovalJob) -> None:
+    """Every reason this repository's job must not be written right now.
+
+    Ordered by what each protects, and all of them read-only, so a refusal
+    leaves the installation exactly as it was. The legacy daemon comes first
+    because it is about the canonical lock rather than about this service:
+    installing beside it would produce a job whose ordered barrier the daemon
+    walks straight past (D-13). Then a second checkout of this identity, then
+    this checkout's own live run -- a manager asked to replace a definition
+    under a live job leaves a controller nothing can see or stop.
+    """
+    require_no_legacy_daemon(job.repo_path)
+    snapshot = status_snapshot(job)
+    conflict = another_checkout_running(job, snapshot)
+    if conflict is not None:
+        raise ServiceError(
+            f"The issue approval controller for {job.identity} is already running "
+            f"from {conflict}, which is another checkout of the same repository as "
+            f"{job.repo_path}. Stop it before installing this checkout's job."
+        )
+    if snapshot["state"] in LIVE_STATES:
+        raise ServiceError(
+            "Stop the running issue approval controller before installing its "
+            f"{service_backend().backend_name()} job."
+        )
+
+
+def install_plan(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
+    """Exactly what `install_job` would do, without writing anything.
+
+    Reported from the same derivations the install itself uses, so a dry run
+    cannot describe a job the install would not produce. Every refusal
+    `require_installable` raises is raised here too: a plan that ignored them
+    would report an installation that could not actually happen.
+
+    The host check leads, ahead of the service-manager selection and ahead of
+    every write on every path that reaches here -- installing, planning, and
+    the refresh a start performs. A host that cannot supervise a process group
+    cannot run this service at all, so a job loaded there could only ever fail
+    at start (requirement 14).
+    """
+    require_supported_host()
+    backend = service_backend()
+    require_installable(job)
+    label = service_label(job)
+    definition_path = backend.definition_path(label)
+    return {
+        "repository": job.identity,
+        "repo": str(job.repo_path),
+        "label": label,
+        "service_manager": backend.backend_name(),
+        backend.definition_label(): str(definition_path),
+        "target": backend.manager_target(label),
+        "record": str(discovery_record_path()),
+        "install_dir": str(install_dir),
+        "controller": str(controller_path(install_dir)),
+        "config_path": job.config_path,
+        "runtime_dir": str(job.runtime_dir),
+        "log_dir": str(job.log_dir),
+        # Installation loads a stopped job and nothing else. The definition
+        # itself carries no login trigger, so this is a statement about the
+        # whole operation rather than about this one step (D-9).
+        "started": False,
+    }
+
+
+def write_discovery_record(
+    job: ApprovalJob, label: str, definition_path: Path, install_dir: Path
+) -> Path:
+    """Record where the definition just written for this job actually lives, so
+    Kanban resolves it by reading rather than by deriving the label a second
+    time.
+
+    Which keys name the job is the backend's answer, because the entry is a
+    discriminated union exactly as the drainer's is. `install_dir` rides along
+    because a custom installation is otherwise discoverable only through an
+    environment variable a dashboard never inherits.
+    """
+    backend = service_backend()
+    updates: dict[str, Any] = {
+        **backend.record_entry(label, definition_path),
+        "repository": str(job.repo_path),
+        "install_dir": str(install_dir),
+    }
+    if job.config_path:
+        updates["config_path"] = job.config_path
+    return merge_repository_record(job.identity, updates)
+
+
+def install_job(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
+    """Load one stopped job for this repository, and record where it is.
+
+    Nothing is started here and nothing starts at login: the definition the
+    backend writes is non-resident by construction, so only an explicit `start`
+    ever produces a run (D-9).
+    """
+    plan = install_plan(job, install_dir)
+    backend = service_backend()
+    ensure_dirs(job)
+    label = plan["label"]
+    definition_path = backend.write_definition(service_definition(job, install_dir))
+    # Written from the definition on disk and before the manager is asked to
+    # load it: the record describes where the job is, so it has to be true from
+    # the moment the job exists. Every install path reaches here, including the
+    # refresh `start_service` performs, so no route can leave it stale.
+    record = write_discovery_record(job, label, definition_path, install_dir)
+    backend.load_definition(label)
+    return {**plan, "installed": True, "record": str(record)}
+
+
+def uninstall_plan(job: ApprovalJob) -> dict[str, Any]:
+    """Exactly what `uninstall_job` would do, without writing anything.
+
+    Led by the same host check, for the same reason: a removal is a mutation
+    too, and a host this service cannot run on is one whose job nothing here
+    should be reasoning about.
+    """
+    require_supported_host()
+    backend = service_backend()
+    require_stopped_for_uninstall(job)
+    label = service_label(job)
+    return {
+        "repository": job.identity,
+        "repo": str(job.repo_path),
+        "label": label,
+        "service_manager": backend.backend_name(),
+        backend.definition_label(): str(backend.definition_path(label)),
+        "record": str(discovery_record_path()),
+        "record_entry_removed": job.identity in installed_repository_records(),
+        # Runtime state, logs, and open incidents are deliberately left behind:
+        # they are the record of what this service did, and an uninstall is not
+        # an acknowledgement.
+        "runtime_dir": str(job.runtime_dir),
+        "log_dir": str(job.log_dir),
+    }
+
+
+def require_stopped_for_uninstall(job: ApprovalJob) -> None:
+    """Refuse to remove a job whose controller is still running.
+
+    A manager asked to forget a live job leaves a controller reviewing issues
+    with nothing able to see or stop it, so the remediation is named rather
+    than performed: stopping somebody's run is an explicit operator decision,
+    and an uninstall that stopped it silently would take that decision away.
+    """
+    snapshot = status_snapshot(job)
+    conflict = another_checkout_running(job, snapshot)
+    if conflict is not None:
+        raise ServiceError(
+            f"The issue approval controller for {job.identity} is running from "
+            f"{conflict}, another checkout of the same repository. Stop it there "
+            "before uninstalling this job."
+        )
+    if snapshot["state"] in LIVE_STATES:
+        raise ServiceError(
+            f"The issue approval controller for {job.identity} is running. Stop it "
+            "first: uninstalling a live job would leave a controller nothing can "
+            "see or stop."
+        )
+
+
+def uninstall_job(job: ApprovalJob) -> dict[str, Any]:
+    """Remove this repository's job: its definition, the manager's hold on it,
+    and its entry in the discovery record.
+
+    Scoped to one repository throughout -- the definition is this job's alone
+    and the record edit removes one entry -- so a second installed repository's
+    job, and the shared script links every installed job runs from, are
+    untouched. Removing those links is the installer's decision, and only once
+    no installed job is left to depend on them.
+    """
+    plan = uninstall_plan(job)
+    backend = service_backend()
+    label = plan["label"]
+    outcome = backend.uninstall_definition(label)
+    record = remove_repository_record(job.identity)
+    # Asserted rather than assumed: a successful uninstall must leave nothing
+    # loaded and nothing running, and a manager that still holds the job after
+    # being asked to forget it is a half-finished removal the caller has to
+    # hear about rather than discover later.
+    if backend.is_loaded(label) or backend.is_running(label):
+        raise ServiceError(
+            f"The {backend.backend_name()} job {label} is still present after "
+            "being removed. Uninstall did not complete; stop the service and "
+            "retry."
+        )
+    return {
+        **plan,
+        "uninstalled": True,
+        "unloaded": outcome.unloaded,
+        backend.definition_label() + "_removed": outcome.definition_removed,
+        "record": str(record),
+    }
+
+
+def start_service(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
+    """Start this repository's job, and confirm it is really running.
+
+    The install is refreshed first, on the drainer's precedent: a start is the
+    moment a stale definition or a missing record would matter, and repairing
+    both costs one write nobody notices. What the manager then starts outlives
+    this process by construction -- it is the manager's child, not this one's.
+    """
+    snapshot = status_snapshot(job)
+    conflict = another_checkout_running(job, snapshot)
+    if conflict is not None:
+        raise ServiceError(
+            f"The issue approval controller for {job.identity} is already running "
+            f"from {conflict}, which is another checkout of the same repository as "
+            f"{job.repo_path}. One repository runs one controller at a time."
+        )
+    if snapshot["state"] in LIVE_STATES:
+        return {"started": False, "message": "Already running.", **snapshot}
+    installed = install_job(job, install_dir)
+    label = installed["label"]
+    previous_incidents = {
+        path.name for path, _document in incident_documents(job, open_only=True)
+    }
+    service_backend().kick(label)
+    deadline = time.monotonic() + START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(START_POLL_SECONDS)
+        current = status_snapshot(job)
+        if current["state"] in LIVE_STATES:
+            return {"started": True, "label": label, **current}
+        new_incidents = [
+            document
+            for path, document in incident_documents(job, open_only=True)
+            if path.name not in previous_incidents
+        ]
+        if new_incidents:
+            raise ServiceError(
+                "The issue approval controller exited during startup: "
+                + str(new_incidents[0].get("summary") or new_incidents[0].get("incident_id"))
+            )
+    raise ServiceError(
+        "Timed out waiting for the issue approval controller to start."
+    )
+
+
+def stop_service(job: ApprovalJob) -> dict[str, Any]:
+    """Ask this repository's job to stop, and wait for it to really be gone.
+
+    The manager's own polite stop, so the controller runs its intentional
+    shutdown -- finishing the pass it is in, preserving the barrier, and
+    recording that it stopped on purpose. The job stays installed and loaded:
+    stopping is not uninstalling, and a stopped job is exactly what the next
+    start needs to find.
+    """
+    snapshot = status_snapshot(job)
+    if snapshot["state"] not in LIVE_STATES:
+        return {"stopped": False, "message": "Already stopped.", **snapshot}
+    label = service_label(job)
+    service_backend().request_stop(label)
+    deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(STOP_POLL_SECONDS)
+        current = status_snapshot(job)
+        if current["state"] not in LIVE_STATES:
+            return {"stopped": True, "label": label, **current}
+    raise ServiceError("Timed out waiting for the issue approval controller to stop.")
+
+
 def run_service(job: ApprovalJob, *, interval: float, legacy_policy: str) -> int:
     """Start one controller for this repository, or refuse before it writes.
 
@@ -2035,8 +2720,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "Supervise repeated bounded passes of the canonical issue-review "
             "backend's queue mode for one repository, with durable per-identity "
-            "status, incidents, and logs. This slice installs no service-manager "
-            "job: `run` is an ordinary foreground process."
+            "status, incidents, and logs, and install, start, stop, or remove "
+            "the managed job that supervises them."
         )
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -2082,6 +2767,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "status", help="Report the durable state without changing it."
     )
 
+    # The four managed-job operations. Each is reached by
+    # `tools/install_issue_approval.py` through the *installed* copy of this
+    # module, which is why they take no install-directory option: the copy that
+    # runs them is the installation they are about, and it reads its own
+    # location from the environment that launched it.
+    install_parser = subparsers.add_parser(
+        "install", help="Load a stopped job for this repository. Starts nothing."
+    )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing anything.",
+    )
+    uninstall_parser = subparsers.add_parser(
+        "uninstall", help="Unload this repository's job and drop its record entry."
+    )
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing anything.",
+    )
+    subparsers.add_parser(
+        "start", help="Start the installed job; the run outlives this process."
+    )
+    subparsers.add_parser("stop", help="Stop the run, leaving the job installed.")
+
     # Requirement 7's bookkeeping dismissal. It is deliberately not a control:
     # resolving a barrier's warning leaves the barrier record that stops the
     # queue exactly where it is.
@@ -2109,6 +2820,21 @@ def main(argv: list[str] | None = None) -> int:
             value: Any = status_snapshot(job)
         elif args.command == "ack":
             value = acknowledge_incident(job, args.incident_id, args.note)
+        elif args.command == "install":
+            selected = job_install_dir(job)
+            value = (
+                install_plan(job, selected)
+                if args.dry_run
+                else install_job(job, selected)
+            )
+            value = {**value, "dry_run": args.dry_run}
+        elif args.command == "uninstall":
+            value = uninstall_plan(job) if args.dry_run else uninstall_job(job)
+            value = {**value, "dry_run": args.dry_run}
+        elif args.command == "start":
+            value = start_service(job, job_install_dir(job))
+        elif args.command == "stop":
+            value = stop_service(job)
         else:
             raise ServiceError(f"Unknown command: {args.command}")
         print_value(value, as_json=args.json)
