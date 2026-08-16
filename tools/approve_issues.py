@@ -104,6 +104,9 @@ REVIEW_QUEUE_INVENTORY_LIMIT = 5000
 # to the specification as it stands right now. Named once because both the
 # ordered batch and the review queue key their barrier on exactly this reason.
 CURRENT_CHANGES_REASON = "latest current review verdict is CHANGES_REQUESTED"
+# The canonical approval lock's file name, inside the repository's shared Git
+# directory -- see approval_lock_path.
+APPROVAL_LOCK_NAME = "approve_issues.lock"
 ORIGIN_RE = re.compile(r"<!--\s*issue-origin:(claude|codex)\s*-->", re.IGNORECASE)
 REVIEW_MARKER_RE = re.compile(r"<!--\s*issue-review:v2\s+([^>]*?)\s*-->", re.IGNORECASE)
 AUTOMATED_REVIEW_COMMENT_RE = re.compile(r"<!--\s*issue-review:v2\b", re.IGNORECASE)
@@ -1654,6 +1657,55 @@ def describe_lock_owner(owner: dict[str, Any] | None) -> str:
     return f"another approval process{suffix}"
 
 
+def approval_lock_path(ctx: RepoContext) -> Path:
+    """The one approval lock every checkout of this repository contends for.
+
+    `ctx.path` is `git rev-parse --show-toplevel`, which in a linked worktree
+    answers that worktree's own root -- and there `.git` is a regular *file*
+    pointing into the primary checkout, so joining the lock name onto it
+    raises NotADirectoryError. Both packaged review assets pass
+    `--show-toplevel` through `--path` and solve and review agents work in
+    linked worktrees, so that is the ordinary caller rather than an operator
+    mistake.
+
+    Resolving it here, at the lock, is what gives every mode the behavior:
+    the daemon, `--review`, the ordered batch, `--rereview`, and
+    `--review-queue` all take the lock through this one function.
+
+    The *common* directory, not `--absolute-git-dir`: the latter answers a
+    linked worktree's own `.git/worktrees/<name>`, which is private to that
+    worktree. A lock no other checkout can see is not a lock at all -- it
+    would trade the crash for two canonical reviews of one repository running
+    at once, publishing conflicting v2 comments and labels. Git is asked only
+    when `.git` is not a directory, which leaves an ordinary checkout's lock
+    exactly where a process already holding it put it.
+    """
+    entry = ctx.path / ".git"
+    if entry.is_dir():
+        return entry / APPROVAL_LOCK_NAME
+    proc = run(["git", "rev-parse", "--git-common-dir"], cwd=ctx.path, check=False)
+    answer = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not answer:
+        detail = (proc.stderr or "").strip() or (
+            f"exit code {proc.returncode}"
+            if proc.returncode != 0
+            else "it printed nothing"
+        )
+        raise ApproveError(
+            "Could not resolve the shared Git directory for "
+            f"{ctx.path}, so the approval lock has no location every checkout "
+            f"of this repository shares: git rev-parse --git-common-dir {detail}"
+        )
+    common = Path(answer)
+    if not common.is_absolute():
+        # Git answers relative to the directory it ran in, which cwd made
+        # this checkout. Left unanchored the lock would move with the calling
+        # process's working directory, which is the shared location's whole
+        # point.
+        common = ctx.path / common
+    return common / APPROVAL_LOCK_NAME
+
+
 def acquire_lock(
     ctx: RepoContext,
     *,
@@ -1661,7 +1713,7 @@ def acquire_lock(
     issue_number: int | None = None,
     issue_numbers: list[int] | None = None,
 ):
-    path = ctx.path / ".git" / "approve_issues.lock"
+    path = approval_lock_path(ctx)
     # Never truncate before flock: a losing contender must not erase the
     # current owner's diagnostic metadata.
     handle = open(path, "a+", encoding="utf-8")

@@ -24,8 +24,8 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Resolve Kanban's managed installs, records, and logs per platform — [#347]
-- [ ] PATH-1. Make one platform-aware resolver own the issue-review paths
-- [ ] PATH-2. Route the drainer's install, record, runtime, and log paths
+- [x] PATH-1. Make one platform-aware resolver own the issue-review paths — [#357]
+- [x] PATH-2. Route the drainer's install, record, runtime, and log paths — [#358]
 - [ ] PATH-3. Resolve the Haskell consumers' managed paths per platform
 - [ ] PATH-4. Repoint the packaged plugin assets at the resolved record
 
@@ -52,12 +52,22 @@ concrete precondition
 - **Two managed installs, resolved independently.** `tools/kanban_config.py:50`
   returns `~/Library/Application Support/kanban/issue-review` for the
   issue-review backend; the drainer never consults it and spells its own at
-  `tools/drain_prs_service.py:53` (`~/Library/LaunchAgents`), `:60`
-  (`~/Library/Application Support/kanban/pr-drainer/config.json`), `:64`
-  (`DEFAULT_INSTALL_DIR`, the record's parent), and `:85`
-  (`~/Library/Logs/kanban/pr-drainer`). `RUNTIME_ROOT` (`:86`) hangs off the
-  install dir. So LNX-4's "`kanban_config.py` resolver" named a module that
+  `tools/drain_prs_service.py:92-94`
+  (`~/Library/Application Support/kanban/pr-drainer/config.json`), `:95`
+  (`DEFAULT_INSTALL_DIR`, the record's parent), and `:122`
+  (`~/Library/Logs/kanban/pr-drainer`). `RUNTIME_ROOT` (`:123`) hangs off the
+  install dir, and `~/Library/LaunchAgents` now lives at
+  `tools/service_manager.py:88`, where #291 put it when it extracted the
+  backend seam. So LNX-4's "`kanban_config.py` resolver" named a module that
   today governs the *other* component.
+- **Two more managed paths, outside both resolvers.** The issue-review backend
+  spells its own log directory at `tools/approve_issues.py:72`
+  (`~/Library/Logs/kanban/issue-review`, the `--log-dir` default at `:2763`),
+  and the drainer spells its at `tools/drain_prs_service.py:122`. Neither has a
+  §4 `personal-path` row, and no existing check would catch that: §4 states the
+  home-relative-path scan covers Haskell sources and the packaged assets, and
+  is executable-only for `tools/`. Runtime and incident directories need no
+  separate answer — both already hang off their install directory. See D-10.
 - **The Haskell side spells both again.** `src/Kanban/Drainer.hs:349` builds
   the drainer record path and `src/Kanban/Review/Canonical.hs:134` the
   issue-review record path, each as its own `home <> "/Library/…"` literal.
@@ -103,11 +113,14 @@ concrete precondition
   install directories. Neither moves the discovery record, by design: a
   dashboard that inherited no environment still has to find an install made
   with `--install-dir`.
-- **Sequencing context.** Epic #290's LNX-2 adds the systemd backend and lands
-  before this arc, so a Linux install may briefly create `~/Library/…`
-  directories that this arc relocates. #291 (the service-manager seam) is open
-  and unstarted; its body names LNX-4 as the owner of path resolution, which
-  this split supersedes.
+- **Sequencing context.** Epic #290's LNX-2 (#329) merged on 2026-08-16,
+  clearing this arc's blocker. It lifted the drainer's darwin gate —
+  `tools/install_drainer.py:108-112` now states that "`sys.platform` never
+  decides, so a Linux host with a live user session installs here exactly as a
+  macOS host does" — so a Linux host that installs the drainer today really
+  does create `~/Library/…` directories, which is the install D-9 and D-11
+  relocate. #291 (the service-manager seam) is merged; its body named LNX-4 as
+  the owner of path resolution, which this split supersedes.
 
 ## Desired experience
 
@@ -126,7 +139,9 @@ spelling.
 ### In scope
 
 - Per-platform resolution of both managed installs: install directories,
-  discovery records, runtime state, and logs.
+  discovery records, runtime state, and logs — including the two log
+  directories spelled outside the resolvers, `tools/approve_issues.py:72` and
+  `tools/drain_prs_service.py:122` (D-10).
 - The Haskell consumers of those records (`Drainer.hs`, `Review/Canonical.hs`)
   and their diagnostics.
 - The packaged plugin assets and both bundle READMEs that spell the
@@ -186,6 +201,16 @@ The settled design is:
 - **The migration closes the LNX-2 window (D-9).** A Linux install made before
   this arc is moved to its XDG location by the installer's next run. macOS is
   never migrated because D-1 leaves it already correct.
+- **The log directories come along (D-10).** Both components' log directories
+  are managed paths spelled outside their resolver, and the arc's `Done when`
+  already claims both components log under the XDG home on Linux. Each is
+  converted by the slice that owns its component, and each enters §4 as a new
+  macOS/Linux row pair, because neither has an existing row to sibling.
+- **Consumers keep their shape (D-12).** The resolvers answer per call, but a
+  consumer need not change shape to match: `approve_issues.py` inherits the
+  probe through the import it already has, and `drain_prs_service.py` keeps its
+  four module-level constants, resolved once at import. This is what keeps
+  PATH-2 inside one reviewable PR.
 - **One accepted intermediate.** Between PATH-2 and PATH-3, the Python side
   resolves Linux paths while the Haskell side still spells `~/Library`. That
   window is invisible in practice: epic #290 does not claim a working Linux
@@ -210,7 +235,7 @@ create `~/Library/…` directories on a Linux host; this arc relocates them.
 Waiting for this arc before the systemd backend was rejected as stretching
 #290's critical path behind a multi-issue arc. Consequence: this arc inherits
 whatever spelling LNX-2 ships on Linux, and D-9 requires migrating that install
-rather than merely superseding it.
+rather than merely superseding it. D-11 settles what that migration moves.
 
 ### D-3. Managed paths are their own arc, not an LNX-2 fold
 
@@ -288,7 +313,63 @@ macOS-spelled location to the XDG one on its next run, following the existing
 report was rejected as leaving a split state; ignoring it was rejected because
 a real Linux host that ran LNX-2 early would stay inconsistent. Consequence:
 PATH-2 carries the migration and its fixtures; macOS installs are still never
-touched, since D-1 keeps their location correct.
+touched, since D-1 keeps their location correct. What that migration actually
+moves is D-11.
+
+### D-10. Both managed log directories join the arc and enter the manifest
+
+User signoff 2026-08-16, during issue processing. The issue-review backend's
+log directory (`tools/approve_issues.py:72`) is converted by PATH-1 alongside
+the install directory it sits beside, and the drainer's `LOG_ROOT` by PATH-2.
+Neither carries a §4 row today, so each enters the manifest as a *new*
+macOS/Linux row pair rather than as a sibling of an existing row — D-6's
+pairing rule extended to a path it never covered. Leaving both log directories
+on `~/Library` was rejected because the epic's own `Done when` requires each
+component to log under the applicable XDG home on Linux; declaring only the
+Linux token was rejected as leaving the macOS literal unpoliced. Consequence:
+PATH-1 and PATH-2 each carry a two-row manifest addition beyond their sibling
+rows, and `tools/approve_issues.py` derives its `--log-dir` default from the
+resolver instead of spelling the path.
+
+### D-11. The Linux migration relinks, merges, moves logs, and removes the old install
+
+User signoff 2026-08-16, during issue processing; completes D-9, which fixed
+that a migration happens without saying what it moves. On Linux an installer
+run that finds a `~/Library`-spelled install relocates it in that same run: the
+script links are installed at the XDG install directory, the discovery record
+is migrated, the `~/Library/Logs/kanban/pr-drainer` tree is moved to the XDG
+log root, and the old install directory is removed. Leaving the old log tree
+behind was rejected as leaving a Linux host with two log locations, one of them
+frozen history; migrating the record alone was rejected as leaving debris the
+probe merely tolerates. When both locations hold a record, their `repositories`
+entries merge with the XDG document winning per key, mirroring
+`migrate_legacy_installed_config`'s existing "keys already in the shared
+document win" rule; preferring XDG without merging was rejected because a
+repository installed only under the old record would silently vanish, and
+refusing the install outright was rejected as blocking a host that ran LNX-2
+early until manual cleanup. The running-drainer case needs no new answer —
+`tools/install_drainer.py:293-295` already refuses an install while the job is
+live. Consequence: PATH-2 carries a directory move and a record merge, not only
+a path change.
+
+### D-12. Consumers keep their existing resolution shape
+
+User signoff 2026-08-16, during issue processing. The resolvers answer per
+call, but a consumer is not required to change shape to match.
+`tools/approve_issues.py` keeps resolving its install directory through the
+import it already has (`:71`) and gains no second spelling; the probe reaches
+it through that import, so a backend running from a `~/Library` install on
+Linux still resolves itself with no source change. `tools/drain_prs_service.py`
+keeps its four module-level constants, resolved once at import from the
+resolver's per-call functions, exactly as they are frozen today. Converting
+those constants to per-call functions was rejected because it rewrites nearly
+every fixture in `tools/test_drain_prs_service.py` and pushes PATH-2 past the
+reviewable size D-3 split this arc to preserve; repointing `approve_issues.py`
+at a separate discovery function was rejected as editing a module whose
+behavior the existing import already delivers. Consequence: the
+`mock.patch.object` fixture surface survives unchanged, and the drainer
+evaluates the probe once per process — which is what a long-running service
+does today.
 
 ## Open questions
 
@@ -316,6 +397,22 @@ Resolved by D-7.
 
 Resolved by D-8.
 
+### Q-7. Which slice owns the issue-review backend's log directory?
+
+Raised during PATH-1 processing. Resolved by D-10.
+
+### Q-8. How does a managed log directory enter §4 with no existing row to sibling?
+
+Raised during PATH-1 processing. Resolved by D-10.
+
+### Q-9. What does the D-9 migration relocate, and what wins when both locations hold a record?
+
+Raised during PATH-2 processing. Resolved by D-11.
+
+### Q-10. Do the consumers change shape to match the resolver's per-call contract?
+
+Raised during PATH-2 processing. Resolved by D-12.
+
 No open questions remain. Every slice below is deliberately closed; a solver
 that finds one of these decisions contradicted by the code should stop and
 return the arc here rather than deciding it in a PR.
@@ -329,9 +426,13 @@ return the arc here rather than deciding it in a PR.
   environment override × which location exists) so a new managed path cannot
   be added with only one platform's expectation, and the D-7 order is asserted
   for each location alone and for both present at once.
-- The D-9 migration is proven by seeding a `~/Library`-spelled install on a
-  simulated Linux host, running the installer, and asserting the install
-  moved, the record followed, and the same run on macOS is a no-op.
+- The D-9/D-11 migration is proven by seeding a `~/Library`-spelled install on
+  a simulated Linux host, running the installer, and asserting the links land
+  at the XDG install directory, the record is migrated, the log tree moved, the
+  old install directory is gone, and the same run on a simulated macOS host
+  changes nothing. A separate case seeds a record at *both* locations and
+  asserts every repository from both survives the merge with the XDG value
+  winning where an entry appears in both.
 - The §4 reconciliations stay green throughout and are the mechanism that
   catches an undeclared second spelling; a slice that changes a spelling
   without its row fails the Python suite.
@@ -344,45 +445,64 @@ return the arc here rather than deciding it in a PR.
 
 ## Delivery plan
 
-Shaped by D-4 through D-9, with no open questions remaining. Each slice keeps
+Shaped by D-4 through D-12, with no open questions remaining. Each slice keeps
 its own §4 sibling rows and documentation prose in the same PR, because the
 reconciliation fails closed on a spelling whose row is missing.
 
 ### PATH-1. Make one platform-aware resolver own the issue-review paths
 
+> Processed as #357.
+
 - **Outcome:** `tools/kanban_config.py` answers one write path per platform
-  for the issue-review install and probes both locations for discovery; macOS
-  output byte-identical; the override behavior unchanged.
-- **Scope:** the resolver's two halves, its §4 sibling row,
-  `tools/install_issue_review.py`, and the Python fixtures.
+  for the issue-review install *and its log directory*, and probes both
+  locations for discovery; macOS output byte-identical; the override behavior
+  unchanged.
+- **Scope:** the resolver's two halves, its §4 sibling row, the new
+  macOS/Linux row pair for the issue-review log directory (D-10),
+  `tools/install_issue_review.py`, `tools/approve_issues.py`'s `--log-dir`
+  default, `docs/workflow-setup.md`'s installer-facing prose, and the Python
+  fixtures.
 - **Phase:** 1
 - **Depends on:** none
 - **Ordering:** critical path
-- **Relevant decisions:** D-1, D-5, D-6, D-7, D-8
+- **Relevant decisions:** D-1, D-5, D-6, D-7, D-8, D-10, D-12
 - **Acceptance signals:** table-driven resolver test green over platform ×
-  override × which location exists; existing macOS fixtures unchanged; §4
-  reconciliation green with the new sibling row.
-- **Out of scope:** the drainer's paths; the Haskell consumers; the bundles.
+  path kind × override × which location exists; existing macOS fixtures
+  unchanged, including `tools/test_approve_issues.py`'s
+  `PortableDefaultPathTests`; §4 reconciliation green with the new sibling row
+  and the new log row pair.
+- **Out of scope:** the drainer's paths; the Haskell consumers; the bundles;
+  the `issue-review-discovery-record` Linux sibling row, whose declared files
+  are all Haskell and packaged assets.
 - **Open questions:** None
 
 ### PATH-2. Route the drainer's install, record, runtime, and log paths
 
+> Processed as #358.
+
 - **Outcome:** `drain_prs_service.py` and `install_drainer.py` derive every
   managed path from the resolver instead of spelling it, and the installer
-  migrates a `~/Library`-spelled Linux install on its next run; macOS output
+  relocates a `~/Library`-spelled Linux install on its next run; macOS output
   byte-identical and never migrated.
-- **Scope:** the four drainer path constants, their §4 sibling rows, the D-9
-  migration, and the drainer fixtures.
+- **Scope:** the four drainer path constants (kept as module-level constants
+  per D-12), their §4 sibling rows, the new macOS/Linux row pair for the
+  drainer log root (D-10), the corrected `files` columns on the two existing
+  drainer rows, the D-9/D-11 migration, `docs/pr-drainer.md` and
+  `docs/agent-workflow-contract.md` prose, and the drainer fixtures.
 - **Phase:** 2
 - **Depends on:** PATH-1
 - **Ordering:** critical path
-- **Relevant decisions:** D-1, D-2, D-5, D-6, D-7, D-8, D-9
+- **Relevant decisions:** D-1, D-2, D-5, D-6, D-7, D-8, D-9, D-10, D-11, D-12
 - **Acceptance signals:** drainer fixtures pass with macOS spellings
-  unchanged; Linux resolution asserted; the migration moves a seeded
-  `~/Library` Linux install and is a no-op on macOS; §4 reconciliation green
-  with the new sibling rows.
+  unchanged, including `PinnedServiceDefinitionTests`' golden plist; Linux
+  resolution asserted; the migration relinks, migrates the record, moves the
+  log tree, and removes the old install directory on a seeded `~/Library`
+  Linux install, and is a no-op on macOS; a record at both locations merges
+  with XDG winning per key; §4 reconciliation green with the new rows and the
+  corrected file lists; the `systemd-drainer-lifecycle` CI job passes.
 - **Out of scope:** `~/Library/LaunchAgents`, plists, and the systemd unit
-  location, which belong to LNX-2.
+  location, which belong to LNX-2; adding `src/Kanban/Drainer.hs` to the new
+  Linux sibling rows' file lists, which is PATH-3's.
 - **Open questions:** None
 
 ### PATH-3. Resolve the Haskell consumers' managed paths per platform
@@ -390,9 +510,11 @@ reconciliation fails closed on a spelling whose row is missing.
 - **Outcome:** `Drainer.hs` and `Review/Canonical.hs` discover their records
   through the same probe order from one Haskell resolution point, with
   diagnostics naming the resolved path.
-- **Scope:** both modules, the Haskell resolution point, and the Haskell
-  fixtures that pin the literals, including
-  `test/Spec/Agent/Protocol.hs:219`.
+- **Scope:** both modules, the Haskell resolution point, the Haskell fixtures
+  that pin the literals, including `test/Spec/Agent/Protocol.hs:219`, the
+  `issue-review-discovery-record` Linux sibling row, and the
+  `src/Kanban/Drainer.hs` entries PATH-2 deliberately left off the drainer
+  sibling rows' file lists until this module carries their tokens.
 - **Phase:** 2
 - **Depends on:** PATH-1, PATH-2
 - **Ordering:** critical path

@@ -337,9 +337,12 @@ arithmetic, which §2.3 owns.
   access to the canonical backend script.
 - **Durable state:** none Kanban owns beyond the GitHub comment/labels; the
   backend may keep additional state outside Kanban's tracking.
-  `--review-queue` takes the canonical `.git/approve_issues.lock` for the one
+  `--review-queue` takes the canonical `approve_issues.lock` for the one
   issue it reviews and releases it before the process exits on every outcome,
-  failures included. It never holds that lock across issues, and never takes
+  failures included. That lock lives in the repository's *shared* Git
+  directory — `.git/` in an ordinary checkout, and the primary checkout's
+  `.git/` for a linked worktree, whose own `.git` is a file — so every
+  checkout of one repository contends for it rather than each taking its own. It never holds that lock across issues, and never takes
   it at all for a pass that turns out to be idle or barriered.
 - **Mandatory/optional:** optional at the Kanban-action level (the `r` key),
   but a solve session refuses to claim an issue that has not passed the
