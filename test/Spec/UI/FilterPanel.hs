@@ -584,6 +584,28 @@ blockerSpec = describe "the completed-history blocker" $ do
     cardSurfaceFor firstLoad `shouldBe` CardSurfaceLoadingOpen
     cardSurfaceFor firstFailure `shouldBe` CardSurfaceUnavailableOpen "AUTH REQUIRED: nope"
 
+  -- §7 makes the completed blocker unconditional, so it outranks the open
+  -- panels: on a fresh launch both generations are running and Open is still
+  -- checked, and checking Closed there must report what was just asked for
+  -- rather than leaving the criteria's own state unreported — and leaving
+  -- every card action ungated with it.
+  it "answers the checked Closed box before the open generation, with Open still checked" $ do
+    state <- panelState
+    let freshLaunch = state {appLastSuccessfulFetch = Nothing, appBoardFreshness = Loading}
+        progress = CompletedProgress 4 (Just 9) 2 (Just 5)
+        loading = withBoxes [LifecycleBox LifecycleClosed] freshLaunch {appCompletedStatus = CompletedHistoryLoading, appCompletedProgress = progress}
+        paused = loading {appCompletedStatus = CompletedHistoryPaused epoch}
+        failed = loading {appCompletedHistory = Nothing, appCompletedStatus = CompletedHistoryFailed "RATE LIMITED: slow down"}
+    filterBoxChecked loading.appFilterCriteria (LifecycleBox LifecycleOpen) `shouldBe` True
+    cardSurfaceFor loading `shouldBe` CardSurfaceLoadingCompleted progress Nothing
+    cardSurfaceFor paused `shouldBe` CardSurfaceLoadingCompleted progress (Just epoch)
+    cardSurfaceFor failed `shouldBe` CardSurfaceUnavailableCompleted "RATE LIMITED: slow down"
+    -- ...so the card-action protection is live in that window too.
+    map completedCardsBlocked [loading, paused, failed] `shouldBe` [True, True, True]
+    -- The open panel is still what an unfinished open generation shows once
+    -- the completed one has settled.
+    cardSurfaceFor (withBoxes [LifecycleBox LifecycleClosed] freshLaunch) `shouldBe` CardSurfaceLoadingOpen
+
   -- With Open unchecked no card on the board came from the open generation, so
   -- its panel is not what a settled-history board waits behind.
   it "does not hold a completed-only board behind the open panel" $ do
@@ -659,6 +681,28 @@ blockerSpec = describe "the completed-history blocker" $ do
     (.searchQuery) <$> released.appSearch `shouldBe` Just "x"
     focusedSearch (press (key 's') released) `shouldBe` released.appSearch
     (.searchQuery) <$> (press (key 's') released).appSearch `shouldBe` Just "x"
+
+  -- A visible panel is never keyboard-dead. The blocker takes the search out
+  -- of reach, so the panel it yielded to takes focus back: without that,
+  -- checking Closed while search held the keyboard would leave the very box
+  -- that put the blocker up unable to take it down, and `d` would fall
+  -- through to the drainer binding.
+  it "returns the keyboard to a yielded panel when the blocker suppresses its search" $ do
+    state <- panelState
+    let searching = press (key 's') (toggleFilterPanel state {appCompletedStatus = CompletedHistoryLoading})
+        -- Exactly the reachable route: a click edits the criteria without
+        -- taking the keyboard from the query.
+        blocked = boardMousePress (ToggleFilterBoxFromClick (LifecycleBox LifecycleClosed)) searching
+    focusedFilterPanel searching `shouldBe` Nothing
+    completedCardsBlocked blocked `shouldBe` True
+    focusedFilterPanel blocked `shouldNotBe` Nothing
+    focusedSearch blocked `shouldBe` Nothing
+    -- Space still takes the blocker down, and `d` is the panel's defaults
+    -- rather than the board's drainer.
+    filterInput (focusedFilterPanel blocked) (key 'd') `shouldBe` Just FilterRestoreDefaults
+    completedCardsBlocked (press (key ' ') blocked) `shouldBe` False
+    -- ...and the search gets the keyboard back the moment the blocker lifts.
+    focusedSearch (press (key ' ') blocked) `shouldNotBe` Nothing
 
   it "blocks exactly the actions that reach a card" $
     -- Stated as a partition over the whole table, so a binding added later
@@ -737,6 +781,22 @@ presentationSpec = describe "what the board says about the criteria" $ do
     -- narrow.
     let both = applySearchInput (SearchInsert 'z') (openSearch filtered)
     emptyColumnText both Issues `shouldBe` "No filter matches"
+
+  -- Each column answers for itself. A criteria set that empties Issues says
+  -- nothing about a column that had nothing in it to begin with, and calling
+  -- that one filtered would blame the filter for the repository's own shape.
+  it "keeps No items for a column that was already empty under the defaults" $ do
+    shown <- shownPanel
+    -- Unchecking Approved removes #2 from Issues and touches nothing else.
+    let filtered = withBoxes [WorkflowBox WorkflowApproved] shown
+    criteriaAreFiltering filtered `shouldBe` True
+    null (entriesForBoard filtered.appBoard Active) `shouldBe` True
+    emptyColumnText filtered Active `shouldBe` "No items"
+    emptyColumnText filtered Done `shouldBe` "No items"
+    -- ...while the column the criteria actually emptied still says so.
+    let emptied = withBoxes [KindBox KindIssues] shown
+    null (entriesForBoard emptied.appBoard Issues) `shouldBe` False
+    emptyColumnText emptied Issues `shouldBe` "No filter matches"
 
   it "marks the footer chip only while the criteria are hiding cards" $ do
     boardFooterHintLine False `shouldBe` footerHintLine

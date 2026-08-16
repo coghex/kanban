@@ -601,20 +601,35 @@ interface immediately and does not cancel the load; checking it again restores
 the blocker until that generation publishes or fails. A generation that fails
 over a complete history keeps that history on screen with the footer marking it
 stale; one that fails with no complete history behind it shows a card-free
-`COMPLETED DATA UNAVAILABLE` panel instead. While either completed panel is up,
-every card key and every stale card, epic, or column mouse target resolves to no
-work at all, and the filter panel, the footer, help, options, refresh, the
-drainer, `Esc`, `q`, and `Ctrl-C` stay exactly as usable as they were.
+`COMPLETED DATA UNAVAILABLE` panel instead.
+
+That blocker is unconditional, so it outranks the open loading and unavailable
+panels above rather than waiting behind them. On a fresh launch both generations
+are running with Open still checked, and checking Closed there reports the
+completed generation the user just asked for. Only once the completed side has
+settled does an unfinished open generation put its own panel up.
+
+While either completed panel is up, every card key and every stale card, epic,
+or column mouse target resolves to no work at all, and the filter panel, the
+footer, help, options, refresh, the drainer, `Esc`, `q`, and `Ctrl-C` stay
+exactly as usable as they were. The panel keeps the keyboard while it is up: no
+column is drawn, so a live search is unreachable and a panel that had handed
+focus to one takes it back — the box that put the blocker up is always the box
+that can take it down.
 
 A column with nothing to draw names the reason, and the three reasons are
 distinct from each other and from any loading state:
 
 - `No search matches` when a query narrowed a non-empty eligible set to nothing.
-- `No filter matches` when the criteria admit nothing there. If filtering
-  already produced zero this is what the row says, whether or not a query is
-  also live.
+- `No filter matches` when the criteria admit nothing there and that column held
+  something under the default criteria. If filtering already produced zero this
+  is what the row says, whether or not a query is also live.
 - `No items` when the column is empty under the default criteria, which are the
   baseline the other two are departures from.
+
+Both questions are asked of the column itself. A criteria set that empties
+Issues says nothing about Active, so a column that was already empty under the
+defaults keeps `No items` however much the filter is hiding elsewhere.
 
 Every keyboard and mouse target resolves against the final composed view —
 criteria first, then any query — so no raw row index is ever mixed with a

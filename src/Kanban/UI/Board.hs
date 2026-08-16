@@ -583,15 +583,22 @@ drawColumn state columnWidth column =
 -- loading state. The order follows the pipeline: search narrows what the
 -- criteria admitted, so a query can only be blamed for a column that had
 -- something to narrow — if filtering already produced zero, the filter is what
--- the row names. The defaults are the baseline, so a column empty under them
--- is intrinsically empty rather than filtered.
+-- the row names.
+--
+-- Both questions are asked of /this/ column rather than of the criteria as a
+-- whole. A criteria set that empties Issues says nothing about Active, and a
+-- column that was already empty under the default criteria is intrinsically
+-- empty however much the filter is hiding elsewhere. That per-column baseline
+-- is 'appBoard' itself: the defaults admit the open board unchanged, by
+-- identity rather than by a comparison somebody has to keep true.
 emptyColumnText :: AppState -> BoardColumn -> Text
 emptyColumnText state column
   | isJust (activeQueryFor state column), not (null eligible) = "No search matches"
-  | criteriaAreFiltering state = "No filter matches"
+  | criteriaAreFiltering state, not (null baseline) = "No filter matches"
   | otherwise = "No items"
   where
     eligible = entriesForBoard state.appVisibleBoard column
+    baseline = entriesForBoard state.appBoard column
 
 -- | The one-line label naming the box a query is typed into.
 searchBoxLabel :: Text

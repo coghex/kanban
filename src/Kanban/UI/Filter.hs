@@ -143,28 +143,37 @@ settledItem state target = do
 -- Focus
 -- ---------------------------------------------------------------------------
 
+-- | The live search a key press could reach at all, before deciding which of
+-- the two surfaces has the keyboard.
+--
+-- The completed blocker draws no column, so there is no box on screen to type
+-- into and no result to move between. The query itself is untouched and comes
+-- back with the columns the moment @Closed@ is unchecked.
+reachableSearch :: AppState -> Maybe ColumnSearch
+reachableSearch state
+  | completedCardsBlocked state = Nothing
+  | otherwise = state.appSearch
+
 -- | The panel a key press reaches, or 'Nothing' when nothing on screen gives
 -- it the keyboard.
 --
 -- A panel that handed focus to a search takes it back the moment that search
--- ends, which is why this is derived rather than stored: no close path has to
--- know the panel is underneath it.
+-- stops being reachable, which is why this is derived rather than stored: no
+-- close path has to know the panel is underneath it, and neither does the
+-- blocker. A visible panel is never keyboard-dead — without that, checking
+-- @Closed@ while search held the focus would leave the box that put the
+-- blocker up unable to take it down, and @d@ would reach the drainer.
 focusedFilterPanel :: AppState -> Maybe FilterPanel
 focusedFilterPanel state = do
   panel <- state.appFilterPanel
-  if panel.filterPanelYielded && isJust state.appSearch then Nothing else Just panel
+  if panel.filterPanelYielded && isJust (reachableSearch state) then Nothing else Just panel
 
 -- | The live search a key press reaches. A focused panel outranks it, so the
 -- box under the cursor is edited rather than the query typed into.
---
--- The completed blocker outranks both: it draws no column, so there is no box
--- on screen to type into and no result to move between. The query itself is
--- untouched and comes back with the columns the moment @Closed@ is unchecked.
 focusedSearch :: AppState -> Maybe ColumnSearch
 focusedSearch state
-  | completedCardsBlocked state = Nothing
   | isJust (focusedFilterPanel state) = Nothing
-  | otherwise = state.appSearch
+  | otherwise = reachableSearch state
 
 -- | The checkbox the panel is focused on, for drawing. 'Nothing' while the
 -- panel is hidden or a search has the keyboard, so the frame shows no focused
@@ -458,10 +467,14 @@ completedHistoryStatusText state = "history: " <> case state.appCompletedStatus 
 -- | What the board's card area shows, decided from the criteria and the two
 -- generations and from nothing else.
 --
--- The open panels come first and only while the criteria ask for open work, so
--- the default criteria keep §7's loading and unavailable states exactly as they
--- are while a board showing only settled history is not held up by an open
--- generation nothing on it came from.
+-- A checked @Closed@ over an unfinished completed generation comes first,
+-- because §7 makes that blocker unconditional: it is the answer to what the
+-- user has just asked for, and deferring to the open panel while both
+-- generations are still running on a fresh launch would leave the criteria's
+-- own state unreported and every card action ungated. The open panels follow,
+-- and only while the criteria ask for open work at all, so a board showing
+-- nothing but settled history is not held up by an open generation nothing on
+-- it came from.
 data CardSurface
   = -- | No complete open generation has published yet (§7).
     CardSurfaceLoadingOpen
@@ -480,21 +493,23 @@ data CardSurface
 
 cardSurfaceFor :: AppState -> CardSurface
 cardSurfaceFor state
+  | admitsClosed, CompletedHistoryLoading <- completedStatus =
+      CardSurfaceLoadingCompleted state.appCompletedProgress Nothing
+  | admitsClosed, CompletedHistoryPaused resetAt <- completedStatus =
+      CardSurfaceLoadingCompleted state.appCompletedProgress (Just resetAt)
+  -- A failed generation over a complete history keeps that history on screen
+  -- with the footer marking it stale, so only a failure with nothing behind
+  -- it — which is exactly what 'CompletedHistoryFailed' means — empties the
+  -- area.
+  | admitsClosed, CompletedHistoryFailed reason <- completedStatus =
+      CardSurfaceUnavailableCompleted reason
   | admitsOpen, OpenDataLoading <- openView = CardSurfaceLoadingOpen
   | admitsOpen, OpenDataUnavailable reason <- openView = CardSurfaceUnavailableOpen reason
-  | admitsClosed = case state.appCompletedStatus of
-      CompletedHistoryLoading -> CardSurfaceLoadingCompleted state.appCompletedProgress Nothing
-      CompletedHistoryPaused resetAt -> CardSurfaceLoadingCompleted state.appCompletedProgress (Just resetAt)
-      -- A failed generation over a complete history keeps that history on
-      -- screen with the footer marking it stale; only a failure with nothing
-      -- behind it empties the area.
-      CompletedHistoryFailed reason -> CardSurfaceUnavailableCompleted reason
-      CompletedHistoryStale _ -> CardSurfaceCards
-      CompletedHistoryCurrent -> CardSurfaceCards
   | otherwise = CardSurfaceCards
   where
     admitsOpen = LifecycleOpen `Set.member` state.appFilterCriteria.filterLifecycle
     admitsClosed = LifecycleClosed `Set.member` state.appFilterCriteria.filterLifecycle
+    completedStatus = state.appCompletedStatus
     openView = openDataView state.appLastSuccessfulFetch state.appBoardFreshness
 
 -- | Whether the completed criteria are standing between the user and the
