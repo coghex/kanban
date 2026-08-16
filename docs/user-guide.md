@@ -211,6 +211,48 @@ The sidebar shows the available Codex and Claude usage windows. Press `u` to ref
 
 Press `c` to hide or show the sidebar.
 
+## Checking usage from a shell
+
+`kanban --usage` prints both services' windows and exits without starting the
+board. Each line gives the window's label, how much is left, how long until it
+resets, and the reset time in your own timezone, followed by how old the
+printed information is:
+
+```console
+$ kanban --usage
+Codex
+  5 hour   63% left · resets in 4h 5m (Thu 16:05)
+  weekly   41% left · resets in 3d 21h (Mon 09:00)
+  snapshot 30m old
+
+Claude
+  unavailable: claude is not installed
+```
+
+It needs no repository, so it works from any directory, and it honors
+`--config`. A service that fails prints its own line and does not hide the
+other one. The command exits successfully as long as at least one service
+answered.
+
+By default it prints what Kanban already has cached and only asks a service
+that has nothing cached, so the usual run costs nothing. Add `--fresh` to ask
+both services regardless. `--no-cache` also asks both services, and
+additionally neither reads nor updates the stored snapshots — as does a global
+`cache = false` in `config.toml`. Combining `--fresh` with `--no-cache` is
+accepted and does the same thing as `--no-cache` alone.
+
+Add `--json` for a machine-readable document instead of the text above:
+
+```console
+$ kanban --usage --json
+{"schema_version":1,"providers":{"codex":{"status":"ok","fetched_at":"2026-07-16T11:30:00Z","windows":[{"label":"5 hour","pct_left":63,"resets_at":"2026-07-16T16:05:00Z"}]},"claude":{"status":"error","error":"claude is not installed"}}}
+```
+
+Both services are always present under the lowercase keys `codex` and
+`claude`, and `status` says whether that entry carries windows or an error, so
+a failing service is reported rather than missing. Times are UTC. Warnings go
+to standard error, so the document is the only thing on standard output.
+
 ## Local files
 
 Kanban stores local state in the following places:

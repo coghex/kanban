@@ -43,8 +43,7 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime, defaultTimeLocale, diffUTCTime, formatTime, utcToZonedTime)
-import Kanban.CLI (Options (..))
-import Kanban.Config (ResolvedConfig (..) )
+import Kanban.Config (cacheEnabled)
 import Kanban.Domain
 import Kanban.Preflight
   ( preflightDiagnosticDetail
@@ -274,9 +273,6 @@ directMergeNoticeFor (Just report) notice =
 -- started.
 directMergeReportAfterRefresh :: Bool -> Maybe DirectMergeReport -> Maybe DirectMergeReport
 directMergeReportAfterRefresh queued carried = if queued then carried else Nothing
-
-cacheEnabled :: Options -> ResolvedConfig -> Bool
-cacheEnabled options config = not options.optionNoCache && config.resolvedCache
 
 -- | The activity text for a terminal or pending 'SolveFailed' outcome,
 -- distinguishing the persistent-worker deadline and a preflight-detected

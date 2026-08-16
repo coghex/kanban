@@ -238,12 +238,17 @@ Initial options:
 --border box|open                 border renderer; defaults to box
 --glyph-test                      print vertical-line candidates and exit
 --doctor                          report AI-action readiness read-only and exit
+--usage                           print both providers' usage windows and exit
+--fresh                           with --usage, probe live instead of reading the cache
+--json                            with --usage, write the machine-readable document
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
 --version
 --help
 ```
+
+`--fresh` and `--json` modify `--usage` and are inert without it.
 
 Startup sequence:
 
@@ -270,6 +275,13 @@ is strictly read-only: status-only probes, no agent session, no login flow,
 no model quota, and no mutation of the filesystem, provider configuration,
 launchd, or GitHub. See
 [workflow-setup.md](workflow-setup.md) for the setup command it names.
+
+`--usage` short-circuits it after step 5's configuration load and before
+step 2's repository resolution. Usage is global (section 14), so this mode
+resolves no `owner/name` and applies no repository override: it honors
+`--config` and the global usage, timeout, and cache settings, and answers
+normally from a directory that is not a checkout or has no configured
+remote. It never enters the TUI and never starts a background refresh.
 
 ## 6. Layout
 
@@ -1594,6 +1606,81 @@ independently. Reset and relative times are recomputed whenever a redraw
 happens for another reason; the application never wakes on a timer to maintain
 a countdown.
 
+### The `--usage` command-line surface
+
+`kanban --usage` answers the same question from a shell without starting the
+dashboard. It reports both providers and exits zero when at least one produced
+windows, non-zero when none did. A provider that fails prints its own line and
+never suppresses or replaces the other's.
+
+```text
+Codex
+  5 hour   63% left · resets in 4h 5m (Thu 16:05)
+  weekly   41% left · resets in 3d 21h (Mon 09:00)
+  snapshot 30m old
+
+Claude
+  unavailable: claude is not installed
+```
+
+Both the window countdowns and the snapshot-age line are computed by one pure
+function of the snapshot, an explicitly supplied current time, and the zone
+the reset wall clock is stated in. The sidebar renders through that same
+function rather than a second copy of the arithmetic, and every duration is
+clamped at zero, so a reset instant already past and a snapshot stamped ahead
+of the clock read as `0s` rather than as a negative interval.
+
+Which process a provider runs is decided by the one routing path the board
+uses, so a configured `[usage.codex]` or `[usage.claude]` command replaces the
+built-in probe here exactly as it does there.
+
+Freshness policy:
+
+- The default is cache-first. A provider with a usable cached snapshot is
+  printed from it and is not spawned; a provider the cache has nothing to
+  print for is probed live. A cached snapshot carrying no windows is not
+  usable — there is nothing to print — so it is probed live too and never
+  counts toward the exit status.
+- `--fresh` probes both providers live regardless of the cache.
+- `--no-cache` and a global `cache = false` probe live and neither read nor
+  write the `usage.json` snapshot (section 16). Combining either with
+  `--fresh` is accepted and behaves the same. Neither affects the scratch
+  directory a configured usage command is launched from; that is not a
+  snapshot.
+- A live result obtained under an enabled cache is merged into `usage.json`,
+  leaving the other provider's stored entry intact. A provider that fails
+  never erases its own last-good stored snapshot.
+- The printed output always describes the acquisition path that ran. A forced
+  live probe that fails reports that failure rather than falling back to the
+  older cached snapshot, even though an enabled cache keeps that snapshot on
+  disk.
+- No background or automatic refresh is introduced. Nothing runs except the
+  probes the two rules above call for.
+
+`--usage --json` writes a machine-readable document to standard output instead
+of the human rendering, and never both. Its shape is a contract for scripts:
+
+```json
+{
+  "schema_version": 1,
+  "providers": {
+    "codex": {
+      "status": "ok",
+      "fetched_at": "2026-07-16T11:30:00Z",
+      "windows": [{"label": "5 hour", "pct_left": 63, "resets_at": "2026-07-16T16:05:00Z"}]
+    },
+    "claude": {"status": "error", "error": "claude is not installed"}
+  }
+}
+```
+
+Provider keys are lowercase and always both present; `status` discriminates a
+successful entry from a failed one, so a failure is represented rather than
+omitted. Timestamps are absolute RFC 3339 UTC, needing no knowledge of the
+reader's zone. Configuration warnings and cache warnings go to standard error
+in both renderings, so a `--json` consumer's standard output carries the
+document alone.
+
 ## 15. Refresh and event model
 
 - Brick owns the blocking terminal event loop.
@@ -2091,7 +2178,16 @@ Defaults:
 - Permit `--no-cache` and a global `cache = false` setting. Either suppresses
   both the read and the write of every cache here, the completed generation
   included: a run with caching off seeds no history and stores none, and leaves
-  whatever an earlier cached run wrote exactly where it was.
+  whatever an earlier cached run wrote exactly where it was. `kanban --usage`
+  answers to both identically, and with either in force it probes live for the
+  same reason it does under `--fresh`: there is no snapshot it is permitted to
+  read.
+- The usage snapshot is what `--no-cache` and `cache = false` govern for
+  `--usage`. A configured usage command's own scratch directory under the XDG
+  cache root is not a snapshot and is unaffected. When the cache is enabled, a
+  live usage result is merged into `usage.json` rather than replacing it, so
+  one provider's failure never erases the other's stored entry or its own
+  last-good one (section 14).
 - Key repository settings by `owner/name`; do not require modifying the target
   repository. The key is canonical: two non-empty segments of ASCII lowercase
   letters, digits, `.`, `_`, and `-` around exactly one `/`, with no

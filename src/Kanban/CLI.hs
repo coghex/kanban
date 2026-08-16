@@ -21,6 +21,9 @@ data Options = Options
     optionBorder :: BorderPolicy,
     optionGlyphTest :: Bool,
     optionDoctor :: Bool,
+    optionUsage :: Bool,
+    optionFresh :: Bool,
+    optionJson :: Bool,
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
@@ -77,6 +80,18 @@ optionsParser =
     <*> switch
       ( long "doctor"
           <> help "Report AI-action readiness read-only, then exit without starting the dashboard"
+      )
+    <*> switch
+      ( long "usage"
+          <> help "Print Codex and Claude usage windows, then exit without starting the dashboard"
+      )
+    <*> switch
+      ( long "fresh"
+          <> help "With --usage, probe both providers live instead of reading the cache"
+      )
+    <*> switch
+      ( long "json"
+          <> help "With --usage, write a machine-readable document instead of the human rendering"
       )
     <*> switch (long "ascii" <> help "Use ASCII borders")
     <*> switch (long "no-cache" <> help "Do not read or write snapshots")

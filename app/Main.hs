@@ -4,12 +4,13 @@ import Control.Monad (unless)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Kanban.CLI (Options (..), optionsParserInfo)
-import Kanban.Config (RawConfig (..), loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption)
+import Kanban.Config (RawConfig (..), cacheEnabled, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository)
 import Kanban.UI (runDashboard)
+import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Kanban.Worker (runWorker)
 import Options.Applicative (execParser)
 import System.Exit (exitFailure)
@@ -32,6 +33,32 @@ main = do
       environment <- gatherPreflightEnvironment parsedOptions.optionPath
       mapM_ TextIO.putStrLn (doctorLines environment)
       unless (doctorReady environment) exitFailure
+    -- Configuration but no repository: usage is global (§14), so this answers
+    -- from a directory that is not a checkout at all, while still honoring an
+    -- explicit --config and the global timeout and cache settings it carries.
+    Nothing | parsedOptions.optionUsage -> do
+      absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
+      configResult <- loadRawConfig absoluteConfigPath
+      case configResult of
+        Left message -> do
+          hPutStrLn stderr ("kanban: " <> Text.unpack message)
+          exitFailure
+        Right (rawConfig, warnings) -> do
+          mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
+          let resolvedConfig = resolveGlobalConfig rawConfig
+              -- Caching off is forced-live by construction rather than by
+              -- accident, so --no-cache and a global cache = false reach the
+              -- same acquisition path --fresh does, as section 16 requires of
+              -- either setting.
+              cacheOn = cacheEnabled parsedOptions resolvedConfig
+              mode =
+                UsageMode
+                  { usageModeAcquisition = if parsedOptions.optionFresh || not cacheOn then UsageForceFresh else UsageCacheFirst,
+                    usageModeCache = cacheOn,
+                    usageModeJson = parsedOptions.optionJson
+                  }
+          produced <- runUsageMode mode resolvedConfig
+          unless produced exitFailure
     Nothing -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and
