@@ -1,9 +1,16 @@
 module Kanban.Claude
-  ( claudeEnvironment,
+  ( ScriptFlavor (..),
+    claudeEnvironment,
+    claudeProbeArguments,
     claudeScratchDirectory,
     decodeClaudeUsageText,
     fetchClaudeUsage,
+    fetchClaudeUsageWith,
+    hostScriptFlavor,
     runClaudeProvider,
+    runClaudeProviderWith,
+    scriptFlavorFor,
+    scriptFlavorLabel,
   )
 where
 
@@ -53,6 +60,7 @@ import System.Directory
   )
 import System.Environment (getEnvironment)
 import System.FilePath ((</>))
+import System.Info (os)
 import System.IO
   ( BufferMode (NoBuffering),
     Handle,
@@ -73,25 +81,101 @@ import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
+-- | Which dialect of @script@ the host's userland provides, and so which
+-- operands compose a pseudo-terminal probe rather than a usage error. BSD
+-- @script@ takes the command to run as trailing operands after the
+-- typescript file; util-linux @script@ accepts at most one file operand and
+-- runs a command only via @-c@, so handing it the BSD operands fails with
+-- "unexpected number of arguments" before @claude@ is ever started.
+data ScriptFlavor = BsdScript | UtilLinuxScript
+  deriving stock (Eq, Show)
+
+-- | The flavor a host provides, decided by platform alone. Probing the
+-- installed @script@ for its own dialect is deliberately not done: the
+-- dialect is a property of the userland Kanban is built for, and a probe
+-- would add a second external invocation to every refresh for a question
+-- the platform already answers. macOS is the one BSD-userland host Kanban
+-- supports, and Linux -- which CI already builds and tests on -- the other,
+-- so every non-darwin host resolves to the util-linux form.
+scriptFlavorFor :: String -> ScriptFlavor
+scriptFlavorFor "darwin" = BsdScript
+scriptFlavorFor _ = UtilLinuxScript
+
+-- | 'scriptFlavorFor' applied to the platform this binary was built for.
+hostScriptFlavor :: ScriptFlavor
+hostScriptFlavor = scriptFlavorFor os
+
+-- | How a flavor names itself in a diagnostic, so a mismatch between the
+-- composed operands and the installed @script@ is distinguishable from a
+-- missing executable, a timeout, or output the parser does not recognize.
+scriptFlavorLabel :: ScriptFlavor -> Text
+scriptFlavorLabel BsdScript = "BSD"
+scriptFlavorLabel UtilLinuxScript = "util-linux"
+
+-- | The @script@ operands that run @claude@ under a pseudo-terminal for
+-- each flavor. The BSD operands are the argv Kanban has always composed.
+--
+-- util-linux hands its @-c@ payload to a shell, so the resolved executable
+-- path — which is whatever @findExecutable@ or a caller supplied, and can
+-- carry whitespace, quotes or any other metacharacter — is single-quoted
+-- rather than concatenated, and so are the two literal flags. That keeps
+-- the payload exactly three words to the shell: the executable, then
+-- @--safe-mode@ and @--ax-screen-reader@, with no splitting and nothing
+-- else evaluated.
+claudeProbeArguments :: ScriptFlavor -> FilePath -> [String]
+claudeProbeArguments BsdScript claudePath =
+  ["-q", "/dev/null", claudePath, "--safe-mode", "--ax-screen-reader"]
+claudeProbeArguments UtilLinuxScript claudePath =
+  ["-q", "-c", unwords (map shellQuoted [claudePath, "--safe-mode", "--ax-screen-reader"]), "/dev/null"]
+
+-- | One shell word, POSIX-quoted: wrapped in single quotes, with each
+-- embedded single quote closed, backslash-escaped and reopened.
+shellQuoted :: String -> String
+shellQuoted value = "'" <> concatMap escape value <> "'"
+  where
+    escape '\'' = "'\\''"
+    escape character = [character]
+
+-- | Names the flavor whose operands were composed on every way the probe can
+-- fail, leaving the 'ProviderErrorKind' — and so every classification built
+-- on it — exactly as the failing step reported it.
+annotateFlavor :: ScriptFlavor -> Either ProviderError result -> Either ProviderError result
+annotateFlavor flavor (Left providerError) =
+  Left
+    providerError
+      { providerErrorMessage =
+          providerError.providerErrorMessage <> " (script flavor: " <> scriptFlavorLabel flavor <> ")"
+      }
+annotateFlavor _ result = result
+
 fetchClaudeUsage :: Int -> IO (Either ProviderError UsageSnapshot)
-fetchClaudeUsage timeoutMicros = do
+fetchClaudeUsage = fetchClaudeUsageWith hostScriptFlavor
+
+fetchClaudeUsageWith :: ScriptFlavor -> Int -> IO (Either ProviderError UsageSnapshot)
+fetchClaudeUsageWith flavor timeoutMicros = do
   scriptExecutable <- findExecutable "script"
   claudeExecutable <- findExecutable "claude"
   case (scriptExecutable, claudeExecutable) of
-    (Nothing, _) -> pure (Left (ProviderError ExecutableMissing "script executable was not found"))
-    (_, Nothing) -> pure (Left (ProviderError ExecutableMissing "claude executable was not found"))
-    (Just scriptPath, Just claudePath) -> runClaudeProvider timeoutMicros scriptPath claudePath
+    (Nothing, _) -> pure (annotateFlavor flavor (Left (ProviderError ExecutableMissing "script executable was not found")))
+    (_, Nothing) -> pure (annotateFlavor flavor (Left (ProviderError ExecutableMissing "claude executable was not found")))
+    (Just scriptPath, Just claudePath) -> runClaudeProviderWith flavor timeoutMicros scriptPath claudePath
 
 runClaudeProvider :: Int -> FilePath -> FilePath -> IO (Either ProviderError UsageSnapshot)
-runClaudeProvider timeoutMicros scriptPath claudePath = do
+runClaudeProvider = runClaudeProviderWith hostScriptFlavor
+
+runClaudeProviderWith :: ScriptFlavor -> Int -> FilePath -> FilePath -> IO (Either ProviderError UsageSnapshot)
+runClaudeProviderWith flavor timeoutMicros scriptPath claudePath = do
   scratchDirectory <- claudeScratchDirectory
   createPrivateDirectory XdgCache scratchDirectory
   environment <- claudeEnvironment
   fetchedAt <- getCurrentTime
   timeZone <- getCurrentTimeZone
-  let createProcess = claudeProcess scriptPath claudePath scratchDirectory environment
+  let createProcess = claudeProcess flavor scriptPath claudePath scratchDirectory environment
   result <- try @IOException (withCreateProcess createProcess (runProcess timeoutMicros fetchedAt timeZone))
-  pure $ case result of
+  -- Annotated here rather than at each failing step so the flavor reaches
+  -- the transcript-decoding failures too, which are reported by a pure
+  -- decoder that knows nothing about how the probe was launched.
+  pure . annotateFlavor flavor $ case result of
     Left exception -> Left (ProviderError RequestFailed (Text.pack (show exception)))
     Right providerResult -> providerResult
 
@@ -123,9 +207,9 @@ claudeEnvironment = do
 setEnvironmentValue :: [(String, String)] -> (String, String) -> [(String, String)]
 setEnvironmentValue environment value@(name, _) = value : filter ((/= name) . fst) environment
 
-claudeProcess :: FilePath -> FilePath -> FilePath -> [(String, String)] -> CreateProcess
-claudeProcess scriptPath claudePath scratchDirectory environment =
-  (proc scriptPath ["-q", "/dev/null", claudePath, "--safe-mode", "--ax-screen-reader"])
+claudeProcess :: ScriptFlavor -> FilePath -> FilePath -> FilePath -> [(String, String)] -> CreateProcess
+claudeProcess flavor scriptPath claudePath scratchDirectory environment =
+  (proc scriptPath (claudeProbeArguments flavor claudePath))
     { cwd = Just scratchDirectory,
       env = Just environment,
       std_in = CreatePipe,

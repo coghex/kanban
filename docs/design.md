@@ -1551,11 +1551,17 @@ machine-readable shell command for the same plan limits.
 
 The built-in provider therefore:
 
-1. Starts the official `claude` client through macOS `script` in a private
+1. Starts the official `claude` client through the host's `script` in a private
    pseudo-terminal only after an explicit refresh, in a dedicated scratch
    directory such as `~/.cache/kanban/claude-probe/` rather than the user's
    repository. A fixed scratch directory means the client's folder-trust prompt
    happens at most once, and session history lands outside the user's project.
+   The operands are composed for the host platform's `script` dialect — the BSD
+   form, which runs the trailing operands, on macOS; the util-linux form, which
+   takes one file operand and runs the command through `-c`, elsewhere — chosen
+   by platform rather than by probing the installed `script`. The executable
+   path is shell-quoted in the util-linux payload, and every probe failure
+   names the dialect it composed alongside its own classification.
 2. Uses `--safe-mode` and `--ax-screen-reader`, disables the auto-updater,
    telemetry, prompt history, and CLAUDE.md loading, and leaves normal OAuth
    access intact.

@@ -6,6 +6,7 @@
 module Spec.Support.ClaudeProbe
   ( ClaudeSignalPolicy (..),
     ClaudeProbeFixture (..),
+    ClaudeTranscript (..),
     withClaudeProbeFixture,
   )
 where
@@ -30,6 +31,25 @@ data ClaudeSignalPolicy
     ClaudeIgnoresInterruptAndTerminate
   deriving stock (Eq, Show)
 
+-- | What the fake `claude` puts on the pseudo-terminal before its tail
+-- behavior takes over. Each shape drives one of 'Kanban.Provider'\'s error
+-- classifications through the real capture loop, so a test can show the
+-- flavor annotation naming the dialect without flattening the kind the
+-- failing step reported.
+data ClaudeTranscript
+  = -- | Nothing at all: capture can only end by timing out.
+    NoTranscript
+  | -- | The screen-reader prompt and a complete, decodable @/usage@ screen.
+    CompleteUsageTranscript
+  | -- | A client that has been signed out, which capture recognizes as a
+    -- failure without waiting for the quiet period.
+    AuthenticationFailureTranscript
+  | -- | A screen naming both windows but resetting both of them at a
+    -- clock time, so it carries two five-hour windows and no weekly one --
+    -- complete enough to end capture, not decodable into a snapshot.
+    MissingWeeklyWindowTranscript
+  deriving stock (Eq, Show)
+
 data ClaudeProbeFixture = ClaudeProbeFixture
   { claudeProbeScriptPath :: FilePath,
     claudeProbeClaudePath :: FilePath,
@@ -50,8 +70,8 @@ data ClaudeProbeFixture = ClaudeProbeFixture
 -- nothing else changed it" case) and one placed in a session/group of its
 -- own -- what `script`'s pty actually does in production, and the shape a
 -- create_group-only signal never reaches.
-withClaudeProbeFixture :: Bool -> ClaudeSignalPolicy -> Bool -> (ClaudeProbeFixture -> IO result) -> IO result
-withClaudeProbeFixture separateGroup signalPolicy emitValidUsage action =
+withClaudeProbeFixture :: Bool -> ClaudeSignalPolicy -> ClaudeTranscript -> (ClaudeProbeFixture -> IO result) -> IO result
+withClaudeProbeFixture separateGroup signalPolicy transcript action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
     let binaryRoot = temporaryRoot </> "bin"
         scriptPath = binaryRoot </> "script"
@@ -62,33 +82,50 @@ withClaudeProbeFixture separateGroup signalPolicy emitValidUsage action =
     createDirectoryIfMissing True binaryRoot
     ByteString.writeFile scriptPath (ByteString.unlines (fakeScriptBody scriptMarker separateGroup))
     setFileMode scriptPath 0o700
-    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker signalPolicy emitValidUsage))
+    ByteString.writeFile claudePath (ByteString.unlines (fakeClaudeBody childMarker termMarker signalPolicy transcript))
     setFileMode claudePath 0o700
     action (ClaudeProbeFixture scriptPath claudePath scriptMarker childMarker termMarker)
 
--- | Stands in for real `script -q /dev/null <claude> --safe-mode
--- --ax-screen-reader`: records its own pid, then runs the given `claude`
--- path as a child, optionally under job-control monitor mode so the child
--- gets a process group of its own -- the same effect `script`'s pty gets
--- for free via `forkpty`'s implicit `setsid`.
+-- | Stands in for a real `script`, in whichever dialect
+-- 'Kanban.Claude.claudeProbeArguments' composed for the host: it records
+-- its own pid, then runs the `claude` the operands name as a child,
+-- optionally under job-control monitor mode so the child gets a process
+-- group of its own -- the same effect `script`'s pty gets for free via
+-- `forkpty`'s implicit `setsid`.
+--
+-- Accepting both dialects is what keeps the termination tests below running
+-- against whichever one the host selects, on macOS and on Linux alike. It is
+-- deliberately *not* the proof that the right dialect was selected: a fake
+-- that answers to both cannot fail on a wrong-flavor argv, so that proof
+-- lives in the direct assertions on 'Kanban.Claude.claudeProbeArguments' and
+-- 'Kanban.Claude.scriptFlavorFor' instead.
+--
+-- util-linux hands its @-c@ payload to a shell, so this does too, rather
+-- than word-splitting the payload itself -- otherwise the fixture would
+-- accept a payload no real `script` could run.
 fakeScriptBody :: FilePath -> Bool -> [ByteString.ByteString]
 fakeScriptBody scriptMarkerPath separateGroup =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted scriptMarkerPath,
-    "shift 2",
-    "claudePath=\"$1\"",
-    "shift"
+    "if [ \"$2\" = '-c' ]; then",
+    -- util-linux: script -q -c COMMAND FILE
+    "  probeCommand=(/bin/sh -c \"$3\")",
+    "else",
+    -- BSD: script -q FILE COMMAND [ARG...]
+    "  shift 2",
+    "  probeCommand=(\"$@\")",
+    "fi"
   ]
     <> ["set -m" | separateGroup]
-    <> [ "\"$claudePath\" \"$@\" &",
+    <> [ "\"${probeCommand[@]}\" &",
          "childPid=$!"
        ]
     <> ["set +m" | separateGroup]
     <> ["wait \"$childPid\""]
 
 -- | Stands in for real `claude --safe-mode --ax-screen-reader` running
--- inside `script`'s pty: records its own pid, optionally emits a decodable
--- `/usage` transcript, then either drains the exact byte count Kanban's
+-- inside `script`'s pty: records its own pid, emits whichever screen the
+-- transcript names, then either drains the exact byte count Kanban's
 -- ESC+`/exit` writes before exiting on its own, or loops under whichever
 -- signal-ignoring trap the policy names.
 --
@@ -103,8 +140,8 @@ fakeScriptBody scriptMarkerPath separateGroup =
 -- fake that closed its output pipe any earlier would race a real Claude
 -- session's output never closing on its own, hitting a decode path this
 -- fixture is not testing.
-fakeClaudeBody :: FilePath -> FilePath -> ClaudeSignalPolicy -> Bool -> [ByteString.ByteString]
-fakeClaudeBody childMarkerPath termMarkerPath signalPolicy emitValidUsage =
+fakeClaudeBody :: FilePath -> FilePath -> ClaudeSignalPolicy -> ClaudeTranscript -> [ByteString.ByteString]
+fakeClaudeBody childMarkerPath termMarkerPath signalPolicy transcript =
   [ "#!/bin/bash",
     "printf '%s' \"$$\" > " <> quoted childMarkerPath
   ]
@@ -117,13 +154,25 @@ fakeClaudeBody childMarkerPath termMarkerPath signalPolicy emitValidUsage =
       ClaudeExitsCleanly -> [recordTermThenExit]
       ClaudeIgnoresInterrupt -> ["trap '' INT", recordTermThenExit]
       ClaudeIgnoresInterruptAndTerminate -> ["trap '' INT", "trap '' TERM"]
-    outputLines
-      | emitValidUsage =
-          [ "printf '$\\n'",
-            "printf 'Current session\\n5%% used\\nResets 8:40pm (America/Los_Angeles)\\n'",
-            "printf 'Current week\\n10%% used\\nResets Jul 22 at 11pm (America/Los_Angeles)\\n'"
-          ]
-      | otherwise = []
+    -- Every emitting shape opens with the screen-reader prompt, so the
+    -- capture loop answers each of them with the same "/usage\r" and the
+    -- byte count the clean-exit tail drains stays one number.
+    outputLines = case transcript of
+      NoTranscript -> []
+      CompleteUsageTranscript ->
+        [ "printf '$\\n'",
+          "printf 'Current session\\n5%% used\\nResets 8:40pm (America/Los_Angeles)\\n'",
+          "printf 'Current week\\n10%% used\\nResets Jul 22 at 11pm (America/Los_Angeles)\\n'"
+        ]
+      AuthenticationFailureTranscript ->
+        [ "printf '$\\n'",
+          "printf 'Not logged in\\n'"
+        ]
+      MissingWeeklyWindowTranscript ->
+        [ "printf '$\\n'",
+          "printf 'Current session\\n5%% used\\nResets 8:40pm (America/Los_Angeles)\\n'",
+          "printf 'Current week\\n10%% used\\nResets 9:40pm (America/Los_Angeles)\\n'"
+        ]
     tailLines = case signalPolicy of
       -- 14 bytes: 'respondToScreen' answers the "$" prompt above with
       -- "/usage\r" (7 bytes) as soon as it appears in the transcript, well
