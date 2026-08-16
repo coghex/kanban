@@ -763,6 +763,39 @@ NOTE_ASSETS = (
 # resolve.
 PUBLISHING_ASSETS = PROCESSING_ASSETS + NOTE_ASSETS
 
+# Issue #328's round-1 review blocker, pinned so it cannot come back. The
+# personal note-problem source carried a "Create a missing report" path, which
+# cannot survive §9.4's only-writer rule: publish_coordination_doc.py leaves
+# `applied` False when the document is absent from the publication tip, so it
+# declines to WRITE the document as well as to publish it. An asset promising to
+# create the report would therefore leave the user with no report at all and the
+# approved observation reachable only as a preserved blob. The boundary reads as
+# a mere omission once that reason is forgotten, which is exactly why it is
+# asserted rather than left to prose.
+NOTE_NO_CREATE_CLAUSES = {
+    "appends-to-an-existing-report": (
+        "this workflow appends to a report that already exists"
+    ),
+    "a-missing-path-stops": (
+        "when the resolved path holds no report, stop and say so"
+    ),
+    "helper-declines-to-write-an-absent-document": (
+        "a document absent from the publication tip is one it declines to write "
+        "as well as to publish"
+    ),
+    "promising-creation-leaves-no-report": (
+        "would therefore leave the user with no report at all"
+    ),
+    "confirms-existence-before-investigating": (
+        "confirm the report exists at the resolved path before investigating"
+    ),
+}
+
+# The heading that path shipped under. Forbidden outright in the note assets:
+# the clauses above could all be satisfied while a creation section sat beside
+# them contradicting every one.
+NOTE_FORBIDDEN_CREATE_PROSE = "create a missing report"
+
 # The assets that create a novel document and therefore state §9.1's rule that
 # it stays local until separately classified and published.
 DRAFTING_ASSETS = (
@@ -1050,6 +1083,14 @@ def missing_publication_clauses(text):
     asset = canonical(text)
     return sorted(
         key for key, clause in PUBLICATION_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_no_create_clauses(text):
+    """The note-problem no-creation clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in NOTE_NO_CREATE_CLAUSES.items() if clause not in asset
     )
 
 
@@ -1686,6 +1727,41 @@ class PublicationTests(unittest.TestCase):
                     self.assertEqual(
                         missing_bootstrap_clauses(asset.replace(clause, "")), [key]
                     )
+
+    def test_neither_note_asset_promises_to_create_a_missing_report(self):
+        for path in NOTE_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_no_create_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states that a missing report is drafting's "
+                    "to create, not its own; the publication helper declines to "
+                    f"write an absent document, so the report would never exist: {missing}",
+                )
+                self.assertNotIn(
+                    NOTE_FORBIDDEN_CREATE_PROSE,
+                    canonical(self.asset_text(path)),
+                    f"{path} reintroduces a create-the-report path that "
+                    "tools/publish_coordination_doc.py cannot carry out",
+                )
+
+    def test_removing_a_no_create_clause_from_a_note_asset_is_reported(self):
+        for path in NOTE_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in NOTE_NO_CREATE_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_no_create_clauses(asset.replace(clause, "")), [key]
+                    )
+
+    def test_only_the_drafting_assets_create_a_document(self):
+        # The other half: creation lives with the assets that publish nothing
+        # and therefore write their own file. Without this, moving the create
+        # path into a publishing asset would fail no test.
+        for path in DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertEqual(missing_bootstrap_clauses(self.asset_text(path)), [])
 
     def test_no_drafting_asset_invokes_the_helper(self):
         # Scoped to DRAFTING_ASSETS alone: note-problem is a capture asset that

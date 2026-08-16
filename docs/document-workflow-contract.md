@@ -193,10 +193,17 @@ follow from their subject being a document that already exists:
   `coordination`, and an appended observation left in one checkout is a cursor
   only that checkout can resume. So they take §8's ownership resolution and §9's
   same-run publication exactly as the processing assets do, rather than §9.1's
-  novel-document rule. A report one of them creates because it was missing is
-  the ordinary `pr-atomic` case §9.2 already fails closed on: not yet tracked,
-  matched by no §7 row, and declined by the publication module with the
-  approved content applied locally.
+  novel-document rule.
+- **They create no report.** A path holding no report is `draft-report`'s to
+  draft and create; `note-problem` stops and says so. That boundary is forced by
+  §9.4's only-writer rule rather than chosen: a document absent from the
+  publication tip is one the module declines to *write* as well as to publish,
+  so an asset that promised to create the report would leave the user with none
+  and the approved observation reachable only as a preserved blob. Writing it
+  directly instead would contradict the only-writer rule and leave a document
+  the next publication refuses as not matching the tip. A report `draft-report`
+  created but no pull request has enrolled is in the same position, and these
+  assets report that outcome rather than describing the observation as captured.
 - **They acquire no tracker transaction.** They create, link, label, and comment
   on nothing, so §9.6's rule that a disposition mutating no tracker acquires no
   transaction covers them outright. A record acquired here would be one nothing
@@ -502,13 +509,14 @@ inventory is `git ls-files '*.md'`, so a document a drafting asset just created
 is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
 moment at which a novel document is directly publishable.
 
-That is also why `note-problem` sits on the publishing side despite creating a
-report when one is missing: it hands every mutation to the module, which
-classifies the path itself and declines a not-yet-tracked one, reporting
-`not-published` with the approved content applied locally. Classifying it as a
-drafting asset instead would leave an appended observation on an already-tracked
-`coordination` report permanently unpublished, which is the exact
-one-checkout-cursor failure this section exists to prevent.
+`note-problem` sits on the publishing side because its subject is the opposite
+case: a report that already exists and may already be classified
+`coordination`. Classifying it as a drafting asset would leave an appended
+observation on such a report permanently unpublished, which is the exact
+one-checkout-cursor failure this section exists to prevent. The same split is
+why it creates nothing: the module declines to write an absent document as well
+as to publish it, so the novel-document case stays entirely with the drafting
+assets, which write their own file precisely because they publish nothing.
 
 ### 9.2 Eligibility, and the fail-closed default
 

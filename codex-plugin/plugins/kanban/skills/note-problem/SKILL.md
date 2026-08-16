@@ -110,7 +110,9 @@ $note-problem docs/ui-bugs.md "the observed problem"
 Treat the first token ending in `.md` as the report path, and feed it to the
 ownership resolution above as the explicit path input. Treat all remaining text
 as one note. Quoting is optional. If either is missing, ask only for the missing
-value.
+value. Confirm the report exists at the resolved path before
+investigating; a path that holds no report is `$draft-report`'s to draft, not this
+workflow's to create.
 
 ## Status vocabulary
 
@@ -132,7 +134,7 @@ translation.
 
 ## Workflow
 
-1. Read applicable repository instructions and the complete report if it exists.
+1. Read applicable repository instructions and the complete existing report.
 2. Preserve the user's original wording. Treat it as a claim to verify, not as
    proof or a complete specification.
 3. Search the report for an obviously equivalent finding:
@@ -208,29 +210,27 @@ Add exactly one observation per invocation, and only after explicit approval.
    these" does not waive it; each observation is invoked, approved, and
    published on its own.
 
-## Create a missing report
+## A missing report is not this workflow's to create
 
-When the requested report does not exist, create it with:
+This workflow appends to a report that already exists. When the resolved path
+holds no report, stop and say so, and point the user at `$draft-report`, which
+drafts a new report from their notes and creates it after explicit approval.
+Then this workflow can capture observations into it.
 
-- a descriptive level-one title;
-- one sentence stating that entries contain focused evidence for later
-  disposition;
-- this status legend:
+That boundary follows from the publication contract below rather than from
+preference. `tools/publish_coordination_doc.py` is this workflow's only writer,
+and a document absent from the publication tip is one it declines to *write* as
+well as to publish: it preserves the approved content in the object database and
+reports that the document was not written. An invocation that promised to create
+the report would therefore leave the user with no report at all and the
+observation reachable only as a preserved blob. Writing the file directly
+instead would contradict the only-writer rule, and the document it left behind
+would be refused by the next publication as no longer matching the tip.
 
-  ```text
-  [ ] unprocessed · [#N] filed · [no-issue] closed without an issue · [deferred] blocked on a concrete precondition
-  ```
-
-- `## Status`;
-- a thematic chapter for the first finding; and
-- a stable item prefix derived from the report's subject, such as `UI` for
-  `ui-bugs.md`.
-
-Use the same checklist and finding shapes described above. Do not add empty
-boilerplate findings. A report that did not exist a moment ago is not tracked,
-so it matches no §7 row and is `pr-atomic` by the fail-closed default; the
-helper below will decline to publish it and say so, which is the ordinary
-outcome for a novel document rather than a failure of this run.
+A report that `$draft-report` has created but that no pull request has enrolled yet
+is in the same position: it exists locally but is absent from the publication
+tip, so the helper declines both to publish it and to write into it. Report that
+outcome plainly rather than describing the observation as captured.
 
 ## Publish the approved mutation
 
@@ -347,4 +347,9 @@ disposition, one finding per invocation.
          its own checkout did not need;
      (4) the §4 status vocabulary stated as exact literals;
      (5) `apply_patch` is no longer named, since the caller renders the
-         approved document and the publication helper is its only writer. -->
+         approved document and the publication helper is its only writer;
+     (6) the personal source's missing-report creation path is dropped and
+         handed to $draft-report. It cannot survive adaptation (3): a document
+         absent from the publication tip is one
+         tools/publish_coordination_doc.py declines to write as well as to
+         publish, so the promised report would never exist. -->
