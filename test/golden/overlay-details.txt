@@ -1,15 +1,15 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
-║┃ Codex                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃         Thu 16:05        ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃         Tue 09:00        ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃ Claude                   ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
 ║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the vers┏━━━━━━━━━━━━━━━━━━━━━━━━━━ PR #823  Fix modal scroll routing ━━━━━━━━━━━━━━━━━━━━━━━━━┓r ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃         Thu 17:30        ┃┃     │ envelope           ┃                                                                                      ┃          │ ┃  │ updated 3h ago                     │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope           ┃                                                                                      ┃          │ ┃  │ updated 3h ago                     │ ┃║
 ║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┃ PR #823  Fix modal scroll routing                                                    ┃ into     │ ┃  │ Updates the branch after the       │ ┃║
-║┃         Sat 09:10        ┃┃     │ unassigned · update┃  reviewed:approve   input   ui                                                       ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃  reviewed:approve   input   ui                                                       ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
 ║┃                          ┃┃     │ Write the envelope ┃ Metadata                                                                             ┃          │ ┃  │ master.                            │ ┃║
 ║┃                          ┃┃     │ of the payload so a┃ #812 · agent-name → master · updated 3h ago                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
 ║┃                          ┃┃     │ write is detectable┃ Author                                                                               ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║

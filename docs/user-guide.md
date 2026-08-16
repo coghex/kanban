@@ -209,6 +209,22 @@ If the PR drainer has not answered yet, or could not be asked, the list says so 
 
 The sidebar shows the available Codex and Claude usage windows. Press `u` to refresh them. A failure from one service does not prevent the other service or the GitHub board from updating.
 
+Each window takes two rows. The first is its label, a bar, and the percentage left. The second says how long until that window resets and the wall-clock time it resets at, in your own timezone:
+
+```text
+Codex          3h 0m old
+5 hour  [██████░░░░] 63%
+in 1h 5m · Thu 16:05
+week    [████░░░░░░] 41%
+in 4d 18h · Tue 09:00
+```
+
+A window whose reset time has already gone by reads `due now` instead of a countdown.
+
+Beside each service's name is how old the numbers under it are. Kanban shows the snapshot it last stored, so opening the board displays whatever was cached from your last session until a refresh replaces it — the age is how you tell one from the other. Press `u` if it is older than you want.
+
+Both the countdown and the age are recomputed whenever the screen redraws for any other reason. Nothing is on a timer, so a board left open on an idle desktop stays idle; the numbers catch up the moment anything happens.
+
 Press `c` to hide or show the sidebar.
 
 ## Checking usage from a shell
