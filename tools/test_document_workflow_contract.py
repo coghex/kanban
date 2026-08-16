@@ -20,9 +20,20 @@ the surface a document started by one brand and resumed by the other depends on,
 not their wording.
 
 Issue #241 transposed /design-epic and /process-design-doc into the Claude
-bundle from the post-#239 tracked Codex skills, so §3.5's asymmetry is now
-partial: $draft-report is the sole remaining Codex-only workflow, the declared
-set is seven assets, and three of the four workflow names are cross-brand pairs.
+bundle from the post-#239 tracked Codex skills, and issue #328 closed the rest:
+/draft-report was transposed the same way and note-problem entered as a pair in
+both bundles at once. The declared set is ten assets, all five workflow names
+are cross-brand pairs, and §3.5's Codex-only set is empty while the section
+stays as a closure record.
+
+Issue #328 also split two dimensions this module had been treating as one. An
+asset's STATUS classification (may it write a checked box?) and its PUBLICATION
+classification (does it hand the document to publish_coordination_doc.py?) used
+to coincide, so CAPTURE_ASSETS and DRAFTING_ASSETS were the same tuple.
+note-problem is the first asset for which they differ: it applies no
+disposition, but it appends to a report that already exists and may already be
+classified `coordination`, so it publishes in the same run without ever
+acquiring a tracker transaction.
 
 Discovery, frontmatter, and no-personal-path coverage for the same assets lives
 in tools/test_claude_plugin.py and tools/test_codex_plugin.py; their
@@ -52,24 +63,32 @@ DOCUMENT_WORKFLOW_NAMES = {
     "design-epic",
     "process-design-doc",
     "draft-report",
+    # Requirement 5 of issue #328. Membership here, not only a §2 row, is what
+    # makes a note-problem file appearing in a bundle without a declared row
+    # fail the §7 completeness check: the scan compares discovered workflow
+    # files against this set to decide whether a row was owed.
+    "note-problem",
     "process-report",
 }
 
 EXPECTED_DECLARED_PATHS = {
     "claude-plugin/plugins/kanban/commands/design-epic.md",
     "claude-plugin/plugins/kanban/commands/process-design-doc.md",
+    "claude-plugin/plugins/kanban/commands/draft-report.md",
+    "claude-plugin/plugins/kanban/commands/note-problem.md",
     "claude-plugin/plugins/kanban/commands/process-report.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md",
 }
 
-# The one workflow §3.5 still declares Codex-only after issue #241 closed the
-# design half of the asymmetry. The Claude plugin must not grow a counterpart
-# under this contract: authoring one would be new behavior no pinned source
-# defines.
-CODEX_ONLY_WORKFLOWS = ("draft-report",)
+# Empty since issue #328 transposed /draft-report from the tracked Codex skill.
+# §3.5 keeps its standing rule and closure record rather than being deleted, so
+# this stays as the enforcement point: a name added back here would have to
+# come with a pinned source that never got one.
+CODEX_ONLY_WORKFLOWS = ()
 
 # The marker vocabulary every declared asset states, as raw literals: these are
 # the interface between two runs, two brands, and two sessions, so an
@@ -91,15 +110,23 @@ DISPOSITION_APPLYING_ASSETS = (
 
 # The capture assets, which select no disposition and therefore may never write
 # a checked box (§4). The counterpart to DISPOSITION_APPLYING_ASSETS above.
+# Note that this is the STATUS dimension. Since issue #328 it no longer
+# coincides with the publication dimension below: both note-problem variants
+# are capture assets that nonetheless publish, because what they capture into
+# is a document that already exists.
 CAPTURE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/draft-report.md",
+    "claude-plugin/plugins/kanban/commands/note-problem.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
 )
 
-# The three cross-brand pairs in this contract, and therefore the only places a
+# The five cross-brand pairs in this contract, and therefore the only places a
 # report or design document started by one brand can stop being resumable by
-# the other.
+# the other. Every declared workflow is one since issue #328 closed the
+# Codex-only set.
 CROSS_BRAND_PAIRS = {
     "design-epic": (
         "claude-plugin/plugins/kanban/commands/design-epic.md",
@@ -108,6 +135,14 @@ CROSS_BRAND_PAIRS = {
     "process-design-doc": (
         "claude-plugin/plugins/kanban/commands/process-design-doc.md",
         "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md",
+    ),
+    "draft-report": (
+        "claude-plugin/plugins/kanban/commands/draft-report.md",
+        "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+    ),
+    "note-problem": (
+        "claude-plugin/plugins/kanban/commands/note-problem.md",
+        "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
     ),
     "process-report": (
         "claude-plugin/plugins/kanban/commands/process-report.md",
@@ -139,25 +174,29 @@ PROCESS_REPORT_SHARED_BOUNDARIES = (
 # does not fail CI.
 CONTRACT_STATEMENTS = {
     "haskell-parity-exclusion": "user-invoked and never spawned by Kanban's CLI",
-    # Issue #241 closed the design half of §3.5's asymmetry. What the document
-    # must still state is the residue — one Codex-only workflow, still
-    # declared rather than accidental — plus the closure record that says why
-    # the other two stopped being one.
-    "codex-only-asymmetry": (
-        "$draft-report is the sole remaining Codex-only workflow"
+    # Issue #328 closed the last of §3.5's asymmetry. The section is now a
+    # completed closure record, and what the document must state is history
+    # plus the standing rule — not the section's deletion, which would leave
+    # the rule governing the next proposed asset looking arbitrary.
+    "codex-only-set-is-empty": "The Codex-only set is empty",
+    "codex-only-closure-is-the-record": (
+        "This section stays as the closure record and the standing rule"
     ),
-    "codex-only-has-no-counterpart": (
-        "No Claude counterpart to $draft-report exists"
+    "codex-only-rule-still-stands": (
+        "must not grow a counterpart under this contract until a reviewed, "
+        "pinned source exists to transpose from"
     ),
     "codex-only-is-declared": "a declared gap rather than an oversight",
-    "design-pair-closure-is-recorded": (
-        "$design-epic and $process-design-doc were Codex-only under the same "
-        "rule until issue #239 landed their decision-authority guardrails in "
-        "the tracked Codex skills"
+    "closure-record-names-each-clearing-source": (
+        "Each workflow that left the Codex-only set, with the pinned source "
+        "that cleared it"
     ),
-    "design-pair-closure-names-its-source": (
-        "is the pinned source /design-epic and /process-design-doc were "
-        "transposed from"
+    "closure-record-covers-draft-report": (
+        "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md, the reviewed "
+        "tracked skill issue #239 strengthened"
+    ),
+    "note-problem-never-was-codex-only": (
+        "note-problem never appeared in this set"
     ),
     "design-epic-creates-nothing": (
         "/design-epic and $design-epic produce a durable design document and "
@@ -199,9 +238,21 @@ CONTRACT_STATEMENTS = {
         "/process-design-doc, and $process-design-doc — publish the approved "
         "document mutation during the same invocation that applies it"
     ),
+    # Issue #328: the write side's second half publishes too, because its
+    # subject is a report that already exists. Pinned separately from the
+    # clause above so reclassifying it into the drafting rule — the one
+    # mistake that would leave an appended observation unpublished forever —
+    # fails with this key named.
+    "publication-note-problem-publishes-too": (
+        "The two observation-capture assets — /note-problem and $note-problem — "
+        "publish the same way and under the same §9.2 eligibility"
+    ),
+    "publication-note-problem-has-no-transaction": (
+        "they mutate no tracker, so they acquire no §9.6 transaction"
+    ),
     "publication-drafting-assets-stay-local": (
-        "The three drafting assets — /design-epic, $design-epic, and "
-        "$draft-report — publish nothing at all"
+        "The four drafting assets — /design-epic, $design-epic, "
+        "/draft-report, and $draft-report — publish nothing at all"
     ),
     "publication-unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
@@ -690,7 +741,36 @@ BOOTSTRAP_CLAUSES = {
 }
 
 PROCESSING_ASSETS = DISPOSITION_APPLYING_ASSETS
-DRAFTING_ASSETS = CAPTURE_ASSETS
+
+# The PUBLICATION dimension, which issue #328 split apart from the status
+# dimension above. Before it, every capture asset was also a drafting asset and
+# the two partitions coincided; note-problem is the first asset for which they
+# do not. It writes no checked box (a capture asset) but its subject is an
+# existing report that may already be classified `coordination`, so it takes
+# §8's ownership resolution and §9's same-run publication rather than §9.1's
+# novel-document rule. Classifying it as a drafting asset would leave an
+# appended observation on a tracked coordination report permanently
+# unpublished — a cursor only one checkout could resume, which is the failure
+# §9 exists to prevent.
+NOTE_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/note-problem.md",
+    "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md",
+)
+
+# Everything that hands a document to tools/publish_coordination_doc.py. The
+# transaction assertions stay scoped to PROCESSING_ASSETS: note-problem
+# mutates no tracker, so a transaction in it would be a record nothing could
+# resolve.
+PUBLISHING_ASSETS = PROCESSING_ASSETS + NOTE_ASSETS
+
+# The assets that create a novel document and therefore state §9.1's rule that
+# it stays local until separately classified and published.
+DRAFTING_ASSETS = (
+    "claude-plugin/plugins/kanban/commands/design-epic.md",
+    "claude-plugin/plugins/kanban/commands/draft-report.md",
+    "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
+)
 
 # Issue #278: the ownership-resolution step every declared asset states, as the
 # load-bearing prose fragments. Compared against canonical() output for the
@@ -1051,7 +1131,7 @@ class DeclaredAssetTests(unittest.TestCase):
     def setUp(self):
         self.declared = parse_declared_assets()
 
-    def test_declared_assets_are_exactly_the_seven_packaged_workflows(self):
+    def test_declared_assets_are_exactly_the_ten_packaged_workflows(self):
         self.assertEqual(set(self.declared), EXPECTED_DECLARED_PATHS)
 
     def test_every_declared_asset_exists_in_the_tracked_tree(self):
@@ -1088,28 +1168,44 @@ class DeclaredAssetTests(unittest.TestCase):
         )
 
     def test_an_undeclared_asset_added_to_either_plugin_is_reported(self):
-        # The realistic regression this guards is a Claude counterpart to the
-        # one workflow §3.5 still declares Codex-only appearing without that
-        # section being revisited. /design-epic used to be the planted asset
-        # here; issue #241 declared it, so the plant moved to /draft-report,
-        # which is the remaining case the rule protects.
+        # Every (brand, workflow) combination is declared since issue #328
+        # closed the Codex-only set, so the plant is no longer a counterpart
+        # appearing for a workflow §3.5 reserved to one brand. What the rule
+        # still protects is a bundled workflow file with no §2 row of its own,
+        # which is requirement 5 of #328: discovery is driven by
+        # DOCUMENT_WORKFLOW_NAMES, so note-problem's membership in that set is
+        # what makes these two files findable at all. Declaring the rows
+        # without the name would leave this scan blind to them.
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
             commands = repo_root / "claude-plugin" / "plugins" / "kanban" / "commands"
             skills = repo_root / "codex-plugin" / "plugins" / "kanban" / "skills"
             commands.mkdir(parents=True)
-            (skills / "draft-report").mkdir(parents=True)
-            (commands / "draft-report.md").write_text("---\n---\n", encoding="utf-8")
+            (skills / "note-problem").mkdir(parents=True)
+            (commands / "note-problem.md").write_text("---\n---\n", encoding="utf-8")
+            # A workflow from another contract, to prove the scan is selective
+            # rather than returning whatever it walks over.
             (commands / "solve.md").write_text("---\n---\n", encoding="utf-8")
-            (skills / "draft-report" / "SKILL.md").write_text("x\n", encoding="utf-8")
+            (skills / "note-problem" / "SKILL.md").write_text("x\n", encoding="utf-8")
             found = discovered_document_assets(
                 claude_commands_root=commands,
                 codex_skills_root=skills,
                 repo_root=repo_root,
             )
+        self.assertEqual(sorted(found), sorted(NOTE_ASSETS))
         self.assertEqual(
-            sorted(found - EXPECTED_DECLARED_PATHS),
-            ["claude-plugin/plugins/kanban/commands/draft-report.md"],
+            sorted(found - (EXPECTED_DECLARED_PATHS - set(NOTE_ASSETS))),
+            sorted(NOTE_ASSETS),
+        )
+
+    def test_note_problem_is_in_the_workflow_name_set(self):
+        # Requirement 5 of issue #328, asserted directly: the row list and the
+        # name set are separate surfaces, and only the second one decides
+        # whether a bundled file was owed a row.
+        self.assertIn("note-problem", DOCUMENT_WORKFLOW_NAMES)
+        self.assertEqual(
+            {row["invocation"][1:] for row in self.declared.values()},
+            DOCUMENT_WORKFLOW_NAMES,
         )
 
     def test_declared_brand_and_invocation_match_the_assets_own_plugin_and_name(self):
@@ -1139,22 +1235,30 @@ class DeclaredAssetTests(unittest.TestCase):
                 f"{path} does not implement its declared invocation {row['invocation']!r}",
             )
 
-    def test_the_remaining_codex_only_workflow_is_declared_for_codex_alone(self):
-        for name in CODEX_ONLY_WORKFLOWS:
-            rows = [
-                row
-                for row in self.declared.values()
-                if row["invocation"][1:] == name
-            ]
-            self.assertEqual(len(rows), 1, name)
-            self.assertEqual(rows[0]["brand"], "codex", name)
-            self.assertFalse(
-                (CLAUDE_COMMANDS_ROOT / f"{name}.md").exists(),
-                f"{name} is Codex-only (docs/document-workflow-contract.md §3.5); "
-                "the Claude plugin must not package a counterpart",
-            )
+    def test_the_codex_only_set_is_empty(self):
+        # Requirement 4 of issue #328. Kept as a positive assertion rather than
+        # deleted with the set: a name added back here must come with the
+        # pinned source §3.5 still requires, and this is where that shows up.
+        self.assertEqual(CODEX_ONLY_WORKFLOWS, ())
+        single_brand = sorted(
+            name
+            for name, brands in self.brands_by_workflow().items()
+            if len(brands) < 2
+        )
+        self.assertEqual(
+            single_brand,
+            [],
+            "docs/document-workflow-contract.md §3.5 declares no Codex-only "
+            f"workflow, but these are declared for one brand: {single_brand}",
+        )
 
-    def test_the_three_cross_brand_pairs_are_declared_for_both_brands(self):
+    def brands_by_workflow(self):
+        by_workflow = {}
+        for row in self.declared.values():
+            by_workflow.setdefault(row["invocation"][1:], set()).add(row["brand"])
+        return by_workflow
+
+    def test_the_five_cross_brand_pairs_are_declared_for_both_brands(self):
         by_workflow = {}
         for row in self.declared.values():
             by_workflow.setdefault(row["invocation"][1:], set()).add(row["brand"])
@@ -1393,10 +1497,13 @@ class OwningRepositoryTests(unittest.TestCase):
             recovered,
             {
                 "claude-plugin/plugins/kanban/commands/design-epic.md": 0,
+                "claude-plugin/plugins/kanban/commands/draft-report.md": 0,
+                "claude-plugin/plugins/kanban/commands/note-problem.md": 0,
                 "claude-plugin/plugins/kanban/commands/process-design-doc.md": 4,
                 "claude-plugin/plugins/kanban/commands/process-report.md": 3,
                 "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
+                "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 4,
                 "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 3,
             },
@@ -1470,12 +1577,24 @@ class PublicationTests(unittest.TestCase):
 
     def test_the_two_asset_groups_partition_the_declared_set(self):
         self.assertEqual(
-            set(PROCESSING_ASSETS) | set(DRAFTING_ASSETS), EXPECTED_DECLARED_PATHS
+            set(PUBLISHING_ASSETS) | set(DRAFTING_ASSETS), EXPECTED_DECLARED_PATHS
         )
-        self.assertEqual(set(PROCESSING_ASSETS) & set(DRAFTING_ASSETS), set())
+        self.assertEqual(set(PUBLISHING_ASSETS) & set(DRAFTING_ASSETS), set())
 
-    def test_every_processing_asset_states_the_publication_policy(self):
-        for path in PROCESSING_ASSETS:
+    def test_the_publication_and_status_partitions_no_longer_coincide(self):
+        # Issue #328's structural claim, asserted rather than left implicit:
+        # note-problem is a capture asset on the status dimension and a
+        # publishing asset on the publication dimension. An implementation that
+        # collapsed the two dimensions back together — the natural mistake,
+        # since they were the same tuple before — fails here rather than
+        # silently reclassifying note-problem into the novel-document rule.
+        self.assertEqual(set(NOTE_ASSETS) - set(CAPTURE_ASSETS), set())
+        self.assertEqual(set(NOTE_ASSETS) & set(DRAFTING_ASSETS), set())
+        self.assertLessEqual(set(NOTE_ASSETS), set(PUBLISHING_ASSETS))
+        self.assertNotEqual(set(CAPTURE_ASSETS), set(DRAFTING_ASSETS))
+
+    def test_every_publishing_asset_states_the_publication_policy(self):
+        for path in PUBLISHING_ASSETS:
             with self.subTest(path=path):
                 missing = missing_publication_clauses(self.asset_text(path))
                 self.assertEqual(
@@ -1486,7 +1605,7 @@ class PublicationTests(unittest.TestCase):
                 )
 
     def test_removing_a_publication_clause_from_an_asset_is_reported(self):
-        for path in PROCESSING_ASSETS:
+        for path in PUBLISHING_ASSETS:
             asset = canonical(self.asset_text(path))
             for key, clause in PUBLICATION_CLAUSES.items():
                 with self.subTest(path=path, clause=key):
@@ -1494,8 +1613,8 @@ class PublicationTests(unittest.TestCase):
                         missing_publication_clauses(asset.replace(clause, "")), [key]
                     )
 
-    def test_every_processing_asset_invokes_the_helper(self):
-        for path in PROCESSING_ASSETS:
+    def test_every_publishing_asset_invokes_the_helper(self):
+        for path in PUBLISHING_ASSETS:
             with self.subTest(path=path):
                 self.assertIn(
                     PUBLICATION_INVOCATION,
@@ -1504,8 +1623,8 @@ class PublicationTests(unittest.TestCase):
                     "owning repository's own write root",
                 )
 
-    def test_every_processing_asset_lets_the_helper_mint_the_scratch_path(self):
-        for path in PROCESSING_ASSETS:
+    def test_every_publishing_asset_lets_the_helper_mint_the_scratch_path(self):
+        for path in PUBLISHING_ASSETS:
             with self.subTest(path=path):
                 self.assertIn(
                     PUBLICATION_SCRATCH_INVOCATION,
@@ -1514,8 +1633,8 @@ class PublicationTests(unittest.TestCase):
                     "naming one, which would collide across runs",
                 )
 
-    def test_every_processing_asset_extracts_the_tip_binding(self):
-        for path in PROCESSING_ASSETS:
+    def test_every_publishing_asset_extracts_the_tip_binding(self):
+        for path in PUBLISHING_ASSETS:
             with self.subTest(path=path):
                 body = normalized(self.asset_text(path))
                 self.assertIn(
@@ -1569,6 +1688,8 @@ class PublicationTests(unittest.TestCase):
                     )
 
     def test_no_drafting_asset_invokes_the_helper(self):
+        # Scoped to DRAFTING_ASSETS alone: note-problem is a capture asset that
+        # does invoke it, which is exactly the distinction this issue drew.
         for path in DRAFTING_ASSETS:
             with self.subTest(path=path):
                 self.assertNotIn(
@@ -1700,11 +1821,14 @@ class TrackerTransactionContractTests(unittest.TestCase):
                 with self.subTest(path=path, invocation=invocation):
                     self.assertIn(invocation, body, path)
 
-    def test_no_drafting_asset_touches_the_transaction(self):
-        # The counterpart of the publication split: the three drafting assets
-        # create no tracker items, so a transaction in one of them would be a
-        # record nothing could ever resolve.
-        for path in DRAFTING_ASSETS:
+    def test_no_non_processing_asset_touches_the_transaction(self):
+        # The counterpart of the publication split: the four drafting assets
+        # create no tracker items, and neither do the two note-problem
+        # variants, so a transaction in any of them would be a record nothing
+        # could ever resolve. note-problem is covered here rather than by the
+        # drafting rule because it publishes — it is the one asset that takes
+        # §9's publication without §9.6's transaction.
+        for path in DRAFTING_ASSETS + NOTE_ASSETS:
             with self.subTest(path=path):
                 self.assertNotIn(
                     "tracker_transaction.py", self.asset_text(path), path

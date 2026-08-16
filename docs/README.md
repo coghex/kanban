@@ -24,4 +24,4 @@ operating those workflows, not to install or use the board.
 
 - [Agent-workflow contract](agent-workflow-contract.md) — every external workflow Kanban's AI actions depend on, ownership, and the portable-install policy.
 - [Drafting and issue-review workflow contract](drafting-workflow-contract.md) — the packaged issue-drafting and canonical issue-review workflows, their responsibilities, and their boundaries.
-- [Design and report document workflow contract](document-workflow-contract.md) — the packaged design-document and findings-report workflows, their shared status vocabulary, the three cross-brand pairs, and the one remaining declared Codex-only gap.
+- [Design and report document workflow contract](document-workflow-contract.md) — the packaged design-document and findings-report workflows, their shared status vocabulary, and the five cross-brand pairs that now cover every one of them.

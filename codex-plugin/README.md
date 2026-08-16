@@ -6,7 +6,8 @@ packages the Codex-side workflows Kanban invokes by name — `$solve`,
 canonical issue-review workflows a user or the review daemon invokes directly:
 `$issue`, `$autoissue`, and `$issue-review`. Since issue #229 it also packages
 the design and report document workflows a user invokes directly — `$design-epic`,
-`$process-design-doc`, `$draft-report`, and `$process-report`. It exists so a
+`$process-design-doc`, `$draft-report`, `$note-problem`, and `$process-report`.
+It exists so a
 clean Codex installation can perform these actions without depending on any
 developer's personal skill collection. See
 [docs/agent-workflow-contract.md](../docs/agent-workflow-contract.md) for
@@ -51,11 +52,12 @@ Verify discovery:
 codex plugin list
 ```
 
-`kanban@kanban` should show as `installed, enabled`, and all thirteen workflow
+`kanban@kanban` should show as `installed, enabled`, and all fourteen workflow
 names should be available as `$solve`, `$pr-review`, `$pr-rereview`,
 `$pr-revise`, `$issue`, `$autoissue`, `$issue-review`, `$issue-rereview`,
-`$repair`, `$design-epic`, `$process-design-doc`, `$draft-report`, and
-`$process-report` in any Codex session run from this checkout.
+`$repair`, `$design-epic`, `$process-design-doc`, `$draft-report`,
+`$note-problem`, and `$process-report` in any Codex session run from this
+checkout.
 
 Verified against Codex CLI `codex-cli 0.144.6` (`codex --version`), the
 version that provides the `codex plugin` / `codex plugin marketplace`
@@ -87,10 +89,11 @@ which covers exactly the names Kanban's own code spawns.
 | `skills/repair/` | `$repair` | Diagnoses why a pull request cannot merge — merge conflict, any failed check, or a blocking label, in `pullRequestStatus` order — repairs it in the worktree already on the PR's head branch, pushes without force, and hands off to exactly one canonical rereview. Never merges, closes, or sets a verdict label; never removes a blocking label without asking. |
 | `skills/design-epic/` | `$design-epic` | Captures and refines an epic-sized design in one durable `*_design.md` document. Creates no tracker items at all; hands off to `$process-design-doc` only once the user declares the design ready. Paired with the Claude `/design-epic` command. |
 | `skills/process-design-doc/` | `$process-design-doc` | Turns a ready design document into tracker artifacts, the epic first and then **one** dependency-ready child per invocation, using the document's ledger as the durable cursor. Stops for approval before every tracker mutation. Paired with the Claude `/process-design-doc` command. |
-| `skills/draft-report/` | `$draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. |
+| `skills/draft-report/` | `$draft-report` | Turns free-form notes or an audit request into one evidence-backed `*_findings.md` report, presented in full and written only after explicit approval. Files no issues and chooses no dispositions. Paired with the Claude `/draft-report` command. |
+| `skills/note-problem/` | `$note-problem` | Appends **exactly one** verified observation to an existing findings report: preserve the user's wording as a claim, investigate only that claim, classify the result, and record evidence and handoff context. Stops for approval before touching the report, applies no disposition, and creates no tracker item. Paired with the Claude `/note-problem` command. |
 | `skills/process-report/` | `$process-report` | Processes **exactly one** finding per invocation from an existing report: verify, deduplicate, recommend one disposition, stop for approval, then mark the report. Paired with the Claude `/process-report` command. |
 
-The four document workflows are user-invoked only. Kanban's CLI never spawns
+The five document workflows are user-invoked only. Kanban's CLI never spawns
 one, because each has a mandatory human approval stop in the middle; see
 [docs/document-workflow-contract.md §5](../docs/document-workflow-contract.md#5-one-artifact-per-invocation-and-the-approval-stop).
 
@@ -104,17 +107,17 @@ which captures the arc as a durable design document, with
 once created epic trees directly was retired 2026-08-11 in that pipeline's
 favor.
 
-The asymmetry runs the other way for one document workflow: `$draft-report` is
-**Codex-only**, and the Claude marketplace packages no counterpart to it. That
-is a declared gap rather than
-an oversight — authoring a Claude counterpart would be new behavior no pinned
-source defines, which the SHA-pinned vendoring model of issue #118 refused to
-do. `$design-epic` and `$process-design-doc` were Codex-only under the same
-rule until issue #239 landed their decision-authority guardrails here; issue
-#241 transposed the Claude `/design-epic` and `/process-design-doc` commands
-from that pinned source, so the other three document workflows are now
-cross-brand pairs. See
-[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-partially-closed).
+No document workflow is Codex-only any more. `$design-epic` and
+`$process-design-doc` were, until issue #239 landed their decision-authority
+guardrails here and issue #241 transposed the Claude commands from that pinned
+source; `$draft-report` was the last one, and issue #328 transposed
+`/draft-report` from this skill the same way while vendoring `$note-problem`
+into both marketplaces at once. All five document workflows are now cross-brand
+pairs. The rule that made those gaps declared rather than accidental still
+stands for whatever is proposed next: a counterpart is transposed from a
+reviewed, pinned source, never authored from scratch, which is what the
+SHA-pinned vendoring model of issue #118 required. See
+[docs/document-workflow-contract.md §3.5](../docs/document-workflow-contract.md#35-declared-codex-only-asymmetry-now-closed).
 
 `pr-review`, `pr-rereview`, `pr-revise`, and `repair` all delegate publication
 to the bundled coordinator at `skills/pr-review/scripts/review_pr.py`. Kanban
@@ -251,11 +254,11 @@ gate language.
 skills against
 [docs/document-workflow-contract.md](../docs/document-workflow-contract.md):
 every declared asset must exist, no undeclared design or report workflow may
-appear, the document must keep stating the remaining Codex-only asymmetry, the
+appear, the document must keep stating §3.5's standing rule and closure record, the
 design-pair closure record, and the
 design-pipeline epic-planner boundary, and the exact `[#N]`, `[no-issue]`,
 `[deferred]`, `- [x]`, and `- [ ]` literals must survive in the document and in
-the assets — including in all three cross-brand pairs, whose halves may differ
+the assets — including in all five cross-brand pairs, whose halves may differ
 in wording but not on the surface that makes a report or design document
 started under one brand resumable under the other.
 

@@ -114,12 +114,20 @@ DRAFTING_COMMAND_NAMES = {
 }
 
 # The design and report document workflows vendored by issue #229, plus the
-# design pair issue #241 transposed from the post-#239 tracked Codex skills.
-# Also user-invoked and excluded from Haskell name parity.
-# docs/document-workflow-contract.md §3.5 now declares only $draft-report
-# Codex-only, so the Claude plugin must not grow that one.
-DOCUMENT_COMMAND_NAMES = {"design-epic", "process-design-doc", "process-report"}
-CODEX_ONLY_DOCUMENT_WORKFLOWS = ("draft-report",)
+# design pair issue #241 transposed from the post-#239 tracked Codex skills and
+# the report write side issue #328 completed: /draft-report transposed from the
+# tracked Codex skill, and /note-problem authored as the brand transpose of the
+# skill #328 vendored beside it. Also user-invoked and excluded from Haskell
+# name parity. docs/document-workflow-contract.md §3.5's Codex-only set is now
+# empty, so there is no document workflow the Claude plugin must not grow.
+DOCUMENT_COMMAND_NAMES = {
+    "design-epic",
+    "process-design-doc",
+    "draft-report",
+    "note-problem",
+    "process-report",
+}
+CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (

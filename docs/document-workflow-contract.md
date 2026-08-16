@@ -25,7 +25,7 @@ Scope boundaries:
   in [drafting-workflow-contract.md](drafting-workflow-contract.md); nothing
   here redeclares them.
 - Each brand's asset is vendored as that brand's own text. Brand-specific
-  wording may differ, and the three cross-brand pairs are deliberately not
+  wording may differ, and the five cross-brand pairs are deliberately not
   reconciled into one file each. What may not differ is the shared status
   vocabulary in §4 and the processing boundaries in §5.
 
@@ -38,10 +38,13 @@ Machine-readable; parsed verbatim by
 ```text
 claude | /design-epic | claude-plugin/plugins/kanban/commands/design-epic.md
 claude | /process-design-doc | claude-plugin/plugins/kanban/commands/process-design-doc.md
+claude | /draft-report | claude-plugin/plugins/kanban/commands/draft-report.md
+claude | /note-problem | claude-plugin/plugins/kanban/commands/note-problem.md
 claude | /process-report | claude-plugin/plugins/kanban/commands/process-report.md
 codex | $design-epic | codex-plugin/plugins/kanban/skills/design-epic/SKILL.md
 codex | $process-design-doc | codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md
 codex | $draft-report | codex-plugin/plugins/kanban/skills/draft-report/SKILL.md
+codex | $note-problem | codex-plugin/plugins/kanban/skills/note-problem/SKILL.md
 codex | $process-report | codex-plugin/plugins/kanban/skills/process-report/SKILL.md
 ```
 
@@ -55,7 +58,8 @@ does a row whose path is missing from the tracked tree.
 | --- | --- | --- | --- | --- |
 | `/design-epic`, `$design-epic` | Claude and Codex | One `*_design.md` document | No — never | The document's `Design state` and processing ledger |
 | `/process-design-doc`, `$process-design-doc` | Claude and Codex | One approved epic or child disposition per run | Yes, after per-artifact signoff | The design document's `## Processing status` ledger |
-| `$draft-report` | **Codex only** | One `*_findings.md` report | No — never | The report it creates, with every box unchecked |
+| `/draft-report`, `$draft-report` | Claude and Codex | One `*_findings.md` report | No — never | The report it creates, with every box unchecked |
+| `/note-problem`, `$note-problem` | Claude and Codex | One verified observation appended to an existing report | No — never | The report it appends to, with the new box unchecked |
 | `/process-report`, `$process-report` | Claude and Codex | One approved finding disposition per run | Yes, after per-finding signoff | The report's status checklist and heading markers |
 
 ### 3.1 Design capture: `/design-epic` and `$design-epic`
@@ -81,12 +85,20 @@ one dependency-ready child. Each requires the ready state, and returns a
 document whose ledger and delivery plan disagree to its own brand's
 design-capture workflow rather than guessing which representation wins.
 
-### 3.3 Report drafting: `$draft-report`
+### 3.3 Report drafting: `/draft-report` and `$draft-report`
 
-`$draft-report` turns free-form notes or an audit request into one
-evidence-backed findings report, presents the complete draft, and creates the
-file only after explicit approval. It files no issues and chooses no
-dispositions; every status box it writes is unchecked.
+`/draft-report` and `$draft-report` turn free-form notes or an audit request
+into one
+evidence-backed findings report, present the complete draft, and create the
+file only after explicit approval. Neither files an issue or chooses a
+disposition; every status box either writes is unchecked.
+
+Together with `/note-problem` and `$note-problem` in §3.7 these are the report
+**write side**: one starts a report, the other grows an existing one. Both are
+cross-brand pairs, so §4's status vocabulary is a hard compatibility surface
+across the whole write side: a report produced or extended by either brand's
+write-side asset is processable by the other brand's `process-report` without
+translation.
 
 ### 3.4 Report processing: `/process-report` and `$process-report`
 
@@ -97,7 +109,7 @@ Each verifies the finding against the current repository, deduplicates it
 against the tracker, recommends exactly one disposition, and applies it only
 after explicit approval.
 
-These two are one of the three cross-brand pairs in this contract, so §4's
+These two are one of the five cross-brand pairs in this contract, so §4's
 status vocabulary is a hard compatibility surface between them: a report started
 by one brand must be resumable by the other without translation.
 
@@ -107,29 +119,43 @@ through `$process-report` to Codex's `$design-epic` and `$process-design-doc`.
 Neither variant may name a nonexistent counterpart in the other brand's sigil or
 depend on owner-maintained personal copies.
 
-### 3.5 Declared Codex-only asymmetry, partially closed
+### 3.5 Declared Codex-only asymmetry, now closed
 
-`$draft-report` is the sole remaining Codex-only workflow. No Claude
-counterpart to `$draft-report` exists, and that is a declared gap rather than an
-oversight: authoring one would be new behavior that no pinned source defines,
-which is precisely what the SHA-pinned vendoring model of issue #118 refused to
-do. The Claude plugin must not grow one under this contract until a pinned
-source exists to vendor.
+**The Codex-only set is empty.** Every workflow this contract declares is a
+cross-brand pair. This section stays as the closure record and the standing
+rule, because the rule is what governs the next asset somebody proposes, and
+deleting the history would leave that rule looking arbitrary.
 
-`$design-epic` and `$process-design-doc` were Codex-only under the same rule
-until issue #239 landed their decision-authority guardrails in the tracked Codex
-skills. That reviewed, tracked text — `design-epic/SKILL.md` and
-`process-design-doc/SKILL.md` under `codex-plugin/plugins/kanban/skills/` — is
-the pinned source `/design-epic` and `/process-design-doc` were transposed
-from, so the clearing condition this section states was satisfied for the design
-pair and for it alone. The Claude commands are that source's text under Claude
-command frontmatter, `$ARGUMENTS` plumbing, Claude tool names, and Claude
-origin markers; nothing else about them is new behavior.
+**The standing rule.** A Claude counterpart is not authored from scratch. Doing
+so would be new behavior that no pinned source defines, which is precisely what
+the SHA-pinned vendoring model of issue #118 refused to do. So a workflow
+existing in one brand alone is a declared gap rather than an oversight, and the
+other brand's plugin must not grow a counterpart under this contract until a
+reviewed, pinned source exists to transpose from. That clearing condition is
+what each entry below records as satisfied.
 
-The remaining asymmetry runs opposite to the Claude-only `/draft-issues`
-boundary in
+**The closure record.** Each workflow that left the Codex-only set, with the
+pinned source that cleared it:
+
+| Workflow | Left the set | Pinned source that satisfied the clearing condition |
+| --- | --- | --- |
+| `design-epic` | Issue #241 | `codex-plugin/plugins/kanban/skills/design-epic/SKILL.md`, after issue #239 landed its decision-authority guardrails in the tracked text |
+| `process-design-doc` | Issue #241 | `codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md`, cleared by #239 the same way |
+| `draft-report` | Issue #328 | `codex-plugin/plugins/kanban/skills/draft-report/SKILL.md`, the reviewed tracked skill issue #239 strengthened |
+
+In each case the Claude command is that source's text under Claude command
+frontmatter, `$ARGUMENTS` plumbing, Claude tool names, and Claude origin
+markers; nothing else about any of them is new behavior.
+
+`note-problem` never appeared in this set. It entered the contract in issue #328
+as a pair in both bundles at once, vendored from a reviewed personal source
+under the same pinning rule rather than transposed out of an existing tracked
+asset.
+
+The asymmetry that remains in the packaged workflows is the Claude-only
+`/draft-issues` boundary in
 [drafting-workflow-contract.md §3.2](drafting-workflow-contract.md#32-claude-only-breadth-draft-issues),
-and is recorded the same way rather than closed.
+which is that contract's to record and runs opposite to the ones closed here.
 
 ### 3.6 The epic planner: the design pair with the processing pair
 
@@ -144,6 +170,41 @@ remains unpackaged in both plugins per
 and the personal `/epic` command that once did so was retired 2026-08-11 in
 this pipeline's favor. The design workflow settles behavior, scope, decisions,
 and slice boundaries without touching the tracker.
+
+### 3.7 Observation capture: `/note-problem` and `$note-problem`
+
+`/note-problem` and `$note-problem` append exactly one verified observation to
+an existing findings report: they preserve the user's wording as a claim,
+investigate only that claim against the current repository, classify the result,
+and record concise evidence and handoff context under the report's existing
+key pattern and concern chapters. Each stops for explicit approval before
+touching the report, and each stops after one observation.
+
+They are the write side's second half (§3.3) and the fifth cross-brand pair, so
+§4's status vocabulary binds them as hard as it binds `process-report`: an
+observation either brand appends is processable by the other brand's
+`process-report` without translation. Every checklist line they write is
+unchecked, because an observation just captured is unprocessed by definition.
+
+Two things separate them from the drafting assets they sit beside, and both
+follow from their subject being a document that already exists:
+
+- **They publish.** A report they append to may already be classified
+  `coordination`, and an appended observation left in one checkout is a cursor
+  only that checkout can resume. So they take §8's ownership resolution and §9's
+  same-run publication exactly as the processing assets do, rather than §9.1's
+  novel-document rule. A report one of them creates because it was missing is
+  the ordinary `pr-atomic` case §9.2 already fails closed on: not yet tracked,
+  matched by no §7 row, and declined by the publication module with the
+  approved content applied locally.
+- **They acquire no tracker transaction.** They create, link, label, and comment
+  on nothing, so §9.6's rule that a disposition mutating no tracker acquires no
+  transaction covers them outright. A record acquired here would be one nothing
+  could ever resolve.
+
+They apply no disposition. `[#N]`, `[no-issue]`, and `[deferred]` remain
+`process-report`'s alone, and an observation these workflows capture is
+unprocessed work the report still owes.
 
 ## 4. Shared status vocabulary
 
@@ -162,7 +223,8 @@ The at-a-glance index is a Markdown task list, one line per entry, using
 exactly `- [x]` for a terminal disposition and `- [ ]` for anything still
 outstanding. `[deferred]` and unmarked entries stay `- [ ]`, so the count of
 unchecked boxes is the count of entries a document still owes. `/design-epic`,
-`$design-epic`, and `$draft-report` write only the unchecked form: none of them
+`$design-epic`, `/draft-report`, `$draft-report`, `/note-problem`, and
+`$note-problem` write only the unchecked form: none of them
 applies a disposition, so a checked box in a document they just produced would
 be a bug.
 
@@ -171,8 +233,10 @@ entry, the second keeps it open behind a stated precondition. "Needs more
 thought", "low priority", and "revisit later" are not preconditions.
 
 Every cross-brand pair must state these literals identically — `/process-report`
-with `$process-report`, `/design-epic` with `$design-epic`, and
-`/process-design-doc` with `$process-design-doc`. That is what makes a report or
+with `$process-report`, `/design-epic` with `$design-epic`,
+`/process-design-doc` with `$process-design-doc`, `/draft-report` with
+`$draft-report`, and `/note-problem` with `$note-problem`. That is what makes a
+report or
 a design document portable between the brands, and it is the part of each pair's
 otherwise-permitted textual divergence that this contract does not allow.
 
@@ -213,8 +277,9 @@ licensing a guess.
 
 This is the design-conversation half of the boundary above: §5 governs the
 external mutation, §5.1 governs the choice that mutation encodes. The report
-workflows are unaffected — `$draft-report` and both `process-report` variants
-keep exactly the two boundaries of §5.
+workflows are unaffected — both `draft-report` variants, both `note-problem`
+variants, and both `process-report` variants keep exactly the two boundaries of
+§5.
 
 ## 6. Project-scoped locations
 
@@ -239,12 +304,17 @@ parses §2 and fails if:
 
 - a declared asset path is absent from the tracked tree;
 - a design or report document workflow exists under either plugin that §2 does
-  not declare;
+  not declare — which requires `note-problem` to be a member of the
+  document-workflow **name** set and not only of the row list above, since a
+  workflow file present in a bundle is compared against that name set to decide
+  whether a declared row was owed for it;
 - a declared row's brand, invocation sigil, or workflow name disagrees with the
   plugin and file the row points at;
-- this document stops stating the remaining Codex-only asymmetry (§3.5), the
-  design-pipeline epic-planner boundary (§3.6), or the Haskell
-  invocation-parity exclusion (§1);
+- a cross-brand pair declares fewer than its two actual files;
+- the Codex-only set of §3.5 becomes non-empty, or this document stops stating
+  that section's standing rule and closure record, the design-pipeline
+  epic-planner boundary (§3.6), the observation-capture boundary (§3.7), or the
+  Haskell invocation-parity exclusion (§1);
 - this document or a declared asset drops one of the exact `[#N]`,
   `[no-issue]`, or `[deferred]` literals of §4, or an asset that applies a
   disposition drops a checklist form — which is how the surface the two brands
@@ -270,14 +340,17 @@ parses §2 and fails if:
   `$process-report`, `/process-design-doc`, and `$process-design-doc` from
   reverting to the unscoped form that binds them to the shell's current
   directory;
-- a processing asset loses its §9 publication step, or stops resolving
+- a publishing asset — the four processing assets or either `note-problem`
+  variant — loses its §9 publication step, or stops resolving
   `tools/publish_coordination_doc.py` from the owning repository's own write
   root;
-- a processing asset carries any part of the publication sequence itself rather
+- a publishing asset carries any part of the publication sequence itself rather
   than invoking that module, or writes the document instead of handing over its
   approved content;
 - a drafting asset stops stating that a novel document remains local until it is
-  separately classified and published;
+  separately classified and published, or either `note-problem` variant is
+  reclassified into that rule instead of the same-run publication rule its
+  existing-document subject requires;
 - this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
   boundary, or its rule that publication is reported only on reachability;
 - a processing asset drops the §9.6 tracker-transaction clause for any one of
@@ -286,8 +359,8 @@ parses §2 and fails if:
   comment, or an umbrella-epic checklist edit — since a single record-step
   phrase somewhere in a file proves nothing about the branch that skipped it;
 - a processing asset carries any part of the transaction mechanism itself
-  rather than invoking `tools/tracker_transaction.py`, or a drafting asset
-  invokes it at all;
+  rather than invoking `tools/tracker_transaction.py`, or a drafting asset or
+  `note-problem` variant invokes it at all;
 - either `process-design-doc` variant reintroduces the instruction to write
   partial-failure recovery information into the document, which contradicts the
   publication module being that document's only writer;
@@ -408,10 +481,18 @@ same run that mutates it, rather than left for a later manual commit.
   contradict §9.4's rule that the module is the document's only writer, and the
   document it left behind would be refused as no longer matching the
   publication tip.
-- The three **drafting** assets — `/design-epic`, `$design-epic`, and
-  `$draft-report` — publish nothing at all. A document one of them newly
-  creates is local and unpublished. Its first publication requires a separate
-  pull request that adds both the document and its `coordination`
+- The two **observation-capture** assets — `/note-problem` and `$note-problem` —
+  publish the same way and under the same §9.2 eligibility, because their
+  subject is a report that already exists and may already be classified
+  `coordination`. They differ from the four above in one respect only: they
+  mutate no tracker, so they acquire no §9.6 transaction and have no tracker
+  identities to carry into publication. Everything else in this section applies
+  to them unchanged, the rule that the module is the document's only writer
+  included.
+- The four **drafting** assets — `/design-epic`, `$design-epic`,
+  `/draft-report`, and `$draft-report` — publish nothing at all. A document one
+  of them newly creates is local and unpublished. Its first publication requires
+  a separate pull request that adds both the document and its `coordination`
   classification; only after that pull request lands may a later processing run
   publish direct-to-`master` mutations to it. Automating that enrollment pull
   request is outside this contract.
@@ -420,6 +501,14 @@ The split follows from §7 rather than from convenience: the classifier's subjec
 inventory is `git ls-files '*.md'`, so a document a drafting asset just created
 is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
 moment at which a novel document is directly publishable.
+
+That is also why `note-problem` sits on the publishing side despite creating a
+report when one is missing: it hands every mutation to the module, which
+classifies the path itself and declines a not-yet-tracked one, reporting
+`not-published` with the approved content applied locally. Classifying it as a
+drafting asset instead would leave an appended observation on an already-tracked
+`coordination` report permanently unpublished, which is the exact
+one-checkout-cursor failure this section exists to prevent.
 
 ### 9.2 Eligibility, and the fail-closed default
 
@@ -647,7 +736,9 @@ a target issue plus a verified post-edit fingerprint — so what a step records 
 the identity appropriate to its own kind of mutation, never an assumed issue
 number.
 
-**A disposition that mutates no tracker acquires no transaction.** `[no-issue]`
+**A disposition that mutates no tracker acquires no transaction.** The two
+`note-problem` variants mutate no tracker at all and so never acquire one;
+`[no-issue]`
 and `[deferred]` mutate nothing; neither does an `Existing issue` linked through
 `process-report` with no approved comment, which is a document change and not a
 tracker one; and neither does `process-report`'s `Epic` disposition: that arc is handed to the design pair, and its epic is created
