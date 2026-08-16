@@ -322,6 +322,23 @@ spec = do
           _ <- waitForProcess handle
           pure ()
 
+    -- An escalation can only verify the identities the census gave it, so a
+    -- member that forks a worker and exits between those two reads leaves it
+    -- reporting the group clear — everyone it was told about really is gone —
+    -- while the worker it never saw keeps running. The fixture forces exactly
+    -- that ordering rather than racing for it: the first `ps` takes its
+    -- snapshot while the leader is still alive, then releases the leader to
+    -- fork and exit, and only returns that older snapshot once it has.
+    it "kills a worker forked between the census and its re-check" $
+      withPingRoot $ \root -> do
+        withProcessSnapshotForkingAfterCensus root $ do
+          handle <- spawnLeaderForkingOnRelease root
+          sweepOwnedGroup handle
+          helper <- helperPid root
+          processAlive helper `shouldReturn` False
+          _ <- waitForProcess handle
+          pure ()
+
     it "takes the whole group and nothing outside it" $
       ownedGroupMembers 500 mixedSnapshot
         `shouldBe` [ leader 500 "Thu Aug 15 10:00:00 2026",
@@ -737,6 +754,59 @@ withProcessSnapshotHangingAfter root answers action = do
         "exec /bin/ps \"$@\""
       ]
   action
+
+-- | A @ps@ whose first call pins the ordering the race needs: it takes its
+-- snapshot while the leader is still alive, releases the leader to fork its
+-- worker and exit, waits for that to have happened, and only then answers with
+-- the snapshot it took earlier. Every later call answers normally, so the
+-- re-check sees the world as it is by then — leader gone, worker running.
+withProcessSnapshotForkingAfterCensus :: FilePath -> IO result -> IO result
+withProcessSnapshotForkingAfterCensus root action = do
+  let counter = root </> "ps-calls"
+  _ <-
+    writeExecutableScript
+      (root </> "bin" </> "ps")
+      [ ByteString.pack ("calls=$(cat \"" <> counter <> "\" 2>/dev/null || echo 0)"),
+        "calls=$((calls + 1))",
+        ByteString.pack ("printf '%s' \"$calls\" > \"" <> counter <> "\""),
+        "if [ \"$calls\" -eq 1 ]; then",
+        "  census=$(/bin/ps \"$@\")",
+        ByteString.pack ("  : > \"" <> releaseFile root <> "\""),
+        "  waited=0",
+        ByteString.pack ("  while [ ! -f \"" <> forkedFile root <> "\" ] && [ \"$waited\" -lt 100 ]; do"),
+        "    sleep 0.05",
+        "    waited=$((waited + 1))",
+        "  done",
+        "  sleep 0.3",
+        "  printf '%s\\n' \"$census\"",
+        "  exit 0",
+        "fi",
+        "exec /bin/ps \"$@\""
+      ]
+  action
+
+-- | A group leader that waits to be released, then forks a worker into its
+-- group, records it, and exits — leaving the worker with no live ancestor.
+--
+-- The worker's pid is deliberately not read here: it does not exist until the
+-- sweep's own first census releases the leader, so the caller reads it after
+-- the sweep instead.
+spawnLeaderForkingOnRelease :: FilePath -> IO ProcessHandle
+spawnLeaderForkingOnRelease root = do
+  script <-
+    writeExecutableScript
+      (root </> "late-fork-leader.sh")
+      [ ByteString.pack ("while [ ! -f \"" <> releaseFile root <> "\" ]; do sleep 0.02; done"),
+        ByteString.pack ("sh -c 'exec sleep 30' & printf '%s' \"$!\" > \"" <> helperPidFile root <> "\""),
+        ByteString.pack (": > \"" <> forkedFile root <> "\"")
+      ]
+  (_, _, _, handle) <-
+    createProcess (proc script []) {std_in = NoStream, std_out = NoStream, std_err = NoStream, new_session = True}
+  pure handle
+
+releaseFile, forkedFile :: FilePath -> FilePath
+releaseFile root = root </> "leader-released"
+forkedFile root = root </> "leader-forked"
 
 -- | A live, unreaped group leader with a helper running in its group, which is
 -- the state a sweep is asked to clear.

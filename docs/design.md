@@ -1789,6 +1789,16 @@ and then stopped answering able to hold the escalation open, and with it the
 group it was clearing. A re-check that never answers leaves the escalation
 unable to say the group is gone, so the cleanup finishes without one.
 
+The cleanup also censuses again after an escalation reports the group clear,
+and keeps going until a read shows it empty. An escalation can only verify the
+identities its census named, so a member that forks a worker and exits between
+those two reads leaves it correctly reporting everyone it was told about gone,
+while the worker it never saw carries on. Repeating is safe for the same reason
+the first read was — the leader is unreaped throughout, so the group stays
+provably Kanban's — and the deadline is what ends it: a group that kept
+producing members reaches the blind termination above, which takes it without
+naming anyone in it.
+
 A machine whose process snapshots fail or hang loses the ability to see the
 ping finish, never the cleanup. Such a snapshot is treated as a poll that
 learned nothing rather than as a reason to wait on the handle, because that

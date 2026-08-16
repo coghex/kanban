@@ -40,7 +40,7 @@ where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, finally, try)
-import Control.Monad (unless, void)
+import Control.Monad (void)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -497,17 +497,41 @@ sweepOwnedGroup processHandle = do
       -- leave a `ps` that answered once and then hung able to hold the
       -- escalation open, and with it the group it was clearing.
       deadlineAt <- cleanupDeadline
-      snapshotResult <- deadlineSnapshot deadlineAt
-      case snapshotResult of
-        Left _ -> terminateOwnedGroupBlind groupPid
-        Right snapshot -> do
-          let members = ownedGroupMembers groupPid snapshot
-          unless (null members) $ do
-            escalated <- killVerifiedGroupWith (deadlineSnapshot deadlineAt) groupPid members
-            -- Unverified is not the same as clear: a re-check that never
-            -- answered leaves the escalation unable to say the group is gone,
-            -- so it finishes the job without one.
-            either (const (terminateOwnedGroupBlind groupPid)) pure escalated
+      clearOwnedGroup deadlineAt groupPid
+
+-- | Signals the group until a snapshot shows it empty, the deadline runs out,
+-- or a read stops answering.
+--
+-- The repetition is not belt and braces. An escalation verifies against the
+-- identities the census handed it, so a member that forks a worker and exits
+-- in the moment between the two reads leaves that escalation reporting the
+-- group clear — every identity it was told about really is gone — while the
+-- worker it never saw carries on. Re-censusing is what closes that, and it is
+-- allowed to repeat because the leader is still unreaped throughout, so the
+-- group remains just as provably Kanban's on the second read as on the first.
+--
+-- The deadline is what makes it terminate. A group that kept producing new
+-- members would keep this going otherwise; when it expires, the blind
+-- termination below takes the group without needing to name anyone in it.
+clearOwnedGroup :: Word64 -> Int -> IO ()
+clearOwnedGroup deadlineAt groupPid = do
+  snapshotResult <- deadlineSnapshot deadlineAt
+  case snapshotResult of
+    Left _ -> terminateOwnedGroupBlind groupPid
+    Right snapshot -> case ownedGroupMembers groupPid snapshot of
+      [] -> pure ()
+      members -> do
+        escalated <- killVerifiedGroupWith (deadlineSnapshot deadlineAt) groupPid members
+        case escalated of
+          -- Unverified is not the same as clear: a re-check that never
+          -- answered leaves the escalation unable to say the group is gone,
+          -- so it finishes the job without one.
+          Left _ -> terminateOwnedGroupBlind groupPid
+          Right () -> do
+            now <- getMonotonicTimeNSec
+            if now >= deadlineAt
+              then terminateOwnedGroupBlind groupPid
+              else clearOwnedGroup deadlineAt groupPid
 
 cleanupDeadline :: IO Word64
 cleanupDeadline = (+ (fromIntegral cleanupBudgetMicros * 1000)) <$> getMonotonicTimeNSec
