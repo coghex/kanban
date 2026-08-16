@@ -91,10 +91,17 @@ defaultLimitsConfig =
     }
 
 -- | Provider timeouts, in whole seconds.
+--
+-- The ping fields are separate from 'timeoutsCodexSeconds' and
+-- 'timeoutsClaudeSeconds' on purpose: those two bound an account-status read,
+-- which is a different and much shorter operation than the model round trip a
+-- deliberate ping submits (§14).
 data TimeoutsConfig = TimeoutsConfig
   { timeoutsGithubSeconds :: Int,
     timeoutsCodexSeconds :: Int,
-    timeoutsClaudeSeconds :: Int
+    timeoutsClaudeSeconds :: Int,
+    timeoutsPingCodexSeconds :: Int,
+    timeoutsPingClaudeSeconds :: Int
   }
   deriving stock (Eq, Show)
 
@@ -103,7 +110,9 @@ defaultTimeoutsConfig =
   TimeoutsConfig
     { timeoutsGithubSeconds = 30,
       timeoutsCodexSeconds = 10,
-      timeoutsClaudeSeconds = 45
+      timeoutsClaudeSeconds = 45,
+      timeoutsPingCodexSeconds = 120,
+      timeoutsPingClaudeSeconds = 120
     }
 
 -- | An external usage-provider command: executable followed by literal
@@ -167,7 +176,9 @@ emptyLimitsOverride =
 data TimeoutsOverride = TimeoutsOverride
   { overrideGithubSeconds :: Maybe Int,
     overrideCodexSeconds :: Maybe Int,
-    overrideClaudeSeconds :: Maybe Int
+    overrideClaudeSeconds :: Maybe Int,
+    overridePingCodexSeconds :: Maybe Int,
+    overridePingClaudeSeconds :: Maybe Int
   }
   deriving stock (Eq, Show)
 
@@ -176,7 +187,9 @@ emptyTimeoutsOverride =
   TimeoutsOverride
     { overrideGithubSeconds = Nothing,
       overrideCodexSeconds = Nothing,
-      overrideClaudeSeconds = Nothing
+      overrideClaudeSeconds = Nothing,
+      overridePingCodexSeconds = Nothing,
+      overridePingClaudeSeconds = Nothing
     }
 
 -- | A single '[repositories."owner/name"]' table. Only workflow, limits, and
@@ -318,7 +331,9 @@ applyTimeoutsOverride base override =
   base
     { timeoutsGithubSeconds = fromMaybe base.timeoutsGithubSeconds override.overrideGithubSeconds,
       timeoutsCodexSeconds = fromMaybe base.timeoutsCodexSeconds override.overrideCodexSeconds,
-      timeoutsClaudeSeconds = fromMaybe base.timeoutsClaudeSeconds override.overrideClaudeSeconds
+      timeoutsClaudeSeconds = fromMaybe base.timeoutsClaudeSeconds override.overrideClaudeSeconds,
+      timeoutsPingCodexSeconds = fromMaybe base.timeoutsPingCodexSeconds override.overridePingCodexSeconds,
+      timeoutsPingClaudeSeconds = fromMaybe base.timeoutsPingClaudeSeconds override.overridePingClaudeSeconds
     }
 
 --------------------------------------------------------------------------------
@@ -466,11 +481,15 @@ timeoutsOverrideParser = do
   githubSecondsValue <- optKeyOf "github_seconds" parsePositiveTimeoutSeconds
   codexSecondsValue <- optKeyOf "codex_seconds" parsePositiveTimeoutSeconds
   claudeSecondsValue <- optKeyOf "claude_seconds" parsePositiveTimeoutSeconds
+  pingCodexSecondsValue <- optKeyOf "ping_codex_seconds" parsePositiveTimeoutSeconds
+  pingClaudeSecondsValue <- optKeyOf "ping_claude_seconds" parsePositiveTimeoutSeconds
   pure
     TimeoutsOverride
       { overrideGithubSeconds = githubSecondsValue,
         overrideCodexSeconds = codexSecondsValue,
-        overrideClaudeSeconds = claudeSecondsValue
+        overrideClaudeSeconds = claudeSecondsValue,
+        overridePingCodexSeconds = pingCodexSecondsValue,
+        overridePingClaudeSeconds = pingClaudeSecondsValue
       }
 
 usageConfigParser :: ParseTable Position UsageConfig

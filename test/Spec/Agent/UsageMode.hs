@@ -178,13 +178,13 @@ spec = do
     it "keeps the global usage commands, timeouts, and cache setting" $ do
       let resolved = resolveGlobalConfig globalOnlyRawConfig
       resolved.resolvedUsage.usageCodexCommand `shouldBe` Just (UsageCommandConfig ["global-codex"])
-      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
+      resolved.resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13
       resolved.resolvedCache `shouldBe` False
 
     -- The mode resolves no @owner/name@, so there is nothing for an override
     -- to be keyed by; a repository-scoped timeout must not leak in.
     it "applies no repository override" $
-      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9
+      (resolveGlobalConfig overriddenRawConfig).resolvedTimeouts `shouldBe` TimeoutsConfig 5 7 9 11 13
 
   describe "acquisition against real provider commands" $ do
     it "answers from a directory that is not a Git repository at all" $
@@ -325,7 +325,7 @@ globalOnlyRawConfig :: RawConfig
 globalOnlyRawConfig =
   defaultRawConfig
     { rawCache = False,
-      rawTimeouts = TimeoutsConfig 5 7 9,
+      rawTimeouts = TimeoutsConfig 5 7 9 11 13,
       rawUsage = UsageConfig (Just (UsageCommandConfig ["global-codex"])) Nothing
     }
 
@@ -337,7 +337,7 @@ overriddenRawConfig =
     { rawRepositories =
         Map.singleton
           "coghex/kanban"
-          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62)}
+          emptyRepositoryOverride {repositoryOverrideTimeouts = TimeoutsOverride (Just 60) (Just 61) (Just 62) (Just 63) (Just 64)}
     }
 
 -- | Both providers pointed at real executables, on top of the shared resolved

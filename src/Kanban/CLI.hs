@@ -24,6 +24,11 @@ data Options = Options
     optionUsage :: Bool,
     optionFresh :: Bool,
     optionJson :: Bool,
+    -- | Every @--ping@ occurrence, in order, still unvalidated.  Collected as
+    -- a list rather than a 'Maybe' so that supplying the flag twice — with
+    -- two brands or the same one — reaches 'Kanban.Ping.resolvePingBrand' as
+    -- the error it is, instead of one occurrence silently winning.
+    optionPing :: [String],
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
@@ -92,6 +97,13 @@ optionsParser =
     <*> switch
       ( long "json"
           <> help "With --usage, write a machine-readable document instead of the human rendering"
+      )
+    <*> many
+      ( strOption
+          ( long "ping"
+              <> metavar "codex|claude"
+              <> help "Start the named provider's usage window with one deliberate model request, then exit"
+          )
       )
     <*> switch (long "ascii" <> help "Use ASCII borders")
     <*> switch (long "no-cache" <> help "Do not read or write snapshots")

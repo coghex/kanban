@@ -45,10 +45,17 @@ excerpt_lines = 3
 # traversal rather than the whole refresh: a repository large enough to need
 # many pages gets the full budget for each of them. Values are positive whole
 # seconds.
+#
+# codex_seconds and claude_seconds bound an account-status read. The
+# ping_* keys bound the single model request `kanban --ping codex` and
+# `kanban --ping claude` submit, which is a much longer operation, so they
+# are separate keys with their own 120-second defaults.
 [timeouts]
 github_seconds = 30
 codex_seconds = 10
 claude_seconds = 45
+ping_codex_seconds = 120
+ping_claude_seconds = 120
 
 # Omit `command` to use the built-in provider. When present it is a non-empty
 # argv array whose first element is a non-empty executable path/name,
@@ -96,6 +103,8 @@ claude_seconds = 45
 # github_seconds = 30
 # codex_seconds = 10
 # claude_seconds = 45
+# ping_codex_seconds = 120
+# ping_claude_seconds = 120
 
 # Kanban's own repository, and the one live table in this file. The paths below
 # are exactly the `coordination` rows of docs/agent-workflow-contract.md

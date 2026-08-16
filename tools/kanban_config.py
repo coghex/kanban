@@ -111,6 +111,11 @@ class TimeoutsConfig:
     github_seconds: int = 30
     codex_seconds: int = 10
     claude_seconds: int = 45
+    # A deliberate `kanban --ping` submits a model prompt, so it is bounded
+    # separately from the account-status reads above, which only fetch a
+    # number (docs/design.md section 14).
+    ping_codex_seconds: int = 120
+    ping_claude_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,8 @@ class TimeoutsOverride:
     github_seconds: int | None = None
     codex_seconds: int | None = None
     claude_seconds: int | None = None
+    ping_codex_seconds: int | None = None
+    ping_claude_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -481,11 +488,15 @@ def _parse_timeouts_override(value: dict, path: str, warnings: list[str]) -> Tim
     github_seconds = _pop_positive_timeout_seconds(table, "github_seconds", path)
     codex_seconds = _pop_positive_timeout_seconds(table, "codex_seconds", path)
     claude_seconds = _pop_positive_timeout_seconds(table, "claude_seconds", path)
+    ping_codex_seconds = _pop_positive_timeout_seconds(table, "ping_codex_seconds", path)
+    ping_claude_seconds = _pop_positive_timeout_seconds(table, "ping_claude_seconds", path)
     _collect_unknown(table, path, warnings)
     return TimeoutsOverride(
         github_seconds=github_seconds,
         codex_seconds=codex_seconds,
         claude_seconds=claude_seconds,
+        ping_codex_seconds=ping_codex_seconds,
+        ping_claude_seconds=ping_claude_seconds,
     )
 
 
