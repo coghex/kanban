@@ -624,7 +624,12 @@ def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
     return update_json_document(path, merged)
 
 
-def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
+def merge_repository_record(
+    identity: str,
+    updates: dict[str, Any],
+    *,
+    discard: frozenset[str] | tuple[str, ...] = (),
+) -> Path:
     """Merge `updates` into one repository's entry under the shared document's
     `repositories` table, leaving every sibling entry and every top-level key
     untouched.
@@ -634,6 +639,15 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
     other installed repository. The entry itself is merged for the same reason
     one level down — the installer writes `config_path` and the controller
     writes the identifier and definition path, and either may run without the other.
+
+    `discard` is the exception a merge alone cannot express: keys the writer
+    owns outright and must therefore replace rather than add to. Only the
+    service-manager keys are ever discarded, and only by the writer that is
+    about to restate them, so everything an installer persisted beside them
+    survives. Without it, reinstalling a repository under the other service
+    manager would leave the first manager's keys beside the second's — the
+    mixed shape a reader is required to fail closed on, which would make the
+    reinstall itself the thing that broke discovery.
 
     The read that computes the merge happens inside `update_json_document`'s
     lock, so a repository installed between another writer's read and its write
@@ -645,6 +659,7 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
         records = dict(records) if isinstance(records, dict) else {}
         existing = records.get(identity)
         entry = dict(existing) if isinstance(existing, dict) else {}
+        entry = {key: value for key, value in entry.items() if key not in discard}
         entry.update(updates)
         records[identity] = entry
         return {**document, RECORD_REPOSITORIES_KEY: records}
@@ -674,6 +689,12 @@ def write_discovery_record(job: DrainerJob) -> Path:
             **backend.record_entry(job.label, job.definition_path),
             "repository": str(job.repo_path),
         },
+        # Every service-manager key, not just this backend's: reinstalling a
+        # repository under the other manager must leave the entry naming one
+        # backend rather than carrying both, and the merge that keeps
+        # `config_path` alive would otherwise keep the superseded manager's
+        # keys alive with it.
+        discard=service_manager.RECORD_KEYS,
     )
 
 

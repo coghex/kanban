@@ -522,6 +522,41 @@ class SystemdDefinitionTests(SystemdBackendTestCase):
         )
         self.assertIn("WorkingDirectory=/tmp/100%%", directives)
 
+    def test_a_path_directive_is_percent_escaped_and_never_quoted(self):
+        # Established against real systemd (255.9 and 257.9), because guessing
+        # gets this wrong in both directions:
+        #
+        #   * `WorkingDirectory=`, `StandardOutput=` and `StandardError=` are
+        #     NOT unquoted or unescaped. A backslash and a double quote in the
+        #     value round-trip verbatim, and `systemctl show` reports the path
+        #     unchanged — so they need no escaping. Quoting them instead makes
+        #     the unit invalid outright: systemd refuses to start it with "has
+        #     a bad unit file setting".
+        #   * Specifiers ARE expanded, so `%` must still be doubled. A bare
+        #     `%n` in a path becomes the unit's own name.
+        #
+        # `ExecStart` is the opposite on both counts, which is why the two are
+        # rendered by different helpers.
+        awkward = '/tmp/dir with space and \\ backslash and " quote and %n'
+        rendered = self.backend.render_definition(
+            self.definition(
+                working_directory=awkward,
+                stdout_path=awkward + "/out",
+                stderr_path=awkward + "/err",
+            )
+        )
+        directives = self.directives(rendered)
+        expected = '/tmp/dir with space and \\ backslash and " quote and %%n'
+        self.assertIn(f"WorkingDirectory={expected}", directives)
+        self.assertIn(f"StandardOutput=append:{expected}/out", directives)
+        self.assertIn(f"StandardError=append:{expected}/err", directives)
+        # Never quoted: a leading `"` is what makes systemd read the value as
+        # a quoted string, and for these three settings that is the rejection
+        # above rather than an unquoted path.
+        for directive in directives:
+            if directive.startswith(("WorkingDirectory=", "StandardOutput=", "StandardError=")):
+                self.assertFalse(directive.split("=", 1)[1].startswith('"'), directive)
+
     def test_a_line_break_is_refused_rather_than_written_into_the_unit(self):
         # The one input that cannot be escaped into safety: it would end the
         # directive and leave the rest of the value being read as unit syntax.
@@ -717,6 +752,21 @@ class RecordEntryTests(SystemdBackendTestCase):
         launchd_keys = set(launchd.record_entry("x", Path("/tmp/x.plist")))
         systemd_keys = set(self.backend.record_entry("x.service", Path("/tmp/x.service")))
         self.assertEqual(launchd_keys & systemd_keys, {"backend"})
+
+    def test_the_owned_key_set_covers_every_key_any_backend_writes(self):
+        # `RECORD_KEYS` is what a writer clears before restating its own, so a
+        # backend whose keys escaped it would leave the superseded manager's
+        # keys in the entry — the mixed shape again, arrived at by reinstalling
+        # rather than by hand-editing.
+        launchd = service_manager.LaunchdBackend(self.runner)
+        written = set(launchd.record_entry("x", Path("/tmp/x.plist"))) | set(
+            self.backend.record_entry("x.service", Path("/tmp/x.service"))
+        )
+        self.assertEqual(written, set(service_manager.RECORD_KEYS))
+        # And it covers nothing else: clearing a key an installer persisted —
+        # `config_path` above all — would make a reinstall lose configuration.
+        self.assertNotIn("config_path", service_manager.RECORD_KEYS)
+        self.assertNotIn("repository", service_manager.RECORD_KEYS)
 
     def test_the_backend_name_is_the_discriminator_and_the_wording_noun(self):
         # One string with two jobs, so a record can never be keyed on a name

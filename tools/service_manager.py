@@ -106,6 +106,20 @@ SYSTEMD = "systemd"
 SYSTEMD_UNIT_SUFFIX = ".service"
 LEGACY_UNIT_NAME = f"{LEGACY_LABEL}{SYSTEMD_UNIT_SUFFIX}"
 
+# The discovery-record keys this boundary owns, per backend and in total.
+#
+# `RECORD_KEYS` is what a writer must clear from an entry before writing its
+# own: a repository reinstalled under the other manager would otherwise keep
+# the first manager's keys beside the second's, and that mixed shape is exactly
+# what a reader must fail closed on. Clearing is scoped to these names alone,
+# so `config_path` and anything else an installer persisted survives.
+RECORD_BACKEND_KEY = "backend"
+LAUNCHD_RECORD_KEYS = ("launchd_label", "plist_path")
+SYSTEMD_RECORD_KEYS = ("systemd_unit", "unit_path")
+RECORD_KEYS = frozenset(
+    {RECORD_BACKEND_KEY, *LAUNCHD_RECORD_KEYS, *SYSTEMD_RECORD_KEYS}
+)
+
 
 def _systemd_user_dir() -> Path:
     """systemd's own user-unit directory, by systemd's own rule.
@@ -376,10 +390,11 @@ class LaunchdBackend(ServiceManagerBackend):
         # drainer already carries and every released Kanban already reads, so
         # they stay exactly as they are; `backend` joins them so a reader
         # never has to infer launchd from the absence of anything.
+        identifier_key, definition_key = LAUNCHD_RECORD_KEYS
         return {
-            "backend": LAUNCHD,
-            "launchd_label": identifier,
-            "plist_path": str(definition_path),
+            RECORD_BACKEND_KEY: LAUNCHD,
+            identifier_key: identifier,
+            definition_key: str(definition_path),
         }
 
     def load_definition(self, identifier: str) -> None:
@@ -554,10 +569,11 @@ class SystemdBackend(ServiceManagerBackend):
         )
 
     def record_entry(self, identifier: str, definition_path: Path) -> dict[str, str]:
+        identifier_key, definition_key = SYSTEMD_RECORD_KEYS
         return {
-            "backend": SYSTEMD,
-            "systemd_unit": identifier,
-            "unit_path": str(definition_path),
+            RECORD_BACKEND_KEY: SYSTEMD,
+            identifier_key: identifier,
+            definition_key: str(definition_path),
         }
 
     def load_definition(self, identifier: str) -> None:

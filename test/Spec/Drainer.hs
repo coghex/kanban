@@ -185,6 +185,25 @@ spec = do
       message launchdWithUnit `shouldMention` "unit_path"
       message undeclaredWithUnit `shouldMention` "systemd"
 
+    it "tells an absent backend field apart from one explicitly set to null" $ do
+      -- Only *absent* is the legacy shape. A null was written by something
+      -- that knew the field existed and still named no manager, so reading it
+      -- as launchd would resolve a record nobody can vouch for — and the two
+      -- are the same value to a decoder that asks with `.:?`.
+      let entry body = ByteString.pack ("{\"repositories\":{\"example/project\":" <> body <> "}}")
+          nulled =
+            entry
+              "{\"backend\":null,\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+          absent =
+            entry
+              "{\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+      fmap (fmap (.drainerRecordBackend)) (drainerRecordFromBytes "example/project" absent)
+        `shouldBe` Right (Just DrainerLaunchd)
+      either id (const "unexpectedly accepted") (drainerRecordFromBytes "example/project" nulled)
+        `shouldMention` "backend field is null"
+
     it "selects the record by a case-folded identity, so one repository has one drainer" $ do
       -- GitHub owner and repository names are case-insensitive, and the
       -- controller case-folds the identity it derives its label from. A

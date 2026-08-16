@@ -1160,6 +1160,51 @@ class DiscoveryRecordTests(RedirectedControllerTestCase):
         self.install(self.widgets_job)
         self.assertEqual(self.read_record(), first)
 
+    def test_reinstalling_under_the_other_manager_replaces_the_first_ones_keys(self):
+        # The one way the mixed shape Kanban fails closed on can be reached
+        # without hand-editing: the entry is merged, so a systemd install over
+        # a launchd entry would leave `launchd_label` and `plist_path` beside
+        # `systemd_unit` and `unit_path` — and the reinstall would be the thing
+        # that made this repository undiscoverable. Everything the
+        # service manager does not own survives the replacement.
+        self.install(self.widgets_job)
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"config_path": "/home/user/widgets.toml"}
+        )
+        self.install(self.gadgets_job)
+        gadgets_before = self.read_record()["repositories"]["acme/gadgets"]
+
+        units = self.root / "systemd-user"
+        with mock.patch.object(service_manager, "SYSTEMD_USER_DIR", units), \
+            mock.patch.object(
+                service_manager,
+                "detect_service_manager",
+                return_value=service_manager.SYSTEMD,
+            ):
+            job = drain_prs_service.job_for_identity(self.widgets, "acme/widgets")
+            drain_prs_service.write_discovery_record(job)
+
+        entry = self.read_record()["repositories"]["acme/widgets"]
+        self.assertEqual(entry["backend"], "systemd")
+        self.assertEqual(entry["systemd_unit"], job.label)
+        self.assertNotIn("launchd_label", entry)
+        self.assertNotIn("plist_path", entry)
+        self.assertEqual(entry["config_path"], "/home/user/widgets.toml")
+        self.assertEqual(entry["repository"], str(self.widgets))
+        self.assertEqual(self.read_record()["repositories"]["acme/gadgets"], gadgets_before)
+
+    def test_reinstalling_under_the_same_manager_still_only_refreshes(self):
+        # The ordinary case the replacement must not disturb: re-running the
+        # installer repairs the record in place, and a key another writer
+        # persisted has to survive that.
+        self.install(self.widgets_job)
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"config_path": "/home/user/widgets.toml"}
+        )
+        before = self.read_record()
+        self.install(self.widgets_job)
+        self.assertEqual(self.read_record(), before)
+
     def test_uninstalling_removes_one_entry_and_leaves_everything_else(self):
         # The repository-scoped removal this seam previously had no ordinary
         # path for. Scoped throughout: one job's definition, one entry — the

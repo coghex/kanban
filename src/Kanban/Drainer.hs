@@ -51,6 +51,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, eitherDecodeStrict, withObject, (.!=), (.:), (.:?))
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser, parseEither)
@@ -390,9 +391,29 @@ allDrainerBackends = [DrainerLaunchd, DrainerSystemd]
 -- fails closed with the reinstall guidance, because each of those is a record
 -- that would otherwise be guessed at, and a guess here controls the wrong job
 -- or none at all.
+-- | What an entry's @backend@ field says, with "absent" kept apart from
+-- "present but naming nothing".
+--
+-- @.:?@ collapses those two, and the difference is the whole compatibility
+-- rule: /absent/ is the shape a launchd install written before the field
+-- existed can only have, so it is read as launchd, while an explicit @null@
+-- was written by something that knew about the field and still named no
+-- manager. Treating the second as the first would resolve a record nobody can
+-- vouch for as a launchd job.
+data DeclaredBackend
+  = BackendAbsent
+  | BackendNull
+  | BackendNamed Text
+
+declaredBackend :: Aeson.Object -> Parser DeclaredBackend
+declaredBackend value = case KeyMap.lookup "backend" value of
+  Nothing -> pure BackendAbsent
+  Just Aeson.Null -> pure BackendNull
+  Just _ -> BackendNamed <$> value .: "backend"
+
 parseDrainerRecord :: Value -> Parser (Either Text DrainerRecord)
 parseDrainerRecord = withObject "PR drainer install record" $ \value -> do
-  declared <- value .:? "backend"
+  declared <- declaredBackend value
   let presentKeys backend =
         filter (`KeyMap.member` value) [fst (recordKeysFor backend), snd (recordKeysFor backend)]
       others backend = filter (/= backend) allDrainerBackends
@@ -410,8 +431,15 @@ parseDrainerRecord = withObject "PR drainer install record" $ \value -> do
         pure (DrainerRecord backend identifier definition repository)
       strayDetail backend =
         Text.intercalate " and " (map Key.toText (strayKeys backend))
-  case declared :: Maybe Text of
-    Just name -> case lookup name [(serviceManagerName backend, backend) | backend <- allDrainerBackends] of
+  case declared of
+    BackendNull ->
+      pure
+        ( Left
+            "its backend field is null, which names no service manager; only an \
+            \entry with no backend field at all reads as the launchd install \
+            \that predates it"
+        )
+    BackendNamed name -> case lookup name [(serviceManagerName backend, backend) | backend <- allDrainerBackends] of
       Nothing ->
         pure
           ( Left
@@ -430,7 +458,7 @@ parseDrainerRecord = withObject "PR drainer install record" $ \value -> do
                   )
               )
         | otherwise -> Right <$> read' backend
-    Nothing
+    BackendAbsent
       | not (null (strayKeys DrainerLaunchd)) ->
           pure
             ( Left
