@@ -51,7 +51,11 @@ The `[usage.codex]`/`[usage.claude]` `command` keys let a user-supplied
 executable replace the built-in Codex or Claude usage probe: when set, Kanban
 runs that command instead of the built-in provider on every usage refresh,
 under the same provider timeout, and expects it to print the JSON document
-`config.toml.example` documents.
+`config.toml.example` documents. The same tables take
+`estimated_percent_per_solve_round`, which turns the percentage left into a
+number of solve rounds — see [Estimating how many solve rounds are
+left](#estimating-how-many-solve-rounds-are-left). Both keys are global; like
+everything else under `[usage]`, they cannot be set per repository.
 
 `tools/approve_issues.py` and `tools/drain_prs.py` read the same file (with
 the same `--config FILE` override) so the canonical issue reviewer and PR
@@ -227,6 +231,61 @@ Beside each service's name is how old the numbers under it are. Kanban shows the
 Both the countdown and the age are recomputed whenever the screen redraws for any other reason. Nothing is on a timer, so a board left open on an idle desktop stays idle; the numbers catch up the moment anything happens.
 
 Press `c` to hide or show the sidebar.
+
+## Estimating how many solve rounds are left
+
+A percentage does not say what the capacity buys. If you tell Kanban roughly
+what one solve round costs a service, it converts the percentage left into a
+number of rounds for you:
+
+```toml
+[usage.codex]
+estimated_percent_per_solve_round = 8
+
+[usage.claude]
+estimated_percent_per_solve_round = 12
+```
+
+The value is your own estimate, as a whole percentage of a window from 1 to
+100. Kanban measures nothing and learns nothing — it just divides:
+
+```text
+percentage left ÷ estimated cost per round, rounded down
+```
+
+So 63% left at 8% per round is `≈7` rounds. A window with less than one round
+left shows `≈0`, which is the answer rather than a missing one.
+
+`kanban --usage` and `kanban --ping` spell it out at the end of each window's
+line:
+
+```console
+$ kanban --usage
+Codex
+  5 hour   63% left · resets in 4h 5m (Thu 16:05) · ≈7 solve rounds left this window
+  weekly   41% left · resets in 3d 21h (Mon 09:00) · ≈5 solve rounds left this window
+  snapshot 30m old
+```
+
+The sidebar is only 28 columns wide, so it appends the short form ` · ≈7` to
+the reset row instead:
+
+```text
+Codex          3h 0m old
+5 hour  [██████░░░░] 63%
+in 30m · Thu 15:30 · ≈7
+```
+
+There is not always room for it. When the countdown and reset time already use
+most of the row, the estimate is dropped rather than squeezed in — the reset
+row itself is never shortened to make space, so you may see the estimate on one
+window and not on another.
+
+Leave the key out and nothing changes anywhere: there is no default estimate,
+and a service you have not configured — or one reporting no windows — shows no
+estimate and no placeholder. The key is global, not per repository, and setting
+it stores nothing new. Anything outside 1 to 100, or that is not a whole
+number, is a configuration error at startup naming the key that was wrong.
 
 ## Checking usage from a shell
 

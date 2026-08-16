@@ -17,12 +17,17 @@ module Kanban.Usage.Render
     usageResetLocalText,
     usageRfc3339,
     usageSnapshotAgeText,
+    usageSolveRoundsLeft,
+    usageSolveRoundsSuffix,
+    usageSolveRoundsText,
   )
 where
 
 import Data.Aeson (Value, object, (.=))
 import qualified Data.Aeson.Key as Key
 import Data.List (intercalate)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (NominalDiffTime, TimeZone, UTCTime, defaultTimeLocale, diffUTCTime, formatTime, utcToZonedTime)
@@ -54,35 +59,46 @@ usageReportProduced report = any (produced . snd) report.usageReportEntries
     produced (UsageAvailable snapshot) = not (null snapshot.usageWindows)
     produced (UsageFailed _) = False
 
--- | The human rendering: a pure function of the report, an explicitly supplied
--- current time, and the zone reset instants are stated in.
+-- | The human rendering: a pure function of the report, the configured
+-- per-provider solve-round estimates, an explicitly supplied current time, and
+-- the zone reset instants are stated in.
 --
 -- The zone is an input for the same reason the clock is.  A reset time is
 -- printed as a local wall clock, and a renderer that read either from the
 -- process could not be pinned by a fixture; the sidebar supplies its
--- @appTimeZone@ here for the same reason.
-renderUsageReport :: TimeZone -> UTCTime -> UsageReport -> [Text]
-renderUsageReport zone now report =
-  intercalate [""] (map (renderEntry zone now) report.usageReportEntries)
+-- @appTimeZone@ here for the same reason.  The estimates are an input on those
+-- same terms: they come from resolved configuration, and a renderer that read
+-- that itself could not be pinned either.  A provider absent from the map
+-- configured no estimate and renders none.
+renderUsageReport :: Map UsageProvider Int -> TimeZone -> UTCTime -> UsageReport -> [Text]
+renderUsageReport estimates zone now report =
+  intercalate [""] (map (renderEntry estimates zone now) report.usageReportEntries)
 
-renderEntry :: TimeZone -> UTCTime -> (UsageProvider, UsageOutcome) -> [Text]
-renderEntry zone now (provider, outcome) = usageProviderName provider : body
+renderEntry :: Map UsageProvider Int -> TimeZone -> UTCTime -> (UsageProvider, UsageOutcome) -> [Text]
+renderEntry estimates zone now (provider, outcome) = usageProviderName provider : body
   where
+    estimate = Map.lookup provider estimates
     body = case outcome of
       UsageFailed message -> ["  unavailable: " <> message]
       UsageAvailable snapshot ->
         windowLines snapshot <> ["  snapshot " <> usageSnapshotAgeText (diffUTCTime now snapshot.usageFetchedAt)]
     windowLines snapshot
       | null snapshot.usageWindows = ["  no usage windows reported"]
-      | otherwise = map (renderWindowLine zone now (labelWidth snapshot)) snapshot.usageWindows
+      | otherwise = map (renderWindowLine estimate zone now (labelWidth snapshot)) snapshot.usageWindows
 
 -- | Labels are padded to the widest one this provider reported, so the columns
 -- line up without depending on anything outside the snapshot being rendered.
 labelWidth :: UsageSnapshot -> Int
 labelWidth snapshot = maximum (1 : map (Text.length . (.usageWindowLabel)) snapshot.usageWindows)
 
-renderWindowLine :: TimeZone -> UTCTime -> Int -> UsageWindow -> Text
-renderWindowLine zone now width window =
+-- | One window's line.  The estimate is appended to the window it describes
+-- rather than given a line of its own, because a provider commonly reports
+-- more than one window and a line standing alone would not say which of them
+-- it counted.  Nothing before the estimate changes: the label padding, the
+-- percentage column, the countdown, and the parenthesized reset time are what
+-- they were, and an unconfigured provider's line ends where it always did.
+renderWindowLine :: Maybe Int -> TimeZone -> UTCTime -> Int -> UsageWindow -> Text
+renderWindowLine estimate zone now width window =
   "  "
     <> Text.justifyLeft width ' ' window.usageWindowLabel
     <> "  "
@@ -92,6 +108,42 @@ renderWindowLine zone now width window =
     <> " ("
     <> usageResetLocalText zone window.usageResetsAt
     <> ")"
+    <> maybe "" ((" · " <>) . usageSolveRoundsText) (usageSolveRoundsLeft estimate window.usagePercentLeft)
+
+-- | How many whole solve rounds a window's remaining percentage buys, given
+-- what one round is configured to cost for that provider.  This is the one
+-- derivation both surfaces read the count off: the sidebar's compact suffix
+-- and the printed line state the same number for the same inputs because
+-- neither computes it.
+--
+-- Integer division rounds down, so a remaining percentage that does not cover
+-- one whole round is zero rounds rather than a fraction of one — and zero is a
+-- real answer that renders, not an absent estimate.
+--
+-- The remaining percentage is clamped at zero first.  Only the live
+-- external-command decoder bounds @pct_left@ to 0-100; a snapshot decoded from
+-- the cache carries whatever was written there, and Haskell's 'div' rounds
+-- toward negative infinity, so an out-of-range stored value would otherwise
+-- render as a negative number of rounds.  A non-positive estimate is treated
+-- as unconfigured for the same class of reason: configuration rejects it, and
+-- dividing by it here would be an arithmetic exception rather than a rendering
+-- fault.
+usageSolveRoundsLeft :: Maybe Int -> Int -> Maybe Int
+usageSolveRoundsLeft estimate percentLeft = do
+  percentPerRound <- estimate
+  if percentPerRound <= 0 then Nothing else Just (max 0 percentLeft `div` percentPerRound)
+
+-- | The estimate as @kanban --usage@ and @kanban --ping@ state it, where there
+-- is no width to budget and the count can be spelled out.
+usageSolveRoundsText :: Int -> Text
+usageSolveRoundsText rounds = "≈" <> Text.pack (show rounds) <> " solve rounds left this window"
+
+-- | The estimate as the sidebar appends it to a reset row, where there is not
+-- room to spell it out.  The leading separator is part of the suffix: the
+-- caller either appends the whole thing or none of it, and measuring the
+-- separator with the count is what makes that decision honest.
+usageSolveRoundsSuffix :: Int -> Text
+usageSolveRoundsSuffix rounds = " · ≈" <> Text.pack (show rounds)
 
 -- | How long until a window resets, in the one wording both the @--usage@
 -- line and the sidebar's reset row state it in.

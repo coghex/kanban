@@ -1,0 +1,22 @@
+== fitting one-digit count ==
+Codex             0s old
+5 hour  [██████░░░░] 63%
+in 30m · Thu 15:30 · ≈7
+== fitting two-digit count, filling the interior exactly ==
+Codex             0s old
+5 hour  [██████░░░░] 63%
+in 30m · Thu 15:30 · ≈12
+== three-digit count, omitted whole because the suffix would not fit ==
+Codex             0s old
+5 hour  [██████████] 100
+in 30m · Thu 15:30
+== zero rounds, rendered rather than hidden ==
+Codex             0s old
+5 hour  [██████░░░░] 63%
+in 30m · Thu 15:30 · ≈0
+== no configured estimate ==
+Codex             0s old
+5 hour  [██████░░░░] 63%
+in 30m · Thu 15:30
+== configured provider reporting no windows ==
+Codex             0s old

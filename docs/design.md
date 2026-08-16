@@ -1618,6 +1618,64 @@ When configured, the external command is the provider: it runs with the same
 timeout and validation rules, and the built-in integration is not used. This
 keeps users unblocked when a client update breaks a built-in parser.
 
+### Burn planning
+
+Either provider table may also carry an estimate of what one solve round costs
+it, beside — and independently of — its `command`:
+
+```toml
+[usage.codex]
+estimated_percent_per_solve_round = 8
+
+[usage.claude]
+estimated_percent_per_solve_round = 12
+```
+
+The value is a whole percentage of a window, from 1 through 100 inclusive.
+Zero, a negative number, a non-integer, and anything above 100 are startup
+configuration errors naming the full provider-specific key path; a TOML boolean
+is a non-integer here, not a one. The key is optional and has no default: an
+unconfigured provider renders no estimate anywhere, and neither does one
+reporting no windows. It is global provider configuration like the rest of
+`[usage]`, and cannot be overridden per repository.
+
+Neither key gates the other. A provider table carrying only
+`estimated_percent_per_solve_round` is valid, and the estimate then describes
+the windows the built-in probe reports.
+
+For every window of a configured provider, the count is the remaining
+percentage divided by the configured cost, as integer division rounded down. A
+window with less than one round left is `0` rounds, and zero renders rather
+than being hidden — it is the answer being asked for. The remaining percentage
+is clamped at zero first, so a snapshot restored from the cache carrying a
+value outside the 0-100 the live decoder enforces cannot produce a negative
+count.
+
+One pure derivation produces that count for every surface, taking the
+configured estimate as an argument the way the clock and zone already are, so
+the printed commands and the sidebar cannot drift into two formulas.
+`kanban --usage` and `kanban --ping` — which prints its post-ping refresh
+through the same renderer — state it in full, appended to the window line it
+describes:
+
+```text
+  5 hour   63% left · resets in 4h 5m (Thu 16:05) · ≈7 solve rounds left this window
+```
+
+The sidebar has no room for that wording, so it appends the exact compact
+suffix ` · ≈N` to the reset row instead, and only when the finished row still
+fits the sidebar interior. The suffix is appended whole or not at all: nothing
+already on the row — the countdown or the reset instant — is shortened,
+truncated, or clipped to make room, because both are things the user acts on
+while the estimate can be recomputed from the percentage above it. The
+measurement is in terminal cells, since `·` and `≈` are both East Asian
+ambiguous.
+
+The estimate introduces no state. It is derived from resolved configuration and
+the window on screen, writes nothing, and changes nothing about the usage
+snapshot cache. `--usage --json` is unchanged: it gains no field and stays at
+`schema_version` 1.
+
 ### Sidebar display
 
 ```text
@@ -2406,6 +2464,10 @@ Configurable repository semantics include:
   microseconds without overflowing, and inherits globally or per repository on
   the same terms.
 - External usage provider commands (section 14).
+- The per-provider solve-round estimate `estimated_percent_per_solve_round`
+  (section 14), a whole percentage from 1 through 100 with no default. It is a
+  sibling of that provider's `command` rather than part of it, and like the
+  rest of `[usage]` it is global only — a repository table cannot override it.
 
 ## 17. Error presentation
 
