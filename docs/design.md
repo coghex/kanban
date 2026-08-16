@@ -12,7 +12,7 @@ concrete precondition
 - [x] REL-1. Record real-terminal performance measurements — [#269]
 - [x] REL-2. Verify live Codex and Claude usage refreshes — [#270]
 - [x] REL-3. Exercise the installed terminal application — [#273]
-- [ ] REL-4. Publish the first Kanban release — [deferred]: #269 and #270 have merged with passing records in section 21; #273 is the last of the three
+- [x] REL-4. Publish the first Kanban release — [#340]
 
 ## Epic contract
 
@@ -29,11 +29,13 @@ concrete precondition
   versioning, packaging, and publication`, `#FBCA04`) and carried by epic #268.
   Also intended for `docs/public_release_design.md`'s packaging epic.
 
-Two reconciliations are owed to epic #268 and belong to the next
-`/process-design-doc` run, not here. Its `Done when` still says the record
-distinguishes drainer status checks from "continuous visible repainting or
-flicker", which D-9 narrows to observable content churn; and its background
-predates D-10's process-group rule. Neither changes the arc's shape.
+Epic #268 was reconciled against this document on 2026-08-15. Its `Done when`
+now carries D-10's process-group rule and D-11's populated-board clock alongside
+the D-9 content-churn wording it already had, its background records what
+packaging epic #282 closed, its Phase 1 paragraph matches the delivery plan's
+dependency order, its three completed children are ticked, and its REL-4
+paragraph describes the post-#283, post-#289 shape D-14 and the rewritten slice
+below settle. Nothing is owed to it.
 
 ## Release scope
 
@@ -6161,6 +6163,113 @@ The Haskell suite reported `1101 examples, 0 failures` and
 Python suite's stdin is redirected because a fake-CLI call stalls for 60 seconds
 per invocation when stdin is a non-tty pipe.
 
+### REL-4. First release publication, 2026-08-15
+
+Kanban `1.0.0.0` is **published**. Every check in this record passes. Times are
+UTC; the local date was 2026-08-15 PDT.
+
+| Item | Value |
+| --- | --- |
+| Released commit | `150a01b9578ffc46d0c265611eb021a745a3255a` |
+| Required CI on it | `build-test` **success**, from `ci.yml` run [31917142036](https://github.com/coghex/kanban/actions/runs/31917142036), event `push`, branch `master`, head `150a01b` |
+| Tag | `v1.0.0.0`, annotated, object `a6ee35f260318aba9e98da1c1acc9996c2198195` |
+| Peeled ref `refs/tags/v1.0.0.0^{}` | `150a01b9578ffc46d0c265611eb021a745a3255a` |
+| Release run | [31917703227](https://github.com/coghex/kanban/actions/runs/31917703227), workflow `Release`, event `push`, ref `v1.0.0.0`, head `150a01b` |
+| Its jobs | `build-test` **success**, `publish-release` **success**, `publish-dry-run` skipped; 00:38:29Z → 00:48:11Z |
+| Release | <https://github.com/coghex/kanban/releases/tag/v1.0.0.0>, name `1.0.0.0`, published 00:48:09Z |
+| Draft / prerelease | both `false` |
+| Release target | `150a01b9578ffc46d0c265611eb021a745a3255a` |
+| Asset | exactly one: `kanban-1.0.0.0.tar.gz`, 1 631 111 bytes, sha256 `13af35272f0d353c4e93dcb00051c0ab0a94156a9b315c11b7fb75243ee058b3` |
+
+Two identity checks are deliberately narrower than they look. The `build-test`
+that gated the release commit is `ci.yml`'s, resolved through that workflow's
+own run for the `push` event at exactly `150a01b`: `release.yml` defines a job
+of the same name, so a check-run match on the name alone would have proved
+nothing. The release run was likewise correlated by workflow, event, ref, and
+head rather than by recency, which would have raced GitHub's indexing. The
+release commit's other required check, `review-approved`, structurally cannot
+appear here — `review-gate.yml` triggers only on `pull_request` — and was
+satisfied on the pull request that produced the commit.
+
+#### Notes
+
+The published body is the whole `1.0.0.0` section of `CHANGELOG.md` and nothing
+else. Extracting that section locally with the workflow's own `awk` program and
+comparing it against the published body byte for byte leaves a single
+difference: one trailing newline that `gh release view --json body --jq .body`
+adds on retrieval. Content is identical at 97 lines, sha256
+`9fa35fb5b3766f11eb581f89f11dad2a5ca66d8f549d40f35462ad2239b5245e`.
+
+#### Gate provenance
+
+The three manual gates measured builds of earlier trees, which is unavoidable:
+a record can only merge after the measurement it describes, so no gate can ever
+have measured a tree containing its own record. What matters instead is that
+each measured commit is an ancestor of the released one and that the released
+commit carries all three records.
+
+| Gate | Measured commit | Ancestor of `150a01b` | Commits behind it |
+| --- | --- | :---: | ---: |
+| REL-1 | `878f8a2e` | yes | 99 |
+| REL-2 | `e3e02bb4` | yes | 63 |
+| REL-3 | `0279672` | yes | 60 |
+
+So the release is not a re-measurement of the gates, and this record does not
+claim it is. The startup, CPU, memory, provider, and interaction evidence
+describes the trees named above; the released tree is their descendant, passes
+the same automated gates, and is verified below as a consumer receives it.
+
+#### Consumer verification
+
+`docs/public_release_design.md` D-7 assigns consumer-side verification of the
+published archive to this slice. The sole asset was downloaded from the Release,
+unpacked in a clean directory outside any checkout, and built and tested there —
+macOS 15.6 on arm64, GHC 9.12.2, Cabal 3.16.1.0:
+
+```console
+gh release download v1.0.0.0 --repo coghex/kanban \
+  --pattern 'kanban-1.0.0.0.tar.gz' --dir "$CONS"
+tar -xzf kanban-1.0.0.0.tar.gz
+cd kanban-1.0.0.0
+grep '^version:' kanban.cabal
+cabal build all
+cabal test all --test-show-details=direct
+"$(cabal list-bin exe:kanban)" --version
+```
+
+The unpacked `kanban.cabal` declares `version:            1.0.0.0`, the build
+succeeds, the suite reports `1202 examples, 0 failures` and `Test suite
+kanban-test: PASS`, and the executable the archive produces prints
+`kanban 1.0.0.0`. The archive itself was built by the workflow on
+`ubuntu-latest`; this consumer check is macOS arm64 only, and no other platform
+was exercised.
+
+#### Failure handling, unexercised
+
+Nothing failed, so D-14's stop-and-report rule was never invoked. It is recorded
+here as unexercised rather than omitted: had the workflow or any verification
+above failed after the tag reached the remote, the correct outcome was to report
+the failing job and the observed tag and release state and stop, never to
+delete, move, or retag `v1.0.0.0` or to create the Release by hand.
+
+#### Suites
+
+Both suites pass on the tree carrying this record — that is, commit `150a01b`
+plus this subsection, not `150a01b` itself, which predates it — run from the
+implementation checkout rather than the unpacked archive:
+
+```console
+cabal build all
+cabal test all --test-show-details=direct
+python3 -m unittest discover -s tools -p 'test_*.py' < /dev/null
+```
+
+The Haskell suite reported `1202 examples, 0 failures` and
+`Test suite kanban-test: PASS`; the Python suite ran 1605 tests, `OK`. The
+Python suite's stdin is redirected for the same reason REL-3's was. The build
+emitted no GHC warning, which `-Werror` on package `kanban` would have turned
+into a failure anyway.
+
 ## Decisions
 
 ### D-1. First-release evidence includes a real installed-terminal run
@@ -6342,6 +6451,38 @@ Verified safe: `test/Spec/UI/Keys.hs:198-207` parses only the rows between
 `docs/agent-workflow-contract.md` section 7, not on its body. A new section
 therefore breaks no parser, but `REL-1` still runs both suites to prove it.
 
+### D-14. A solver agent performs the publication under the issue's authority
+
+User signoff 2026-08-15. `REL-4`'s tag is pushed by the agent pipeline rather
+than by hand: the REL-4 issue is the authorization, and a solver agent may
+create and push an annotated tag `v1.0.0.0` once every manual gate has passed
+and required CI is green on the commit it selects. `build-test` from `ci.yml` is
+that check, established for the `push` event at exactly that commit;
+`review-approved` triggers only on `pull_request` and cannot appear on a master
+commit at all. D-3 and D-5 say what publication is and what it is called; this
+says who performs it.
+
+The tag is the only authorized act. `.github/workflows/release.yml`, added by
+#289 under packaging epic #282, reacts to a `v*` push and creates the GitHub
+Release itself, passing `--verify-tag` so it can never bring a release tag into
+existence — a release whose tag is not already on the remote fails instead. The
+agent's irreversible act is therefore one `git push origin v1.0.0.0`, and
+everything after it is that workflow's own gated publication.
+
+Publication fails stopped, never repaired in place. If the workflow fails after
+the tag is on the remote, or any verification of the published artifacts fails,
+the agent reports the failing job and the observed tag and release state and
+waits: it does not delete or move the tag, force-push, retag another commit, or
+create the Release by hand. A tag with no Release is recoverable deliberately;
+a hand-made release under an authorized tag is indistinguishable from the
+workflow's own output and destroys the provenance the gate exists to establish.
+
+Because the tag and the Release are public and irreversible, they necessarily
+precede the review of the record that documents them. Writing the record first
+would assert an event that had not happened, which the pipeline's provenance
+checks exist to refuse. The order is fixed: verify, tag, observe, then record
+through a pull request.
+
 ## Open questions
 
 ### Q-1. Which numeric performance limits block the first release?
@@ -6446,7 +6587,9 @@ and say plainly that true flicker is not measured at 1.0 (D-9).
 
 Every record lands in section 21 (D-13) and omits account identifiers, usage
 balances, and credentials (D-8). Rerun required CI on the exact commit selected
-for release and verify the published tag and GitHub Release resolve to it.
+for release, push the authorized annotated tag under D-14, and verify that the
+tag's peeled ref and the Release `.github/workflows/release.yml` creates from it
+both resolve to that commit.
 
 ## Delivery plan
 
@@ -6521,44 +6664,60 @@ for release and verify the published tag and GitHub Release resolve to it.
 
 ### REL-4. Publish the first Kanban release
 
-> **Deferred 2026-08-12.** Precondition: #269, #270, and #273 have merged and
-> section 21 records a pass for each gate. Terminal ledger links are not enough.
-> Updated 2026-08-14: all three gates have now been run and each records a pass
-> in section 21 — REL-1 and REL-2 have merged, and REL-3 lands with this
-> record — so the remaining precondition is #273 merging, not the gates being
-> performed. A release-blocking defect found by any of them would still change
-> this slice's scope before it can start; none was.
->
-> Two things to settle when this slice is reprocessed. First, it does not fit one
-> pull request at all: #283 established the package version and the changelog
-> under packaging epic #282, so no code change remains for a PR to carry, and
-> the `v1.0.0.0` tag and the GitHub Release are post-merge operations against
-> master, which `tools/drain_prs.py` merges. Second, the user ruled on
-> 2026-08-12 that a solver agent may create the tag and Release itself, with
-> the issue as its authorization, once every gate has passed and required CI
-> (`build-test` and `review-approved`) is green on the release commit. That
-> ruling still needs a `/design-epic` pass to become a numbered decision, since
-> D-3 and D-5 say what publication is but not who performs it.
+> **Ready 2026-08-15.** The 2026-08-12 deferral is discharged: #269, #270, and
+> #273 have all merged, section 21 records a pass for each gate, and no
+> release-blocking defect was found. Packaging epic #282 closed in the same
+> window — #283 established version `1.0.0.0` and `CHANGELOG.md`, #287 and #288
+> the outsider documentation and screenshot, and #289 the tag-triggered
+> `.github/workflows/release.yml` — so this slice's shape changed and the
+> bullets below are its rewritten form. D-14 settles who performs the
+> publication; nothing about it is open.
 
-- **Outcome:** Kanban version `1.0.0.0` has a GitHub Release whose tag points to
-  the exact required-CI-passing commit containing accepted evidence for every
-  manual gate.
-- **Scope:** Verify that the already-established package version is `1.0.0.0` in
-  both places that carry it — `kanban.cabal` and `src/Kanban/CLI.hs`'s
-  hard-coded `"kanban 1.0.0.0"`, which #283 set under packaging epic #282 and
-  which `tools/test_version_consistency.py` holds to agreeing — apply the chosen
-  tag convention, make any required release-metadata or operator-documentation
-  update, verify the release commit, and publish its GitHub Release.
+- **Outcome:** Kanban version `1.0.0.0` has a GitHub Release, created by
+  `.github/workflows/release.yml` from an authorized `v1.0.0.0` tag, whose tag
+  points to the exact required-CI-passing commit containing accepted evidence
+  for every manual gate.
+- **Scope:** Select the release commit and verify that its successful
+  `build-test` is `ci.yml`'s own, for the `push` event at exactly that commit —
+  `release.yml` defines a job of the same name, so an unqualified check-run
+  match proves nothing. Confirm on that commit the preconditions the workflow
+  enforces: `kanban.cabal` declares exactly one line-anchored `version:` field
+  agreeing with `src/Kanban/CLI.hs`'s hard-coded `"kanban 1.0.0.0"`, which #283
+  set and `tools/test_version_consistency.py` holds to, and `CHANGELOG.md`'s
+  first `## ` section is exactly `1.0.0.0`, which the workflow extracts whole as
+  the release notes. Push the annotated tag under D-14, correlate the triggered
+  run by workflow, event, ref, and commit rather than by recency, and verify the
+  published artifacts: the tag's peeled ref, the Release's target, its complete
+  notes against the complete extracted changelog section, and its sole
+  `kanban-1.0.0.0.tar.gz` asset. Verify that asset as a consumer would —
+  `docs/public_release_design.md` D-7 assigns consumer-side sdist verification
+  here — by unpacking it in a clean directory, building and testing it, and
+  confirming the executable it produces prints `kanban 1.0.0.0`. Record the
+  publication in section 21. No source change remains, so the pull request this
+  slice produces carries that record and nothing else.
+- **Failure contract:** Any failure after the tag reaches the remote — the
+  workflow, the peeled-tag comparison, the full release-note comparison, or the
+  downloaded-asset build, test, or version check — is a stop-and-report state
+  under D-14. The published tag and Release are never deleted, moved, retagged,
+  or hand-created to repair it.
 - **Phase:** 2 — publication.
-- **Depends on:** `REL-1`, `REL-2`, `REL-3`.
+- **Depends on:** `REL-1`, `REL-2`, `REL-3`, and packaging epic #282's #283
+  through #289, all closed as of 2026-08-15.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-3`, `D-5`, `D-7`, `D-8`, `D-12`.
+- **Relevant decisions:** `D-3`, `D-5`, `D-7`, `D-8`, `D-12`, `D-13`, `D-14`.
 - **Acceptance signals:** Every prerequisite slice is terminal, section 21 holds
-  all three accepted records, required CI is green on the selected commit, the
-  published identifier resolves to that commit, and the installed executable
-  reports `1.0.0.0` from both `--version` and `kanban.cabal`.
+  all three accepted records, `ci.yml`'s `build-test` is green for the `push` at
+  the selected commit, and the peeled `refs/tags/v1.0.0.0^{}` and the GitHub
+  Release's target both resolve to it. The Release is neither draft nor
+  prerelease, its complete notes equal the complete `1.0.0.0` changelog section,
+  and its only asset is `kanban-1.0.0.0.tar.gz`, which unpacks, builds, passes
+  both suites, and yields an executable reporting `kanban 1.0.0.0`. Section 21
+  gains a publication record naming the released commit, the correlated workflow
+  run and its jobs' conclusions, the Release, and those verification results.
 - **Out of scope:** Package-registry publication, binary installers, and
-  non-GitHub distribution. Establishing the package version or the changelog,
-  both of which #283 delivered ahead of this slice; deduplicating the two
-  version literals into one source, which that issue also left undone.
+  non-GitHub distribution. Establishing the package version, the changelog, or
+  the release workflow, all of which #282's children delivered ahead of this
+  slice; deduplicating the two version literals into one source, which #283 left
+  undone. Changing `release.yml`: this slice authorizes a tag and verifies what
+  the workflow does with it.
 - **Open questions:** `None`.
