@@ -32,6 +32,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import service_manager
 import fake_cli
 
 
@@ -84,6 +85,23 @@ def snapshot_tree(root):
                 hashlib.sha256(path.read_bytes()).hexdigest(),
             )
     return entries
+
+
+def setUpModule():
+    # The drainer's job identifiers come from whichever service manager the
+    # host has, and nothing in this module is about that choice: pinning it
+    # keeps every case here answering the same on a macOS laptop, a Linux CI
+    # runner, and a container with no user session. `tools/test_service_manager.py`
+    # is where the selection itself is settled.
+    global _PINNED_BACKEND
+    _PINNED_BACKEND = mock.patch.object(
+        service_manager, "detect_service_manager", return_value=service_manager.LAUNCHD
+    )
+    _PINNED_BACKEND.start()
+
+
+def tearDownModule():
+    _PINNED_BACKEND.stop()
 
 
 class SinglePrCliFixture(unittest.TestCase):

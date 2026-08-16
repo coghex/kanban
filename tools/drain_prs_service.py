@@ -32,7 +32,8 @@ import service_manager
 # written from. Nothing here constructs, renders, or parses one — the seam is
 # reached through `service_backend` below, and `tools/install_drainer.py`
 # reaches the same one rather than restating any of it. `src/Kanban/Drainer.hs`
-# derives nothing at all: it reads an installed job's label and plist path out
+# derives nothing at all: it reads an installed job's identifier and definition
+# path out
 # of the per-repository record under DISCOVERY_RECORD_PATH below.
 #
 # There is one identifier, and one of every mutable runtime path, per canonical
@@ -158,7 +159,7 @@ def installed_repository_records() -> dict[str, dict[str, Any]]:
     """Every installed repository's record, keyed by normalized identity.
 
     A separate entry per repository is the whole point: installing or
-    refreshing one repository must leave every other repository's label, plist
+    refreshing one repository must leave every other repository's label, definition
     metadata, runtime and log locations, and configuration selection exactly as
     they were.
     """
@@ -274,21 +275,25 @@ def normalize_identity(raw_value: str) -> str:
 
 @dataclass(frozen=True)
 class DrainerJob:
-    """One repository's drainer: its identity, its launchd job, and every
-    mutable path that belongs to it alone.
+    """One repository's drainer: its identity, its service-manager job, and
+    every mutable path that belongs to it alone.
 
     Built once per invocation and threaded through, so no two code paths can
     derive a different label or status file for the same repository. Every
     field except `repo_path` is a function of `identity`, which is why a second
     checkout of the same GitHub repository resolves to this same job rather
     than to a second one.
+
+    `label` and `definition_path` are the selected backend's answers rather
+    than launchd's: a LaunchAgent label and its plist on macOS, a unit name
+    and its file under `~/.config/systemd/user` on Linux.
     """
 
     repo_path: Path
     identity: str
     slug: str
     label: str
-    plist_path: Path
+    definition_path: Path
     runtime_dir: Path
     incident_dir: Path
     status_path: Path
@@ -306,7 +311,7 @@ def _job(
     identity: str,
     slug: str,
     label: str,
-    plist_path: Path,
+    definition_path: Path,
     runtime_dir: Path,
     log_dir: Path,
     config_path: str | None,
@@ -317,7 +322,7 @@ def _job(
         identity=identity,
         slug=slug,
         label=label,
-        plist_path=plist_path,
+        definition_path=definition_path,
         runtime_dir=runtime_dir,
         incident_dir=runtime_dir / "incidents",
         status_path=runtime_dir / "status.json",
@@ -398,7 +403,7 @@ def job_for_identity(
         identity=identity,
         slug=slug,
         label=label,
-        plist_path=backend.definition_path(label),
+        definition_path=backend.definition_path(label),
         runtime_dir=RUNTIME_ROOT / slug,
         log_dir=LOG_ROOT / slug,
         config_path=config_path,
@@ -431,7 +436,7 @@ def unmanaged_job(repo_path: Path) -> DrainerJob:
     canonical GitHub identity.
 
     Such a checkout cannot install or control a drainer at all, so this never
-    names a job launchd runs. It exists because `drain_prs.py` also runs
+    names a job any service manager runs. It exists because `drain_prs.py` also runs
     standalone — `--pr <number>` against a fixture whose remote is a plain
     local path — and still records conflict and cleanup incidents. Those land
     where the singleton always put them, which by construction can never be any
@@ -443,7 +448,7 @@ def unmanaged_job(repo_path: Path) -> DrainerJob:
         identity="",
         slug="",
         label=backend.legacy_identifier(),
-        plist_path=backend.legacy_definition_path(),
+        definition_path=backend.legacy_definition_path(),
         runtime_dir=RUNTIME_ROOT,
         log_dir=LOG_ROOT,
         config_path=None,
@@ -495,7 +500,7 @@ def requested_job(repo_path: Path, requested: str | None, fallback: DrainerJob) 
     Its paths are a pure function of the identity, so this reconstructs the
     installed job's log directory even when the checkout no longer resolves to
     that identity — which is exactly when a refusal has to be readable, since
-    launchd's stdout and stderr, and `logs`, all still point there.
+    the service manager's stdout and stderr, and `logs`, all still point there.
     """
     if requested is None:
         return fallback
@@ -517,7 +522,7 @@ def ensure_dirs(job: DrainerJob) -> None:
     for path in (INSTALL_DIR, job.runtime_dir, job.incident_dir, job.log_dir):
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
-    job.plist_path.parent.mkdir(parents=True, exist_ok=True)
+    job.definition_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def service_log(job: DrainerJob, message: str) -> None:
@@ -610,7 +615,7 @@ def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
     """Merge `updates` into the private JSON object at `path` rather than
     overwriting it, so a writer that sets one key does not delete a key
     persisted by another. `tools/install_drainer.py` writes `ntfy_url` into the
-    same document this module records installed LaunchAgents in, and either may
+    same document this module records installed jobs in, and either may
     run without the other."""
 
     def merged(document: dict[str, Any]) -> dict[str, Any]:
@@ -619,7 +624,12 @@ def merge_json_document(path: Path, updates: dict[str, Any]) -> Path:
     return update_json_document(path, merged)
 
 
-def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
+def merge_repository_record(
+    identity: str,
+    updates: dict[str, Any],
+    *,
+    discard: frozenset[str] | tuple[str, ...] = (),
+) -> Path:
     """Merge `updates` into one repository's entry under the shared document's
     `repositories` table, leaving every sibling entry and every top-level key
     untouched.
@@ -628,7 +638,16 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
     hand over a `repositories` table built from `updates` alone, deleting every
     other installed repository. The entry itself is merged for the same reason
     one level down — the installer writes `config_path` and the controller
-    writes the label and plist path, and either may run without the other.
+    writes the identifier and definition path, and either may run without the other.
+
+    `discard` is the exception a merge alone cannot express: keys the writer
+    owns outright and must therefore replace rather than add to. Only the
+    service-manager keys are ever discarded, and only by the writer that is
+    about to restate them, so everything an installer persisted beside them
+    survives. Without it, reinstalling a repository under the other service
+    manager would leave the first manager's keys beside the second's — the
+    mixed shape a reader is required to fail closed on, which would make the
+    reinstall itself the thing that broke discovery.
 
     The read that computes the merge happens inside `update_json_document`'s
     lock, so a repository installed between another writer's read and its write
@@ -640,6 +659,7 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
         records = dict(records) if isinstance(records, dict) else {}
         existing = records.get(identity)
         entry = dict(existing) if isinstance(existing, dict) else {}
+        entry = {key: value for key, value in entry.items() if key not in discard}
         entry.update(updates)
         records[identity] = entry
         return {**document, RECORD_REPOSITORIES_KEY: records}
@@ -648,18 +668,56 @@ def merge_repository_record(identity: str, updates: dict[str, Any]) -> Path:
 
 
 def write_discovery_record(job: DrainerJob) -> Path:
-    """Record where the LaunchAgent just written for this job actually lives,
-    so Kanban resolves it by reading rather than by deriving the label a second
-    time. Written from the same label and plist path the backend rendered and
-    loaded the job under, and filed under the identity Kanban selects it by."""
+    """Record where the definition just written for this job actually lives, so
+    Kanban resolves it by reading rather than by deriving the label a second
+    time. Written from the same identifier and definition path the backend
+    rendered and loaded the job under, and filed under the identity Kanban
+    selects it by.
+
+    Which keys those are is the backend's answer, because the entry is a
+    discriminated union: a launchd install keeps writing `launchd_label` and
+    `plist_path`, a systemd install writes `systemd_unit` and `unit_path`, and
+    both name the backend that wrote them. Only an entry naming no backend at
+    all is ambiguous, and that shape can only have been written before this
+    existed — which makes it launchd's, and is exactly how a live macOS
+    drainer keeps working without a reinstall.
+    """
+    backend = service_backend()
     return merge_repository_record(
         job.identity,
         {
-            "launchd_label": job.label,
-            "plist_path": str(job.plist_path),
+            **backend.record_entry(job.label, job.definition_path),
             "repository": str(job.repo_path),
         },
+        # Every service-manager key, not just this backend's: reinstalling a
+        # repository under the other manager must leave the entry naming one
+        # backend rather than carrying both, and the merge that keeps
+        # `config_path` alive would otherwise keep the superseded manager's
+        # keys alive with it.
+        discard=service_manager.RECORD_KEYS,
     )
+
+
+def remove_discovery_record(identity: str) -> Path:
+    """Drop one repository's entry from the shared document, leaving every
+    sibling entry and every top-level key — the global `ntfy_url` above all —
+    exactly as they are.
+
+    The same two-level discipline `merge_repository_record` follows, in the
+    other direction: rewriting `repositories` from anything but its own current
+    value would delete the repositories this uninstall is not about, and the
+    read that computes the removal happens inside `update_json_document`'s lock
+    so an install racing it cannot be dropped.
+    """
+
+    def without(document: dict[str, Any]) -> dict[str, Any]:
+        records = document.get(RECORD_REPOSITORIES_KEY)
+        if not isinstance(records, dict) or identity not in records:
+            return document
+        remaining = {key: value for key, value in records.items() if key != identity}
+        return {**document, RECORD_REPOSITORIES_KEY: remaining}
+
+    return update_json_document(DISCOVERY_RECORD_PATH, without)
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -705,10 +763,18 @@ def service_backend() -> service_manager.ServiceManagerBackend:
     replaces either this function or that wrapper is honoured by every later
     call, which is how service-manager delegation is exercised without a real
     service manager. Nothing about the selection is operator-visible: there is
-    no flag or environment variable to choose a backend, because there is only
-    one to choose.
+    no flag or environment variable to choose a backend, because the host is
+    what decides.
+
+    A host managed by neither supported service manager is refused here, in the
+    failure vocabulary every caller in this module already handles — and
+    refused before anything is written, because every path below has to resolve
+    a backend in order to name a job before it can create one.
     """
-    return service_manager.select_backend(run_command)
+    try:
+        return service_manager.select_backend(run_command)
+    except service_manager.NoServiceManagerError as exc:
+        raise ServiceError(str(exc)) from exc
 
 
 def lock_pid(repo_path: Path) -> int | None:
@@ -1322,12 +1388,18 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     log_path = latest_log_path(job)
     log_tail = tail_lines(log_path, 1)
     inventory = autostash_inventory(job.repo_path)
+    backend = service_backend()
     return {
         "state": state,
         "operation": operation,
         # The key name is the contract Kanban reads, so it stays `launchd_`
         # whatever answers it; the answer itself is the backend's.
-        "launchd_loaded": service_backend().is_loaded(job.label),
+        "launchd_loaded": backend.is_loaded(job.label),
+        # Which manager that answer came from, so a reader can say "outside
+        # systemd" on a host where saying "outside launchd" would be false.
+        # A reader that predates this field is reading a macOS controller, and
+        # launchd is what it correctly assumes.
+        "service_manager": backend.backend_name(),
         "runner_pid": runner_pid if runner_alive else None,
         "drainer_pid": child_pid if child_alive else (locked_pid if locked_alive else None),
         "started_at": stored.get("started_at") if runner_alive else None,
@@ -1468,22 +1540,23 @@ def retire_legacy_job(job: DrainerJob) -> dict[str, Any] | None:
         "retired": True,
         "label": legacy_label,
         "repository": str(legacy_repository) if legacy_repository else None,
-        "plist": str(retired_path),
+        backend.definition_label(): str(retired_path),
     }
 
 
 def install_job(job: DrainerJob) -> dict[str, Any]:
     ensure_dirs(job)
+    manager = service_backend().backend_name()
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
         raise ServiceError(
             f"The PR drainer for {job.identity} is already running from {conflict}, "
             f"which is another checkout of the same repository as {job.repo_path}. "
-            "Stop it before installing this checkout's launchd job."
+            f"Stop it before installing this checkout's {manager} job."
         )
     if snapshot["state"] in {"running", "starting", "external"}:
-        raise ServiceError("Stop the running drainer before installing its launchd job.")
+        raise ServiceError(f"Stop the running drainer before installing its {manager} job.")
 
     # Before the replacement is written, so the singleton can never be loadable
     # at the same instant as the job that supersedes it.
@@ -1504,10 +1577,43 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
         "installed": True,
         "repository": job.identity,
         "label": job.label,
-        "plist": str(job.plist_path),
+        backend.definition_label(): str(job.definition_path),
         "target": backend.manager_target(job.label),
         "record": str(record),
         "legacy_job": retired,
+    }
+
+
+def uninstall_job(job: DrainerJob) -> dict[str, Any]:
+    """Remove this repository's drainer job: its definition, the manager's hold
+    on it, and its entry in the discovery record.
+
+    Refused while it is running, for the reason every other transition here is:
+    a manager asked to forget a live job leaves a drainer draining with nothing
+    able to see or stop it. Scoped to one repository throughout — the
+    definition is this job's alone, and the record edit removes one entry —
+    so a second installed repository, the global `ntfy_url`, and the shared
+    script links are all untouched.
+
+    Runtime state, logs, and open incidents are deliberately left behind: they
+    are the record of what this drainer did, and an uninstall is not an
+    acknowledgement.
+    """
+    backend = service_backend()
+    snapshot = status_snapshot(job)
+    if snapshot["state"] in {"running", "starting", "external"}:
+        raise ServiceError(
+            f"Stop the PR drainer before uninstalling its {backend.backend_name()} job."
+        )
+    outcome = backend.uninstall_definition(job.label)
+    record = remove_discovery_record(job.identity)
+    return {
+        "uninstalled": True,
+        "repository": job.identity,
+        "label": job.label,
+        "unloaded": outcome.unloaded,
+        backend.definition_label() + "_removed": outcome.definition_removed,
+        "record": str(record),
     }
 
 
@@ -1530,7 +1636,8 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
         return {"started": False, "message": "PR drainer is already running", **snapshot}
     if snapshot["state"] == "external":
         raise ServiceError(
-            f"A drainer outside launchd is already running as PID {snapshot['drainer_pid']}."
+            f"A drainer outside {snapshot['service_manager']} is already running "
+            f"as PID {snapshot['drainer_pid']}."
         )
     install_job(job)
 
@@ -2211,7 +2318,7 @@ def source_advisory_lines(audit: SourceAudit) -> list[str]:
 
 
 def log_source_advisory(job: DrainerJob) -> None:
-    """Report the audit into the log stream the plist already writes to.
+    """Report the audit into the log stream the job definition already writes to.
 
     Nothing here may raise: this runs ahead of `run_service`'s own refusals, so
     a failure would turn an observation into the outage it exists to explain.
@@ -2225,9 +2332,9 @@ def log_source_advisory(job: DrainerJob) -> None:
 
 def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     """Run the drainer for this job, first proving the job is still the one the
-    LaunchAgent was installed for.
+    service-manager job was installed for.
 
-    `requested_identity` is what the plist recorded at installation. A checkout
+    `requested_identity` is what the definition recorded at installation. A checkout
     that no longer resolves to it means the shared configuration's remote
     changed underneath an installed job, so this exits having drained nothing
     rather than writing another repository's status file and logs. It stays
@@ -2235,7 +2342,7 @@ def run_service(job: DrainerJob, requested_identity: str | None = None) -> int:
     whichever repository the configuration now names.
     """
     # Into the installed job's own log directory, not this run's: that is where
-    # the plist sends stdout and stderr, and where `logs` looks. Resolved up
+    # the definition sends stdout and stderr, and where `logs` looks. Resolved up
     # front because the advisory below precedes both refusals, and a run that
     # refuses is exactly one whose source state is worth having on record.
     installed = requested_job(job.repo_path, requested_identity, job)
@@ -2336,9 +2443,10 @@ def print_value(value: Any, *, as_json: bool) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Control this repository's launchd-managed PR drainer. Each canonical "
-            "GitHub repository has its own job, and a config.toml path installed "
-            "via install_drainer.py --config is forwarded to its drain_prs.py."
+            "Control this repository's service-managed PR drainer — a launchd job on "
+            "macOS, a systemd user unit on Linux. Each canonical GitHub repository "
+            "has its own job, and a config.toml path installed via install_drainer.py "
+            "--config is forwarded to its drain_prs.py."
         )
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -2355,7 +2463,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("install", help="Install or refresh the launchd job.")
+    subparsers.add_parser("install", help="Install or refresh this repository's job.")
+    subparsers.add_parser(
+        "uninstall",
+        help=(
+            "Remove this repository's stopped job and its discovery entry, leaving "
+            "every other repository's install alone."
+        ),
+    )
     subparsers.add_parser("start", help="Start the PR drainer.")
     subparsers.add_parser(
         "stop",
@@ -2392,12 +2507,14 @@ def main() -> int:
         job = resolve_job(repo_path)
         # `run` checks the same assertion inside the runner, which can report a
         # mismatch into the installed job's log rather than only onto a stderr
-        # stream launchd routes by the plist's own paths.
+        # stream the service manager routes by the definition's own paths.
         if args.command == "run":
             return run_service(job, args.repo)
         require_requested_identity(job, args.repo)
         if args.command == "install":
             value = install_job(job)
+        elif args.command == "uninstall":
+            value = uninstall_job(job)
         elif args.command == "start":
             value = start_service(job)
         elif args.command == "stop":
@@ -2429,7 +2546,11 @@ def main() -> int:
             raise ServiceError(f"Unknown command: {args.command}")
         print_value(value, as_json=args.json)
         return 0
-    except (ServiceError, OSError) as exc:
+    # `ServiceManagerError` is the seam's own vocabulary for a fault no injected
+    # runner can carry — a host with no service manager, a value that cannot be
+    # rendered into a definition — and reaches here whenever it was raised past
+    # the point `service_backend` translates the selection itself.
+    except (ServiceError, service_manager.ServiceManagerError, OSError) as exc:
         if args.json:
             print(json.dumps({"error": str(exc)}, indent=2), file=sys.stderr)
         else:

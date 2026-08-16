@@ -209,7 +209,7 @@ binding action = case action of
       "Update GitHub board data and both usage providers"
   ToggleDrainer ->
     KeyBinding action [key 'd'] [BoardScope] (Just "click") "drainer" "start or stop PR drainer"
-      "Start or stop the launchd-managed PR drainer"
+      "Start or stop the service-managed PR drainer"
   MergeDoneCard ->
     KeyBinding action [key 'm'] [BoardScope, DetailsScope] Nothing "merge" "merge the selected approved PR in Done"
       "Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path"

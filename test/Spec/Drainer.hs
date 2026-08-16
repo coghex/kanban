@@ -1,6 +1,6 @@
--- | The launchd-managed pull request drainer: discovering its LaunchAgent,
--- decoding its status, and deciding what a toggle does. The direct
--- single-pull-request merge behind @m@ is the group's other half, in
+-- | The service-managed pull request drainer: discovering its LaunchAgent or
+-- its systemd unit, decoding its status, and deciding what a toggle does. The
+-- direct single-pull-request merge behind @m@ is the group's other half, in
 -- "Spec.Drainer.DirectMerge".
 module Spec.Drainer (spec) where
 
@@ -11,6 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Text (Text)
 import Kanban.Drainer
   ( DrainerActivity (..),
+    DrainerBackend (..),
     DrainerController (..),
     DrainerIncident (..),
     DrainerObservation (..),
@@ -24,11 +25,13 @@ import Kanban.Drainer
     drainerRecordFromBytes,
     drainerRecordPath,
     drainerToggle,
+    hostServiceManager,
     normalizedRepositoryIdentity,
-    resolveDrainerPlist,
+    resolveDrainerDefinition,
     runDrainerCommand,
     statusFromControllerExit,
-    unreadablePlist
+    unitExecStartArguments,
+    unreadableDefinition
   )
 import Kanban.Process (identityForPid, readProcessSnapshot)
 import qualified Spec.Drainer.DirectMerge as DirectMerge
@@ -41,36 +44,76 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-  describe "PR drainer LaunchAgent discovery" $ do
+  describe "PR drainer service-definition discovery" $ do
     let entryFor label plist =
           "{\"launchd_label\":\""
             <> label
             <> "\",\"plist_path\":\""
             <> plist
             <> "\",\"repository\":\"/tmp/example-project\"}"
-        recordFor identity label plist =
+        unitEntryFor unit path =
+          "{\"backend\":\"systemd\",\"systemd_unit\":\""
+            <> unit
+            <> "\",\"unit_path\":\""
+            <> path
+            <> "\",\"repository\":\"/tmp/example-project\"}"
+        documentFor identity body =
           ByteString.pack
             ( "{\"ntfy_url\":\"https://notify.example.test/topic\",\"repositories\":{\""
                 <> identity
                 <> "\":"
-                <> entryFor label plist
+                <> body
                 <> "}}"
             )
+        recordFor identity label plist = documentFor identity (entryFor label plist)
         recordDocument = recordFor "example/project"
-        failureFor = either id (\plist -> "unexpectedly resolved " <> Data.Text.pack plist)
+        unitDocument unit path = documentFor "example/project" (unitEntryFor unit path)
+        failureFor = either id (\resolved -> "unexpectedly resolved " <> Data.Text.pack (show resolved))
 
     it "reads the label, plist path, and repository the installer recorded" $
+      -- The shape every installed macOS drainer already carries, and the one a
+      -- record predating the backend field can only have: no discriminator at
+      -- all, which is exactly what makes it launchd's.
       drainerRecordFromBytes
         "example/project"
         (recordDocument "com.example.drain" "/Users/example/Library/LaunchAgents/com.example.drain.plist")
         `shouldBe` Right
           ( Just
               ( DrainerRecord
+                  DrainerLaunchd
                   "com.example.drain"
                   "/Users/example/Library/LaunchAgents/com.example.drain.plist"
                   "/tmp/example-project"
               )
           )
+
+    it "reads a systemd entry as its own backend, unit, and unit path" $
+      drainerRecordFromBytes
+        "example/project"
+        (unitDocument
+           "com.coghex.drain-prs.example.project.service"
+           "/home/example/.config/systemd/user/com.coghex.drain-prs.example.project.service")
+        `shouldBe` Right
+          ( Just
+              ( DrainerRecord
+                  DrainerSystemd
+                  "com.coghex.drain-prs.example.project.service"
+                  "/home/example/.config/systemd/user/com.coghex.drain-prs.example.project.service"
+                  "/tmp/example-project"
+              )
+          )
+
+    it "reads an explicit launchd discriminator the same way as none at all" $ do
+      -- Both spellings describe one install: a record written before the
+      -- discriminator existed and one written after it must resolve to the
+      -- same job, or upgrading Kanban would strand a live macOS drainer.
+      let explicit =
+            documentFor
+              "example/project"
+              "{\"backend\":\"launchd\",\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/example-project\"}"
+      drainerRecordFromBytes "example/project" explicit
+        `shouldBe` drainerRecordFromBytes "example/project" (recordDocument "com.example.drain" "/tmp/x.plist")
 
     it "selects each installed repository's own record out of the shared document" $ do
       -- The property per-repository jobs rest on: installing a second
@@ -84,9 +127,9 @@ spec = do
                   <> entryFor "com.example.drain.other.thing" "/tmp/b.plist"
                   <> "}}"
               )
-      fmap (fmap (.drainerRecordLabel)) (drainerRecordFromBytes "example/project" document)
+      fmap (fmap (.drainerRecordIdentifier)) (drainerRecordFromBytes "example/project" document)
         `shouldBe` Right (Just "com.example.drain.example.project")
-      fmap (fmap (.drainerRecordPlist)) (drainerRecordFromBytes "other/thing" document)
+      fmap (fmap (.drainerRecordDefinition)) (drainerRecordFromBytes "other/thing" document)
         `shouldBe` Right (Just "/tmp/b.plist")
       -- A repository with no entry is uninstalled, not malformed: it is the
       -- one failure whose repair is installing rather than reinstalling.
@@ -94,8 +137,8 @@ spec = do
 
     it "rejects a record that cannot name the installed job" $ do
       -- Each of these parses as JSON, or as an object, without identifying a
-      -- launchd job — so each has to be an unreadable record rather than a
-      -- lookup that proceeds on a value it cannot use.
+      -- job — so each has to be an unreadable record rather than a lookup that
+      -- proceeds on a value it cannot use.
       let rejects document =
             drainerRecordFromBytes "example/project" document `shouldSatisfy` isLeft
           entry body = ByteString.pack ("{\"repositories\":{\"example/project\":" <> body <> "}}")
@@ -110,6 +153,56 @@ spec = do
       rejects (entry "{\"launchd_label\":\"com.example.drain\",\"plist_path\":[],\"repository\":\"/tmp/r\"}")
       rejects (recordDocument "   " "/tmp/x.plist")
       rejects (recordDocument "com.example.drain" "Library/LaunchAgents/x.plist")
+      -- The systemd half of the same rules, so neither backend's entry is
+      -- held to a weaker standard than the other's.
+      rejects (entry "{\"backend\":\"systemd\",\"unit_path\":\"/tmp/x.service\",\"repository\":\"/tmp/r\"}")
+      rejects (entry "{\"backend\":\"systemd\",\"systemd_unit\":\"x.service\",\"repository\":\"/tmp/r\"}")
+      rejects (unitDocument " " "/tmp/x.service")
+      rejects (unitDocument "x.service" ".config/systemd/user/x.service")
+
+    it "fails closed on an unknown or mixed backend rather than assuming launchd" $ do
+      -- Assuming launchd is the one repair that is worse than refusing: it
+      -- would send `launchctl` at a host that has none, or read a unit file as
+      -- a plist, and report either as the drainer's state. An entry that
+      -- cannot say unambiguously which job it names sends the user back to the
+      -- installer instead.
+      let entry body = ByteString.pack ("{\"repositories\":{\"example/project\":" <> body <> "}}")
+          message document = either id (const "unexpectedly accepted") (drainerRecordFromBytes "example/project" document)
+          unknown =
+            entry
+              "{\"backend\":\"upstart\",\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+          launchdWithUnit =
+            entry
+              "{\"backend\":\"launchd\",\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"unit_path\":\"/tmp/x.service\",\"repository\":\"/tmp/r\"}"
+          undeclaredWithUnit =
+            entry
+              "{\"launchd_label\":\"com.example.drain\",\"plist_path\":\"/tmp/x.plist\",\
+              \\"systemd_unit\":\"x.service\",\"repository\":\"/tmp/r\"}"
+      message unknown `shouldMention` "unknown service-manager backend"
+      message unknown `shouldMention` "upstart"
+      message launchdWithUnit `shouldMention` "unit_path"
+      message undeclaredWithUnit `shouldMention` "systemd"
+
+    it "tells an absent backend field apart from one explicitly set to null" $ do
+      -- Only *absent* is the legacy shape. A null was written by something
+      -- that knew the field existed and still named no manager, so reading it
+      -- as launchd would resolve a record nobody can vouch for — and the two
+      -- are the same value to a decoder that asks with `.:?`.
+      let entry body = ByteString.pack ("{\"repositories\":{\"example/project\":" <> body <> "}}")
+          nulled =
+            entry
+              "{\"backend\":null,\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+          absent =
+            entry
+              "{\"launchd_label\":\"com.example.drain\",\
+              \\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/r\"}"
+      fmap (fmap (.drainerRecordBackend)) (drainerRecordFromBytes "example/project" absent)
+        `shouldBe` Right (Just DrainerLaunchd)
+      either id (const "unexpectedly accepted") (drainerRecordFromBytes "example/project" nulled)
+        `shouldMention` "backend field is null"
 
     it "selects the record by a case-folded identity, so one repository has one drainer" $ do
       -- GitHub owner and repository names are case-insensitive, and the
@@ -124,14 +217,27 @@ spec = do
       Data.Text.pack recordPath
         `shouldMention` "/Library/Application Support/kanban/pr-drainer/config.json"
 
-    it "names macOS rather than a missing /usr/bin/plutil on another host" $ do
+    it "maps each supported host to the manager that could have installed there" $ do
+      -- The only platform question this side asks, and it is about capability:
+      -- macOS could have a LaunchAgent and Linux a user unit, and every other
+      -- host has no backend that could have written a record at all.
+      hostServiceManager "darwin" `shouldBe` Just DrainerLaunchd
+      hostServiceManager "linux" `shouldBe` Just DrainerSystemd
+      hostServiceManager "mingw32" `shouldBe` Nothing
+
+    it "names the absent service manager rather than macOS on an unsupported host" $ do
+      -- The refusal issue #329 replaced said "needs macOS to run", which was
+      -- false the moment a systemd install existed. What is true on every
+      -- unsupported host is that neither manager is there.
       outcome <-
-        resolveDrainerPlist "linux" "example/project" "/nonexistent/pr-drainer/config.json"
-      failureFor outcome `shouldMention` "macOS"
+        resolveDrainerDefinition "mingw32" "example/project" "/nonexistent/pr-drainer/config.json"
+      failureFor outcome `shouldMention` "no supported service manager"
+      failureFor outcome `shouldMention` "systemd"
+      failureFor outcome `shouldNotMention` "is a launchd job"
 
     it "says the drainer is not installed when no record was written" $
       withTemporaryCacheRoot $ \root -> do
-        outcome <- resolveDrainerPlist "darwin" "example/project" (root </> "config.json")
+        outcome <- resolveDrainerDefinition "darwin" "example/project" (root </> "config.json")
         failureFor outcome `shouldMention` "not installed"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
@@ -144,7 +250,7 @@ spec = do
         ByteString.writeFile
           recordPath
           (recordFor "other/thing" "com.example.drain" "/tmp/b.plist")
-        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        outcome <- resolveDrainerDefinition "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "not installed for example/project"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
@@ -152,7 +258,7 @@ spec = do
       withTemporaryCacheRoot $ \root -> do
         let recordPath = root </> "config.json"
         ByteString.writeFile recordPath (recordDocument "" "/tmp/x.plist")
-        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        outcome <- resolveDrainerDefinition "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "unreadable"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
 
@@ -166,7 +272,7 @@ spec = do
         ByteString.writeFile
           recordPath
           "{\"ntfy_url\":\"https://notify.example.test/topic\",\"launchd_label\":\"com.coghex.drain-prs\",\"plist_path\":\"/tmp/x.plist\",\"repository\":\"/tmp/example-project\"}"
-        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        outcome <- resolveDrainerDefinition "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "not installed for example/project"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
         failureFor outcome `shouldNotMention` "Error in $"
@@ -177,44 +283,102 @@ spec = do
         ByteString.writeFile
           recordPath
           (ByteString.pack "{\"repositories\":{\"example/project\":{\"plist_path\":\"/tmp/x.plist\"}}}")
-        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
+        outcome <- resolveDrainerDefinition "darwin" "example/project" recordPath
         failureFor outcome `shouldMention` "unreadable"
         failureFor outcome `shouldMention` "launchd_label"
         failureFor outcome `shouldNotMention` "Error in $"
 
-    it "reports a stale install when the recorded plist is gone" $
+    it "refuses a record describing the manager this host does not have" $
+      withTemporaryCacheRoot $ \root -> do
+        -- A discovery record that travelled between hosts, which is the only
+        -- way this shape arises. Reading it anyway would parse a unit file as
+        -- a plist and report the result as the drainer's state.
+        let recordPath = root </> "config.json"
+            unit = root </> "com.example.drain.service"
+        ByteString.writeFile unit "[Service]\nExecStart=\"/usr/bin/python3\" \"/tmp/c.py\"\n"
+        ByteString.writeFile recordPath (unitDocument "com.example.drain.service" unit)
+        outcome <- resolveDrainerDefinition "darwin" "example/project" recordPath
+        failureFor outcome `shouldMention` "systemd job"
+        failureFor outcome `shouldMention` "launchd host"
+        failureFor outcome `shouldMention` "tools/install_drainer.py"
+
+    it "reports a stale install when the recorded definition is gone" $
       withTemporaryCacheRoot $ \root -> do
         let recordPath = root </> "config.json"
             plist = root </> "com.example.drain.plist"
+            unit = root </> "com.example.drain.service"
         ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
-        outcome <- resolveDrainerPlist "darwin" "example/project" recordPath
-        failureFor outcome `shouldMention` "LaunchAgent is missing"
-        failureFor outcome `shouldMention` "tools/install_drainer.py"
+        launchd <- resolveDrainerDefinition "darwin" "example/project" recordPath
+        failureFor launchd `shouldMention` "LaunchAgent is missing"
+        failureFor launchd `shouldMention` "tools/install_drainer.py"
+        -- The same branch on the other host names the artifact that host
+        -- actually has, rather than sending a Linux user to look for a
+        -- LaunchAgent.
+        ByteString.writeFile recordPath (unitDocument "com.example.drain.service" unit)
+        systemd <- resolveDrainerDefinition "linux" "example/project" recordPath
+        failureFor systemd `shouldMention` "systemd unit is missing"
+        failureFor systemd `shouldNotMention` "LaunchAgent"
 
-    it "keeps a plist that will not parse distinct, and still names the repair" $ do
-      -- The one failure the record cannot diagnose: it located the plist
-      -- correctly and the file is there. plutil's own complaint is carried
-      -- through, but re-running the installer rewrites the plist, so this
+    it "keeps a definition that will not parse distinct, and still names the repair" $ do
+      -- The one failure the record cannot diagnose: it located the definition
+      -- correctly and the file is there. The reader's own complaint is carried
+      -- through, but re-running the installer rewrites that file, so this
       -- branch is no less actionable than the others.
       let message =
-            unreadablePlist
+            unreadableDefinition
+              DrainerLaunchd
               "/Users/example/Library/LaunchAgents/com.example.drain.plist"
               "Property List error: Unexpected character b at line 1"
       message `shouldMention` "com.example.drain.plist"
       message `shouldMention` "Unexpected character"
       message `shouldMention` "tools/install_drainer.py"
       message `shouldNotMention` "install record"
+      unreadableDefinition DrainerSystemd "/tmp/x.service" "it declares no ExecStart"
+        `shouldMention` "systemd unit"
 
-    it "resolves the plist the record names, wherever the installer put it" $
+    it "resolves the definition the record names, wherever the installer put it" $
       withTemporaryCacheRoot $ \root -> do
         let recordPath = root </> "config.json"
             plist = root </> "com.example.drain.plist"
+            unit = root </> "com.example.drain.service"
         ByteString.writeFile plist "<plist/>"
         ByteString.writeFile recordPath (recordDocument "com.example.drain" plist)
-        resolveDrainerPlist "darwin" "example/project" recordPath `shouldReturn` Right plist
+        resolveDrainerDefinition "darwin" "example/project" recordPath
+          `shouldReturn` Right (DrainerLaunchd, plist)
+        ByteString.writeFile unit "[Service]\nExecStart=\"/usr/bin/python3\"\n"
+        ByteString.writeFile recordPath (unitDocument "com.example.drain.service" unit)
+        resolveDrainerDefinition "linux" "example/project" recordPath
+          `shouldReturn` Right (DrainerSystemd, unit)
+
+  describe "the command a systemd unit names" $ do
+    -- The systemd counterpart of reading ProgramArguments out of a plist. The
+    -- unit is authoritative for what would actually run, so this has to read
+    -- systemd's own quoting rather than a convenient subset of it.
+    it "splits a quoted ExecStart into the exact argument vector" $
+      unitExecStartArguments
+        "[Service]\nType=exec\nExecStart=\"/usr/bin/python3\" \"/install dir/c.py\" \"--repo\" \"a/b\" \"run\"\nRestart=no\n"
+        `shouldBe` Right ["/usr/bin/python3", "/install dir/c.py", "--repo", "a/b", "run"]
+
+    it "reads unquoted words, escapes, and systemd's %% the way systemd does" $ do
+      -- A hand-edited unit is as authoritative as a written one, so the
+      -- ordinary unquoted spelling has to work; `%%` is systemd's own escape
+      -- for a literal per cent, and a reader that kept it doubled would report
+      -- a path that does not exist.
+      unitExecStartArguments "[Service]\nExecStart=/usr/bin/python3 /tmp/c.py run\n"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/c.py", "run"]
+      unitExecStartArguments "[Service]\nExecStart=\"/tmp/100%%/c.py\"\n"
+        `shouldBe` Right ["/tmp/100%/c.py"]
+      unitExecStartArguments "[Service]\nExecStart=\"/tmp/say \\\"hi\\\"/c.py\"\n"
+        `shouldBe` Right ["/tmp/say \"hi\"/c.py"]
+
+    it "refuses a unit that names no command rather than reporting an empty one" $ do
+      unitExecStartArguments "[Service]\nType=exec\nRestart=no\n"
+        `shouldSatisfy` isLeft
+      unitExecStartArguments "[Service]\nExecStart=\nRestart=no\n"
+        `shouldSatisfy` isLeft
 
   describe "PR drainer status decoding" $ do
-    it "replaces the LaunchAgent's managed repository with the current one" $ do
+    it "replaces the definition's managed repository with the current one" $ do
       let repository = Repository "/tmp/current-project" "example" "project"
           expected =
             Right
@@ -226,12 +390,15 @@ spec = do
                     "--repo",
                     "example/project"
                   ]
+                  DrainerLaunchd
               )
       controllerFromProgramArguments
+        DrainerLaunchd
         repository
         ["/usr/bin/python3", "/tmp/drain_prs_service.py", "run"]
         `shouldBe` expected
       controllerFromProgramArguments
+        DrainerLaunchd
         repository
         ["/usr/bin/python3", "/tmp/drain_prs_service.py", "--path", "/tmp/previous-project", "run"]
         `shouldBe` expected
@@ -239,6 +406,7 @@ spec = do
       -- that already carries one cannot make the command name two checkouts
       -- or two repositories.
       controllerFromProgramArguments
+        DrainerLaunchd
         repository
         ["/usr/bin/python3", "/tmp/drain_prs_service.py", "--repo", "other/thing", "run"]
         `shouldBe` expected
@@ -252,6 +420,7 @@ spec = do
       let repository = Repository "/tmp/current-project" "Other" "Thing"
       fmap (.controllerArguments)
         ( controllerFromProgramArguments
+            DrainerLaunchd
             repository
             ["/usr/bin/python3", "/tmp/drain_prs_service.py", "run"]
         )
@@ -651,7 +820,7 @@ spec = do
       decodedStatus ("{\"state\":\"starting\"" <> owing [12] <> "}")
         `shouldBe` Right (DrainerStatus DrainerStarting "starting… · 1 PR owes cleanup" DrainerServiceStarting Nothing)
       decodedStatus ("{\"state\":\"external\"" <> owing [12] <> "}")
-        `shouldBe` Right (DrainerStatus DrainerWarning "on outside launchd · 1 PR owes cleanup" DrainerServiceExternal Nothing)
+        `shouldBe` Right (DrainerStatus DrainerWarning "on outside launchd · 1 PR owes cleanup" (DrainerServiceExternal "launchd") Nothing)
       decodedStatus ("{\"state\":\"mid_operation\",\"operation\":\"rebase\"" <> owing [12] <> "}")
         `shouldBe` Right (DrainerStatus DrainerError "rebase in progress; finish or abort it · 1 PR owes cleanup" DrainerServiceBlocked Nothing)
 

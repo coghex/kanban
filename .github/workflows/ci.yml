@@ -55,3 +55,56 @@ jobs:
 
       - name: PR drainer tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
+
+  # The evidence for the drainer's Linux support, per
+  # docs/linux_portability_design.md decision D-1: no Linux host is known to
+  # exist for this project, so the claim is container-verified against a real
+  # systemd user session rather than asserted from generated files. The whole
+  # lifecycle runs — install, start (which is what exercises the backend's
+  # kick), status, stop, uninstall — and each step is checked against durable
+  # state in both the user manager and the discovery record. Only `gh` and the
+  # provider executables are faked.
+  systemd-drainer-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the systemd image
+        run: docker build --file .github/systemd-lifecycle/Dockerfile --tag kanban-systemd-lifecycle .
+
+      - name: Boot systemd
+        # systemd runs as PID 1 in the container, which is what gives it a
+        # user manager to start; the cgroup mount and `--cgroupns=host` are
+        # what let it manage one on a cgroup v2 runner.
+        run: |
+          docker run --detach --name kanban-systemd \
+            --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            kanban-systemd-lifecycle
+
+      - name: Wait for the user manager
+        run: |
+          for _ in $(seq 60); do
+            if docker exec kanban-systemd systemctl is-active --quiet user@1001.service; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "user@1001.service never became active" >&2
+          docker exec kanban-systemd systemctl status user@1001.service --no-pager || true
+          exit 1
+
+      - name: Run the drainer lifecycle
+        # `systemctl start` on a oneshot blocks until the unit finishes and
+        # exits nonzero if it failed, so the unit's own verdict is this step's.
+        run: docker exec kanban-systemd systemctl start lifecycle-check.service
+
+      - name: Lifecycle output
+        if: always()
+        run: docker exec kanban-systemd journalctl --unit=lifecycle-check.service --no-pager --output=cat || true
+
+      - name: Stop systemd
+        if: always()
+        run: docker rm --force kanban-systemd || true

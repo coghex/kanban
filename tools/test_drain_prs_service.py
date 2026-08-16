@@ -23,6 +23,23 @@ import drain_prs_service
 import service_manager
 
 
+
+def setUpModule():
+    # The drainer's job identifiers come from whichever service manager the
+    # host has, and nothing in this module is about that choice: pinning it
+    # keeps every case here answering the same on a macOS laptop, a Linux CI
+    # runner, and a container with no user session. `tools/test_service_manager.py`
+    # is where the selection itself is settled.
+    global _PINNED_BACKEND
+    _PINNED_BACKEND = mock.patch.object(
+        service_manager, "detect_service_manager", return_value=service_manager.LAUNCHD
+    )
+    _PINNED_BACKEND.start()
+
+
+def tearDownModule():
+    _PINNED_BACKEND.stop()
+
 def _completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
@@ -61,6 +78,12 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
     def names(self):
         return [call[0] for call in self.calls]
 
+    def backend_name(self):
+        return "fake-manager"
+
+    def definition_label(self):
+        return "definition"
+
     def service_identifier(self, slug):
         return f"fake-service.{slug}"
 
@@ -90,9 +113,28 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
         self.written.append(definition)
         return path
 
+    def record_entry(self, identifier, definition_path):
+        return {
+            "backend": self.backend_name(),
+            "fake_identifier": identifier,
+            "fake_definition_path": str(definition_path),
+        }
+
     def load_definition(self, identifier):
         self._record("load_definition", identifier)
         self.loaded = True
+
+    def uninstall_definition(self, identifier):
+        self._record("uninstall_definition", identifier)
+        unloaded = self.loaded
+        self.loaded = False
+        path = self.definition_path(identifier)
+        removed = path.exists()
+        if removed:
+            path.unlink()
+        return service_manager.UninstallOutcome(
+            unloaded=unloaded, definition_removed=removed
+        )
 
     def is_loaded(self, identifier):
         return self.loaded
@@ -361,7 +403,7 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
         second = drain_prs_service.job_for_identity(self.root / "b", "acme/gadgets")
         for field in (
             "label",
-            "plist_path",
+            "definition_path",
             "runtime_dir",
             "incident_dir",
             "status_path",
@@ -391,11 +433,11 @@ class PerRepositoryPathTests(RedirectedControllerTestCase):
         job = drain_prs_service.incident_job(checkout)
         self.assertEqual(job.incident_dir, self.runtime_root / "incidents")
 
-    def test_the_plist_path_and_launchd_target_are_derived_from_the_label(self):
+    def test_the_definition_path_and_launchd_target_are_derived_from_the_label(self):
         # One derivation moves the plist's name, the launchctl target and —
         # through write_discovery_record — Kanban's discovery together.
         job = drain_prs_service.job_for_identity(self.root / "a", "acme/widgets")
-        self.assertEqual(job.plist_path.name, f"{job.label}.plist")
+        self.assertEqual(job.definition_path.name, f"{job.label}.plist")
         self.assertTrue(
             service_manager.launch_target_for(job.label).endswith(f"/{job.label}"),
             service_manager.launch_target_for(job.label),
@@ -578,7 +620,7 @@ class BackendDelegationTests(RedirectedControllerTestCase):
     def test_the_job_is_named_and_placed_by_the_selected_backend(self):
         self.assertEqual(self.job.label, "fake-service.acme.widgets")
         self.assertEqual(
-            self.job.plist_path, self.backend.definition_path(self.job.label)
+            self.job.definition_path, self.backend.definition_path(self.job.label)
         )
 
     def test_the_slug_falls_back_when_the_backend_refuses_the_identifier(self):
@@ -691,6 +733,24 @@ class BackendDelegationTests(RedirectedControllerTestCase):
         self.assertTrue(drain_prs_service.status_snapshot(self.job)["launchd_loaded"])
         self.backend.loaded = False
         self.assertFalse(drain_prs_service.status_snapshot(self.job)["launchd_loaded"])
+
+    def test_status_names_the_manager_that_answered_beside_that_flag(self):
+        # `launchd_loaded` keeps its name because it is the key Kanban has
+        # always read, and renaming it would break every released dashboard
+        # for no gain. Which manager answered is a new field beside it, so a
+        # reader can say "outside systemd" where "outside launchd" is false.
+        self.assertEqual(
+            drain_prs_service.status_snapshot(self.job)["service_manager"],
+            self.backend.backend_name(),
+        )
+
+    def test_an_uninstall_goes_through_the_backend_like_every_other_transition(self):
+        self.backend.loaded = True
+        drain_prs_service.install_job(self.job)
+        self.backend.calls.clear()
+        drain_prs_service.uninstall_job(self.job)
+        self.assertEqual(self.backend.names(), ["uninstall_definition"])
+        self.assertEqual(self.service_manager_commands(), [])
 
 
 class BackendFailureVocabularyTests(RedirectedControllerTestCase):
@@ -929,7 +989,7 @@ class InstalledJobIdentityTests(RedirectedControllerTestCase):
 
     def test_the_installed_plist_names_the_identity_its_label_came_from(self):
         self.install(self.job)
-        arguments = plistlib.loads(self.job.plist_path.read_bytes())["ProgramArguments"]
+        arguments = plistlib.loads(self.job.definition_path.read_bytes())["ProgramArguments"]
         self.assertEqual(arguments[-3:], ["--repo", "acme/widgets", "run"])
         self.assertIn(drain_prs_service.repository_slug("acme/widgets"), self.job.label)
 
@@ -980,9 +1040,9 @@ class InstalledJobIdentityTests(RedirectedControllerTestCase):
         with self._config_naming("upstream"):
             moved = drain_prs_service.resolve_job(self.repo)
             self.install(moved)
-            arguments = plistlib.loads(moved.plist_path.read_bytes())["ProgramArguments"]
+            arguments = plistlib.loads(moved.definition_path.read_bytes())["ProgramArguments"]
         self.assertEqual(arguments[-3:], ["--repo", "upstream-owner/widgets", "run"])
-        self.assertNotEqual(moved.plist_path, self.job.plist_path)
+        self.assertNotEqual(moved.definition_path, self.job.definition_path)
         self.assertEqual(
             set(self.read_record()["repositories"]),
             {"acme/widgets", "upstream-owner/widgets"},
@@ -1007,9 +1067,42 @@ class DiscoveryRecordTests(RedirectedControllerTestCase):
         result = self.install(self.widgets_job)
         entry = self.read_record()["repositories"]["acme/widgets"]
         self.assertEqual(entry["launchd_label"], self.widgets_job.label)
-        self.assertEqual(entry["plist_path"], str(self.widgets_job.plist_path))
+        self.assertEqual(entry["plist_path"], str(self.widgets_job.definition_path))
         self.assertEqual(entry["repository"], str(self.widgets))
         self.assertEqual(result["record"], str(self.record))
+
+    def test_a_launchd_entry_names_its_backend_beside_the_keys_it_always_had(self):
+        # The compatibility requirement in both directions. `launchd_label`
+        # and `plist_path` stay exactly where every installed macOS drainer
+        # and every released Kanban expects them, so nothing has to be
+        # reinstalled; `backend` joins them so a reader never has to infer
+        # launchd from the absence of anything.
+        self.install(self.widgets_job)
+        entry = self.read_record()["repositories"]["acme/widgets"]
+        self.assertEqual(entry["backend"], "launchd")
+        self.assertNotIn("systemd_unit", entry)
+        self.assertNotIn("unit_path", entry)
+
+    def test_a_systemd_install_records_its_unit_rather_than_a_plist(self):
+        # The same install path through the other backend. Nothing about the
+        # controller changes: it asks the backend how its job identifies
+        # itself and files the answer under the identity Kanban selects by.
+        units = self.root / "systemd-user"
+        with mock.patch.object(service_manager, "SYSTEMD_USER_DIR", units), \
+            mock.patch.object(
+                service_manager,
+                "detect_service_manager",
+                return_value=service_manager.SYSTEMD,
+            ):
+            job = drain_prs_service.job_for_identity(self.widgets, "acme/widgets")
+            drain_prs_service.write_discovery_record(job)
+        entry = self.read_record()["repositories"]["acme/widgets"]
+        self.assertEqual(entry["backend"], "systemd")
+        self.assertEqual(entry["systemd_unit"], job.label)
+        self.assertTrue(entry["systemd_unit"].endswith(".service"))
+        self.assertEqual(entry["unit_path"], str(units / job.label))
+        self.assertNotIn("launchd_label", entry)
+        self.assertNotIn("plist_path", entry)
 
     def test_the_record_is_written_from_the_same_values_launchd_is_given(self):
         self.install(self.widgets_job)
@@ -1067,6 +1160,116 @@ class DiscoveryRecordTests(RedirectedControllerTestCase):
         self.install(self.widgets_job)
         self.assertEqual(self.read_record(), first)
 
+    def test_reinstalling_under_the_other_manager_replaces_the_first_ones_keys(self):
+        # The one way the mixed shape Kanban fails closed on can be reached
+        # without hand-editing: the entry is merged, so a systemd install over
+        # a launchd entry would leave `launchd_label` and `plist_path` beside
+        # `systemd_unit` and `unit_path` — and the reinstall would be the thing
+        # that made this repository undiscoverable. Everything the
+        # service manager does not own survives the replacement.
+        self.install(self.widgets_job)
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"config_path": "/home/user/widgets.toml"}
+        )
+        self.install(self.gadgets_job)
+        gadgets_before = self.read_record()["repositories"]["acme/gadgets"]
+
+        units = self.root / "systemd-user"
+        with mock.patch.object(service_manager, "SYSTEMD_USER_DIR", units), \
+            mock.patch.object(
+                service_manager,
+                "detect_service_manager",
+                return_value=service_manager.SYSTEMD,
+            ):
+            job = drain_prs_service.job_for_identity(self.widgets, "acme/widgets")
+            drain_prs_service.write_discovery_record(job)
+
+        entry = self.read_record()["repositories"]["acme/widgets"]
+        self.assertEqual(entry["backend"], "systemd")
+        self.assertEqual(entry["systemd_unit"], job.label)
+        self.assertNotIn("launchd_label", entry)
+        self.assertNotIn("plist_path", entry)
+        self.assertEqual(entry["config_path"], "/home/user/widgets.toml")
+        self.assertEqual(entry["repository"], str(self.widgets))
+        self.assertEqual(self.read_record()["repositories"]["acme/gadgets"], gadgets_before)
+
+    def test_reinstalling_under_the_same_manager_still_only_refreshes(self):
+        # The ordinary case the replacement must not disturb: re-running the
+        # installer repairs the record in place, and a key another writer
+        # persisted has to survive that.
+        self.install(self.widgets_job)
+        drain_prs_service.merge_repository_record(
+            "acme/widgets", {"config_path": "/home/user/widgets.toml"}
+        )
+        before = self.read_record()
+        self.install(self.widgets_job)
+        self.assertEqual(self.read_record(), before)
+
+    def test_uninstalling_removes_one_entry_and_leaves_everything_else(self):
+        # The repository-scoped removal this seam previously had no ordinary
+        # path for. Scoped throughout: one job's definition, one entry — the
+        # sibling repository stays installed and discoverable, and the global
+        # `ntfy_url` beside them is not the uninstall's to touch.
+        self.record.parent.mkdir(parents=True, exist_ok=True)
+        self.record.write_text(
+            json.dumps({"ntfy_url": "https://notify.example.test/topic"}),
+            encoding="utf-8",
+        )
+        self.install(self.widgets_job)
+        self.install(self.gadgets_job)
+        gadgets_before = self.read_record()["repositories"]["acme/gadgets"]
+
+        with mock.patch.object(
+            drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+        ):
+            result = drain_prs_service.uninstall_job(self.widgets_job)
+
+        record = self.read_record()
+        self.assertEqual(set(record["repositories"]), {"acme/gadgets"})
+        self.assertEqual(record["repositories"]["acme/gadgets"], gadgets_before)
+        self.assertEqual(record["ntfy_url"], "https://notify.example.test/topic")
+        self.assertTrue(result["uninstalled"])
+        self.assertTrue(result["plist_removed"])
+        self.assertFalse(self.widgets_job.definition_path.exists())
+        self.assertTrue(self.gadgets_job.definition_path.is_file())
+
+    def test_uninstalling_a_repository_that_was_never_installed_is_not_a_failure(self):
+        # Repairing a half-finished removal reaches here as often as
+        # performing a whole one, so an absent definition and an absent entry
+        # are both ordinary answers rather than errors.
+        with mock.patch.object(
+            drain_prs_service, "status_snapshot", return_value={"state": "stopped"}
+        ):
+            result = drain_prs_service.uninstall_job(self.widgets_job)
+        self.assertTrue(result["uninstalled"])
+        self.assertFalse(result["plist_removed"])
+        self.assertEqual(self.read_record().get("repositories", {}), {})
+
+    def test_a_running_drainer_is_never_uninstalled_out_from_under_itself(self):
+        # A manager asked to forget a live job leaves a drainer draining with
+        # nothing able to see or stop it, so every live state refuses and the
+        # record and definition both survive.
+        self.install(self.widgets_job)
+        for state in ("running", "starting", "external"):
+            with self.subTest(state=state):
+                with mock.patch.object(
+                    drain_prs_service, "status_snapshot", return_value={"state": state}
+                ):
+                    with self.assertRaises(drain_prs_service.ServiceError) as raised:
+                        drain_prs_service.uninstall_job(self.widgets_job)
+                self.assertIn("Stop the PR drainer", str(raised.exception))
+                self.assertIn("launchd job", str(raised.exception))
+                self.assertIn(
+                    "acme/widgets", set(self.read_record()["repositories"])
+                )
+                self.assertTrue(self.widgets_job.definition_path.is_file())
+
+    def test_removing_an_entry_preserves_a_document_it_is_not_in(self):
+        self.install(self.gadgets_job)
+        before = self.read_record()
+        drain_prs_service.remove_discovery_record("acme/widgets")
+        self.assertEqual(self.read_record(), before)
+
     def test_recording_preserves_the_installer_persisted_keys(self):
         self.record.parent.mkdir(parents=True)
         self.record.write_text(
@@ -1078,7 +1281,7 @@ class DiscoveryRecordTests(RedirectedControllerTestCase):
         self.assertEqual(record["ntfy_url"], "https://notify.example.test/topic")
         self.assertEqual(
             record["repositories"]["acme/widgets"]["plist_path"],
-            str(self.widgets_job.plist_path),
+            str(self.widgets_job.definition_path),
         )
 
     def test_the_record_is_private_and_never_a_symlink_target(self):
@@ -1281,10 +1484,10 @@ class IndependentDrainerTests(RedirectedControllerTestCase):
     def test_both_install_and_each_names_only_its_own_repository(self):
         self.install(self.widgets_job)
         self.install(self.gadgets_job)
-        self.assertTrue(self.widgets_job.plist_path.is_file())
-        self.assertTrue(self.gadgets_job.plist_path.is_file())
-        widgets_plist = plistlib.loads(self.widgets_job.plist_path.read_bytes())
-        gadgets_plist = plistlib.loads(self.gadgets_job.plist_path.read_bytes())
+        self.assertTrue(self.widgets_job.definition_path.is_file())
+        self.assertTrue(self.gadgets_job.definition_path.is_file())
+        widgets_plist = plistlib.loads(self.widgets_job.definition_path.read_bytes())
+        gadgets_plist = plistlib.loads(self.gadgets_job.definition_path.read_bytes())
         self.assertEqual(widgets_plist["WorkingDirectory"], str(self.widgets))
         self.assertEqual(gadgets_plist["WorkingDirectory"], str(self.gadgets))
         self.assertIn(str(self.widgets), widgets_plist["ProgramArguments"])
@@ -1432,7 +1635,7 @@ class SameRepositoryExclusionTests(RedirectedControllerTestCase):
         with self.assertRaises(drain_prs_service.ServiceError) as raised:
             drain_prs_service.install_job(self.second_job)
         self.assertIn("acme/widgets", str(raised.exception))
-        self.assertFalse(self.second_job.plist_path.exists())
+        self.assertFalse(self.second_job.definition_path.exists())
 
     def test_an_incident_raised_from_one_clone_is_listed_from_the_other(self):
         # Only running is exclusive per identity; querying is not, so an
@@ -1504,7 +1707,7 @@ class LegacyJobMigrationTests(RedirectedControllerTestCase):
                 "launchctl",
                 "bootstrap",
                 service_manager.launch_domain(),
-                str(self.widgets_job.plist_path),
+                str(self.widgets_job.definition_path),
             ]
         )
         self.assertLess(booted_out, bootstrapped)

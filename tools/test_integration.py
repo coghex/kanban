@@ -19,6 +19,7 @@ from unittest import mock
 import drain_prs
 import drain_prs_service
 import fake_cli
+import service_manager
 
 
 # The paginated comment feed drain_prs reads for pr-review markers, for the
@@ -47,6 +48,23 @@ def git_ref_exists(repo_dir, ref):
         capture_output=True,
     )
     return proc.returncode == 0
+
+
+def setUpModule():
+    # The drainer's job identifiers come from whichever service manager the
+    # host has, and these cases are not about that choice: pinning it keeps
+    # them answering the same on a macOS laptop, a Linux CI runner, and a
+    # container with no user session. `tools/test_service_manager.py` is where
+    # the selection itself is settled.
+    global _PINNED_BACKEND
+    _PINNED_BACKEND = mock.patch.object(
+        service_manager, "detect_service_manager", return_value=service_manager.LAUNCHD
+    )
+    _PINNED_BACKEND.start()
+
+
+def tearDownModule():
+    _PINNED_BACKEND.stop()
 
 
 class ProcessPrFixture(unittest.TestCase):

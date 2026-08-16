@@ -101,6 +101,18 @@ class InstallerFixture(unittest.TestCase):
         )
         patched.start()
         self.addCleanup(patched.stop)
+        # And the backend selection is pinned rather than probed, so these
+        # cases answer the same on a macOS laptop and a Linux CI runner. Which
+        # manager a host has is settled by `tools/test_service_manager.py`;
+        # what is under test here is the installer's own behavior once one has
+        # been selected.
+        patched = mock.patch.object(
+            install_drainer.service_manager,
+            "detect_service_manager",
+            return_value=install_drainer.service_manager.LAUNCHD,
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
 
     def make_checkout(self, name, remote_url):
         """A real checkout with the drainer files and a GitHub remote. No
@@ -403,15 +415,15 @@ class InstallerPolicyTests(InstallerFixture):
 class InstallerBackendTests(InstallerFixture):
     """The installer reaches the service manager only through the backend.
 
-    Its own responsibilities — the macOS refusal, symlink safety, the shared
-    document, the identity assertion — stay here; deciding whether a job is
-    already running is the backend's, and is answered without this process
-    spawning anything.
+    Its own responsibilities — symlink safety, the shared document, the
+    identity assertion — stay here; deciding whether a job is already running
+    is the backend's, and is answered without this process spawning anything.
+    Whether this host has a service manager at all is the backend selection's,
+    which is the installer's only platform refusal.
     """
 
     def dry_run(self, backend):
         with (
-            mock.patch.object(install_drainer.sys, "platform", "darwin"),
             mock.patch.object(
                 install_drainer, "service_backend", return_value=backend
             ),
@@ -442,20 +454,33 @@ class InstallerBackendTests(InstallerFixture):
             self.dry_run(backend)
         self.assertIn("Refusing to install", str(raised.exception))
 
-    def test_a_non_macos_host_is_still_refused_before_anything_is_probed(self):
+    def test_a_linux_host_with_a_user_session_installs_like_any_other(self):
+        # The refusal issue #329 removed. `sys.platform` decides nothing here
+        # any more: a host with a usable service manager installs, and the
+        # only platform question left is whether it has one.
         backend = mock.Mock()
-        with (
-            mock.patch.object(install_drainer.sys, "platform", "linux"),
-            mock.patch.object(
-                install_drainer, "service_backend", return_value=backend
-            ),
+        backend.is_running.return_value = False
+        backend.definition_label.return_value = "unit"
+        with mock.patch.object(install_drainer.sys, "platform", "linux"):
+            result = self.dry_run(backend)
+        self.assertTrue(result["dry_run"])
+        self.assertIn("unit", result)
+        self.assertNotIn("plist", result)
+
+    def test_a_host_with_no_service_manager_is_refused_before_anything_is_written(self):
+        # The one platform refusal that remains, raised by the selection
+        # itself and before any link is created: an installation that could
+        # never be completed or controlled must not leave half of itself
+        # behind.
+        with mock.patch.object(
+            install_drainer.service_manager, "detect_service_manager", return_value=None
         ):
             with self.assertRaises(install_drainer.InstallError) as raised:
                 install_drainer.install(
-                    self.repo, self.install_dir, ntfy_url=None, dry_run=True
+                    self.repo, self.install_dir, ntfy_url=None, dry_run=False
                 )
-        self.assertIn("macOS", str(raised.exception))
-        backend.is_running.assert_not_called()
+        self.assertIn("No supported service manager found", str(raised.exception))
+        self.assertNotIn("requires macOS", str(raised.exception))
         self.assertFalse(self.install_dir.exists())
 
     def test_every_module_the_installed_controller_imports_is_linked(self):
@@ -494,8 +519,31 @@ class InstallerFailureVocabularyTests(unittest.TestCase):
     site that reports `{"error": ...}`.
     """
 
+    def setUp(self):
+        # Pinned, so that what is under test is the translation rather than
+        # the host: an unpinned selection on a runner with no user session
+        # would raise before any backend command was reached, and this group
+        # would pass without exercising the thing it names.
+        patched = mock.patch.object(
+            install_drainer.service_manager,
+            "detect_service_manager",
+            return_value=install_drainer.service_manager.LAUNCHD,
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def completed(self, returncode=0, stdout="", stderr=""):
         return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def test_a_host_with_no_service_manager_is_refused_in_that_vocabulary_too(self):
+        # The selection's own refusal crosses the same seam as a command
+        # failure, so the caller that reports `{"error": ...}` never sees a
+        # third exception type.
+        with mock.patch.object(
+            install_drainer.service_manager, "detect_service_manager", return_value=None
+        ):
+            with self.assertRaises(install_drainer.InstallError):
+                install_drainer.service_backend()
 
     def test_an_unknown_job_is_not_running_rather_than_an_error(self):
         with mock.patch.object(

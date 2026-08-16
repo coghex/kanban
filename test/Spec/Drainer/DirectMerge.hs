@@ -20,6 +20,7 @@ import Kanban.Drainer
   ( DirectMergeDecision (..),
     DirectMergeEffect (..),
     DrainerActivity (..),
+    DrainerBackend (..),
     DrainerController (..),
     DrainerScriptSource (..),
     DrainerState (..),
@@ -59,10 +60,12 @@ examples = do
           createDirectoryIfMissing True directory
           writeFile (singlePullRequestDrainerPath directory) "#!/usr/bin/env python3\n"
           pure (singlePullRequestDrainerPath directory)
-        controllerIn directory =
+        controllerIn = controllerFor DrainerLaunchd
+        controllerFor backend directory =
           DrainerController
             "/usr/bin/python3"
             [directory </> "drain_prs_service.py", "--path", "/tmp/project", "--repo", "example/project"]
+            backend
         failureFor = either id (\path -> "unexpectedly resolved " <> Data.Text.pack path)
 
     it "prefers KANBAN_DRAINER_INSTALL_DIR over the controller's own directory" $
@@ -116,7 +119,8 @@ examples = do
     it "refuses a discovered controller that names no absolute installation" $
       withTemporaryCacheRoot $ \root -> do
         _ <- installDrainerAt root
-        let relative = DrainerController "/usr/bin/python3" ["drain_prs_service.py", "--path", "/tmp/p"]
+        let relative =
+              DrainerController "/usr/bin/python3" ["drain_prs_service.py", "--path", "/tmp/p"] DrainerLaunchd
         outcome <- resolveSinglePullRequestDrainerAt Nothing (Just relative) (root </> "config.json")
         failureFor outcome `shouldMention` "cannot be located"
         failureFor outcome `shouldMention` "tools/install_drainer.py"
@@ -163,7 +167,7 @@ examples = do
         sourceOf (Just "/opt/kanban") Nothing (root </> "config.json")
           `shouldBe` Right (DrainerScriptFromEnvironment "/opt/kanban")
         sourceOf Nothing (Just (controllerIn "/opt/installed")) (root </> "config.json")
-          `shouldBe` Right (DrainerScriptFromController "/opt/installed")
+          `shouldBe` Right (DrainerScriptFromController DrainerLaunchd "/opt/installed")
         sourceOf Nothing Nothing (root </> "config.json")
           `shouldBe` Right (DrainerScriptFromDefault root)
 
@@ -216,7 +220,8 @@ examples = do
       refusalFor DrainerServiceRunning "on" `shouldMention` "running"
       refusalFor DrainerServiceStarting "starting…" `shouldMention` "starting"
       refusalFor DrainerServiceStopping "stopping…" `shouldMention` "stopping"
-      refusalFor DrainerServiceExternal "on outside launchd" `shouldMention` "outside launchd"
+      refusalFor (DrainerServiceExternal "launchd") "on outside launchd" `shouldMention` "outside launchd"
+      refusalFor (DrainerServiceExternal "systemd") "on outside systemd" `shouldMention` "outside systemd"
       refusalFor DrainerServiceBlocked "rebase in progress; finish or abort it" `shouldMention` "rebase in progress"
 
     -- The fail-closed case that matters most: a controller that could not be
@@ -230,7 +235,7 @@ examples = do
   describe "the drainer status a decision reads" $ do
     it "carries the incident and the service state apart from the rendered detail" $ do
       let running = reportedStatus DrainerOn DrainerServiceRunning "on" Nothing
-          external = reportedStatus DrainerWarning DrainerServiceExternal "on outside launchd" Nothing
+          external = reportedStatus DrainerWarning (DrainerServiceExternal "launchd") "on outside launchd" Nothing
           stopped = reportedStatus DrainerOff DrainerServiceStopped "off" Nothing
       -- Both readings of "a drainer is draining this repository", without the
       -- detail text having to begin with the word "on" for either to hold.

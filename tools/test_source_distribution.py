@@ -122,6 +122,14 @@ RELEASE_DOCUMENTS = (
 # why each one is out.
 EXCLUDED_TRACKED_PATHS = (
     ".drain-prs.json",
+    # CI's own harness for the drainer's systemd lifecycle: an image that boots
+    # systemd, the unit that runs the check inside it, and the check itself.
+    # Out for the same reason the workflows below are — it verifies the source
+    # distribution rather than being part of it, and it is useless without a
+    # container runtime and a GitHub Actions runner to build one on.
+    ".github/systemd-lifecycle/Dockerfile",
+    ".github/systemd-lifecycle/lifecycle-check.service",
+    ".github/systemd-lifecycle/lifecycle_check.py",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     ".github/workflows/review-gate.yml",
