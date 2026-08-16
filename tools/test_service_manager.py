@@ -778,6 +778,115 @@ class RecordEntryTests(SystemdBackendTestCase):
         self.assertEqual(self.backend.definition_label(), "unit")
 
 
+class NamespaceTests(unittest.TestCase):
+    """Two services share this boundary, and neither may name the other's job.
+
+    Every case is asserted against both backends, because a namespace that
+    partitioned launchd's identifiers but not systemd's would let one host
+    install two services that collide and another install two that do not.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for name, value in (
+            ("LAUNCH_AGENTS_DIR", self.root / "LaunchAgents"),
+            ("SYSTEMD_USER_DIR", self.root / "units"),
+        ):
+            patched = mock.patch.object(service_manager, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.runner = ScriptedRunner(RunnerError)
+
+    def backends(self, namespace):
+        return (
+            service_manager.LaunchdBackend(self.runner, namespace),
+            service_manager.SystemdBackend(self.runner, namespace),
+        )
+
+    def test_the_drainers_identifiers_are_exactly_what_they_were(self):
+        # A namespace argument that changed the default would rename every
+        # installed drainer job on the next start, orphaning the one launchd or
+        # systemd is already holding.
+        launchd, systemd = self.backends(service_manager.DRAINER_NAMESPACE)
+        self.assertEqual(
+            launchd.service_identifier("acme.widgets"), "com.coghex.drain-prs.acme.widgets"
+        )
+        self.assertEqual(
+            systemd.service_identifier("acme.widgets"),
+            "com.coghex.drain-prs.acme.widgets.service",
+        )
+        # And the default is that namespace, so every existing caller is
+        # unchanged by the argument's arrival.
+        self.assertEqual(
+            service_manager.LaunchdBackend(self.runner).service_identifier("acme.widgets"),
+            launchd.service_identifier("acme.widgets"),
+        )
+        self.assertEqual(
+            service_manager.SystemdBackend(self.runner).service_identifier("acme.widgets"),
+            systemd.service_identifier("acme.widgets"),
+        )
+
+    def test_two_services_never_name_one_job_for_one_repository(self):
+        for approval, drainer in zip(
+            self.backends(service_manager.ISSUE_APPROVAL_NAMESPACE),
+            self.backends(service_manager.DRAINER_NAMESPACE),
+        ):
+            with self.subTest(backend=approval.backend_name()):
+                approval_identifier = approval.service_identifier("acme.widgets")
+                drainer_identifier = drainer.service_identifier("acme.widgets")
+                self.assertNotEqual(approval_identifier, drainer_identifier)
+                self.assertNotEqual(
+                    approval.definition_path(approval_identifier),
+                    drainer.definition_path(drainer_identifier),
+                )
+                self.assertNotEqual(
+                    approval.manager_target(approval_identifier),
+                    drainer.manager_target(drainer_identifier),
+                )
+
+    def test_a_backend_reports_the_namespace_it_was_built_for(self):
+        for backend in self.backends(service_manager.ISSUE_APPROVAL_NAMESPACE):
+            with self.subTest(backend=backend.backend_name()):
+                self.assertIs(
+                    backend.namespace(), service_manager.ISSUE_APPROVAL_NAMESPACE
+                )
+
+    def test_a_namespace_with_no_singleton_has_none_to_name_or_retire(self):
+        # "No singleton installed" and "this service never had one" are
+        # different answers, and only the second may refuse to name an
+        # identifier: inventing one would name a job no host has ever carried.
+        for backend in self.backends(service_manager.ISSUE_APPROVAL_NAMESPACE):
+            with self.subTest(backend=backend.backend_name()):
+                self.assertFalse(backend.legacy_definition_exists())
+                self.assertIsNone(backend.legacy_service_repository())
+                with self.assertRaises(service_manager.ServiceManagerError):
+                    backend.legacy_identifier()
+                with self.assertRaises(service_manager.ServiceManagerError):
+                    backend.retire_legacy()
+        self.assertEqual(self.runner.commands, [])
+
+    def test_an_approval_definition_describes_the_approval_service(self):
+        definition = service_manager.ServiceDefinition(
+            identifier="com.coghex.issue-approval.acme.widgets.service",
+            program_arguments=["/usr/bin/python3", "/install/controller.py", "run"],
+            working_directory="/checkout",
+            environment={},
+            stdout_path="/logs/out",
+            stderr_path="/logs/err",
+        )
+        unit = (
+            service_manager.SystemdBackend(
+                self.runner, service_manager.ISSUE_APPROVAL_NAMESPACE
+            )
+            .render_definition(definition)
+            .decode("utf-8")
+        )
+        self.assertIn("Description=Kanban issue approval", unit)
+        self.assertNotIn("PR drainer", unit)
+
+
 class BackendSelectionTests(unittest.TestCase):
     """Which backend a host gets, decided by probing rather than by naming it.
 

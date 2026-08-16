@@ -78,6 +78,13 @@ class RecordingBackend(service_manager.ServiceManagerBackend):
     def names(self):
         return [call[0] for call in self.calls]
 
+    def namespace(self):
+        # The drainer's, because this stands in for the drainer's own backend.
+        # Its *identifiers* deliberately do not follow from it, which is what
+        # keeps a job named by the real derivation from passing for one named
+        # through the seam.
+        return service_manager.DRAINER_NAMESPACE
+
     def backend_name(self):
         return "fake-manager"
 

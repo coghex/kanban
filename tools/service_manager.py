@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 
-"""The one boundary the PR drainer reaches a service manager through.
+"""The one boundary Kanban's managed services reach a service manager through.
 
 `tools/drain_prs_service.py` owns the drainer's lifecycle — repository
 identity, clone exclusion, preflights, discovery records, incidents, startup
 stabilization, shutdown confirmation — and `tools/install_drainer.py` owns
-installation safety. None of that is platform-specific, and none of it belongs
+installation safety. `tools/approve_issues_service.py` and
+`tools/install_issue_approval.py` own the same two halves for the issue
+approval service. None of that is platform-specific, and none of it belongs
 to a service manager. What is one's lives here: the identifier a job is named
 and targeted by, the definition it is written from, and the commands that
 load, kick, stop, and remove it.
+
+Two services now share that boundary, so a backend is constructed for one
+`ServiceNamespace`: the prefix its identifiers are built from, the description
+its definitions carry, and whether it has a machine-wide singleton predating
+per-repository jobs. Only the drainer has one. The namespace is what keeps two
+services' jobs, and the definitions they are written from, from ever colliding
+without either service restating a single identifier of its own.
 
 So this module is the only one that constructs a `launchctl` or `systemctl`
 argument vector, reads either one's output, serializes or parses a plist or a
@@ -56,6 +65,13 @@ from typing import Any
 
 HOME = Path.home()
 
+# Identity marker for this tracked asset; installers that link it recognize
+# their own managed copy by content rather than by path, exactly as
+# `tools/install_issue_review.py` recognizes the backend's. See
+# `tools/install_issue_approval.py`, which links this module beside the
+# approval controller and must never remove a file that is not this one.
+KANBAN_MANAGED_ASSET = "kanban-managed-asset:issue-approval/service_manager.py"
+
 
 class ServiceManagerError(RuntimeError):
     """A fault of this boundary itself, rather than of a command it ran.
@@ -73,18 +89,28 @@ class NoServiceManagerError(ServiceManagerError):
 # This module writes the service definitions, so it also owns the identifiers
 # they are named and targeted by. Nothing else may restate one:
 # `tools/drain_prs_service.py` and `tools/install_drainer.py` both derive
-# theirs through this module, and `src/Kanban/Drainer.hs` derives none at all —
-# it reads an installed job's label and plist path out of the per-repository
-# discovery record the controller writes.
+# theirs through this module, as do `tools/approve_issues_service.py` and
+# `tools/install_issue_approval.py`, and `src/Kanban/Drainer.hs` derives none
+# at all — it reads an installed job's label and plist path out of the
+# per-repository discovery record the controller writes.
 #
 # There is one label, and one of every mutable runtime path, per canonical
-# GitHub repository: that partitioning is what lets several repositories be
-# drained independently on one account. LABEL_PREFIX on its own is the
-# machine-wide singleton those replace; it survives only as the legacy job
+# GitHub repository *per service*: that partitioning is what lets several
+# repositories be drained independently on one account, and what lets the
+# approval service install a job beside a drainer's for the same repository.
+# LABEL_PREFIX on its own is the machine-wide singleton the drainer's
+# per-repository jobs replace; it survives only as the legacy job
 # `retire_legacy` unloads before a derived job for the same repository is
 # allowed to start.
 LABEL_PREFIX = "com.coghex.drain-prs"
 LEGACY_LABEL = LABEL_PREFIX
+# The issue approval service's own prefix. Distinct from the drainer's by
+# construction, so neither service can name the other's job however similarly
+# two repositories are spelled (`docs/issue_approval_queue_design.md` D-11).
+# There has never been a machine-wide approval job, so this namespace has no
+# singleton to retire; the untracked personal daemon that predates the service
+# is a conflict the controller refuses beside, never a job this module manages.
+ISSUE_APPROVAL_LABEL_PREFIX = "com.coghex.issue-approval"
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
 # Long enough for every GitHub owner/name pair spelled with ordinary
@@ -171,6 +197,43 @@ class UninstallOutcome:
 
 
 @dataclass(frozen=True)
+class ServiceNamespace:
+    """One Kanban service's own identifier space.
+
+    A backend is constructed for exactly one of these, so every identifier it
+    derives, every definition it writes, and every legacy question it answers
+    belong to that service alone. Nothing else about a backend varies: both
+    services are non-resident jobs started on demand, and a namespace that
+    could change that would be a second lifecycle rather than a second name.
+
+    `legacy_prefix` is the machine-wide singleton this namespace's
+    per-repository jobs replaced, or None for a namespace that never had one.
+    None is not "no singleton installed" — it is "this service has no such
+    concept", which is why asking for its identifier is an error rather than
+    an answer.
+    """
+
+    name: str
+    prefix: str
+    description: str
+    legacy_prefix: str | None
+
+
+DRAINER_NAMESPACE = ServiceNamespace(
+    name="pr-drainer",
+    prefix=LABEL_PREFIX,
+    description="Kanban PR drainer",
+    legacy_prefix=LEGACY_LABEL,
+)
+ISSUE_APPROVAL_NAMESPACE = ServiceNamespace(
+    name="issue-approval",
+    prefix=ISSUE_APPROVAL_LABEL_PREFIX,
+    description="Kanban issue approval",
+    legacy_prefix=None,
+)
+
+
+@dataclass(frozen=True)
 class ServiceDefinition:
     """One managed service, described in terms no service manager owns.
 
@@ -189,13 +252,24 @@ class ServiceDefinition:
 
 
 class ServiceManagerBackend(ABC):
-    """Every service-manager interaction the drainer's lifecycle performs.
+    """Every service-manager interaction a managed service's lifecycle performs.
 
     Deliberately total: a caller that needed one more launchd verb than this
     exposes would have to build it itself, which is exactly the leak this
     boundary exists to prevent. Adding a capability means adding a method here
-    and implementing it on every backend.
+    and implementing it on every backend. That totality covers removal as much
+    as installation — `uninstall_definition` is here for the same reason
+    `load_definition` is, so no installer ever unloads a job or deletes a
+    definition on its own account.
     """
+
+    @abstractmethod
+    def namespace(self) -> ServiceNamespace:
+        """Which service's identifier space this backend was built for.
+
+        Reported rather than assumed, so a caller holding a backend can say
+        whose job it is about without restating either service's prefix.
+        """
 
     @abstractmethod
     def backend_name(self) -> str:
@@ -234,7 +308,13 @@ class ServiceManagerBackend(ABC):
     @abstractmethod
     def legacy_identifier(self) -> str:
         """The machine-wide singleton's identifier, which predates
-        per-repository jobs and is only ever retired."""
+        per-repository jobs and is only ever retired.
+
+        An error rather than an answer for a namespace that never had one:
+        inventing an identifier there would name a job no host has ever
+        carried, and every caller reaches this only after
+        `legacy_definition_exists` said there was something to retire.
+        """
 
     @abstractmethod
     def definition_path(self, identifier: str) -> Path:
@@ -338,8 +418,14 @@ class ServiceManagerBackend(ABC):
 class LaunchdBackend(ServiceManagerBackend):
     """macOS launchd: per-user LaunchAgents driven by `launchctl`."""
 
-    def __init__(self, run: Runner) -> None:
+    def __init__(
+        self, run: Runner, namespace: ServiceNamespace = DRAINER_NAMESPACE
+    ) -> None:
         self._run = run
+        self._namespace = namespace
+
+    def namespace(self) -> ServiceNamespace:
+        return self._namespace
 
     def backend_name(self) -> str:
         return LAUNCHD
@@ -348,19 +434,19 @@ class LaunchdBackend(ServiceManagerBackend):
         return "plist"
 
     def service_identifier(self, slug: str) -> str:
-        return f"{LABEL_PREFIX}.{slug}"
+        return f"{self._namespace.prefix}.{slug}"
 
     def identifier_fits(self, slug: str) -> bool:
         return len(self.service_identifier(slug)) <= MAX_LABEL_LENGTH
 
     def legacy_identifier(self) -> str:
-        return LEGACY_LABEL
+        return require_legacy_prefix(self._namespace)
 
     def definition_path(self, identifier: str) -> Path:
         return LAUNCH_AGENTS_DIR / f"{identifier}.plist"
 
     def legacy_definition_path(self) -> Path:
-        return LEGACY_PLIST_PATH
+        return LAUNCH_AGENTS_DIR / f"{self.legacy_identifier()}.plist"
 
     def manager_target(self, identifier: str) -> str:
         return launch_target_for(identifier)
@@ -446,11 +532,18 @@ class LaunchdBackend(ServiceManagerBackend):
         )
 
     def legacy_definition_exists(self) -> bool:
-        return LEGACY_PLIST_PATH.exists()
+        # False rather than an error for a namespace with no singleton: this is
+        # the question every caller asks *before* reaching for one, so it has
+        # to answer for a service that never had one too.
+        if self._namespace.legacy_prefix is None:
+            return False
+        return self.legacy_definition_path().exists()
 
     def legacy_service_repository(self) -> Path | None:
+        if self._namespace.legacy_prefix is None:
+            return None
         try:
-            with LEGACY_PLIST_PATH.open("rb") as handle:
+            with self.legacy_definition_path().open("rb") as handle:
                 document = plistlib.load(handle)
         except (FileNotFoundError, OSError, plistlib.InvalidFileException, ValueError):
             return None
@@ -469,10 +562,12 @@ class LaunchdBackend(ServiceManagerBackend):
         return None
 
     def retire_legacy(self) -> Path:
-        if self.is_loaded(LEGACY_LABEL):
-            self._run(["launchctl", "bootout", launch_target_for(LEGACY_LABEL)])
-        retired_path = LEGACY_PLIST_PATH.with_name(LEGACY_PLIST_PATH.name + ".retired")
-        os.replace(LEGACY_PLIST_PATH, retired_path)
+        legacy_identifier = self.legacy_identifier()
+        legacy_path = self.legacy_definition_path()
+        if self.is_loaded(legacy_identifier):
+            self._run(["launchctl", "bootout", launch_target_for(legacy_identifier)])
+        retired_path = legacy_path.with_name(legacy_path.name + ".retired")
+        os.replace(legacy_path, retired_path)
         return retired_path
 
 
@@ -486,8 +581,14 @@ class SystemdBackend(ServiceManagerBackend):
     an explicit `kick` ever runs it.
     """
 
-    def __init__(self, run: Runner) -> None:
+    def __init__(
+        self, run: Runner, namespace: ServiceNamespace = DRAINER_NAMESPACE
+    ) -> None:
         self._run = run
+        self._namespace = namespace
+
+    def namespace(self) -> ServiceNamespace:
+        return self._namespace
 
     def backend_name(self) -> str:
         return SYSTEMD
@@ -503,19 +604,19 @@ class SystemdBackend(ServiceManagerBackend):
         # name, so no second escaping is needed or wanted: a name escaped
         # twice would no longer be the one `repository_slug` partitions the
         # runtime and log directories by.
-        return f"{LABEL_PREFIX}.{slug}{SYSTEMD_UNIT_SUFFIX}"
+        return f"{self._namespace.prefix}.{slug}{SYSTEMD_UNIT_SUFFIX}"
 
     def identifier_fits(self, slug: str) -> bool:
         return len(self.service_identifier(slug)) <= MAX_LABEL_LENGTH
 
     def legacy_identifier(self) -> str:
-        return LEGACY_UNIT_NAME
+        return require_legacy_prefix(self._namespace) + SYSTEMD_UNIT_SUFFIX
 
     def definition_path(self, identifier: str) -> Path:
         return SYSTEMD_USER_DIR / identifier
 
     def legacy_definition_path(self) -> Path:
-        return SYSTEMD_USER_DIR / LEGACY_UNIT_NAME
+        return self.definition_path(self.legacy_identifier())
 
     def manager_target(self, identifier: str) -> str:
         return systemd_target_for(identifier)
@@ -545,7 +646,8 @@ class SystemdBackend(ServiceManagerBackend):
         # on it.
         lines = [
             "[Unit]",
-            f"Description=Kanban PR drainer ({_unit_value(definition.identifier)})",
+            f"Description={_unit_value(self._namespace.description)} "
+            f"({_unit_value(definition.identifier)})",
             "",
             "[Service]",
             "Type=exec",
@@ -624,15 +726,17 @@ class SystemdBackend(ServiceManagerBackend):
 
     def legacy_definition_exists(self) -> bool:
         # There has never been a systemd install, so there is no systemd
-        # singleton predating per-repository units. Answering False is what
-        # keeps `retire_legacy_job` from reaching for a launchd artifact on a
-        # host that has none.
+        # singleton predating per-repository units — for either namespace.
+        # Answering False is what keeps `retire_legacy_job` from reaching for a
+        # launchd artifact on a host that has none.
         return False
 
     def legacy_service_repository(self) -> Path | None:
         return None
 
     def retire_legacy(self) -> Path:
+        if self._namespace.legacy_prefix is None:
+            raise ServiceManagerError(no_legacy_singleton_message(self._namespace))
         raise ServiceManagerError(
             "There is no systemd singleton to retire; the machine-wide job predates "
             "per-repository units and only ever existed under launchd."
@@ -654,6 +758,26 @@ class SystemdBackend(ServiceManagerBackend):
         if proc.returncode != 0:
             return ""
         return (proc.stdout or "").strip()
+
+
+def no_legacy_singleton_message(namespace: ServiceNamespace) -> str:
+    return (
+        f"The {namespace.name} service has no machine-wide singleton: its jobs "
+        "have always been per-repository, so there is no legacy identifier to "
+        "name and nothing to retire."
+    )
+
+
+def require_legacy_prefix(namespace: ServiceNamespace) -> str:
+    """That namespace's singleton prefix, or a refusal naming why it has none.
+
+    Shared by both backends because the answer is the namespace's rather than
+    either manager's: a service that never had a machine-wide job has none
+    under launchd and none under systemd.
+    """
+    if namespace.legacy_prefix is None:
+        raise ServiceManagerError(no_legacy_singleton_message(namespace))
+    return namespace.legacy_prefix
 
 
 def launch_domain() -> str:
@@ -799,30 +923,40 @@ def _systemd_session_is_live(run: Runner) -> bool:
     )
 
 
-def backend_for(name: str, run: Runner) -> ServiceManagerBackend:
-    """The backend one detected name selects. The single place either name is
-    turned into an implementation, so `select_backend` and any caller that
-    already knows the answer cannot disagree about which class that is."""
+def backend_for(
+    name: str, run: Runner, namespace: ServiceNamespace = DRAINER_NAMESPACE
+) -> ServiceManagerBackend:
+    """The backend one detected name selects, for one service's namespace. The
+    single place either name is turned into an implementation, so
+    `select_backend` and any caller that already knows the answer cannot
+    disagree about which class that is."""
     if name == LAUNCHD:
-        return LaunchdBackend(run)
+        return LaunchdBackend(run, namespace)
     if name == SYSTEMD:
-        return SystemdBackend(run)
+        return SystemdBackend(run, namespace)
     raise ServiceManagerError(f"Unknown service manager: {name!r}")
 
 
-def select_backend(run: Runner) -> ServiceManagerBackend:
-    """The service manager this host's drainer is managed by, or a refusal.
+def select_backend(
+    run: Runner, namespace: ServiceNamespace = DRAINER_NAMESPACE
+) -> ServiceManagerBackend:
+    """The service manager this host's managed jobs run under, or a refusal.
 
     The refusal is this function's rather than any caller's. `sys.platform` is
     the wrong question — a Linux host with no user session and a macOS host
     are both unmanageable for the same reason and neither is about the
-    platform's name — so both callers ask here, and both do so before writing
-    anything.
+    platform's name — so every caller asks here, and every one does so before
+    writing anything.
+
+    Which service the resulting backend is *for* is the caller's, and the only
+    thing a namespace changes: the host question has one answer, and both
+    services get their jobs from whichever manager it names.
     """
     detected = detect_service_manager(run)
     if detected is None:
         raise NoServiceManagerError(
-            "No supported service manager found: the PR drainer needs either macOS "
-            "launchd or a systemd user session reachable through `systemctl --user`."
+            "No supported service manager found: a Kanban managed service needs "
+            "either macOS launchd or a systemd user session reachable through "
+            "`systemctl --user`."
         )
-    return backend_for(detected, run)
+    return backend_for(detected, run, namespace)
