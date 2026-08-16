@@ -37,12 +37,24 @@ import Kanban.CLI (BorderPolicy (..), Options (..))
 import Kanban.Card (displayWidth)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
-import Kanban.Filter (defaultFilterCriteria)
-import Kanban.Fixture (fixtureBoard, fixtureUsage)
+import Kanban.Filter
+  ( FilterBox (..),
+    KindFacet (..),
+    LifecycleFacet (..),
+    boardEntryCount,
+    defaultFilterCriteria,
+  )
+import Kanban.Fixture (fixtureBoard, fixtureCompletedHistory, fixtureSnapshot, fixtureUsage)
 import Kanban.GitHub (HistoryTraversal, RefreshCoordinator, newHistoryTraversal)
 import Kanban.Settings (defaultSettings)
 import Kanban.UI (drawApplication)
-import Kanban.UI.Board (openDataLoadingHeading, openDataUnavailableHeading)
+import Kanban.UI.Board
+  ( completedLoadingHeading,
+    completedUnavailableHeading,
+    openDataLoadingHeading,
+    openDataUnavailableHeading,
+  )
+import Kanban.UI.Filter (focusFilterPanel, refreshVisibleBoard, toggleFilterBoxFromClick, toggleFilterPanel)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Search (SearchInput (..), applySearchInput, openSearch)
 import Kanban.UI.Theme
@@ -58,6 +70,7 @@ import Kanban.UI.Types
   ( AppEvent,
     AppState (..),
     BoardRefreshOutcome,
+    CompletedHistoryStatus (..),
     IncidentSelection (..),
     Overlay (..),
     ProcessSelection (..),
@@ -277,9 +290,9 @@ spec = describe "golden frames" $ do
     (isInfixOf "ISSUES  5" rendered, isInfixOf "ISSUES  1/5" rendered) `shouldBe` (True, False)
     (isInfixOf "ACTIVE  3" rendered, isInfixOf "#901" rendered) `shouldBe` (True, True)
 
-  it "shows No matches, not No items, for a query nothing matched" $ do
+  it "shows No search matches, not No items, for a query nothing matched" $ do
     missing <- frameText <$> renderCase (frameCaseNamed "search-no-matches")
-    (isInfixOf "No matches" missing, isInfixOf "No items" missing) `shouldBe` (True, False)
+    (isInfixOf "No search matches" missing, isInfixOf "No items" missing) `shouldBe` (True, False)
 
   it "exposes a match under the collapsed epic without expanding the saved set" $ do
     exposed <- frameText <$> renderCase (frameCaseNamed "search-collapsed-child")
@@ -288,6 +301,110 @@ spec = describe "golden frames" $ do
     (isInfixOf "#701" exposed, isInfixOf "#721" exposed) `shouldBe` (True, True)
     wide <- frameText <$> renderCase wideCase
     isInfixOf "#721" wide `shouldBe` False
+
+  -- §7: the defaults are the baseline, so the completed generation this suite
+  -- now holds in memory reaches no frame that does not ask for it. Every board
+  -- frame above is checked against the checked-in file it always had, and this
+  -- states the reason directly rather than leaving it to those diffs.
+  it "draws no completed card under the default criteria, with a whole history in memory" $ do
+    frames <- traverse renderCase (wideCase : filter (isPanel "filter-panel-") filterCases)
+    let leaked =
+          [ number
+          | frame <- frames,
+            number <- completedNumbers,
+            Data.Text.pack ("#" <> show number) `Data.Text.isInfixOf` frameLines frame
+          ]
+    leaked `shouldBe` []
+
+  it "names all four groups, every value, and both figures in the panel" $ do
+    panel <- frameText <$> renderCase (frameCaseNamed "filter-panel-wide")
+    sequence_
+      [ (fragment, fragment `isInfixOf` panel) `shouldBe` (fragment, True)
+      | fragment <-
+          ["State", "Kind", "Workflow", "Structure"]
+            <> ["Open", "Closed", "Issues", "Pull requests", "Changes", "Problems", "Approved", "Other", "Epic groups", "Standalone"]
+            <> ["showing ", " cards"]
+      ]
+
+  -- §7: every value starts checked except Closed, and the counts beside them
+  -- predict a toggle rather than describing what is already showing — so the
+  -- unchecked box carries the count of the history it would reveal.
+  it "checks every box except Closed and counts what each one would admit" $ do
+    panel <- Data.Text.unpack . frameLines <$> renderCase (frameCaseNamed "filter-panel-wide")
+    sequence_
+      [ (chip, chip `isInfixOf` panel) `shouldBe` (chip, True)
+      | chip <-
+          [ "[ ] Closed " <> show (length fixtureCompletedHistory.historyIssues + length fixtureCompletedHistory.historyPullRequests),
+            "[x] Open " <> show (boardEntryCount fixtureBoard)
+          ]
+      ]
+
+  it "keeps the query and both boxes on screen when the panel takes the keyboard" $ do
+    stacked <- renderCase (frameCaseNamed "filter-and-search")
+    boxContent stacked `shouldBe` "envelope"
+    -- The panel is above the search box, which is above the cards it filters.
+    let rendered = frameText stacked
+    (isInfixOf "FILTER" rendered, isInfixOf "SEARCH" rendered) `shouldBe` (True, True)
+    fst (frameTextAt stacked "FILTER") `shouldSatisfy` (< fst (frameTextAt stacked "SEARCH"))
+    (searchBox stacked).searchBoxBottom `shouldSatisfy` (< firstCardRow stacked (searchBox stacked))
+    -- And the panel's own hint line is what the footer shows, not search's.
+    (isInfixOf "space toggle" rendered, isInfixOf "backspace delete" rendered) `shouldBe` (True, False)
+
+  it "marks the footer chip while a non-default criteria set is hidden" $ do
+    hidden <- frameText <$> renderCase (frameCaseNamed "filter-hidden-active")
+    plain <- frameText <$> renderCase wideCase
+    (isInfixOf "f filter*" hidden, isInfixOf "FILTER" hidden) `shouldBe` (True, False)
+    (isInfixOf "f filter*" plain, isInfixOf "f filter" plain) `shouldBe` (False, True)
+    -- The criteria are still in force behind the hidden panel: PR #823 is a
+    -- pull request, and Kind now admits only issues.
+    isInfixOf "PR #823" hidden `shouldBe` False
+
+  it "says No filter matches, not No items or No search matches, for criteria that admit nothing" $ do
+    empty <- frameText <$> renderCase (frameCaseNamed "filter-no-matches")
+    (isInfixOf "No filter matches" empty, isInfixOf "No items" empty) `shouldBe` (True, False)
+    isInfixOf "No search matches" empty `shouldBe` False
+
+  it "draws the completed issues and pull requests, badged, with Open unchecked" $ do
+    completed <- frameText <$> renderCase (frameCaseNamed "filter-completed-only")
+    sequence_
+      [ (fragment, fragment `isInfixOf` completed) `shouldBe` (fragment, True)
+      | fragment <- ["#655", "#690", "PR #705", "PR #688", "CLOSED", "MERGED"]
+      ]
+    -- Nothing open survives an unchecked Open box.
+    filter (\number -> isInfixOf ("#" <> show number) completed) fixtureNumbers `shouldBe` []
+
+  it "replaces the whole card area while a completed generation is still running" $ do
+    blocked <- renderCase (frameCaseNamed "filter-completed-loading")
+    let rendered = frameLines blocked
+    Data.Text.isInfixOf completedLoadingHeading rendered `shouldBe` True
+    -- The traversal's own figures, and no invented denominator.
+    Data.Text.isInfixOf "46 of 149 loaded" rendered `shouldBe` True
+    -- The panel that put the blocker up is still there to take it down.
+    Data.Text.isInfixOf "FILTER" rendered `shouldBe` True
+
+  it "reports a completed failure with no fallback as a card-free panel" $ do
+    failed <- frameLines <$> renderCase (frameCaseNamed "filter-completed-unavailable")
+    sequence_
+      [ (fragment, fragment `Data.Text.isInfixOf` failed) `shouldBe` (fragment, True)
+      | fragment <- [completedUnavailableHeading, "RATE LIMITED", "history: failed"]
+      ]
+
+  it "draws no card from any source under either completed panel" $ do
+    frames <- traverse renderCase [frameCaseNamed "filter-completed-loading", frameCaseNamed "filter-completed-unavailable"]
+    let leaked =
+          [ number
+          | frame <- frames,
+            number <- fixtureNumbers <> completedNumbers,
+            Data.Text.pack ("#" <> show number) `Data.Text.isInfixOf` frameLines frame
+          ]
+    leaked `shouldBe` []
+
+  -- Requirement 8's compact status, on the one row that is always on screen.
+  it "states where the completed generation stands in the footer" $ do
+    current <- frameLines <$> renderCase wideCase
+    loading <- frameLines <$> renderCase (frameCaseNamed "filter-completed-loading")
+    Data.Text.isInfixOf "history: current" current `shouldBe` True
+    Data.Text.isInfixOf "history: loading 46/149" loading `shouldBe` True
 
 -- | Text the frames, taken together, have to contain. This is what stops a
 -- fixture state from counting as covered while it sits below a column
@@ -317,6 +434,13 @@ fixtureNumbers =
     entry <- fixtureEntries column,
     Just number <- [entryNumber entry]
   ]
+
+-- | Every item number the seeded completed generation holds, asked of the
+-- history itself for the same reason.
+completedNumbers :: [Int]
+completedNumbers =
+  map (.issueNumber) fixtureCompletedHistory.historyIssues
+    <> map (.pullRequestNumber) fixtureCompletedHistory.historyPullRequests
 
 -- | A frame as one searchable block of text, rows separated by newlines.
 frameLines :: [[FrameCell]] -> Text
@@ -425,6 +549,7 @@ frameCases =
       }
   ]
     <> openDataCases
+    <> filterCases
 
 -- | §7's two blocking panels at every setting the populated board is captured
 -- at, because a panel that replaces the board has to survive the same
@@ -494,6 +619,100 @@ frameSettings =
     FrameSetting "open-borders" 164 48 "--border open" (withOptions (\options -> options {optionBorder = BorderOpen})),
     FrameSetting "ascii" 164 48 "--ascii" (withOptions (\options -> options {optionAscii = True}))
   ]
+
+-- | The filter panel: at every setting the populated board is captured at,
+-- because a panel that shifts the whole board down has to survive the same
+-- responsive and border decisions the board does, and then once per behavior
+-- §7 states for it.
+--
+-- Every one of these reaches its state through the panel's own transitions
+-- rather than by writing criteria into the record, so no frame can show a
+-- combination the interaction cannot produce.
+filterCases :: [FrameCase]
+filterCases =
+  [ FrameCase
+      { frameCaseName = "filter-panel-" <> setting.settingName,
+        frameCaseWidth = setting.settingWidth,
+        frameCaseHeight = setting.settingHeight,
+        frameCaseSummary = "the filter panel over the board, " <> setting.settingSummary,
+        frameCaseState = setting.settingState . toggleFilterPanel
+      }
+  | setting <- frameSettings
+  ]
+    <> [ FrameCase
+           { frameCaseName = "filter-and-search",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "the panel and a live query stacked, the panel holding the keyboard",
+             -- Exactly §7's transfer: lowercase `f` from an open search box
+             -- moves the keyboard to the panel and leaves the query alone.
+             frameCaseState = focusFilterPanel . searching "envelope"
+           },
+         FrameCase
+           { frameCaseName = "filter-hidden-active",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "a non-default criteria set with the panel hidden, marked f filter* in the footer",
+             frameCaseState = hidingPanel (withBoxes [KindBox KindPullRequests])
+           },
+         FrameCase
+           { frameCaseName = "filter-no-matches",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "criteria admitting nothing, every column reporting No filter matches",
+             frameCaseState = withBoxes [KindBox KindIssues, KindBox KindPullRequests]
+           },
+         FrameCase
+           { frameCaseName = "filter-completed-only",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "Open off and Closed on: the completed issues and pull requests alone",
+             frameCaseState = withBoxes [LifecycleBox LifecycleOpen, LifecycleBox LifecycleClosed]
+           },
+         FrameCase
+           { frameCaseName = "filter-completed-loading",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "Closed checked while the completed generation is still running",
+             frameCaseState = withBoxes [LifecycleBox LifecycleClosed] . loadingHistory
+           },
+         FrameCase
+           { frameCaseName = "filter-completed-unavailable",
+             frameCaseWidth = 200,
+             frameCaseHeight = 64,
+             frameCaseSummary = "Closed checked after a completed failure with no history behind it",
+             frameCaseState = withBoxes [LifecycleBox LifecycleClosed] . failedHistory
+           }
+       ]
+
+-- | Show the panel and toggle the named boxes through the click transition,
+-- which is the same criteria edit the keyboard makes.
+withBoxes :: [FilterBox] -> AppState -> AppState
+withBoxes boxes state = foldl (flip toggleFilterBoxFromClick) (toggleFilterPanel state) boxes
+
+-- | The same criteria with the panel put away again, which is the state the
+-- footer's marker exists for.
+hidingPanel :: (AppState -> AppState) -> AppState -> AppState
+hidingPanel change = toggleFilterPanel . change
+
+-- | A completed generation still running over the seeded history, exactly as
+-- 'Kanban.UI.Refresh.startCompletedHistory' leaves the board.
+loadingHistory :: AppState -> AppState
+loadingHistory state =
+  state
+    { appCompletedStatus = CompletedHistoryLoading,
+      appCompletedProgress = CompletedProgress 34 (Just 91) 12 (Just 58)
+    }
+
+-- | A completed generation that failed with nothing complete behind it, which
+-- is the one failure that leaves no settled work to fall back to (§15).
+failedHistory :: AppState -> AppState
+failedHistory state =
+  refreshVisibleBoard
+    state
+      { appCompletedHistory = Nothing,
+        appCompletedStatus = CompletedHistoryFailed "RATE LIMITED: gh: API rate limit exceeded"
+      }
 
 -- | An open, empty search box over the wide board.
 searchEmptyCase :: FrameCase
@@ -589,6 +808,7 @@ restingState channel refreshCoordinator historyTraversal =
       -- frame is drawn from exactly the board it always was.
       appVisibleBoard = fixtureBoard,
       appFilterCriteria = defaultFilterCriteria,
+      appFilterPanel = Nothing,
       appUsage = fixtureUsage,
       appUsageFreshness = Map.map (Fresh . (.usageFetchedAt)) fixtureUsage,
       appSelectedColumn = Issues,
@@ -606,12 +826,18 @@ restingState channel refreshCoordinator historyTraversal =
       appBoardFreshness = Fresh goldenFetchedAt,
       appLastSuccessfulFetch = Just goldenFetchedAt,
       appOpenGeneration = 0,
-      appOpenSnapshot = Nothing,
+      -- Both generations have published, which is what a board with a
+      -- recorded fetch and a current history means. The completed one is held
+      -- in memory and drawn nowhere: under the default criteria every frame
+      -- below is the open board exactly as it always was, which is the whole
+      -- point of capturing it beside a loaded history rather than instead of
+      -- one.
+      appOpenSnapshot = Just fixtureSnapshot,
       appHistoryTraversal = historyTraversal,
-      appCompletedHistory = Nothing,
+      appCompletedHistory = Just fixtureCompletedHistory,
       appCompletedGeneration = 0,
       appCompletedProgress = emptyCompletedProgress,
-      appCompletedFailure = Nothing,
+      appCompletedStatus = CompletedHistoryCurrent,
       appDrainerController = Left "no drainer controller in the fixture",
       appDrainerStatus = DrainerStatus DrainerOff "off" DrainerServiceStopped Nothing,
       -- No controller, so no observation stands: the same unanswered source

@@ -104,6 +104,10 @@ runDashboard options config repository = do
             -- Criteria are process-lifetime state: every launch starts at the
             -- defaults, and nothing restores a previous session's.
             appFilterCriteria = defaultFilterCriteria,
+            -- Hidden at every launch. It is an editor for the criteria above,
+            -- not part of them, so nothing about a previous session restores
+            -- it either.
+            appFilterPanel = Nothing,
             appUsage = initialUsage,
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
@@ -142,7 +146,14 @@ runDashboard options config repository = do
             appCompletedHistory = initialHistory,
             appCompletedGeneration = 0,
             appCompletedProgress = emptyCompletedProgress,
-            appCompletedFailure = Nothing,
+            -- A seeded cache is complete by construction, so it is current
+            -- until this process's own traversal claims a generation --
+            -- which 'startApplication' does immediately, moving this to
+            -- 'CompletedHistoryLoading' before the user can act on it.
+            appCompletedStatus =
+              case initialHistory of
+                Just _ -> CompletedHistoryCurrent
+                Nothing -> CompletedHistoryLoading,
             appDrainerController = drainerController,
             appDrainerStatus =
               case drainerController of

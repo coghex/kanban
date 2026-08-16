@@ -10,8 +10,10 @@ module Kanban.UI.Types
     ChatTranscript (..),
     ColumnSearch (..),
     CompletedGeneration,
+    CompletedHistoryStatus (..),
     DirectMergeReport (..),
     DrainerSourceState (..),
+    FilterPanel (..),
     IncidentClickOutcome (..),
     IncidentEntry (..),
     IncidentRef (..),
@@ -54,7 +56,7 @@ import Kanban.Drainer
     DrainerObservation (..),
     DrainerStatus (..)
     )
-import Kanban.Filter (FilterCriteria)
+import Kanban.Filter (FilterBox, FilterCriteria)
 import Kanban.GitHub
   ( CompletedGeneration,
     GhCleanupFailure (..),
@@ -106,6 +108,10 @@ data Name
   | IncidentsViewport
   | CardTarget BoardColumn Int
   | EpicTarget BoardColumn Int Int
+  | -- | One checkbox of the card filter panel. Named by the box rather than
+    -- by a row and column, so a click resolves to the value it was drawn for
+    -- however the chips wrapped at the current width.
+    FilterBoxTarget FilterBox
   | DetailsPanel
   | ReviewPanel
   | SolvePanel
@@ -446,6 +452,46 @@ openDataView Nothing freshness = case freshness of
   Unavailable reason -> OpenDataUnavailable reason
   Unsupported reason -> OpenDataUnavailable reason
 
+-- | The card filter panel, while it is on screen.
+--
+-- Presentation state and nothing else: it says which checkbox the panel's own
+-- keys act on, never which cards the board is showing. The criteria are
+-- 'AppState.appFilterCriteria' and outlive every panel this record stands
+-- for, which is what lets @f@ hide the panel without changing the view.
+data FilterPanel = FilterPanel
+  { filterPanelBox :: FilterBox,
+    -- | Whether the panel has handed focus to a live search.
+    --
+    -- Only meaningful while one is live: the panel takes focus back on its own
+    -- when the search ends, so no close path — @s@, @Esc@, a click that opened
+    -- details, a transfer, a refresh — has to remember that the panel is
+    -- underneath it. 'Kanban.UI.Filter.focusedFilterPanel' is the one reader.
+    filterPanelYielded :: Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | Where the repository's completed generation stands (§15).
+--
+-- A state rather than a notice: 'appNotice' is cleared by any of two dozen
+-- unrelated presses, so a pause reported only there disappears the moment the
+-- user moves the selection. The footer, the checkbox counts, and the
+-- completed-history blocker all read this instead.
+data CompletedHistoryStatus
+  = -- | A generation is running, and 'appCompletedProgress' says how far.
+    CompletedHistoryLoading
+  | -- | Background history yielded the reserve foreground work is held back
+    -- for, and resumes no earlier than the instant GitHub reported.
+    CompletedHistoryPaused UTCTime
+  | -- | A generation published in full, and 'appCompletedHistory' is it.
+    CompletedHistoryCurrent
+  | -- | A generation failed over a complete history that still stands, which
+    -- is what the board keeps showing (§15).
+    CompletedHistoryStale Text
+  | -- | A generation failed with no complete history behind it, so there is
+    -- no settled work to fall back to at all.
+    CompletedHistoryFailed Text
+  deriving stock (Eq, Show)
+
 data AppEvent
   = -- | One open generation's answer, under the identity that generation was
     -- started with. An outcome older than the newest generation the board has
@@ -517,6 +563,10 @@ data AppState = AppState
     -- 'Kanban.Filter.defaultFilterCriteria' every launch, survives every
     -- refresh, overlay and dismissal, and is never serialized.
     appFilterCriteria :: FilterCriteria,
+    -- | The panel those criteria are edited through, while it is showing.
+    -- Hiding it leaves 'appFilterCriteria' exactly as it was, which is what
+    -- makes a non-default filter something the footer has to announce.
+    appFilterPanel :: Maybe FilterPanel,
     appUsage :: Map UsageProvider UsageSnapshot,
     appUsageFreshness :: Map UsageProvider Freshness,
     appSelectedColumn :: BoardColumn,
@@ -558,7 +608,8 @@ data AppState = AppState
     -- one, or 'Nothing' when none stands — no cache to seed from and none
     -- fetched yet, which is simply an absent history rather than a failure.
     --
-    -- Nothing renders from it in this slice: completed cards are FILT-5's.
+    -- The criteria decide whether any of it reaches the board: with @Closed@
+    -- unchecked it is held here and drawn nowhere.
     appCompletedHistory :: Maybe CompletedHistory,
     -- | The newest completed generation the user has asked for. It is claimed
     -- before the history job is queued, so an outcome carrying an older
@@ -569,10 +620,12 @@ data AppState = AppState
     -- freshness on purpose: the two run on different schedules, and a history
     -- still loading says nothing about whether the open board is current.
     appCompletedProgress :: CompletedProgress,
-    -- | Why the completed generation ended without completing, if it did. It
-    -- never disturbs 'appCompletedHistory': a failed generation leaves the last
-    -- complete one exactly where it was (§15).
-    appCompletedFailure :: Maybe Text,
+    -- | Where the completed generation stands, including why it ended without
+    -- completing if it did. It never disturbs 'appCompletedHistory': a failed
+    -- generation leaves the last complete one exactly where it was (§15),
+    -- which is the difference between 'CompletedHistoryStale' and
+    -- 'CompletedHistoryFailed'.
+    appCompletedStatus :: CompletedHistoryStatus,
     appDrainerController :: Either Text DrainerController,
     appDrainerStatus :: DrainerStatus,
     -- | The last observed set of open incidents, or 'Nothing' whenever no

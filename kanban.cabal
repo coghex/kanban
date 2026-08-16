@@ -247,6 +247,7 @@ test-suite kanban-test
     Spec.UI.Cards
     Spec.UI.CompletedHistory
     Spec.UI.Filter
+    Spec.UI.FilterPanel
     Spec.UI.Golden
     Spec.UI.Incidents
     Spec.UI.Keys

@@ -6,6 +6,7 @@ module Kanban.UI.Events
     applyCardClick,
     applyIncidentsAction,
     applyRunningProcessClick,
+    blockedByCompletedLoad,
     boardMouseAction,
     boardMousePress,
     handleEvent,
@@ -60,7 +61,19 @@ import Kanban.Worker
     )
 import Kanban.UI.Types
 import Kanban.UI.Util
-import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor)
+import Kanban.Filter (FilterBox)
+import Kanban.UI.Filter
+  ( applyFilterInput,
+    completedCardsBlocked,
+    filterInput,
+    focusFilterPanel,
+    focusedFilterPanel,
+    focusedSearch,
+    readOnlyHistoryRefusal,
+    readOnlyHistoryRefusalFor,
+    toggleFilterBoxFromClick,
+    toggleFilterPanel,
+  )
 import Kanban.UI.Keys
 import Kanban.UI.SessionCore
 import Kanban.UI.State
@@ -84,7 +97,12 @@ handleEvent event = do
   case (state.appOverlay, event) of
     (_, AppEvent (BoardRefreshFinished generation result)) -> applyBoardRefresh generation result
     (_, AppEvent (BoardRefreshStarted generation)) -> markBoardRefreshRunning generation
-    (_, AppEvent (BoardHistoryPaused resetAt)) -> setNotice (historyPausedNotice state.appTimeZone resetAt)
+    -- The notice reports the pause once; the status is what outlives it, so
+    -- the footer and the completed blocker still say so after the next press
+    -- clears the line.
+    (_, AppEvent (BoardHistoryPaused resetAt)) -> do
+      modify (\current -> current {appCompletedStatus = CompletedHistoryPaused resetAt})
+      setNotice (historyPausedNotice state.appTimeZone resetAt)
     (_, AppEvent (BoardHistoryUpdated generation historyOutcome)) -> applyBoardHistory generation historyOutcome
     (_, AppEvent (BoardRefreshShutdownFinished verdict)) -> completeDashboardQuit verdict
     (_, AppEvent (CodexRefreshFinished result)) -> applyCodexRefresh result
@@ -164,12 +182,18 @@ handleEvent event = do
     (Just _, VtyEvent (Vty.EvKey Vty.KUp [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) -> vScrollBy (viewportScroll DetailsViewport) (-1)
     (Just _, _) -> pure ()
-    -- A live search decodes the base board's key presses first, so a printable
-    -- key types into the query instead of firing the binding that letter
-    -- ordinarily carries. It claims nothing carrying Ctrl, Meta, or Alt, and
-    -- nothing it declines reaches the table below with its ordinary meaning.
+    -- A focused filter panel and a live search each decode the base board's
+    -- key presses ahead of the table, so a printable key edits a checkbox or
+    -- types into the query instead of firing the binding that letter
+    -- ordinarily carries. The panel outranks the search because focus moves
+    -- between the two explicitly -- `s` yields it and `f` takes it back --
+    -- rather than being inferred from which is on screen. Neither claims
+    -- anything carrying Ctrl, Meta, or Alt, and nothing either declines
+    -- reaches the table below with anything but its ordinary meaning.
     (Nothing, VtyEvent keyEvent)
-      | Just input <- searchInput state.appSearch keyEvent -> handleSearchInput input
+      | Just input <- filterInput (focusedFilterPanel state) keyEvent -> modify (applyFilterInput input)
+    (Nothing, VtyEvent keyEvent)
+      | Just input <- searchInput (focusedSearch state) keyEvent -> handleSearchInput input
     (Nothing, VtyEvent keyEvent)
       | Just action <- boardAction BoardScope keyEvent -> applyBoardAction action
     (Nothing, MouseDown name button modifiers _)
@@ -187,6 +211,7 @@ data BoardMouseAction
   = -- | Move the live search to this column, consuming the press.
     TransferSearch BoardColumn
   | ToggleDrainerFromClick
+  | ToggleFilterBoxFromClick FilterBox
   | ToggleEpicFromClick BoardColumn Int Int
   | SelectOrOpenCardAt BoardColumn Int
   | OpenRunningProcessAt BoardColumn Int
@@ -198,12 +223,22 @@ data BoardMouseAction
 -- A live search outranks every column press: a left or right press aimed at
 -- any column but the searched one moves the search there and does nothing
 -- else, wherever in that column it landed. It does not outrank the drainer
--- button, which is not a column target at all and is answered first, and it
--- claims neither the wheel — which retargets nothing, so it keeps scrolling
--- whatever is under the pointer — nor the middle button.
+-- button or a filter checkbox, neither of which is a column target at all and
+-- both of which are answered first, and it claims neither the wheel — which
+-- retargets nothing, so it keeps scrolling whatever is under the pointer — nor
+-- the middle button.
+--
+-- The completed-history blocker outranks every /card/ press and nothing else.
+-- No column is drawn under it, so a @CardTarget@, @EpicTarget@, or
+-- @ColumnViewport@ press arriving there names a row from a frame that is no
+-- longer on screen; resolving one would act on whatever the criteria have
+-- since put at that index. The drainer button and the filter panel are drawn
+-- through the blocker and keep working.
 boardMouseAction :: AppState -> Name -> Vty.Button -> [Vty.Modifier] -> Maybe BoardMouseAction
 boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (DrainerButton, Vty.BLeft, []) -> Just ToggleDrainerFromClick
+  (FilterBoxTarget box, Vty.BLeft, _) -> Just (ToggleFilterBoxFromClick box)
+  _ | completedCardsBlocked state -> Nothing
   _ | Just column <- searchMouseTransfer state name button -> Just (TransferSearch column)
   (EpicTarget column _ _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
   (EpicTarget column _ _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
@@ -224,6 +259,7 @@ boardMousePress :: BoardMouseAction -> AppState -> AppState
 boardMousePress = \case
   TransferSearch column -> transferSearchTo column
   ToggleDrainerFromClick -> fst . drainerTogglePress
+  ToggleFilterBoxFromClick box -> toggleFilterBoxFromClick box
   ToggleEpicFromClick column row trackerNumber -> toggleTrackerState column row trackerNumber
   SelectOrOpenCardAt column row -> applyCardClick column row
   OpenRunningProcessAt column row -> applyRunningProcessClick column row
@@ -260,9 +296,50 @@ applyBoardMouseAction action = do
 applyBoardAction :: BoardAction -> EventM Name AppState ()
 applyBoardAction action = do
   state <- get
-  case readOnlyHistoryGate state action of
-    Just notice -> setNotice notice
-    Nothing -> dispatchBoardAction action
+  if completedCardsBlocked state && blockedByCompletedLoad action
+    then pure ()
+    else case readOnlyHistoryGate state action of
+      Just notice -> setNotice notice
+      Nothing -> dispatchBoardAction action
+
+-- | Which bindings the completed-history blocker makes inert.
+--
+-- Everything that reaches a card does: the blocker draws none, so a press that
+-- moved, opened, or acted on one would be resolving a selection left over from
+-- the frame before it. Nothing else is touched — the filter panel that put the
+-- blocker up, the footer, help, options, refresh, the drainer, the sidebar,
+-- @Esc@, @q@, and @Ctrl-C@ all stay exactly as usable as they were.
+--
+-- Total in 'BoardAction' for the same reason 'mutatesSelectedWork' is: a
+-- binding added to the table in "Kanban.UI.Keys" cannot reach the board
+-- without a decision about whether a card-free surface may dispatch it.
+blockedByCompletedLoad :: BoardAction -> Bool
+blockedByCompletedLoad = \case
+  NextCard -> True
+  PreviousCard -> True
+  PreviousColumn -> True
+  NextColumn -> True
+  FirstItem -> True
+  LastItem -> True
+  OpenSearch -> True
+  ToggleEpic -> True
+  ShowDetails -> True
+  ReviewSelection -> True
+  SolveSelection -> True
+  AutoSolveSelection -> True
+  MergeDoneCard -> True
+  KillWorking -> True
+  ShowFilter -> False
+  DismissOrClose -> False
+  ShowProcesses -> False
+  ShowIncidents -> False
+  RefreshAll -> False
+  ToggleDrainer -> False
+  ToggleSidebar -> False
+  ShowSettings -> False
+  ShowHelp -> False
+  RepaintTerminal -> False
+  QuitDashboard -> False
 
 -- | Whether the card in front of the user puts this action out of reach, and
 -- what to say instead.
@@ -306,6 +383,7 @@ mutatesSelectedWork = \case
   FirstItem -> False
   LastItem -> False
   OpenSearch -> False
+  ShowFilter -> False
   ToggleEpic -> False
   ShowDetails -> False
   DismissOrClose -> False
@@ -342,6 +420,7 @@ dispatchBoardAction = \case
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
   ShowSettings -> modify (\current -> current {appOverlay = Just SettingsOverlay, appNotice = Nothing})
   OpenSearch -> modify openSearch
+  ShowFilter -> modify toggleFilterPanel
   ShowHelp -> modify (\current -> current {appOverlay = Just HelpOverlay})
   RepaintTerminal -> forceTerminalRepaint
   QuitDashboard -> requestDashboardQuit
@@ -355,9 +434,11 @@ dispatchBoardAction = \case
 -- | Carries out one decoded search key press. Every input is a pure
 -- transition: 'applySearchInput' decides all but Enter, which is
 -- 'openSearchResult' because opening a card's details is the board's own
--- transition and search only ends beneath it.
+-- transition and search only ends beneath it, and @f@, which is the filter
+-- panel's own transition for the same reason.
 handleSearchInput :: SearchInput -> EventM Name AppState ()
 handleSearchInput SearchOpenDetails = modify openSearchResult
+handleSearchInput SearchFocusFilter = modify focusFilterPanel
 handleSearchInput input = modify (applySearchInput input)
 
 -- | The quit key's decision.

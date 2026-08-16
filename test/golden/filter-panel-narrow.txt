@@ -1,16 +1,19 @@
 ╔══════════ coghex/kanban ═════════╗
+║┌──────────── FILTER ────────────┐║
+║│ State      ▌[x] Open 13        │║
+║│             [ ] Closed 4       │║
+║│ Kind                           │║
+║│   [x] Issues 8                 │║
+║│   [x] Pull requests 5          │║
+║│ Workflow    [x] Changes 0      │║
+║│             [x] Problems 2     │║
+║│             [x] Approved 3     │║
+║│             [x] Other 8        │║
+║│ Structure   [x] Epic groups 3  │║
+║│             [x] Standalone 10  │║
+║│ showing 13 of 17 cards         │║
+║└────────────────────────────────┘║
 ║┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━┳║
-║┃                                ┃║
-║┃                                ┃║
-║┃  ▾ #700  Persistence contract  ┃║
-║┃  rollout  1/2 complete         ┃║
-║┃  └─ ╭────────────────────────╮ ┃║
-║┃     │ A1 · tracker #700      │ ┃║
-║┃     │ #711 Adopt the         │ ┃║
-║┃     │ versioned save…        │ ┃║
-║┃     │  feature               │ ┃║
-║┃     │ unassigned · updated   │ ┃║
-║┃     │ 4h ago                 │ ┃║
 ║┃     │ Write the envelope     │ ┃║
 ║┃     │ header ahead of the    │ ┃║
 ║┃     │ payload so a partial…  │ ┃║
@@ -31,10 +34,7 @@
 ║┃  │ currently allow pointer   │ ┃║
 ║┃  │ events to reach lower…    │ ┃║
 ║┃  ╰───────────────────────────╯ ┃║
-║┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
-║ j/↓ next  k/↑ previous  x kill   ║
+║ j/k/↑/↓ box  ←/→ group  space to ║
 ║ board: updated 3h ago · history: ║
-║ Cached GitHub snapshot loaded ·  ║
-║ press u to update                ║
 ╚══════════════════════════════════╝

@@ -1,15 +1,22 @@
 ╔══════════════════════════════════════════════════════════════════════════ coghex/kanban ═════════════════════════════════════════════════════════════════════════╗
-║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━┳━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━┳━━━━━━━━━ REVIEWING  2 ━━━━━━━━━┳━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━┓║
-║┃ Codex          3h 0m old ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ 5 hour  [██████░░░░] 63% ┃┃                                 ┃                                ┃  STANDALONE                    ┃  STANDALONE                    ┃║
-║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract   ┃  ▾ #700  Persistence contract  ┃  ╭───────────────────────────╮ ┃  ╭───────────────────────────╮ ┃║
-║┃ week    [████░░░░░░] 41% ┃┃  rollout  1/2 complete          ┃  rollout  1/2 complete         ┃  │ PR #841 Split the input   │ ┃  │ PR #851 Resolve save      │ ┃║
-║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭─────────────────────────╮ ┃  └─ ╭────────────────────────╮ ┃  │ dispatch facade           │ ┃  │ envelope conflict         │ ┃║
-║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700       │ ┃     │ A2 · tracker #700      │ ┃  │  refactor                 │ ┃  │  reviewed:approve         │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the          │ ┃     │ #712 Migrate the       │ ┃  │ #833 · agent-name →       │ ┃  │ UNLINKED · agent-name →   │ ┃║
-║┃ in 2h 30m · Thu 17:30    ┃┃     │ versioned save envelope │ ┃     │ terrain cache reader   │ ┃  │ master · updated 3h ago   │ ┃  │ master · updated 3h ago   │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature                │ ┃     │  code-health           │ ┃  │ Moves per-domain dispatch │ ┃  │ Updates the branch after  │ ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · updated 4h │ ┃     │ @codex-agent · updated │ ┃  │ into small modules while  │ ┃  │ the persistence registry  │ ┃║
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┌────────────────────────────────────────────────────────────── FILTER ──────────────────────────────────────────────────────────────┐║
+║┃ Codex          3h 0m old ┃│ State      ▌[x] Open 13   [ ] Closed 4                                                                                             │║
+║┃ 5 hour  [██████░░░░] 63% ┃│ Kind        [x] Issues 8   [x] Pull requests 5                                                                                     │║
+║┃ in 1h 5m · Thu 16:05     ┃│ Workflow    [x] Changes 0   [x] Problems 2   [x] Approved 3   [x] Other 8                                                          │║
+║┃ week    [████░░░░░░] 41% ┃│ Structure   [x] Epic groups 3   [x] Standalone 10                                                                                  │║
+║┃ in 4d 18h · Tue 09:00    ┃│ showing 13 of 17 cards                                                                                                             │║
+║┃ Claude         3h 0m old ┃└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘║
+║┃ 5 hour  [████████░░] 78% ┃┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━┳━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━┳━━━━━━━━━ REVIEWING  2 ━━━━━━━━━┳━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━┓║
+║┃ in 2h 30m · Thu 17:30    ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃                                 ┃                                ┃  STANDALONE                    ┃  STANDALONE                    ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃  ▾ #700  Persistence contract   ┃  ▾ #700  Persistence contract  ┃  ╭───────────────────────────╮ ┃  ╭───────────────────────────╮ ┃║
+║┃                          ┃┃  rollout  1/2 complete          ┃  rollout  1/2 complete         ┃  │ PR #841 Split the input   │ ┃  │ PR #851 Resolve save      │ ┃║
+║┃                          ┃┃  └─ ╭─────────────────────────╮ ┃  └─ ╭────────────────────────╮ ┃  │ dispatch facade           │ ┃  │ envelope conflict         │ ┃║
+║┃                          ┃┃     │ A1 · tracker #700       │ ┃     │ A2 · tracker #700      │ ┃  │  refactor                 │ ┃  │  reviewed:approve         │ ┃║
+║┃                          ┃┃     │ #711 Adopt the          │ ┃     │ #712 Migrate the       │ ┃  │ #833 · agent-name →       │ ┃  │ UNLINKED · agent-name →   │ ┃║
+║┃                          ┃┃     │ versioned save envelope │ ┃     │ terrain cache reader   │ ┃  │ master · updated 3h ago   │ ┃  │ master · updated 3h ago   │ ┃║
+║┃                          ┃┃     │  feature                │ ┃     │  code-health           │ ┃  │ Moves per-domain dispatch │ ┃  │ Updates the branch after  │ ┃║
+║┃                          ┃┃     │ unassigned · updated 4h │ ┃     │ @codex-agent · updated │ ┃  │ into small modules while  │ ┃  │ the persistence registry  │ ┃║
 ║┃                          ┃┃     │ ago                     │ ┃     │ 4h ago                 │ ┃  │ preserving the public…    │ ┃  │ changed on master.        │ ┃║
 ║┃                          ┃┃     │ Write the envelope      │ ┃     │ Read through the       │ ┃  │ ◐ CI 12/14 · behind       │ ┃  │ ✓ CI 12/12 · merge        │ ┃║
 ║┃                          ┃┃     │ header ahead of the     │ ┃     │ envelope and reject a  │ ┃  ╰───────────────────────────╯ ┃  │ conflict                  │ ┃║
@@ -47,18 +54,11 @@
 ║┃                          ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ replace it atomically…     │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
+║┃ off                      ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  f filter  e epic  enter details  esc close  r review/revise  S solv ║
+║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  f/esc close                                                                                          ║
 ║ board: updated 3h ago · history: current                                                                                                                         ║
-║ Cached GitHub snapshot loaded · press u to update                                                                                                                ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

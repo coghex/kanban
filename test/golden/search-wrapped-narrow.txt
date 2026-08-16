@@ -36,5 +36,5 @@
 ║┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
 ║ h/l/any letter type  backspace d ║
-║ board: updated 3h ago            ║
+║ board: updated 3h ago · history: ║
 ╚══════════════════════════════════╝

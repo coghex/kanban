@@ -90,6 +90,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `l` / Right | Next column |
 | `g` / `G` | First or last visible card |
 | `s` | Search a column, starting with Issues |
+| `f` | Show or hide the card filter |
 | `Enter` | Open details |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
@@ -115,8 +116,10 @@ column has.
 
 While the box is open, letters and digits are typed into it rather than being
 shortcuts — so `r`, `S`, and `u` do nothing but add a character. The exceptions
-are `s`, which closes the search, and `q`, which still quits. Chords keep
-working too: `Ctrl-C` quits and `Ctrl-L` repaints.
+are `s`, which closes the search, a lowercase `f`, which moves you to the filter
+and leaves what you have typed alone, and `q`, which still quits. An uppercase
+`F` is an ordinary character and goes into the query. Chords keep working too:
+`Ctrl-C` quits and `Ctrl-L` repaints.
 
 A card matches on the `#number` and title shown on the card, ignoring case.
 Nothing else about it is searched. An epic is kept when its own title matches or
@@ -143,6 +146,73 @@ or close an epic, or change which card is selected in the column it lands in, so
 picking a card there takes a second click. Left at the leftmost column and Right
 at the rightmost do nothing at all and leave what you have typed alone, and the
 mouse wheel always just scrolls the column under the pointer.
+
+## Filtering the board
+
+Press `f` to open the filter. It appears across the top of the board, above the
+column headings, and the cards move down to make room for it. `f` again — or
+`Esc` — puts it away without changing anything you set.
+
+The filter has four groups of checkboxes:
+
+- **State**: Open, Closed
+- **Kind**: Issues, Pull requests
+- **Workflow**: Changes, Problems, Approved, Other
+- **Structure**: Epic groups, Standalone
+
+Everything starts checked except Closed, which is why Kanban opens on the live
+open board. Checking or unchecking a box changes the cards straight away; there
+is nothing to apply, and nothing is sent to GitHub. Inside a group the checked
+values are alternatives, and the groups are combined — so unchecking every value
+in one group is a real choice that shows nothing, not a reset.
+
+`j`/`k` or Up and Down move between the boxes, Left and Right move between the
+groups, Space ticks the box you are on, and `d` puts every box back the way it
+started. Clicking a box ticks it too. The number beside each box is how many
+cards that value on its own would show, given whatever you have chosen in the
+other groups, so it tells you what ticking it would bring in. A number Kanban
+cannot honestly give yet — because a load has not finished — shows as `…` or as
+how much has loaded so far.
+
+The filter and the search work together. `s` from the filter takes you to the
+search box, and a lowercase `f` from the search box brings you back with your
+query intact. The filter decides which cards are eligible and the search then
+narrows that result, so neither clears the other.
+
+Your choices last until you quit. They survive putting the filter away, opening
+and closing anything, and every refresh, and they are never saved — a fresh
+start always begins with the same defaults. While the filter is put away and you
+have changed something, the footer shows `f filter*` so a board that is showing
+only part of its work always says so.
+
+### Closed cards and the history load
+
+Kanban fetches every closed issue and completed pull request in the background.
+The footer's second line says where that has got to — `loading`, `paused`,
+`current`, `stale`, or `failed` — and it never gets in your way while Closed is
+unchecked.
+
+Tick Closed before that finishes and the board is replaced by a progress panel
+until it does. No cards are shown under it and no card key or click does
+anything, but the filter, the footer, help, `u`, and `q` all keep working.
+Unticking Closed brings the open board straight back and does not cancel the
+load; ticking it again brings the panel back until the load finishes. If the
+load fails and Kanban still has a complete history from before, it shows that
+history and marks it stale; if it has none at all, it says so and shows no
+cards.
+
+Once the load is done, ticking Closed shows closed issues in Issues and closed
+and merged pull requests in Done, each badged `CLOSED` or `MERGED`. They are
+history: you can read them and open their details, but review, solve, and merge
+decline to act on them.
+
+### When a column is empty
+
+An empty column says which of three things happened, so you never have to guess:
+
+- `No search matches` — the column had cards, and your query matched none.
+- `No filter matches` — your filter choices admit nothing there.
+- `No items` — the column is simply empty.
 
 ## Merging one pull request
 

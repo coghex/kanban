@@ -1,10 +1,19 @@
 module Kanban.UI.Board
   ( CardEnv (..),
+    boardFooterHintLine,
+    boardHintLine,
     cardExcerptLimit,
     cardStatusAttribute,
+    completedLoadingHeading,
+    completedUnavailableHeading,
     drawBase,
     drawCardFrame,
     drawLiveActivity,
+    emptyColumnText,
+    filterChipText,
+    filterFooterHintLine,
+    filterPanelLabel,
+    filterSummaryText,
     footerHintLine,
     openDataLoadingHeading,
     openDataUnavailableHeading,
@@ -40,6 +49,7 @@ import qualified Brick.Types as BrickTypes
 import Data.List (intersperse )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -58,17 +68,38 @@ import Kanban.Domain
 import Kanban.Drainer
   ( DrainerStatus (..)
     )
+import Kanban.Filter
+  ( FilterBox,
+    FilterGroup,
+    filterBoxChecked,
+    filterBoxLabel,
+    filterGroupBoxes,
+    filterGroupLabel,
+  )
 import Kanban.Layout (responsiveColumnWidths, responsiveOpenColumnWidths)
 import Kanban.Text (excerpt, sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
 import Kanban.Usage.Render (usageResetCountdownText, usageResetLocalText, usageSnapshotAgeText, usageSolveRoundsLeft, usageSolveRoundsSuffix)
 import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, orderCardLabels )
 import Kanban.UI.Types
-import Kanban.UI.Keys (BindingScope (..), BoardAction (..), actionKeyText, footerHint, scopeBindings)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, scopeBindings)
 import Kanban.UI.SessionCore
 import Kanban.UI.Util
 import Kanban.UI.Theme
 import Kanban.UI.Search
+import Kanban.UI.Filter
+  ( CardSurface (..),
+    cardSurfaceFor,
+    completedHistoryStatusText,
+    criteriaAreFiltering,
+    facetCount,
+    facetCountText,
+    filterBoxCountText,
+    filterPanelFocusedBox,
+    filteredCount,
+    focusedSearch,
+    rawEntryCount,
+  )
 
 drawBase :: AppState -> Widget Name
 drawBase state
@@ -251,22 +282,37 @@ usageBar state percentage =
       | state.appOptions.optionAscii = ("[", "]", "#", ".")
       | otherwise = ("[", "]", "█", "░")
 
--- | The board body: four columns of cards, or the panel that stands in for
--- them until a complete open generation has published.
+-- | The board region: the filter panel, when it is showing, above whatever
+-- the card area is drawing.
 --
--- The panel replaces the columns rather than being drawn over them, and that
--- is the whole of §7's "renders no cards from any source": there is no
--- heading to carry a count, no viewport holding a stale board underneath, and
--- no partial page set anything could have put there. The sidebar, the footer,
--- and every key stay exactly as they are, so @u@, @q@, @Ctrl-C@, help, and
--- options remain operable while it is up.
+-- The panel is part of this region's own vertical flow rather than an overlay,
+-- so it shifts the columns down by exactly its own height and cannot reach the
+-- usage sidebar beside it or the footer below it (§6).
 drawBoard :: AppState -> Widget Name
-drawBoard state = case openDataView state.appLastSuccessfulFetch state.appBoardFreshness of
-  OpenDataLoading -> drawOpenDataPanel state openDataLoadingHeading loadingBody
-  OpenDataUnavailable reason -> drawOpenDataPanel state openDataUnavailableHeading (unavailableBody reason)
-  OpenDataBoard -> drawPopulatedBoard state
+drawBoard state = case drawFilterPanel state of
+  Nothing -> cardArea
+  Just panel -> panel <=> cardArea
   where
-    loadingBody =
+    cardArea = drawCardArea state
+
+-- | Four columns of cards, or the centered panel that stands in for them.
+--
+-- A panel replaces the columns rather than being drawn over them, and that is
+-- the whole of §7's "renders no cards from any source": there is no heading to
+-- carry a count, no viewport holding a stale board underneath, and no partial
+-- page set anything could have put there. The sidebar, the filter panel, the
+-- footer, and every key that is not a card action stay exactly as they are, so
+-- @f@, @u@, @q@, @Ctrl-C@, help, and options remain operable while one is up.
+drawCardArea :: AppState -> Widget Name
+drawCardArea state = case cardSurfaceFor state of
+  CardSurfaceLoadingOpen -> drawCenteredPanel state openDataLoadingHeading openLoadingBody
+  CardSurfaceUnavailableOpen reason -> drawCenteredPanel state openDataUnavailableHeading (unavailableBody reason)
+  CardSurfaceLoadingCompleted progress pausedUntil ->
+    drawCenteredPanel state completedLoadingHeading (completedLoadingBody state progress pausedUntil)
+  CardSurfaceUnavailableCompleted reason -> drawCenteredPanel state completedUnavailableHeading (unavailableBody reason)
+  CardSurfaceCards -> drawPopulatedBoard state
+  where
+    openLoadingBody =
       [ txtWrap "Fetching every open issue and pull request.",
         withAttr dimAttr (txtWrap "The board appears once the first complete refresh publishes.")
       ]
@@ -275,28 +321,169 @@ drawBoard state = case openDataView state.appLastSuccessfulFetch state.appBoardF
         withAttr dimAttr (txtWrap ("press " <> actionKeyText RefreshAll <> " to retry"))
       ]
 
--- | The headings the two panels are recognised by. Fixed strings rather than
--- composed ones: §7 names @OPEN DATA UNAVAILABLE@ exactly, and the golden
--- frames are what hold both to it.
+-- | What the completed blocker says: what is being fetched, how far it has
+-- got, why it is waiting when it is, and the one press that ends it.
+completedLoadingBody :: AppState -> CompletedProgress -> Maybe UTCTime -> [Widget Name]
+completedLoadingBody state progress pausedUntil =
+  [ txtWrap "Fetching every closed issue and completed pull request.",
+    withAttr dimAttr (txtWrap (completedProgressText progress))
+  ]
+    <> pausedRows
+    <> [withAttr dimAttr (txtWrap ("press " <> actionKeyText ShowFilter <> " and uncheck Closed to return to the open board"))]
+  where
+    pausedRows =
+      [ withAttr pendingAttr (txtWrap (historyPausedText state.appTimeZone resetAt))
+      | Just resetAt <- [pausedUntil]
+      ]
+
+-- | How far a completed traversal has got, in the honest form: a total only
+-- once both connections have reported one, and no invented denominator before
+-- that (§13).
+completedProgressText :: CompletedProgress -> Text
+completedProgressText progress = case (progress.completedIssuesTotal, progress.completedPullRequestsTotal) of
+  (Just issues, Just pullRequests) -> showText loaded <> " of " <> showText (issues + pullRequests) <> " loaded"
+  _ -> showText loaded <> " loaded so far"
+  where
+    loaded = progress.completedIssuesLoaded + progress.completedPullRequestsLoaded
+
+-- | Why the traversal is waiting. The same fact the notice line reported when
+-- the pause arrived, drawn from the status that outlives that notice.
+historyPausedText :: TimeZone -> UTCTime -> Text
+historyPausedText timeZone resetAt = "Paused · GitHub limit resets " <> absoluteTime timeZone resetAt
+
+-- | The headings the centered panels are recognised by. Fixed strings rather
+-- than composed ones: §7 names @OPEN DATA UNAVAILABLE@ exactly, and the golden
+-- frames are what hold all four to their wording.
 openDataLoadingHeading, openDataUnavailableHeading :: Text
 openDataLoadingHeading = "LOADING OPEN DATA"
 openDataUnavailableHeading = "OPEN DATA UNAVAILABLE"
 
+completedLoadingHeading, completedUnavailableHeading :: Text
+completedLoadingHeading = "LOADING COMPLETED HISTORY"
+completedUnavailableHeading = "COMPLETED DATA UNAVAILABLE"
+
 -- | Cells the widest panel is allowed. Narrower regions simply clip it, since
 -- 'hLimit' is an upper bound; the §6 minimum column is wide enough for the
--- longer of the two headings and its border.
-openDataPanelWidth :: Int
-openDataPanelWidth = 52
+-- longest of the headings and its border.
+centeredPanelWidth :: Int
+centeredPanelWidth = 52
 
-drawOpenDataPanel :: AppState -> Text -> [Widget Name] -> Widget Name
-drawOpenDataPanel state heading body =
+drawCenteredPanel :: AppState -> Text -> [Widget Name] -> Widget Name
+drawCenteredPanel state heading body =
   center
-    . hLimit openDataPanelWidth
+    . hLimit centeredPanelWidth
     . withBorderStyle (cardBorderStyle state.appOptions)
     . borderWithLabel (withAttr headingAttr (txt (" " <> heading <> " ")))
     . padLeftRight 1
     . vBox
     $ body
+
+-- | The one-line label naming the filter panel.
+filterPanelLabel :: Text
+filterPanelLabel = " FILTER "
+
+-- | Cells the group-label column takes, sized from the labels themselves so a
+-- renamed group cannot run into the first chip beside it.
+filterGroupColumn :: Int
+filterGroupColumn = maximum (1 : map (displayWidth . filterGroupLabel) [minBound .. maxBound]) + 2
+
+-- | Cells between two chips on one row.
+filterChipGap :: Text
+filterChipGap = "  "
+
+-- | The panel, or 'Nothing' while it is hidden — in which case the board
+-- occupies exactly the rows it always did.
+drawFilterPanel :: AppState -> Maybe (Widget Name)
+drawFilterPanel state = case state.appFilterPanel of
+  Nothing -> Nothing
+  Just _ ->
+    Just
+      . withBorderStyle (cardBorderStyle state.appOptions)
+      . borderWithLabel (withAttr headingAttr (txt filterPanelLabel))
+      . padLeftRight 1
+      $ filterPanelContents state
+
+-- | The four groups and the summary beneath them, laid out for whatever width
+-- the board region currently has. Chips wrap inside their group's own rows, so
+-- a narrower terminal makes the panel taller rather than clipping a checkbox
+-- the mouse can still be aimed at.
+filterPanelContents :: AppState -> Widget Name
+filterPanelContents state =
+  BrickTypes.Widget BrickTypes.Greedy BrickTypes.Fixed $ do
+    context <- BrickTypes.getContext
+    -- Padded to the full region rather than to the widest chip row, because
+    -- §7 has the panel span the board: a border drawn only as wide as its
+    -- contents would sit over the first column or two instead.
+    BrickTypes.render
+      . padRight Max
+      . vBox
+      $ concatMap (drawFilterGroup state (BrickTypes.availWidth context)) [minBound .. maxBound]
+        <> [withAttr dimAttr (txt (filterSummaryText state))]
+
+-- | One group's rows: its label, and its chips wrapped beneath or beside it.
+--
+-- The label shares the first row while every chip still fits next to it, and
+-- takes a row of its own once one does not. That second layout is what keeps a
+-- narrow terminal honest: a chip clipped by the region would lose the count on
+-- its right-hand end, which is exactly the figure the checkbox is there to
+-- state.
+drawFilterGroup :: AppState -> Int -> FilterGroup -> [Widget Name]
+drawFilterGroup state interior group
+  | widestChip <= interior - filterGroupColumn = zipWith besideLabel labels (wrapped (interior - filterGroupColumn))
+  | otherwise = withAttr dimAttr (txt (filterGroupLabel group)) : map (indented . chipRow) (wrapped (max 1 (interior - 1)))
+  where
+    chips = [(box, filterChipText state box) | box <- filterGroupBoxes group]
+    widestChip = maximum (1 : map (displayWidth . snd) chips)
+    wrapped available = wrapFilterChips available chips
+    -- The label leads the group's first row; its continuation rows keep the
+    -- chips in the same column beneath it.
+    labels = padded (filterGroupLabel group) : repeat (Text.replicate filterGroupColumn " ")
+    padded label = label <> Text.replicate (max 1 (filterGroupColumn - displayWidth label)) " "
+    besideLabel label row = withAttr dimAttr (txt label) <+> chipRow row
+    indented row = txt " " <+> row
+    chipRow row = hBox (intersperse (txt filterChipGap) (map (drawFilterChip state) row))
+
+-- | Greedy chip wrapping: a chip goes on the current row while it and the gap
+-- before it still fit, and starts a new one otherwise. A chip wider than the
+-- whole region still gets a row of its own rather than disappearing.
+wrapFilterChips :: Int -> [(FilterBox, Text)] -> [[(FilterBox, Text)]]
+wrapFilterChips available = foldl place []
+  where
+    gap = displayWidth filterChipGap
+    place [] chip = [[chip]]
+    place rows chip = case reverse rows of
+      row : earlier
+        | rowWidth row + gap + displayWidth (snd chip) <= available ->
+            reverse ((row <> [chip]) : earlier)
+      _ -> rows <> [[chip]]
+    rowWidth row = sum (map (displayWidth . snd) row) + gap * max 0 (length row - 1)
+
+drawFilterChip :: AppState -> (FilterBox, Text) -> Widget Name
+drawFilterChip state (box, label) =
+  clickable (FilterBoxTarget box) (withAttr attribute (txt label))
+  where
+    attribute
+      | filterPanelFocusedBox state == Just box = selectedAttr
+      | filterBoxChecked state.appFilterCriteria box = cardTitleAttr
+      | otherwise = dimAttr
+
+-- | One checkbox as it is drawn: the focus marker, the box, its label, and the
+-- count that says what checking it alone would admit.
+filterChipText :: AppState -> FilterBox -> Text
+filterChipText state box =
+  marker <> checkbox <> " " <> filterBoxLabel box <> " " <> filterBoxCountText box (facetCount state box)
+  where
+    marker
+      | filterPanelFocusedBox state /= Just box = " "
+      | state.appOptions.optionAscii = ">"
+      | otherwise = "▌"
+    checkbox = if filterBoxChecked state.appFilterCriteria box then "[x]" else "[ ]"
+
+-- | The panel's own two figures: how many cards the criteria are showing, and
+-- how many the complete datasets hold.
+filterSummaryText :: AppState -> Text
+filterSummaryText state =
+  "showing " <> facetCountText (filteredCount state) <> " of " <> facetCountText (rawEntryCount state) <> " cards"
 
 drawPopulatedBoard :: AppState -> Widget Name
 drawPopulatedBoard state =
@@ -385,12 +572,26 @@ drawColumn state columnWidth column =
     -- rendered height and a resize rewraps both.
     searchRows = maybe [] (pure . drawSearchBox state columnWidth) (searchQueryFor state column)
     entryRows
-      | null entries = [padAll 1 (withAttr dimAttr (txt emptyColumnText))]
+      | null entries = [padAll 1 (withAttr dimAttr (txt (emptyColumnText state column)))]
       | otherwise = drawColumnEntries state (expandedTrackersFor state column) column (zip [0 ..] entries)
-    -- A column a query emptied is not the same thing as an empty column, and
-    -- §7 keeps the two rows distinct.
-    emptyColumnText = maybe "No items" (const "No matches") (activeQueryFor state column)
     columnVisibility = if state.appSelectedColumn == column then visible else id
+
+-- | What a column with nothing in it says, in §7's declared precedence.
+--
+-- A column a query emptied, one the criteria emptied, and one that is simply
+-- empty are three different facts, and none of them may be confused with a
+-- loading state. The order follows the pipeline: search narrows what the
+-- criteria admitted, so a query can only be blamed for a column that had
+-- something to narrow — if filtering already produced zero, the filter is what
+-- the row names. The defaults are the baseline, so a column empty under them
+-- is intrinsically empty rather than filtered.
+emptyColumnText :: AppState -> BoardColumn -> Text
+emptyColumnText state column
+  | isJust (activeQueryFor state column), not (null eligible) = "No search matches"
+  | criteriaAreFiltering state = "No filter matches"
+  | otherwise = "No items"
+  where
+    eligible = entriesForBoard state.appVisibleBoard column
 
 -- | The one-line label naming the box a query is typed into.
 searchBoxLabel :: Text
@@ -733,10 +934,37 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
   padLeftRight 1
     . vBox
-    $ [ withAttr footerAttr (txt (maybe footerHintLine (const searchFooterHintLine) state.appSearch)),
-        withAttr dimAttr (txt (boardFreshnessText state)),
+    $ [ withAttr footerAttr (txt (boardHintLine state)),
+        withAttr dimAttr (txt (boardFreshnessText state <> " · " <> completedHistoryStatusText state)),
         maybe emptyWidget (withAttr noticeAttr . txtWrap) state.appNotice
       ]
+
+-- | Which hint line the footer is showing: the surface that currently has the
+-- keyboard names its own keys, and the board's line otherwise.
+boardHintLine :: AppState -> Text
+boardHintLine state
+  | isJust (filterPanelFocusedBox state) = filterFooterHintLine
+  | isJust (focusedSearch state) = searchFooterHintLine
+  | otherwise = boardFooterHintLine (criteriaAreFiltering state)
+
+-- | The hint line a focused filter panel shows in place of the board's.
+--
+-- Written here rather than projected from the table in "Kanban.UI.Keys" for
+-- the same reason search's is: none of these keys is a binding while the panel
+-- has focus. @d@ restores the defaults rather than toggling the drainer, and
+-- the arrows move between checkboxes rather than between columns, so the
+-- board's line would state both of them wrongly.
+filterFooterHintLine :: Text
+filterFooterHintLine =
+  Text.intercalate
+    "  "
+    [ "j/k/↑/↓ box",
+      "←/→ group",
+      "space toggle",
+      "d defaults",
+      "s search",
+      "f/esc close"
+    ]
 
 -- | Every base-board binding, as one hint chip each, projected from the table
 -- in "Kanban.UI.Keys" rather than transcribed here.
@@ -749,7 +977,21 @@ drawFooter state =
 -- clipped. The help overlay behind @?@ is, as before, the complete list, and
 -- is the one that has to stay readable.
 footerHintLine :: Text
-footerHintLine = Text.intercalate "  " (map footerHint (scopeBindings BoardScope))
+footerHintLine = boardFooterHintLine False
+
+-- | The same line with the filter chip marked while the criteria are hiding
+-- cards.
+--
+-- The marker is the only report a non-default criteria set gets once the panel
+-- is hidden, and a board that is quietly showing a subset of its work has to
+-- say so somewhere that is always on screen. It marks the existing chip rather
+-- than adding one, so the line's inventory still comes from the table.
+boardFooterHintLine :: Bool -> Text
+boardFooterHintLine filtering = Text.intercalate "  " (map chip (scopeBindings BoardScope))
+  where
+    chip candidate
+      | filtering, candidate.bindingAction == ShowFilter = footerHint candidate <> "*"
+      | otherwise = footerHint candidate
 
 -- | The hint line a live search shows in place of the board's.
 --

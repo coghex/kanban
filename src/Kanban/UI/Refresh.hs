@@ -189,8 +189,8 @@ startCompletedHistory = do
             appCompletedProgress = emptyCompletedProgress,
             -- The previous generation's failure described a generation that no
             -- longer exists. The history it failed to replace stays exactly
-            -- where it is.
-            appCompletedFailure = Nothing
+            -- where it is, and the status is this generation's from here on.
+            appCompletedStatus = CompletedHistoryLoading
           }
     )
   liftIO (requestRefreshJob state.appRefreshCoordinator HistoryJob Nothing)
