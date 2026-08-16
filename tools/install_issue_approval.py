@@ -171,7 +171,14 @@ def canonical_backend() -> Path:
     reviewer the operator did not choose is worse than an install refused.
     """
     try:
-        return approve_issues_service.resolve_backend()
+        resolved = approve_issues_service.resolve_backend()
+        # Absolute in what this installer reports, for the same reason the
+        # definition records an absolute override: a relative answer names a
+        # different file to every process that reads it, and the one a job
+        # would read is not the one verified here. An already-absolute path is
+        # reported exactly as recorded, symlinks and all, because the managed
+        # link is the stable name the record deliberately holds.
+        return resolved if resolved.is_absolute() else resolved.resolve()
     except approve_issues_service.ServiceError as exc:
         message = str(exc)
         if "install_issue_review.py" not in message:

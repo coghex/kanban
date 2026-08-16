@@ -2381,9 +2381,17 @@ def service_definition(
     # resolved a different one would run a reviewer nobody checked; a job
     # installed with no override resolves through the fixed issue-review
     # record, which is the durable answer and needs no environment at all.
+    #
+    # Absolute, because a relative override names a different directory to
+    # every process that reads it. `resolve_backend` read it against *this*
+    # process's working directory, while the job runs with the checkout as
+    # its own -- so the raw value would install a definition pointing at a
+    # backend nobody verified, or at none at all.
     override = os.environ.get(kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV)
     if override and override.strip():
-        environment[kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV] = override
+        environment[kanban_config.ISSUE_REVIEW_INSTALL_DIR_ENV] = str(
+            Path(override).expanduser().resolve()
+        )
     arguments = [
         python,
         str(controller_path(install_dir)),
@@ -2447,6 +2455,24 @@ def another_checkout_running(job: ApprovalJob, snapshot: dict[str, Any]) -> str 
     return active_repo
 
 
+def job_is_running(job: ApprovalJob) -> bool:
+    """Whether the service manager holds a live process for this job.
+
+    Asked of the manager rather than inferred from the status document,
+    because that document is written by the run itself: one that has not
+    written its first status yet, one whose write failed, and one that was
+    damaged or removed all read as stopped while the process they describe
+    keeps reviewing issues. The document says what a run is *doing*; only the
+    manager says whether there is one.
+
+    Both questions are asked before every transition that would replace or
+    remove a job, because either answer alone can miss a live controller: the
+    manager cannot see a run started outside it, and the document cannot see a
+    run that has not written.
+    """
+    return service_backend().is_running(service_label(job))
+
+
 def require_installable(job: ApprovalJob) -> None:
     """Every reason this repository's job must not be written right now.
 
@@ -2454,11 +2480,18 @@ def require_installable(job: ApprovalJob) -> None:
     leaves the installation exactly as it was. The legacy daemon comes first
     because it is about the canonical lock rather than about this service:
     installing beside it would produce a job whose ordered barrier the daemon
-    walks straight past (D-13). Then a second checkout of this identity, then
-    this checkout's own live run -- a manager asked to replace a definition
-    under a live job leaves a controller nothing can see or stop.
+    walks straight past (D-13). Then the manager's own answer about this job,
+    then a second checkout of this identity, then this checkout's own live run
+    -- a manager asked to replace a definition under a live job leaves a
+    controller nothing can see or stop.
     """
     require_no_legacy_daemon(job.repo_path)
+    if job_is_running(job):
+        raise ServiceError(
+            "Stop the running issue approval controller before installing its "
+            f"{service_backend().backend_name()} job: the manager still holds a "
+            f"live process for {service_label(job)}."
+        )
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -2600,7 +2633,21 @@ def require_stopped_for_uninstall(job: ApprovalJob) -> None:
     with nothing able to see or stop it, so the remediation is named rather
     than performed: stopping somebody's run is an explicit operator decision,
     and an uninstall that stopped it silently would take that decision away.
+
+    The manager is asked first and believed on its own account, because
+    removal is the one transition that destroys the means of recovery. A job
+    whose status document is absent, damaged, or simply not written yet would
+    otherwise read as stopped, and the definition and record entry would be
+    gone before the live process was ever noticed -- leaving a controller
+    running that nothing can discover, address, or stop.
     """
+    if job_is_running(job):
+        raise ServiceError(
+            f"The issue approval controller for {job.identity} is running: the "
+            f"{service_backend().backend_name()} manager still holds a live "
+            f"process for {service_label(job)}. Stop it first; uninstalling a "
+            "live job would leave a controller nothing can see or stop."
+        )
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -2667,7 +2714,10 @@ def start_service(job: ApprovalJob, install_dir: Path) -> dict[str, Any]:
             f"from {conflict}, which is another checkout of the same repository as "
             f"{job.repo_path}. One repository runs one controller at a time."
         )
-    if snapshot["state"] in LIVE_STATES:
+    # The manager's answer counts here too, and as a no-op rather than a
+    # refusal: starting something already started is nothing to do, and a run
+    # that has not yet written its first status is still a run.
+    if snapshot["state"] in LIVE_STATES or job_is_running(job):
         return {"started": False, "message": "Already running.", **snapshot}
     installed = install_job(job, install_dir)
     label = installed["label"]
@@ -2706,7 +2756,10 @@ def stop_service(job: ApprovalJob) -> dict[str, Any]:
     start needs to find.
     """
     snapshot = status_snapshot(job)
-    if snapshot["state"] not in LIVE_STATES:
+    # Both answers again, and for the same reason: a run whose status is
+    # missing or damaged is still a run, and reporting it as already stopped
+    # would leave it going while claiming otherwise.
+    if snapshot["state"] not in LIVE_STATES and not job_is_running(job):
         return {"stopped": False, "message": "Already stopped.", **snapshot}
     label = service_label(job)
     service_backend().request_stop(label)
@@ -2714,7 +2767,10 @@ def stop_service(job: ApprovalJob) -> dict[str, Any]:
     while time.monotonic() < deadline:
         time.sleep(STOP_POLL_SECONDS)
         current = status_snapshot(job)
-        if current["state"] not in LIVE_STATES:
+        # Confirmed by the manager as well as by the document, so a stop only
+        # reports success once there is really no process left -- which is
+        # what makes the uninstall that may follow it safe.
+        if current["state"] not in LIVE_STATES and not job_is_running(job):
             return {"stopped": True, "label": label, **current}
     raise ServiceError("Timed out waiting for the issue approval controller to stop.")
 

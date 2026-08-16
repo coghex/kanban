@@ -271,6 +271,12 @@ class FakeServiceManager(service_manager.ServiceManagerBackend):
             return None
         return int(path.read_text(encoding="utf-8").strip())
 
+    def record_started_pid(self, identifier, pid):
+        """Say that this identifier's job is being run by `pid`, without
+        starting anything. What a manager holding a live process looks like to
+        every caller that asks it."""
+        self._pid_path(identifier).write_text(str(pid), encoding="utf-8")
+
     # -- the boundary ------------------------------------------------------
 
     def namespace(self):
@@ -589,11 +595,57 @@ class InstallerFixture(unittest.TestCase):
             },
         )
 
+    def pretend_running(self, label=None):
+        """Make the manager report a live process for this job, with no status
+        document behind it.
+
+        This test process's own PID, which is unquestionably alive and needs no
+        cleanup. What it stands for is every way a real run exists without a
+        readable status: one that has not written its first document yet, one
+        whose write failed, and one whose runtime was damaged or removed.
+        """
+        self.manager.record_started_pid(label or self.label(), os.getpid())
+
+    def detached_process(self, source):
+        """A live process in a session of its own, and nobody's child here.
+
+        Spawned through the same launcher the fake manager starts jobs with,
+        because a process this fixture waited on would answer a liveness probe
+        as alive long after it exited: an unreaped child is a zombie, and
+        `os.kill(pid, 0)` finds one.
+        """
+        handle = tempfile.NamedTemporaryFile(dir=self.root, suffix=".pid", delete=False)
+        handle.close()
+        pid_path = Path(handle.name)
+        spec = {
+            "argv": [sys.executable, "-c", source],
+            "working_directory": str(self.root),
+            "environment": {"PATH": os.defpath},
+            "stdout_path": str(self.root / "detached.out"),
+            "stderr_path": str(self.root / "detached.err"),
+            "pid_path": str(pid_path),
+        }
+        launcher = subprocess.Popen([sys.executable, "-c", LAUNCHER, json.dumps(spec)])
+        launcher.wait(timeout=30)
+        wait_until(lambda: pid_path.stat().st_size > 0, message="the detached PID")
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+        self.addCleanup(self.kill_if_alive, pid)
+        return pid
+
+    def kill_if_alive(self, pid):
+        if pid_alive(pid):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
     def stop_everything(self):
         for path in self.manager.root.glob("*.pid"):
             try:
                 pid = int(path.read_text(encoding="utf-8").strip())
             except (OSError, ValueError):
+                continue
+            # Never this process: `pretend_running` records it deliberately, to
+            # stand for a manager holding a run whose status cannot be read.
+            if pid == os.getpid():
                 continue
             if pid_alive(pid):
                 with contextlib.suppress(OSError):
@@ -997,6 +1049,68 @@ class LifecycleTests(InstallerFixture):
             self.assertTrue((self.install_dir / name).is_symlink())
 
 
+class ManagerLivenessTests(InstallerFixture):
+    """A run the status document cannot describe is still a run.
+
+    The document is written by the run itself, so one that has not written yet,
+    or whose write failed, or that was damaged reads as stopped. Every
+    transition that would replace or remove a job therefore asks the manager
+    too, and removal — the one transition that destroys the means of recovery —
+    asks it first.
+    """
+
+    def test_uninstall_refuses_a_live_manager_job_with_no_status(self):
+        self.install()
+        self.pretend_running()
+        self.assertFalse(self.job().status_path.exists())
+
+        with self.assertRaises(installer.InstallError) as raised:
+            self.uninstall()
+        self.assertIn("still holds a live process", str(raised.exception))
+        # Refused before anything was destroyed, so the running controller is
+        # still discoverable and still addressable.
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertTrue(self.manager.definition_path(self.label()).exists())
+        self.assertIn("acme/widgets", self.record()["repositories"])
+        self.assertNotIn("uninstall_definition", self.manager.call_names())
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink())
+
+    def test_the_uninstall_dry_run_refuses_it_too(self):
+        self.install()
+        self.pretend_running()
+        with self.assertRaises(installer.InstallError):
+            self.uninstall(dry_run=True)
+
+    def test_install_refuses_a_live_manager_job_with_no_status(self):
+        self.install()
+        self.pretend_running()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        self.assertIn("still holds a live process", str(raised.exception))
+
+    def test_starting_a_live_manager_job_with_no_status_is_a_no_op(self):
+        # A start is not a destructive transition, so an already-running job is
+        # nothing to do rather than an error -- and nothing is rewritten.
+        self.install()
+        self.pretend_running()
+        before = self.manager.call_names()
+        result = service.start_service(self.job(), self.install_dir)
+        self.assertFalse(result["started"])
+        self.assertEqual(self.manager.call_names(), before)
+
+    def test_stopping_a_live_manager_job_with_no_status_really_stops_it(self):
+        self.install()
+        pid = self.detached_process("import time; time.sleep(300)")
+        self.manager.record_started_pid(self.label(), pid)
+        self.assertFalse(self.job().status_path.exists())
+
+        result = service.stop_service(self.job())
+        self.assertTrue(result["stopped"])
+        self.assertIn("request_stop", self.manager.call_names())
+        self.assertFalse(pid_alive(pid))
+
+
 class ConvergenceTests(InstallerFixture):
     def test_reinstalling_converges(self):
         first = self.install()
@@ -1127,6 +1241,32 @@ class CanonicalBackendTests(InstallerFixture):
         self.assertIn("install_issue_review.py", str(raised.exception))
         self.assertFalse(self.install_dir.exists())
 
+    def test_a_relative_override_is_written_into_the_definition_absolute(self):
+        # The installer reads a relative override against its own working
+        # directory; the job runs with the checkout as its own. Persisting the
+        # raw value would point the job at a directory the installer never
+        # checked, or at none at all.
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.root)
+        os.environ["KANBAN_ISSUE_REVIEW_INSTALL_DIR"] = "canonical"
+        result = self.install()
+        self.assertEqual(
+            Path(result["backend_path"]).resolve(), self.canonical_backend.resolve()
+        )
+        self.assertTrue(Path(result["backend_path"]).is_absolute())
+
+        definition = json.loads(
+            self.manager.definition_path(self.label()).read_text(encoding="utf-8")
+        )
+        recorded = definition["environment"]["KANBAN_ISSUE_REVIEW_INSTALL_DIR"]
+        self.assertTrue(Path(recorded).is_absolute())
+        self.assertEqual(Path(recorded).resolve(), self.backend_dir.resolve())
+        # And it is not the checkout-relative reading the job would otherwise
+        # have performed from its own working directory.
+        self.assertNotEqual(
+            Path(recorded), (Path(definition["working_directory"]) / "canonical")
+        )
+
     def test_the_installed_job_runs_the_backend_the_installer_verified(self):
         # The override is a process's choice; the job outlives that process, so
         # the selection has to be written into the definition or the job would
@@ -1137,7 +1277,7 @@ class CanonicalBackendTests(InstallerFixture):
         )
         self.assertEqual(
             definition["environment"]["KANBAN_ISSUE_REVIEW_INSTALL_DIR"],
-            str(self.backend_dir),
+            str(self.backend_dir.resolve()),
         )
 
 
