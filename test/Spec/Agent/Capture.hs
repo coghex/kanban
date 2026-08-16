@@ -2,7 +2,18 @@
 module Spec.Agent.Capture (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
+import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.Text
+import Data.Time
+  ( LocalTime,
+    NominalDiffTime,
+    defaultTimeLocale,
+    diffLocalTime,
+    getCurrentTime,
+    getCurrentTimeZone,
+    parseTimeM,
+    utcToLocalTime
+  )
 import Kanban.Domain
 import Kanban.Preflight
   ( AuthObservation (..),
@@ -25,7 +36,9 @@ import Spec.Support.Preflight
     undecodableCodexFake,
     withPreflightMachine
   )
+import System.Directory (makeAbsolute)
 import System.FilePath ((</>))
+import System.Posix.Process (getParentProcessID, getProcessID)
 import Test.Hspec
 
 spec :: Spec
@@ -161,6 +174,81 @@ spec = do
           Data.Text.unpack (Data.Text.strip probe.localeProbeRepositoryRoot)
             `shouldEndWith` ("/" <> Data.Text.unpack unicodeCheckoutName)
 
+    it "reads the running test process out of the host's own real ps" $ do
+      -- No fake on PATH: this is the census's own argv against whichever
+      -- `ps` the host ships, so a CI run covers procps and a macOS run
+      -- covers BSD (issue #331). Everything else in this file proves the
+      -- parse against recorded bytes; this proves the argv those bytes
+      -- would ever come from is one the real thing accepts.
+      ownPid <- fromIntegral <$> getProcessID
+      ownParentPid <- fromIntegral <$> getParentProcessID
+      snapshot <- readProcessSnapshot
+      case snapshot of
+        Left message -> expectationFailure ("expected a census from the real ps, got " <> Data.Text.unpack message)
+        Right identities -> do
+          case filter ((== ownPid) . processIdentityPid) identities of
+            [] -> expectationFailure ("the real ps census did not include this test process, pid " <> show ownPid)
+            self : _ -> do
+              self.processIdentityParentPid `shouldBe` ownParentPid
+              self.processIdentityGroupPid `shouldSatisfy` (> 0)
+              -- The five `lstart` tokens the parser splits on, read back as
+              -- a time: a flavor that formatted them differently would
+              -- either have failed to parse the row at all or land here as
+              -- an unreadable start time.
+              startedAt <- case parseStartTime self.processIdentityStartedAt of
+                Nothing -> fail ("could not read a start time from " <> show self.processIdentityStartedAt)
+                Just parsed -> pure parsed
+              now <- utcToLocalTime <$> getCurrentTimeZone <*> getCurrentTime
+              diffLocalTime now startedAt `shouldSatisfy` (>= 0)
+              diffLocalTime now startedAt `shouldSatisfy` (< oneDay)
+
+    -- The recorded half of the same pair: real `ps -axo
+    -- pid=,ppid=,pgid=,stat=,lstart=,command=` output captured on Linux
+    -- (procps-ng 4.0.4, Ubuntu 25.10, Linux 6.17.0 aarch64) rather than
+    -- hand-written, so the flavor a macOS developer never runs is still
+    -- parsed on every run. The zombie rows in it are a reaped-but-unwaited
+    -- `python3` child made for the capture and an `sshd` one that happened
+    -- to be there; the kernel threads are the rows only Linux has.
+    it "parses a recorded procps snapshot, dropping its zombies and keeping its kernel threads" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        recorded <- makeAbsolute procpsFixturePath
+        recordedRows <- length . ByteString.lines <$> ByteString.readFile recorded
+        withFakeOnPath temporaryRoot ("ps", ["cat '" <> ByteString.pack recorded <> "'"]) $ do
+          snapshot <- readProcessSnapshot
+          case snapshot of
+            Left message -> expectationFailure ("expected a census, got " <> Data.Text.unpack message)
+            Right identities -> do
+              -- Every row but the two zombies parsed: a procps-only spelling
+              -- the parser could not read would show up as a shortfall here
+              -- rather than as a row silently missing from a spot check.
+              length identities `shouldBe` recordedRows - length procpsZombiePids
+              filter (`elem` procpsZombiePids) (map processIdentityPid identities) `shouldBe` []
+              -- Row order is the capture's order, so the census still reads
+              -- as the process table it came from.
+              take 1 identities
+                `shouldBe` [ ProcessIdentity
+                               { processIdentityPid = 1,
+                                 processIdentityParentPid = 0,
+                                 processIdentityGroupPid = 1,
+                                 processIdentityStartedAt = Data.Text.pack "Sat Aug 15 21:53:12 2026",
+                                 processIdentityCommand = Data.Text.pack "/sbin/init"
+                               }
+                           ]
+              -- A kernel thread is kept whole, not merely counted. kthreadd
+              -- is parented to pid 0 and sits in group 0 under a bracketed
+              -- command -- a row shape BSD has no equivalent of, and one
+              -- whose zero parent and group must survive the parse rather
+              -- than be read as a missing field.
+              filter ((== 2) . processIdentityPid) identities
+                `shouldBe` [ ProcessIdentity
+                               { processIdentityPid = 2,
+                                 processIdentityParentPid = 0,
+                                 processIdentityGroupPid = 0,
+                                 processIdentityStartedAt = Data.Text.pack "Sat Aug 15 21:53:12 2026",
+                                 processIdentityCommand = Data.Text.pack "[kthreadd]"
+                               }
+                           ]
+
     it "hands a provider probe's real exit status and replacement-decoded output to the classifier" $
       withPreflightMachine [undecodableCodexFake, readyClaudeFake, readyGitHubFake, python3Fake] BackendInstalled $
         \root _ -> do
@@ -178,3 +266,27 @@ spec = do
         case environment.environmentGitHub of
           GitHubUnknown message -> Data.Text.unpack message `shouldContain` "timed out"
           other -> expectationFailure ("expected a timed-out probe, got " <> show other)
+
+-- | The recorded procps capture, read relative to the package root the way
+-- the golden frames are, which is where @cabal test@ starts the suite.
+procpsFixturePath :: FilePath
+procpsFixturePath = "test" </> "fixtures" </> "procps-lstart.txt"
+
+-- | The two rows 'procpsFixturePath' recorded in state @Z@ — an @sshd@ child
+-- and the @python3@ one the capture forked to guarantee a zombie was in the
+-- table at all.
+procpsZombiePids :: [Int]
+procpsZombiePids = [1436, 1829]
+
+-- | A census row's @lstart@ read back as a time. Both userlands format it
+-- the same way @ctime@ does, and the parser has already collapsed the
+-- single-digit day's padding, so one format covers a padded capture and the
+-- unpadded text it becomes.
+parseStartTime :: Data.Text.Text -> Maybe LocalTime
+parseStartTime value =
+  listToMaybe (mapMaybe parseWith ["%a %b %e %H:%M:%S %Y", "%a %b %-d %H:%M:%S %Y"])
+  where
+    parseWith format = parseTimeM True defaultTimeLocale format (Data.Text.unpack value)
+
+oneDay :: NominalDiffTime
+oneDay = 86400

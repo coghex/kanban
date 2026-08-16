@@ -1,0 +1,134 @@
+      1       0       1 Ss   Sat Aug 15 21:53:12 2026 /sbin/init
+      2       0       0 S    Sat Aug 15 21:53:12 2026 [kthreadd]
+      3       2       0 S    Sat Aug 15 21:53:12 2026 [pool_workqueue_release]
+      4       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-rcu_gp]
+      5       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-sync_wq]
+      6       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-kvfree_rcu_reclaim]
+      7       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-slub_flushwq]
+      8       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-netns]
+      9       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/0:0-events]
+     10       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/0:0H-kblockd]
+     11       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/0:1-events]
+     12       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/u16:0-events_unbound]
+     13       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-mm_percpu_wq]
+     14       2       0 S    Sat Aug 15 21:53:12 2026 [ksoftirqd/0]
+     15       2       0 I    Sat Aug 15 21:53:12 2026 [rcu_preempt]
+     16       2       0 S    Sat Aug 15 21:53:12 2026 [rcu_exp_par_gp_kthread_worker/0]
+     17       2       0 S    Sat Aug 15 21:53:12 2026 [rcu_exp_gp_kthread_worker]
+     18       2       0 S    Sat Aug 15 21:53:12 2026 [migration/0]
+     19       2       0 S    Sat Aug 15 21:53:12 2026 [idle_inject/0]
+     20       2       0 S    Sat Aug 15 21:53:12 2026 [cpuhp/0]
+     21       2       0 S    Sat Aug 15 21:53:12 2026 [cpuhp/1]
+     22       2       0 S    Sat Aug 15 21:53:12 2026 [idle_inject/1]
+     23       2       0 S    Sat Aug 15 21:53:12 2026 [migration/1]
+     24       2       0 S    Sat Aug 15 21:53:12 2026 [ksoftirqd/1]
+     25       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/1:0-cgroup_free]
+     26       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/1:0H-events_highpri]
+     27       2       0 S    Sat Aug 15 21:53:12 2026 [cpuhp/2]
+     28       2       0 S    Sat Aug 15 21:53:12 2026 [idle_inject/2]
+     29       2       0 S    Sat Aug 15 21:53:12 2026 [migration/2]
+     30       2       0 S    Sat Aug 15 21:53:12 2026 [ksoftirqd/2]
+     31       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/2:0-cgroup_bpf_destroy]
+     32       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/2:0H-events_highpri]
+     33       2       0 S    Sat Aug 15 21:53:12 2026 [cpuhp/3]
+     34       2       0 S    Sat Aug 15 21:53:12 2026 [idle_inject/3]
+     35       2       0 S    Sat Aug 15 21:53:12 2026 [migration/3]
+     36       2       0 S    Sat Aug 15 21:53:12 2026 [ksoftirqd/3]
+     37       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/3:0-events]
+     38       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/3:0H-events_highpri]
+     39       2       0 S    Sat Aug 15 21:53:12 2026 [kdevtmpfs]
+     40       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-inet_frag_wq]
+     41       2       0 I    Sat Aug 15 21:53:12 2026 [rcu_tasks_kthread]
+     42       2       0 I    Sat Aug 15 21:53:12 2026 [rcu_tasks_rude_kthread]
+     43       2       0 I    Sat Aug 15 21:53:12 2026 [rcu_tasks_trace_kthread]
+     44       2       0 S    Sat Aug 15 21:53:12 2026 [kauditd]
+     45       2       0 S    Sat Aug 15 21:53:12 2026 [khungtaskd]
+     46       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/u16:1-events_power_efficient]
+     47       2       0 S    Sat Aug 15 21:53:12 2026 [oom_reaper]
+     48       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-writeback]
+     49       2       0 S    Sat Aug 15 21:53:12 2026 [kcompactd0]
+     50       2       0 SN   Sat Aug 15 21:53:12 2026 [ksmd]
+     51       2       0 SN   Sat Aug 15 21:53:12 2026 [khugepaged]
+     52       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-kblockd]
+     53       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-blkcg_punt_bio]
+     54       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-kintegrityd]
+     55       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/1:1-mm_percpu_wq]
+     56       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-tpm_dev_wq]
+     57       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-ata_sff]
+     58       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-md]
+     59       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-md_bitmap]
+     60       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-edac-poller]
+     61       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/u16:2-flush-253:0]
+     62       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-devfreq_wq]
+     63       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/2:1-cgroup_free]
+     64       2       0 S    Sat Aug 15 21:53:12 2026 [watchdogd]
+     65       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-quota_events_unbound]
+     66       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/2:1H-kblockd]
+     67       2       0 S    Sat Aug 15 21:53:12 2026 [kswapd0]
+     68       2       0 S    Sat Aug 15 21:53:12 2026 [ecryptfs-kthread]
+     69       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-kthrotld]
+     70       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/u17:0]
+     71       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-acpi_thermal_pm]
+     72       2       0 S    Sat Aug 15 21:53:12 2026 [khvcd]
+     73       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/3:1-cgroup_free]
+     74       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-mld]
+     75       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/3:1H-kblockd]
+     76       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-ipv6_addrconf]
+     77       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-kstrp]
+     80       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/u16:3-flush-253:0]
+     82       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/R-charger_manager]
+     83       2       0 S    Sat Aug 15 21:53:12 2026 [irq/13-ACPI:Event]
+     84       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/0:1H]
+    114       2       0 I<   Sat Aug 15 21:53:12 2026 [kworker/1:1H-kblockd]
+    138       2       0 S    Sat Aug 15 21:53:12 2026 [hwrng]
+    141       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/0:2-events]
+    142       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/0:3-rcu_gp]
+    176       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/2:2-events]
+    181       2       0 I    Sat Aug 15 21:53:12 2026 [kworker/1:2-cgroup_release]
+    201       2       0 I<   Sat Aug 15 21:53:13 2026 [kworker/R-raid5wq]
+    248       2       0 S    Sat Aug 15 21:53:13 2026 [jbd2/vda1-8]
+    249       2       0 I<   Sat Aug 15 21:53:13 2026 [kworker/R-ext4-rsv-conversion]
+    330       1     330 S<s  Sat Aug 15 21:53:13 2026 /usr/lib/systemd/systemd-journald
+    347       2       0 I<   Sat Aug 15 21:53:13 2026 [kworker/R-kmpathd]
+    348       2       0 I<   Sat Aug 15 21:53:13 2026 [kworker/R-kmpath_handlerd]
+    352       2       0 I    Sat Aug 15 21:53:13 2026 [kworker/3:2-events]
+    380       1     380 SLsl Sat Aug 15 21:53:13 2026 /usr/sbin/multipathd -d -s
+    383       2       0 I    Sat Aug 15 21:53:13 2026 [kworker/1:3-cgroup_free]
+    384       2       0 I    Sat Aug 15 21:53:13 2026 [kworker/2:3]
+    390       1     390 Ss   Sat Aug 15 21:53:13 2026 /usr/lib/systemd/systemd-resolved
+    394       1     394 Ss   Sat Aug 15 21:53:13 2026 /usr/lib/systemd/systemd-udevd
+    409       2       0 S    Sat Aug 15 21:53:13 2026 [psimon]
+    492       2       0 S    Sat Aug 15 21:53:14 2026 [jbd2/vda13-8]
+    493       2       0 I<   Sat Aug 15 21:53:14 2026 [kworker/R-ext4-rsv-conversion]
+    714       1     714 Ss   Sat Aug 15 21:53:14 2026 /usr/lib/systemd/systemd-networkd
+    724       2       0 I<   Sat Aug 15 21:53:14 2026 [kworker/R-cfg80211]
+    776       1     776 Ss   Sat Aug 15 21:53:16 2026 /bin/sh /usr/lib/systemd/scripts/chronyd-starter.sh -n -F 1
+    778       1     778 Ss   Sat Aug 15 21:53:16 2026 /usr/sbin/cron -f -P
+    779       1     779 Ss   Sat Aug 15 21:53:16 2026 @dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+    788       1     788 Ssl  Sat Aug 15 21:53:16 2026 /usr/local/bin/lima-guestagent daemon --vsock-port 2222 --runtime-dir=/run/lima-guestagent
+    790       1     790 Ss   Sat Aug 15 21:53:16 2026 /usr/bin/python3 /usr/bin/networkd-dispatcher --run-startup-triggers
+    791       1     791 Ssl  Sat Aug 15 21:53:16 2026 /usr/lib/polkit-1/polkitd --no-debug --log-level=notice
+    803       1     803 Ss   Sat Aug 15 21:53:16 2026 /usr/lib/systemd/systemd-logind
+    805       1     805 Ssl  Sat Aug 15 21:53:16 2026 /usr/libexec/udisks2/udisksd
+    808       1     808 Ss   Sat Aug 15 21:53:16 2026 sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+    846       1     846 Ss+  Sat Aug 15 21:53:16 2026 /sbin/agetty -o -- \u --noreset --noclear --keep-baud 115200,57600,38400,9600 - vt220
+    855       2       0 I    Sat Aug 15 21:53:16 2026 [kworker/3:3-events]
+    857       2       0 I    Sat Aug 15 21:53:16 2026 [kworker/3:4]
+    870       1     870 Ss+  Sat Aug 15 21:53:16 2026 /sbin/agetty -o -- \u --noreset --noclear - linux
+    893       1     893 Ssl  Sat Aug 15 21:53:16 2026 /usr/sbin/rsyslogd -n -iNONE
+    898     776     776 S    Sat Aug 15 21:53:17 2026 /usr/sbin/chronyd -n -F 1
+    902       1     902 Ssl  Sat Aug 15 21:53:17 2026 /usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
+    907     898     776 S    Sat Aug 15 21:53:17 2026 /usr/sbin/chronyd -n -F 1
+    914       1     914 Ss   Sat Aug 15 21:53:17 2026 /usr/lib/systemd/systemd --user
+    932       1     932 Ssl  Sat Aug 15 21:53:17 2026 /usr/sbin/ModemManager
+    947     914     914 S    Sat Aug 15 21:53:17 2026 (sd-pam)
+   1182       2       0 S    Sat Aug 15 21:53:17 2026 [psimon]
+   1434       1    1434 Ss   Sat Aug 15 21:53:18 2026 sshd-session: vincentcoghlan [priv]
+   1436    1434    1434 Z    Sat Aug 15 21:53:18 2026 [sshd] <defunct>
+   1486    1434    1434 S    Sat Aug 15 21:53:18 2026 sshd-session: vincentcoghlan@notty
+   1505       2       0 I<   Sat Aug 15 21:53:18 2026 [kworker/R-tls-strp]
+   1507       2       0 I    Sat Aug 15 21:53:44 2026 [kworker/u16:4-ipv6_addrconf]
+   1826       1    1826 Ss   Sat Aug 15 21:58:08 2026 /bin/sh /tmp/kanban-capture.sh
+   1827    1826    1826 S    Sat Aug 15 21:58:08 2026 python3 /tmp/kanban-mkzombie.py
+   1829    1827    1826 Z    Sat Aug 15 21:58:08 2026 [python3] <defunct>
+   1830    1826    1826 R    Sat Aug 15 21:58:11 2026 ps -axo pid=,ppid=,pgid=,stat=,lstart=,command=

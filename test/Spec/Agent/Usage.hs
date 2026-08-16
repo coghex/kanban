@@ -7,7 +7,17 @@ import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text
 import Data.Time (minutesToTimeZone)
-import Kanban.Claude (decodeClaudeUsageText, runClaudeProvider)
+import Kanban.Claude
+  ( ScriptFlavor (..),
+    claudeProbeArguments,
+    decodeClaudeUsageText,
+    fetchClaudeUsageWith,
+    hostScriptFlavor,
+    runClaudeProvider,
+    runClaudeProviderWith,
+    scriptFlavorFor,
+    scriptFlavorLabel
+  )
 import Kanban.Codex (decodeCodexUsageResponse)
 import Kanban.Config
 import Kanban.Domain
@@ -18,6 +28,7 @@ import Kanban.UsageCommand (decodeUsageCommandDocument, runUsageCommand)
 import Spec.Support.ClaudeProbe
   ( ClaudeProbeFixture (..),
     ClaudeSignalPolicy (..),
+    ClaudeTranscript (..),
     withClaudeProbeFixture
   )
 import Spec.Support.Env
@@ -27,7 +38,7 @@ import Spec.Support.Env
     withTemporaryCacheRoot,
     writeExecutableScript
   )
-import Spec.Support.Expect (isLeft, shouldMention)
+import Spec.Support.Expect (isLeft, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (epoch)
 import Spec.Support.Json (claudeUsageOutput, codexRateLimitResponse, codexWeeklyOnlyResponse)
 import Spec.Support.Process (shouldRecordASweptProcess)
@@ -40,6 +51,7 @@ import System.Directory
   )
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -71,6 +83,107 @@ spec = do
       decodeClaudeUsageText (minutesToTimeZone (-420)) epoch "Current session\nFailed to load usage data"
         `shouldSatisfy` isLeft
 
+  -- The probe's one BSD-userland assumption (issue #331). `script` is the
+  -- only external executable Kanban composes differently per platform: the
+  -- BSD form runs the trailing operands, while util-linux takes at most one
+  -- file operand and needs `-c`, so the same argv there is a usage error
+  -- rather than a usage probe. These assert the composed operands directly,
+  -- because the fake `script` beside them answers to both dialects and so
+  -- cannot fail on a wrong-flavor argv.
+  describe "Claude usage probe script flavor" $ do
+    it "selects the dialect from the platform alone -- darwin BSD, linux util-linux" $ do
+      scriptFlavorFor "darwin" `shouldBe` BsdScript
+      scriptFlavorFor "linux" `shouldBe` UtilLinuxScript
+
+    it "composes the BSD operands macOS has always run" $
+      claudeProbeArguments BsdScript "/opt/homebrew/bin/claude"
+        `shouldBe` ["-q", "/dev/null", "/opt/homebrew/bin/claude", "--safe-mode", "--ax-screen-reader"]
+
+    it "composes util-linux operands that carry one file operand and run claude through -c" $
+      claudeProbeArguments UtilLinuxScript "/usr/bin/claude"
+        `shouldBe` ["-q", "-c", "'/usr/bin/claude' '--safe-mode' '--ax-screen-reader'", "/dev/null"]
+
+    -- util-linux runs its -c payload through a shell, so the resolved path
+    -- is the one part of the probe an unlucky (or hostile) install location
+    -- could turn into extra commands. The proof is the real shell's own
+    -- argv, not the payload's spelling.
+    it "keeps a shell-hostile executable path one literal word in the util-linux payload" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let hostileDirectory = temporaryRoot </> "b in; touch pwned"
+            hostilePath = hostileDirectory </> "cl'aude"
+            argumentLog = temporaryRoot </> "claude-argv"
+        createDirectoryIfMissing True hostileDirectory
+        _ <-
+          writeExecutableScript
+            hostilePath
+            ["printf '%s\\n' \"$0\" \"$@\" > '" <> ByteString.pack argumentLog <> "'"]
+        payload <- case claudeProbeArguments UtilLinuxScript hostilePath of
+          ["-q", "-c", command, "/dev/null"] -> pure command
+          other -> fail ("expected util-linux operands carrying one -c payload, got " <> show other)
+        (_, _, _) <-
+          readCreateProcessWithExitCode
+            (proc "/bin/sh" ["-c", payload]) {cwd = Just temporaryRoot}
+            ""
+        recorded <- readFile argumentLog
+        lines recorded `shouldBe` [hostilePath, "--safe-mode", "--ax-screen-reader"]
+        -- The `; touch pwned` inside the directory name stayed data. A
+        -- payload that concatenated the path unquoted would have run it,
+        -- from the working directory set above.
+        doesFileExist (temporaryRoot </> "pwned") `shouldReturn` False
+
+    -- Requirement 3: a flavor mismatch has to be tellable apart from a
+    -- missing executable, a timeout, or an unsupported screen -- which
+    -- means the annotation names the dialect without flattening the kind
+    -- the failing step reported.
+    it "names the selected flavor on a missing claude, still as ExecutableMissing" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+        createDirectoryIfMissing True binaryRoot
+        _ <- writeExecutableScript (binaryRoot </> "script") ["exit 0"]
+        withEnvironmentValue "PATH" binaryRoot $ do
+          result <- fetchClaudeUsageWith UtilLinuxScript 1000000
+          case result of
+            Left providerError -> do
+              providerError.providerErrorKind `shouldBe` ExecutableMissing
+              providerError.providerErrorMessage `shouldMention` "claude executable was not found"
+              providerError.providerErrorMessage `shouldMention` "util-linux"
+            Right snapshot -> expectationFailure ("expected a missing-executable failure, got " <> show snapshot)
+
+    it "names the selected flavor on a missing script, still as ExecutableMissing" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+        createDirectoryIfMissing True binaryRoot
+        withEnvironmentValue "PATH" binaryRoot $ do
+          result <- fetchClaudeUsageWith BsdScript 1000000
+          case result of
+            Left providerError -> do
+              providerError.providerErrorKind `shouldBe` ExecutableMissing
+              providerError.providerErrorMessage `shouldMention` "script executable was not found"
+              providerError.providerErrorMessage `shouldMention` "BSD"
+            Right snapshot -> expectationFailure ("expected a missing-executable failure, got " <> show snapshot)
+
+    -- Driven through the util-linux operands on whichever host runs the
+    -- suite, so the -c payload is launched for real on macOS too.
+    it "names the selected flavor on a signed-out client, still as AuthenticationRequired" $
+      withClaudeProbeFixture True ClaudeExitsCleanly AuthenticationFailureTranscript $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProviderWith UtilLinuxScript 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` AuthenticationRequired
+            providerError.providerErrorMessage `shouldMention` "util-linux"
+            providerError.providerErrorMessage `shouldNotMention` "BSD"
+          other -> expectationFailure ("expected an authentication failure, got " <> show other)
+
+    it "names the selected flavor on an unrecognized /usage screen, still as UnsupportedVersion" $
+      withClaudeProbeFixture True ClaudeExitsCleanly MissingWeeklyWindowTranscript $ \fixture -> do
+        result <- timeout 20000000 (runClaudeProviderWith BsdScript 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
+        case result of
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` UnsupportedVersion
+            providerError.providerErrorMessage `shouldMention` "BSD"
+            providerError.providerErrorMessage `shouldNotMention` "util-linux"
+          other -> expectationFailure ("expected an unsupported-version failure, got " <> show other)
+
   describe "Claude usage probe termination" $ do
     it "decodes a clean-exiting probe's usage without ever needing TERM or KILL" $
       -- separateGroup=True so the wrapper's background job keeps its real
@@ -79,7 +192,7 @@ spec = do
       -- child needs the actual bytes Kanban writes to know when to exit.
       -- The descendant exits on its own once it has drained them, so
       -- escalation never needs to signal anyone.
-      withClaudeProbeFixture True ClaudeExitsCleanly True $ \fixture -> do
+      withClaudeProbeFixture True ClaudeExitsCleanly CompleteUsageTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Nothing -> expectationFailure "expected the clean-exit probe to return well within its bound"
@@ -94,10 +207,14 @@ spec = do
       -- before the claude child (which ignores INT, in its own process
       -- group) does -- exactly the "leader reaped, descendant survives"
       -- shape 'script''s pty produces in production.
-      withClaudeProbeFixture True ClaudeIgnoresInterrupt False $ \fixture -> do
+      withClaudeProbeFixture True ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
-          Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
+          Just (Left providerError) -> do
+            providerError.providerErrorKind `shouldBe` RequestTimedOut
+            -- Whichever dialect this host composed, the timeout still reads
+            -- as a timeout and still says which operands produced it.
+            providerError.providerErrorMessage `shouldMention` scriptFlavorLabel hostScriptFlavor
           other -> expectationFailure ("expected a clean timeout, got " <> show other)
         shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
         shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"
@@ -106,7 +223,7 @@ spec = do
         doesFileExist fixture.claudeProbeTermMarker `shouldReturn` True
 
     it "kills an INT-resistant claude child that still shares the wrapper's own process group" $
-      withClaudeProbeFixture False ClaudeIgnoresInterrupt False $ \fixture -> do
+      withClaudeProbeFixture False ClaudeIgnoresInterrupt NoTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
@@ -120,12 +237,13 @@ spec = do
       -- on its own -- but the claude child ignores both INT and TERM, so
       -- only SIGKILL ends it; the provider must report that as a failure
       -- rather than silently decode the snapshot it already has.
-      withClaudeProbeFixture True ClaudeIgnoresInterruptAndTerminate True $ \fixture -> do
+      withClaudeProbeFixture True ClaudeIgnoresInterruptAndTerminate CompleteUsageTranscript $ \fixture -> do
         result <- timeout 20000000 (runClaudeProvider 8000000 fixture.claudeProbeScriptPath fixture.claudeProbeClaudePath)
         case result of
           Just (Left providerError) -> do
             providerError.providerErrorKind `shouldBe` RequestFailed
             providerError.providerErrorMessage `shouldMention` "forced kill"
+            providerError.providerErrorMessage `shouldMention` scriptFlavorLabel hostScriptFlavor
           other -> expectationFailure ("expected a forced-kill failure, got " <> show other)
         shouldRecordASweptProcess fixture.claudeProbeScriptMarker "the script wrapper"
         shouldRecordASweptProcess fixture.claudeProbeChildMarker "the claude child"

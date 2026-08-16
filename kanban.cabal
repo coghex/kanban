@@ -19,6 +19,7 @@ build-type:         Simple
 -- keeps it that way, and records why each tracked root asset is in or out.
 extra-source-files:
   cabal.project
+  test/fixtures/*.txt
   test/golden/*.attrs
   test/golden/*.txt
   tools/**/*.py
